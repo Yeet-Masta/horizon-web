@@ -3,7 +3,10 @@
 //! (`coverage.json`, `coverage.md`). It reads what the other steps wrote:
 //! the inventory, each mod's `carry-report.json` and its harness result
 //! (`tools/mod_port_harness.py`).
-use crate::inventory::Record;
+use crate::{
+    inventory::Record,
+    resourcepacks::{Outcome, Report, State},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, fmt::Write, path::Path};
@@ -158,6 +161,9 @@ fn carried(work: &Path, key: &str) -> Option<(Status, String)> {
     let mut checked = 0;
     match &harness {
         Some(h) => {
+            if h["passed"].as_bool() == Some(false) {
+                gaps.push("harness failed".into());
+            }
             for (name, c) in h["checks"].as_object().into_iter().flatten() {
                 let (p, f) = (
                     c["passed"].as_u64().unwrap_or(0),
@@ -167,6 +173,9 @@ fn carried(work: &Path, key: &str) -> Option<(Status, String)> {
                 if f > 0 {
                     gaps.push(format!("{name} {p}/{}", p + f));
                 }
+            }
+            if checked == 0 {
+                gaps.push("harness has no checks".into());
             }
         }
         None => gaps.push("harness not run".into()),
@@ -194,10 +203,42 @@ fn carried(work: &Path, key: &str) -> Option<(Status, String)> {
     }
 }
 
+fn resource_row(path: &str, outcome: Option<&Outcome>, record: Option<&Record>) -> Row {
+    let state = outcome.map_or(State::Missing, |o| o.state);
+    let shader = path.starts_with("shaderpacks/");
+    Row {
+        key: path.into(),
+        name: path.into(),
+        class: if shader { "shaderpack" } else { "resourcepack" }.into(),
+        tier: "data".into(),
+        license: record.map_or("unknown", |r| r.license.as_str()).into(),
+        license_kind: license_kind(record.map_or("unknown", |r| r.license.as_str())).into(),
+        status: if !shader && state == State::Available {
+            Status::Partial
+        } else {
+            Status::NotYet
+        },
+        reason: outcome.map_or_else(
+            || {
+                if shader {
+                    "shader-pack conversion is pending".into()
+                } else {
+                    "resource pack not obtained yet; run port".into()
+                }
+            },
+            |o| format!("{:?}: {}", o.state, o.detail),
+        ),
+    }
+}
+
 pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
+    let resourcepacks = Report::load(work);
     let mut rows: Vec<Row> = records
         .iter()
         .map(|r| {
+            if r.path.starts_with("resourcepacks/") || r.path.starts_with("shaderpacks/") {
+                return resource_row(&r.path, resourcepacks.files.get(&r.path), Some(r));
+            }
             let (status, reason) = if r.class == "unknown" {
                 let why =
                     "unclassified: its jar (mods.toml, file census) or a reviewed row decides";
@@ -242,6 +283,11 @@ pub fn build(records: &[Record], work: &Path) -> Vec<Row> {
             .collect();
         if !waiting.is_empty() {
             let _ = write!(row.reason, "; waits on {}", waiting.join(", "));
+        }
+    }
+    for (path, outcome) in &resourcepacks.files {
+        if !records.iter().any(|r| &r.path == path) {
+            rows.push(resource_row(path, Some(outcome), None));
         }
     }
     rows
@@ -403,6 +449,90 @@ mod tests {
             "{md}"
         );
         std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    #[test]
+    fn carried_harness_needs_executed_checks() {
+        for harness in [
+            serde_json::json!({"passed": false, "checks": {}}),
+            serde_json::json!({"passed": true, "checks": {}}),
+            serde_json::json!({"checks": {"blocks": {"passed": 0, "failed": 0}}}),
+            serde_json::json!({}),
+        ] {
+            let row = carried_harness_row(Some(&harness.to_string()));
+            assert_eq!(row.status, Status::Partial, "{harness}: {}", row.reason);
+            assert!(row.reason.contains("no checks"), "{}", row.reason);
+            assert!(!row.reason.contains("harness green"), "{}", row.reason);
+        }
+    }
+
+    #[test]
+    fn carried_harness_rejects_failed_verdicts() {
+        for harness in [
+            serde_json::json!({"passed": false,
+                "checks": {"blocks": {"passed": 3, "failed": 0}}}),
+            serde_json::json!({"passed": true,
+                "checks": {"blocks": {"passed": 1, "failed": 2}}}),
+            serde_json::json!({"checks": {"blocks": {"passed": 1, "failed": 2}}}),
+        ] {
+            let row = carried_harness_row(Some(&harness.to_string()));
+            assert_eq!(row.status, Status::Partial, "{harness}: {}", row.reason);
+            assert!(!row.reason.contains("harness green"), "{}", row.reason);
+            if harness["passed"] == false {
+                assert!(row.reason.contains("harness failed"), "{}", row.reason);
+            } else {
+                assert!(row.reason.contains("blocks 1/3"), "{}", row.reason);
+            }
+        }
+    }
+
+    #[test]
+    fn carried_harness_keeps_current_and_legacy_successes() {
+        for harness in [
+            serde_json::json!({"passed": true,
+                "checks": {"blocks": {"passed": 3, "failed": 0}}}),
+            serde_json::json!({"checks": {"blocks": {"passed": 3, "failed": 0}}}),
+        ] {
+            let row = carried_harness_row(Some(&harness.to_string()));
+            assert_eq!(row.status, Status::Ported, "{harness}: {}", row.reason);
+            assert!(row.reason.contains("harness green"), "{}", row.reason);
+        }
+    }
+
+    #[test]
+    fn carried_harness_keeps_missing_or_unreadable_results_partial() {
+        for harness in [None, Some("not JSON")] {
+            let row = carried_harness_row(harness);
+            assert_eq!(row.status, Status::Partial, "{}", row.reason);
+            assert!(row.reason.contains("harness not run"), "{}", row.reason);
+        }
+    }
+
+    fn carried_harness_row(harness: Option<&str>) -> Row {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let work = std::env::temp_dir().join(format!(
+            "horizon-report-verdict-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let dir = work.join("mods/example");
+        std::fs::create_dir_all(dir.join("harness")).unwrap();
+        std::fs::write(
+            dir.join("carry-report.json"),
+            r#"{"blocks":{"example:block":"minecraft:stone"},"items":0}"#,
+        )
+        .unwrap();
+        if let Some(harness) = harness {
+            std::fs::write(dir.join("harness/result.json"), harness).unwrap();
+        }
+        let row = build(&[record("example", "content", "data", &[])], &work)
+            .pop()
+            .unwrap();
+        std::fs::remove_dir_all(work).unwrap();
+        row
     }
 
     #[test]

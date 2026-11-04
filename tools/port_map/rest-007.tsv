@@ -89,7 +89,7 @@ Direction.getCounterClockWiseX	skip:other		reached only from getClockWise(Axis),
 Direction.getClockWiseZ	skip:other		reached only from getClockWise(Axis), which no 26.3 code calls
 Direction.getCounterClockWiseZ	skip:other		reached only from getClockWise(Axis), which no 26.3 code calls
 Direction.fromAxisAndDirection	inline	crates/horizon-world/src/level/sculk.rs::Sim::sculk_unobstructed_move	gap: minor: the axis-and-sign pick is done for sculk's movement check; the other callers (voxel shape faces, poplar foliage) are not checked
-Direction.getNearest	missing		minor: only the experimental redstone orientation uses it, and Horizon has no orientation code
+Direction.getNearest	port	crates/horizon-core/src/geometry/mod.rs::Direction::approximate_nearest	the float overload: max dot of the six axis normals, best seeded with Float.MIN_VALUE and north as the fallback; the Vec3i overload's explicit fallback has no counterpart
 Direction.verifyVertical	skip:data		codec check for vertical directions
 Direction.get	inline	crates/horizon-world/src/level/portal_travel.rs::largest_rectangle_around	the positive side is negative(axis).opposite() there; the PortalForcer call is not traced
 Direction.Axis.getPositive	inline	crates/horizon-world/src/level/portal_travel.rs::largest_rectangle_around	the positive side is negative(axis).opposite() there
@@ -98,7 +98,7 @@ Direction.Axis.getDirections	port	crates/horizon-world/src/level/creaking.rs::ax
 Direction.Axis.getPlane	port	crates/horizon-world/src/level/query.rs::is_horizontal	takes a direction and checks its axis is X or Z
 Direction.Axis.choose	port	crates/horizon-core/src/geometry/mod.rs::Vec3::component	gap: minor: selects a double component of a Vec3; no integer version
 Direction.Plane.test	port	crates/horizon-world/src/level/query.rs::is_horizontal	the horizontal plane only; the vertical plane has no test
-GlobalPos.isCloseEnough	missing		player: an allay never remembers a liked jukebox or note block, so the same-dimension, 1024-block check never runs (see AllayAi.hearNoteblock)
+GlobalPos.isCloseEnough	port	crates/horizon-client/src/mobs/allay.rs::GlobalPos::is_close_enough	same dimension and chessboard distance within max; the allay's liked block is checked with the 1024-block limit
 Holder.direct	skip:data		wraps a value as a registry holder; Horizon has no holders
 Holder.Reference.key	skip:data		registry holder bookkeeping
 Holder.Reference.value	skip:data		registry holder bookkeeping

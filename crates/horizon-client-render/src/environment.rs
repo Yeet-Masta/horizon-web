@@ -121,7 +121,7 @@ pub struct Environment {
     tracks: HashMap<String, Track>,
     base: HashMap<String, [f32; 4]>,
 }
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Sky {
     pub sky_color: [f32; 3],
     pub fog_color: [f32; 3],
@@ -142,6 +142,8 @@ pub struct Sky {
     pub fog_end: f32,
     /// `visual/cloud_fog_end_distance`.
     pub cloud_fog_end: f32,
+    /// `visual/cloud_height`.
+    pub cloud_height: f32,
 }
 impl Environment {
     pub fn load(root: &Path) -> Result<Self> {
@@ -310,6 +312,10 @@ impl Environment {
                 .base
                 .get("minecraft:visual/cloud_fog_end_distance")
                 .map_or(2048.0, |v| v[0]),
+            cloud_height: self
+                .base
+                .get("minecraft:visual/cloud_height")
+                .map_or(crate::clouds::CLOUD_HEIGHT as f32, |v| v[0]),
         }
     }
 }

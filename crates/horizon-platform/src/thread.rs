@@ -150,6 +150,17 @@ pub fn scope_parallelism() -> usize {
     available_parallelism().map_or(1, |n| n.get())
 }
 
+/// Threads for a [`scope`] sized `native` natively (a count of the machine's
+/// threads): on the web build, [`scope_parallelism`], as a browser tells
+/// std nothing of its cores.
+pub fn scoped_threads(native: usize) -> usize {
+    if crate::WEB {
+        scope_parallelism()
+    } else {
+        native
+    }
+}
+
 /// How many [`spawn_worker`] threads make sense: natively the cores less the
 /// one the game runs on (its workers run behind it, `horizon_threads`). A
 /// browser can't put a worker behind the page, so the threaded web build

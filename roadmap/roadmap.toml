@@ -119,7 +119,7 @@ issue = "#3914"
 plain = """Single player now runs a small server in the background, as vanilla does. We are fixing what still \
 behaves differently there; every fix also works for LAN and server players."""
 dev = """Since #1514 single player runs on the server thread (`game/integrated.rs`) and the window joins it as a \
-client; `--in-frame` keeps the old path. The open `[server-thread]` issues list the gaps. In review: breeding's \
+client. The open `[server-thread]` issues list the gaps. In review: breeding's \
 advancement and statistic (#3873), the client's menu when the server replaces the player (#3841), splashes when \
 falling in water (#3621). docs/server-levels.md."""
 links = ["#1514", "#3873", "#3841", "#3621", "docs/server-levels.md"]
@@ -183,7 +183,7 @@ dev = """One item for all modding work (#3911), led by levzzz5154 with vladislav
 parts is theirs. Native mods on stable hook points (game/native_hooks.rs, #3345, #3346, #3434, #3435) built by the \
 launcher (#3388, #3855); server-side hooks (#3878, #3706); mod-owned screens, input and drawing; tools for mod makers \
 (templates, `native.py check`); the registry (#1634, #1642, #1659); machines with inventories and menus (#1189); mods \
-that read and change the world through the server. The WebAssembly runtime is removed (#3350, #3351, #3353). \
+that read and change the world through the server. \
 docs/native-mods.md."""
 links = ["#3855", "#3351", "#3353", "#3360", "#3706", "#3878", "#3345", "#3346", "#3388", "#3434", "#3435", "#1634", "#1642", "#1659", "#1596", "#1635", "docs/native-mods.md"]
 
@@ -414,13 +414,13 @@ id = "one-single-player-path"
 title = "One single-player path: remove the in-frame world"
 status = "next"
 area = "gameplay"
-plain = """Single player will have one way to run, the server thread, so every fix works everywhere and there are fewer \
-bugs. The older in-frame mode goes once everything passes without it."""
-dev = """`--in-frame` (also `--no-server-thread` and `HORIZON_SERVER_THREAD=0`) still ticks the world inside the \
-window's `Game`, and most harnesses test that path. Delete it once `lan_e2e --server-thread` and the parity \
-harnesses pass on the server thread, which also halves the bug surface. See also 'Single player as a server' \
-and docs/server-levels.md."""
-links = ["docs/server-levels.md"]
+plain = """Single player has one way to run, the server thread, so every fix works everywhere and there are fewer \
+bugs. The older in-frame mode is removed."""
+dev = """`--in-frame` (also `--no-server-thread` and `HORIZON_SERVER_THREAD=0`) ticked the world inside the \
+window's `Game`. #6473 removes it with the code only it reached (the window's world loader and player tick, its \
+portal travel and loading screen, the in-frame LAN host); the harnesses run on the server thread. See also \
+'Single player as a server' and docs/server-levels.md."""
+links = ["#6473", "docs/server-levels.md"]
 
 [[item]]
 id = "mod-languages"
@@ -428,7 +428,7 @@ title = "Scripts for mods"
 status = "later"
 area = "mods"
 plain = """Small mods written as scripts, in the style of KubeJS, with no compiler."""
-dev = """Waits for native mods to settle: the earlier plan ran Lua inside the WebAssembly sandbox, which is removed. A script layer over the native hook points is to be designed."""
+dev = """Waits for native mods to settle: a script layer over the native hook points is to be designed."""
 links = ["docs/native-mods.md"]
 
 [[item]]
@@ -553,11 +553,8 @@ id = "modpack-own-packs"
 title = "A modpack's own resource and shader packs"
 status = "later"
 area = "modpacks"
-plain = """Importing a modpack also brings the resource packs and shader packs it ships with, where Horizon can use \
-them."""
-dev = """Porting a pack carries data, assets and worldgen today; the resource packs and shader packs bundled with it \
-are left out. Resource packs can be carried as they are; shader packs go through the converter \
-(docs/modpacks.md)."""
+plain = """Imported modpacks carry their resource packs into a profile of their own. Shader-pack conversion is still pending."""
+dev = """Resource-pack carry-over is implemented locally: Modrinth common/client overrides, CurseForge's override folder, installed instances (ZIP and directory packs), and hash-checked indexed ZIP downloads. The launcher keeps profile edits and lets resource-only profiles play; packs are enabled in Resource Packs. Synthetic import and profile tests cover the file pipeline; in-game rendering has not been verified. Shader-pack conversion is still pending, so this combined item remains partial (docs/modpacks.md)."""
 links = ["docs/modpacks.md"]
 
 [[item]]
@@ -681,12 +678,14 @@ links = ["#1180"]
 [[item]]
 id = "hdr"
 title = "HDR monitors"
-status = "later"
+status = "shipped"
+shipped_in = "v0.2.74"
 area = "rendering"
 plain = "Output for HDR monitors: brighter highlights and richer colour where your screen supports it."
-dev = """Issue #1441. Needs a surface format and a tone-mapping path per backend, and tests on real HDR screens on \
-Windows, macOS and Linux."""
-links = ["#1441"]
+dev = """HDR10 (PQ) or scRGB output (#2021, #2292), with its own settings screen, Auto from what the compositor \
+or Windows reports, and calibration (docs/graphics.md). Since then: light sources shine by kind, and light itself \
+above paper white (#6671). Next: LabPBR emission, an HDR output for shader packs (#3125)."""
+links = ["#1441", "#2021", "#2292"]
 
 [[item]]
 id = "msaa-fullscreen"
@@ -790,7 +789,7 @@ plain = """Versions of Horizon for Android, iOS and web browsers. Nothing offici
 first pieces."""
 dev = """No official build. Android was first closed as not planned, with touch controls, a mobile interface, \
 packaging and loading the player's own assets all missing; the roadmap now includes it, iOS and a \
-WebAssembly build for the browser as long-term goals. First pieces from contributors: `horizon-dualsense` \
+build for the browser as long-term goals. First pieces from contributors: `horizon-dualsense` \
 compiling on iOS (#1813) and helper-thread limits on Android (#1751). Preparing without Java (#1750) matters \
 here too. Horizon ships none of Mojang's files on any platform."""
 links = ["#1813", "#1751"]
@@ -1099,7 +1098,7 @@ more accurate. No coding needed."""
 dev = """`horizon-launcher play --arg=--benchmark --arg=standard` writes a JSON report; `horizon-launcher data \
 benchmark <report>` shows what would be sent and uploads it (playhorizon.dev/docs/performance). Results from three \
 installs with the same hardware appear on the Benchmarks page. Example: #1711."""
-links = ["https://playhorizon.dev/docs/performance", "#1711"]
+links = ["https://playhorizon.dev/docs/performance"]
 
 [[item]]
 id = "end-city-banners"
@@ -1109,8 +1108,8 @@ area = "gameplay"
 plain = """Banners in End cities show as plain magenta instead of with their pattern."""
 dev = """Compare the banner block entities the End city templates place with vanilla's (`EndCityPieces`, the \
 templates' block entity NBT, `BannerBlockEntity`'s patterns), in `crates/horizon-world/src/worldgen/structure/`. \
-Issue #1438; possibly related: #526."""
-links = ["#1438", "#526"]
+Issue #1438; possibly related: #526. The templates' block entities now keep their patterns (#1928)."""
+links = ["#1438", "#526", "#1928"]
 
 [[item]]
 id = "end-city-loot"
@@ -1119,8 +1118,8 @@ status = "help-wanted"
 area = "gameplay"
 plain = """Armour and tools in End city chests should come enchanted, as in vanilla."""
 dev = """`loot.rs` implements `enchant_with_levels`: find why the End city chest table's rolls come out bare, and \
-compare them with vanilla's for a few seeds. Issues #1437, #1660."""
-links = ["#1437", "#1660"]
+compare them with vanilla's for a few seeds. Issues #1437, #1660. The loot's enchantment functions now reach every table that rolls (#1911, #2037)."""
+links = ["#1437", "#1660", "#1911", "#2037"]
 
 # ---------------------------------------------------------------------------------------------------- Shipped
 # Newest first: `tools/roadmap.py sync` adds each newly shipped item on top.
@@ -1238,11 +1237,12 @@ links = ["docs/design-system.md"]
 
 [[item]]
 id = "linux-packages"
-title = "AppImage and a Nix flake"
+title = "A Nix flake"
 status = "later"
 area = "platforms"
-plain = """Install Horizon on any Linux distribution as an AppImage, and on NixOS through a Nix flake."""
-dev = """A player's idea (#horizon-ideas). An AppImage of the launcher and game from the release workflow, and a \
-flake.nix packaging the release binaries with their runtime libraries (Vulkan loader, X11/Wayland, ALSA), \
-the way horizon-parity's NixOS setup runs them today."""
-links = []
+plain = """Install Horizon on NixOS through a Nix flake."""
+dev = """A player's idea (#horizon-ideas). The launcher's AppImage ships with each launcher release \
+(packaging/linux/appimage.sh): one file with the libraries GPUI needs, which replaces itself when it \
+updates. A flake.nix packaging the release binaries with their runtime libraries (Vulkan loader, \
+X11/Wayland, ALSA) is still missing, the way horizon-parity's NixOS setup runs them today."""
+links = ["packaging/linux/appimage.sh"]

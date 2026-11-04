@@ -31,7 +31,7 @@ async fn boot() -> Result<()> {
         horizon_platform::web::status(&format!("Horizon crashed: {info}"), true);
     }));
     horizon_client::gfx::open_web_device().await?;
-    super::run()
+    super::run_with()
 }
 
 /// The game stopped: its error, or that it quit, goes over the page.

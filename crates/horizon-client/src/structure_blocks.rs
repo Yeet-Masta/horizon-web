@@ -248,7 +248,17 @@ fn text(nbt: &Compound, key: &str) -> Option<String> {
 /// hands the template's block entity NBT to `loadWithComponents`, which is
 /// what a chunk load does with a saved one.
 fn generated_block_entity(block: &str, nbt: &Compound) -> Option<BlockEntity> {
-    let fallback = BlockEntity::for_block(block)?;
+    // A mod sign has no vanilla block name; its saved entity id is still vanilla's.
+    let fallback = BlockEntity::for_block(block).or_else(|| {
+        let id = text(nbt, "id")?;
+        if !block.starts_with("minecraft:")
+            && matches!(id.as_str(), "minecraft:sign" | "minecraft:hanging_sign")
+        {
+            BlockEntity::for_block(&id)
+        } else {
+            None
+        }
+    })?;
     let mut tag = nbt.clone();
     // RandomizableContainer.tryLoadLootTable: with a table the items are not read.
     if text(&tag, "LootTable").is_some() {
@@ -305,6 +315,34 @@ pub fn block_entities(
 mod tests {
     use super::*;
     use horizon_world::loot::{ExplorationMap, LootStack};
+
+    #[test]
+    fn a_saved_mod_sign_uses_its_vanilla_entity_type() {
+        for hanging in [false, true] {
+            let mut sign = crate::signs::SignData {
+                hanging,
+                ..Default::default()
+            };
+            sign.front.lines[0] = "Front".into();
+            sign.back.lines[0] = "Back".into();
+            sign.front.color = 9;
+            sign.back.glowing = true;
+            sign.waxed = true;
+            let mut nbt: Compound = sign
+                .encode()
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect();
+            nbt.insert("id".into(), Tag::String(sign.id().into()));
+            let Some(BlockEntity::Sign(loaded)) = generated_block_entity("test:notice", &nbt)
+            else {
+                panic!("saved sign missing");
+            };
+            assert_eq!(loaded, sign);
+            assert!(generated_block_entity("minecraft:stone", &nbt).is_none());
+        }
+        assert!(generated_block_entity("test:road_sign", &Compound::new()).is_none());
+    }
 
     #[test]
     fn generated_end_gateway_keeps_its_exit() {
@@ -370,9 +408,10 @@ mod tests {
     #[test]
     fn a_world_open_reuses_loot_data_of_the_same_packs() {
         use horizon_world::loot::PackOverlay;
-        let root = std::env::temp_dir().join(format!("horizon-loot-reuse-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
-        std::fs::write(root.join("items.json"), "{}").unwrap();
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-loot-reuse-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        horizon_platform::fs::write(root.join("items.json"), "{}").unwrap();
         let mut slot = None;
         let first = reuse_or_load(&mut slot, &root, &PackOverlay::NONE).expect("loot data");
         let again = reuse_or_load(&mut slot, &root, &PackOverlay::NONE).unwrap();
@@ -384,7 +423,7 @@ mod tests {
         let packs = PackOverlay { files: &files };
         let other = reuse_or_load(&mut slot, &root, &packs).unwrap();
         assert!(!Arc::ptr_eq(&first, &other));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = horizon_platform::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -21,6 +21,12 @@ use std::{
 pub const MAX_SIZE: u64 = 262_144_000;
 /// `DownloadQueue.MAX_KEPT_PACKS`.
 const MAX_KEPT: usize = 20;
+/// Longest wait for a connection, and for any one read from the server. The
+/// queue runs batches on one thread, so a server that accepts the connection
+/// and then goes silent would otherwise hold the pack screen forever.
+#[cfg(not(target_family = "wasm"))]
+const NET_TIMEOUT: horizon_platform::time::Duration =
+    horizon_platform::time::Duration::from_secs(30);
 
 /// `createDownloadHeaders`: who is downloading, with which game.
 pub fn headers(name: &str, uuid: u128) -> Vec<(&'static str, String)> {
@@ -259,10 +265,22 @@ pub fn download_file(
     max_size: u64,
     progress: &Sender<Progress>,
 ) -> Result<PathBuf, String> {
+    download_file_within(dir, request, headers, max_size, progress, NET_TIMEOUT)
+}
+/// `download_file` with the connect and read timeout given.
+#[cfg(not(target_family = "wasm"))]
+fn download_file_within(
+    dir: &Path,
+    request: &Request,
+    headers: &[(&'static str, String)],
+    max_size: u64,
+    progress: &Sender<Progress>,
+    timeout: horizon_platform::time::Duration,
+) -> Result<PathBuf, String> {
     if let Some(cached) = cached(dir, request)? {
         return Ok(cached);
     }
-    let (size, mut input) = get(&request.url, headers)?;
+    let (size, mut input) = get(&request.url, headers, timeout)?;
     store(dir, request, size, &mut input, max_size, progress)
 }
 /// [`download_file`] on the web, through the page's fetch.
@@ -366,13 +384,19 @@ fn store(
         }
     }
 }
-/// A GET of `url`: the length the response gives, if any, and its body.
+/// A GET of `url`, connecting and reading within `timeout`: the length the
+/// response gives, if any, and its body.
 #[cfg(not(target_family = "wasm"))]
 fn get(
     url: &str,
     headers: &[(&'static str, String)],
+    timeout: horizon_platform::time::Duration,
 ) -> Result<(Option<u64>, Box<dyn Read>), String> {
-    let mut call = ureq::AgentBuilder::new().build().get(url);
+    let mut call = ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .build()
+        .get(url);
     for (name, value) in headers {
         call = call.set(name, value);
     }
@@ -684,6 +708,38 @@ mod tests {
             sha1: None,
         };
         assert!(download_file(&dir, &missing, &[], MAX_SIZE, &channel().0).is_err());
+        server.join().unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_server_that_goes_silent_fails_the_download() {
+        let dir = scratch();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
+        let (release, hold) = channel::<()>();
+        let server = horizon_platform::thread::spawn(move || {
+            // Accept, then answer nothing until the test is done.
+            let (_stream, _) = listener.accept().unwrap();
+            let _ = hold.recv();
+        });
+        let request = Request {
+            id: 9,
+            url,
+            sha1: None,
+        };
+        let started = horizon_platform::time::Instant::now();
+        let result = download_file_within(
+            &dir,
+            &request,
+            &[],
+            MAX_SIZE,
+            &channel().0,
+            horizon_platform::time::Duration::from_millis(300),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < horizon_platform::time::Duration::from_secs(10));
+        drop(release);
         server.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
     }

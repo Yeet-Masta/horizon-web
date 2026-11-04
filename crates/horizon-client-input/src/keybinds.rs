@@ -284,6 +284,33 @@ pub fn mouse_button(name: &str) -> Option<MouseButton> {
 }
 pub use horizon_client_core::key_display::display_name;
 
+/// A key event: what the layout writes on its key, without modifiers, names
+/// that key from now on (`key_display::learn_layout`), so an AZERTY player's
+/// Q key shows A.
+pub fn learn_layout(event: &winit::event::KeyEvent) {
+    use winit::keyboard::{Key, PhysicalKey};
+    let PhysicalKey::Code(code) = event.physical_key else {
+        return;
+    };
+    let Some(name) = key_name(code) else {
+        return;
+    };
+    let learn = horizon_client_core::key_display::learn_layout;
+    #[cfg(not(target_family = "wasm"))]
+    let key = {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+        event.key_without_modifiers()
+    };
+    // A browser's key event has the layout's key only as typed (`KeyboardEvent.key`).
+    #[cfg(target_family = "wasm")]
+    let key = event.logical_key.clone();
+    match key {
+        Key::Character(text) => learn(name, &text),
+        Key::Dead(Some(c)) => learn(name, c.encode_utf8(&mut [0; 4])),
+        _ => {}
+    }
+}
+
 /// Current bindings by mapping name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyBinds {
@@ -463,6 +490,21 @@ impl KeyBinds {
             .find(|mapping| self.get(mapping) == name)
             .and_then(|mapping| key_code(Self::default_of(mapping)))
     }
+    /// `AbstractContainerScreen.checkHotbarKeyPressed`: the off hand and the
+    /// hotbar slots, as the controls bind them now. Answers the key the menu
+    /// acts on (`KeyF` for the off hand, `DigitN` for a slot), so a rebound key
+    /// swaps instead of reaching the screen.
+    pub fn container_hotbar_key(&self, key: KeyCode) -> Option<KeyCode> {
+        let name = key_name(key)?;
+        if self.get("key.swapOffhand") == name {
+            return Some(KeyCode::KeyF);
+        }
+        MAPPINGS
+            .iter()
+            .filter(|m| m.0.starts_with("key.hotbar."))
+            .find(|m| self.get(m.0) == name)
+            .and_then(|m| key_code(Self::default_of(m.0)))
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +539,29 @@ mod tests {
         assert_eq!(keys.container_mouse_key(MouseButton::Left, false), None);
         assert_eq!(keys.container_mouse_key(MouseButton::Right, false), None);
         assert_eq!(keys.container_mouse_key(MouseButton::Forward, false), None);
+    }
+
+    #[test]
+    fn container_hotkeys_follow_the_bound_keys() {
+        let mut keys = KeyBinds::default();
+        assert_eq!(
+            keys.container_hotbar_key(KeyCode::KeyF),
+            Some(KeyCode::KeyF)
+        );
+        assert_eq!(
+            keys.container_hotbar_key(KeyCode::Digit3),
+            Some(KeyCode::Digit3)
+        );
+        assert_eq!(keys.container_hotbar_key(KeyCode::Tab), None);
+        // The report's key: bound to the off hand, the menu takes it first.
+        keys.set("key.swapOffhand", "key.keyboard.tab");
+        assert_eq!(keys.container_hotbar_key(KeyCode::Tab), Some(KeyCode::KeyF));
+        assert_eq!(keys.container_hotbar_key(KeyCode::KeyF), None);
+        keys.set("key.hotbar.3", "key.keyboard.t");
+        assert_eq!(
+            keys.container_hotbar_key(KeyCode::KeyT),
+            Some(KeyCode::Digit3)
+        );
     }
 
     #[test]

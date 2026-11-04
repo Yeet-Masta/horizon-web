@@ -43,6 +43,10 @@ impl Game<'_> {
             });
             return Ok(());
         }
+        // Stop client-side terrain work before the integrated server is shut down. The
+        // server's own stop path aborts its workers, but the window's streaming registration
+        // is dropped only after the event loop exits and would otherwise wait for queued work.
+        self.streaming.abort_generation();
         if let Some(integrated) = &self.integrated {
             integrated.request_stop();
             self.pending_save = Some(ClosingSave {
@@ -69,7 +73,7 @@ impl Game<'_> {
             });
         } else {
             self.close_container();
-            self.stats.custom("leave_game", 1);
+            self.award_custom_stat("leave_game", 1);
             self.lan_close(false);
             self.free_player_beds()?;
             self.pending_save = Some(ClosingSave {
@@ -156,7 +160,7 @@ impl Game<'_> {
                         self.save.save_later(
                             &chunks,
                             self.pack.assets.registry,
-                            self.res.biomes(),
+                            world_biomes!(self),
                         )?;
                         self.world.modified.remove(&key);
                         keys.pop_front();
@@ -184,13 +188,17 @@ impl Game<'_> {
                     if keys.is_empty() {
                         self.prune_entity_memory();
                         self.save_raids();
+                        self.save.save_attachments(&self.world.attachments)?;
                         self.save.save_forced_chunks(&self.streaming.forced)?;
                         self.save_game_metadata()?;
                         save.stage = Stage::Writes;
                     }
                     Ok(false)
                 }
-                Stage::Writes => self.save.writes_finished(),
+                Stage::Writes => {
+                    let players = self.finish_player_autosaves(false)?;
+                    Ok(self.save.writes_finished()? && players)
+                }
             }
         })();
         match result {
@@ -239,6 +247,15 @@ impl Game<'_> {
         ) {
             return Ok(());
         }
+        // disconnectWithSavingScreen: a GenericMessageScreen, its title and
+        // no navigation.
+        horizon_client::widgets::begin_screen(|| {
+            horizon_client::widgets::ScreenInfo::new(
+                "saving",
+                super::screen_info::tr("menu.savingLevel", &[]),
+            )
+            .without_navigation()
+        });
         let Some(renderer) = &mut self.renderer else {
             return Ok(());
         };

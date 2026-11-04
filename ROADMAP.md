@@ -76,9 +76,9 @@ Owner: [levzzz5154](https://github.com/levzzz5154) · Tracking: [#3911](https://
 
 <details><summary>Technical</summary>
 
-One item for all modding work ([#3911](https://github.com/horizon-rust/horizon/issues/3911)), led by levzzz5154 with vladislav_hagen; the order between the parts is theirs. Native mods on stable hook points (game/native_hooks.rs, [#3345](https://github.com/horizon-rust/horizon/issues/3345), [#3346](https://github.com/horizon-rust/horizon/issues/3346), [#3434](https://github.com/horizon-rust/horizon/issues/3434), [#3435](https://github.com/horizon-rust/horizon/issues/3435)) built by the launcher ([#3388](https://github.com/horizon-rust/horizon/issues/3388), [#3855](https://github.com/horizon-rust/horizon/issues/3855)); server-side hooks ([#3878](https://github.com/horizon-rust/horizon/issues/3878), [#3706](https://github.com/horizon-rust/horizon/issues/3706)); mod-owned screens, input and drawing; tools for mod makers (templates, `native.py check`); the registry ([#1634](https://github.com/horizon-rust/horizon/issues/1634), [#1642](https://github.com/horizon-rust/horizon/issues/1642), [#1659](https://github.com/horizon-rust/horizon/issues/1659)); machines with inventories and menus ([#1189](https://github.com/horizon-rust/horizon/issues/1189)); mods that read and change the world through the server. The WebAssembly runtime is removed ([#3350](https://github.com/horizon-rust/horizon/issues/3350), [#3351](https://github.com/horizon-rust/horizon/issues/3351), [#3353](https://github.com/horizon-rust/horizon/issues/3353)). [docs/native-mods.md](docs/native-mods.md).
+One item for all modding work ([#3911](https://github.com/horizon-rust/horizon/issues/3911)), led by levzzz5154 with vladislav_hagen; the order between the parts is theirs. Native mods on stable hook points (game/native_hooks.rs, [#3345](https://github.com/horizon-rust/horizon/issues/3345), [#3346](https://github.com/horizon-rust/horizon/issues/3346), [#3434](https://github.com/horizon-rust/horizon/issues/3434), [#3435](https://github.com/horizon-rust/horizon/issues/3435)) built by the launcher ([#3388](https://github.com/horizon-rust/horizon/issues/3388), [#3855](https://github.com/horizon-rust/horizon/issues/3855)); server-side hooks ([#3878](https://github.com/horizon-rust/horizon/issues/3878), [#3706](https://github.com/horizon-rust/horizon/issues/3706)); mod-owned screens, input and drawing; tools for mod makers (templates, `native.py check`); the registry ([#1634](https://github.com/horizon-rust/horizon/issues/1634), [#1642](https://github.com/horizon-rust/horizon/issues/1642), [#1659](https://github.com/horizon-rust/horizon/issues/1659)); machines with inventories and menus ([#1189](https://github.com/horizon-rust/horizon/issues/1189)); mods that read and change the world through the server. [docs/native-mods.md](docs/native-mods.md).
 
-More: [#3360](https://github.com/horizon-rust/horizon/issues/3360) · [#1596](https://github.com/horizon-rust/horizon/issues/1596) · [#1635](https://github.com/horizon-rust/horizon/issues/1635)
+More: [#3351](https://github.com/horizon-rust/horizon/issues/3351) · [#3353](https://github.com/horizon-rust/horizon/issues/3353) · [#3360](https://github.com/horizon-rust/horizon/issues/3360) · [#1596](https://github.com/horizon-rust/horizon/issues/1596) · [#1635](https://github.com/horizon-rust/horizon/issues/1635)
 
 </details>
 
@@ -92,7 +92,7 @@ Owner: [ludovic111](https://github.com/ludovic111) · Tracking: [#3914](https://
 
 <details><summary>Technical</summary>
 
-Since [#1514](https://github.com/horizon-rust/horizon/issues/1514) single player runs on the server thread (`game/integrated.rs`) and the window joins it as a client; `--in-frame` keeps the old path. The open `[server-thread]` issues list the gaps. In review: breeding's advancement and statistic ([#3873](https://github.com/horizon-rust/horizon/issues/3873)), the client's menu when the server replaces the player ([#3841](https://github.com/horizon-rust/horizon/issues/3841)), splashes when falling in water ([#3621](https://github.com/horizon-rust/horizon/issues/3621)). [docs/server-levels.md](docs/server-levels.md).
+Since [#1514](https://github.com/horizon-rust/horizon/issues/1514) single player runs on the server thread (`game/integrated.rs`) and the window joins it as a client. The open `[server-thread]` issues list the gaps. In review: breeding's advancement and statistic ([#3873](https://github.com/horizon-rust/horizon/issues/3873)), the client's menu when the server replaces the player ([#3841](https://github.com/horizon-rust/horizon/issues/3841)), splashes when falling in water ([#3621](https://github.com/horizon-rust/horizon/issues/3621)). [docs/server-levels.md](docs/server-levels.md).
 
 </details>
 
@@ -234,11 +234,11 @@ Client-of-a-server fixes in `game/remote*.rs` and `horizon-protocol`: mobs' aggr
 
 #### One single-player path: remove the in-frame world
 
-Single player will have one way to run, the server thread, so every fix works everywhere and there are fewer bugs. The older in-frame mode goes once everything passes without it.
+Single player has one way to run, the server thread, so every fix works everywhere and there are fewer bugs. The older in-frame mode is removed.
 
 <details><summary>Technical</summary>
 
-`--in-frame` (also `--no-server-thread` and `HORIZON_SERVER_THREAD=0`) still ticks the world inside the window's `Game`, and most harnesses test that path. Delete it once `lan_e2e --server-thread` and the parity harnesses pass on the server thread, which also halves the bug surface. See also 'Single player as a server' and [docs/server-levels.md](docs/server-levels.md).
+`--in-frame` (also `--no-server-thread` and `HORIZON_SERVER_THREAD=0`) ticked the world inside the window's `Game`. [#6473](https://github.com/horizon-rust/horizon/issues/6473) removes it with the code only it reached (the window's world loader and player tick, its portal travel and loading screen, the in-frame LAN host); the harnesses run on the server thread. See also 'Single player as a server' and [docs/server-levels.md](docs/server-levels.md).
 
 </details>
 
@@ -326,11 +326,11 @@ A mapping table from intermediary and SRG names so pre-26.1 jars can be classifi
 
 #### A modpack's own resource and shader packs
 
-Importing a modpack also brings the resource packs and shader packs it ships with, where Horizon can use them.
+Imported modpacks carry their resource packs into a profile of their own. Shader-pack conversion is still pending.
 
 <details><summary>Technical</summary>
 
-Porting a pack carries data, assets and worldgen today; the resource packs and shader packs bundled with it are left out. Resource packs can be carried as they are; shader packs go through the converter ([docs/modpacks.md](docs/modpacks.md)).
+Resource-pack carry-over is implemented locally: Modrinth common/client overrides, CurseForge's override folder, installed instances (ZIP and directory packs), and hash-checked indexed ZIP downloads. The launcher keeps profile edits and lets resource-only profiles play; packs are enabled in Resource Packs. Synthetic import and profile tests cover the file pipeline; in-game rendering has not been verified. Shader-pack conversion is still pending, so this combined item remains partial ([docs/modpacks.md](docs/modpacks.md)).
 
 </details>
 
@@ -490,7 +490,7 @@ Small mods written as scripts, in the style of KubeJS, with no compiler.
 
 <details><summary>Technical</summary>
 
-Waits for native mods to settle: the earlier plan ran Lua inside the WebAssembly sandbox, which is removed. A script layer over the native hook points is to be designed.
+Waits for native mods to settle: a script layer over the native hook points is to be designed.
 
 More: [docs/native-mods.md](docs/native-mods.md)
 
@@ -634,16 +634,6 @@ A spike with ray-traced sun shadows, off by default, is a draft ([#1180](https:/
 
 </details>
 
-#### HDR monitors
-
-Output for HDR monitors: brighter highlights and richer colour where your screen supports it.
-
-<details><summary>Technical</summary>
-
-Issue [#1441](https://github.com/horizon-rust/horizon/issues/1441). Needs a surface format and a tone-mapping path per backend, and tests on real HDR screens on Windows, macOS and Linux.
-
-</details>
-
 #### MSAA, anisotropic filtering, exclusive fullscreen
 
 More graphics options: multisample anti-aliasing, anisotropic filtering and an exclusive fullscreen mode. Today Horizon has FXAA and borderless fullscreen.
@@ -718,7 +708,7 @@ Versions of Horizon for Android, iOS and web browsers. Nothing official yet; con
 
 <details><summary>Technical</summary>
 
-No official build. Android was first closed as not planned, with touch controls, a mobile interface, packaging and loading the player's own assets all missing; the roadmap now includes it, iOS and a WebAssembly build for the browser as long-term goals. First pieces from contributors: `horizon-dualsense` compiling on iOS ([#1813](https://github.com/horizon-rust/horizon/issues/1813)) and helper-thread limits on Android ([#1751](https://github.com/horizon-rust/horizon/issues/1751)). Preparing without Java ([#1750](https://github.com/horizon-rust/horizon/issues/1750)) matters here too. Horizon ships none of Mojang's files on any platform.
+No official build. Android was first closed as not planned, with touch controls, a mobile interface, packaging and loading the player's own assets all missing; the roadmap now includes it, iOS and a build for the browser as long-term goals. First pieces from contributors: `horizon-dualsense` compiling on iOS ([#1813](https://github.com/horizon-rust/horizon/issues/1813)) and helper-thread limits on Android ([#1751](https://github.com/horizon-rust/horizon/issues/1751)). Preparing without Java ([#1750](https://github.com/horizon-rust/horizon/issues/1750)) matters here too. Horizon ships none of Mojang's files on any platform.
 
 </details>
 
@@ -742,13 +732,13 @@ Open: the GUI Scale is clamped to 2 after a restart under Hyprland, while XWayla
 
 </details>
 
-#### AppImage and a Nix flake
+#### A Nix flake
 
-Install Horizon on any Linux distribution as an AppImage, and on NixOS through a Nix flake.
+Install Horizon on NixOS through a Nix flake.
 
 <details><summary>Technical</summary>
 
-A player's idea (#horizon-ideas). An AppImage of the launcher and game from the release workflow, and a flake.nix packaging the release binaries with their runtime libraries (Vulkan loader, X11/Wayland, ALSA), the way horizon-parity's NixOS setup runs them today.
+A player's idea (#horizon-ideas). The launcher's AppImage ships with each launcher release ([packaging/linux/appimage.sh](packaging/linux/appimage.sh)): one file with the libraries GPUI needs, which replaces itself when it updates. A flake.nix packaging the release binaries with their runtime libraries (Vulkan loader, X11/Wayland, ALSA) is still missing, the way horizon-parity's NixOS setup runs them today.
 
 </details>
 
@@ -878,7 +868,7 @@ Banners in End cities show as plain magenta instead of with their pattern.
 
 <details><summary>Technical</summary>
 
-Compare the banner block entities the End city templates place with vanilla's (`EndCityPieces`, the templates' block entity NBT, `BannerBlockEntity`'s patterns), in `crates/horizon-world/src/worldgen/structure/`. Issue [#1438](https://github.com/horizon-rust/horizon/issues/1438); possibly related: [#526](https://github.com/horizon-rust/horizon/issues/526).
+Compare the banner block entities the End city templates place with vanilla's (`EndCityPieces`, the templates' block entity NBT, `BannerBlockEntity`'s patterns), in `crates/horizon-world/src/worldgen/structure/`. Issue [#1438](https://github.com/horizon-rust/horizon/issues/1438); possibly related: [#526](https://github.com/horizon-rust/horizon/issues/526). The templates' block entities now keep their patterns ([#1928](https://github.com/horizon-rust/horizon/issues/1928)).
 
 </details>
 
@@ -888,7 +878,7 @@ Armour and tools in End city chests should come enchanted, as in vanilla.
 
 <details><summary>Technical</summary>
 
-`loot.rs` implements `enchant_with_levels`: find why the End city chest table's rolls come out bare, and compare them with vanilla's for a few seeds. Issues [#1437](https://github.com/horizon-rust/horizon/issues/1437), [#1660](https://github.com/horizon-rust/horizon/issues/1660).
+`loot.rs` implements `enchant_with_levels`: find why the End city chest table's rolls come out bare, and compare them with vanilla's for a few seeds. Issues [#1437](https://github.com/horizon-rust/horizon/issues/1437), [#1660](https://github.com/horizon-rust/horizon/issues/1660). The loot's enchantment functions now reach every table that rolls ([#1911](https://github.com/horizon-rust/horizon/issues/1911), [#2037](https://github.com/horizon-rust/horizon/issues/2037)).
 
 </details>
 
@@ -904,6 +894,7 @@ Armour and tools in End city chests should come enchanted, as in vanilla.
 - **Discord Rich Presence** (v0.2.58): Your Discord profile can show that you are playing Horizon, with a switch to turn it off. [#1787](https://github.com/horizon-rust/horizon/issues/1787) · [#1788](https://github.com/horizon-rust/horizon/issues/1788)
 - **Server dialogs and login screens** (v0.2.67): Servers that show dialogs, such as the register and login screens of AuthMe, will work in Horizon. [#1720](https://github.com/horizon-rust/horizon/issues/1720) · [#1734](https://github.com/horizon-rust/horizon/issues/1734) · [#1735](https://github.com/horizon-rust/horizon/issues/1735)
 - **Microsoft sign-in** (launcher@0.2.17): Sign in with your Microsoft account in the launcher to play on online-mode servers. [docs/microsoft-account.md](docs/microsoft-account.md) · [#2879](https://github.com/horizon-rust/horizon/issues/2879)
+- **HDR monitors** (v0.2.74): Output for HDR monitors: brighter highlights and richer colour where your screen supports it. [#1441](https://github.com/horizon-rust/horizon/issues/1441) · [#2021](https://github.com/horizon-rust/horizon/issues/2021) · [#2292](https://github.com/horizon-rust/horizon/issues/2292)
 - **OpenGL for old computers** (v0.2.63): Horizon now starts on old PCs whose graphics card has no Vulkan or DirectX 12 driver: it switches to OpenGL by itself, and Options > Graphics can pick OpenGL by hand. [#1917](https://github.com/horizon-rust/horizon/issues/1917) · [#1920](https://github.com/horizon-rust/horizon/issues/1920) · [#1936](https://github.com/horizon-rust/horizon/issues/1936)
 - **Server resource packs** (v0.2.48): Servers can send you their resource pack: Horizon asks, downloads it and applies it, like vanilla. [#1562](https://github.com/horizon-rust/horizon/issues/1562) · [#1569](https://github.com/horizon-rust/horizon/issues/1569) · [#1570](https://github.com/horizon-rust/horizon/issues/1570)
 - **Single player on its own server thread** (v0.2.39): Single player runs on a server thread, as vanilla does, so the world keeps ticking smoothly while the window draws. [#1514](https://github.com/horizon-rust/horizon/issues/1514) · [docs/server-levels.md](docs/server-levels.md)

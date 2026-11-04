@@ -8,11 +8,12 @@ use super::{
     goals::{Cx, Goal, LookAtPlayer, MOVE, Panic, RandomLookAround, Stroll, goal_clone},
     nav::NavKind,
 };
+use crate::items::ItemStack;
 use crate::sculk::{self, Context, Info};
-use horizon_core::geometry::Vec3;
 use horizon_core::geometry::trig::Mth;
+use horizon_core::geometry::{Aabb, Vec3};
 
-// Allay state: `main_hand` the held item, `ints[1]` how many it carries,
+// Allay state: `main_hand` the held filter; `State::inventory` the fetched stack,
 // `tame` a liked player, `point` the wanted item (set by the game),
 // `State::noteblock` the liked note block with `ints[2]` its cooldown,
 // `ints[3]` the pickup cooldown, `flag` dancing with `ints[4]` the dance clock,
@@ -64,13 +65,81 @@ pub fn dimension(w: &MobWorld) -> &'static str {
     }
 }
 
+/// `AllayAi.allayConsidersItemEqual`: the same item (`ItemStack.isSameItem`)
+/// and the same potion contents (`!hasNonMatchingPotion`); no
+/// `potion_contents` on a stack is the empty contents, and two empty ones match.
+// shortcut: only the potion id is compared, not custom effects or colour, which
+// `StackData` does not keep; upgrade when it does.
+pub fn considers_item_equal(held: &ItemStack, candidate: &ItemStack) -> bool {
+    held.item == candidate.item && held.potion() == candidate.potion()
+}
+
+/// `Allay.setDancing` marks an allay dancing only under `isEffectiveAi()`, so
+/// `NoAI` never dances; panicking stops it, and 10 blocks is the jukebox reach
+/// (`distance_sq` to the nearest playing jukebox's centre, infinite for none).
+pub fn dances(no_ai: bool, panicking: bool, distance_sq: f64) -> bool {
+    !no_ai && !panicking && distance_sq <= 100.0
+}
+
+/// `Mob.getPickupReach` (1, 1, 1) around the box: `Mob.aiStep`'s looting loop
+/// takes an equal drop from here with or without AI, so it is the only pickup a
+/// `NoAI` allay has (`canPickUpLoot` and `wantsToPickUp` never ask for AI;
+/// walking to a drop is the sensor's and throwing it is the brain's).
+pub fn pickup_reach(bounds: Aabb) -> Aabb {
+    bounds.inflate(Vec3::new(1.0, 1.0, 1.0))
+}
+
 /// An allay's vibration listener (`Allay.vibrationData`) and the brain
 /// memory `LIKED_NOTEBLOCK_POSITION`; `LIKED_NOTEBLOCK_COOLDOWN_TICKS` is
 /// `ints[2]`.
 #[derive(Clone, Debug, Default)]
 pub struct State {
+    /// Allay's separate one-slot SimpleContainer.
+    pub inventory: Option<ItemStack>,
     pub vibration: sculk::Data,
     pub noteblock: Option<GlobalPos>,
+}
+
+/// The pocket is independent of the main-hand filter.
+pub fn inventory(m: &Mob) -> Option<&ItemStack> {
+    m.extra.allay.as_ref()?.inventory.as_ref()
+}
+
+impl State {
+    /// SimpleContainer.canAddItem: merge only identical item components.
+    pub fn room(&self, stack: &ItemStack, max: u32) -> u32 {
+        let max = max.min(99);
+        match &self.inventory {
+            None => max,
+            Some(held) if held.same_item_same_components(stack) => max.saturating_sub(held.count),
+            Some(_) => 0,
+        }
+    }
+
+    /// SimpleContainer.addItem for the Allay's single slot; returns the count accepted.
+    pub fn add(&mut self, mut stack: ItemStack, max: u32) -> u32 {
+        let count = stack.count.min(self.room(&stack, max));
+        if count > 0 {
+            if let Some(held) = &mut self.inventory {
+                held.count += count;
+            } else {
+                stack.count = count;
+                self.inventory = Some(stack);
+            }
+        }
+        count
+    }
+
+    pub fn take(&mut self, count: u32) -> Option<ItemStack> {
+        let held = self.inventory.as_mut()?;
+        let mut taken = held.clone();
+        taken.count = count.min(held.count);
+        held.count -= taken.count;
+        if held.count == 0 {
+            self.inventory = None;
+        }
+        Some(taken)
+    }
 }
 
 pub fn register(m: &mut Mob) {
@@ -209,7 +278,7 @@ impl Goal for Deliver {
         MOVE
     }
     fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        m.extra.ints[1] > 0 && m.extra.point.is_none() && deposit(m, cx).is_some()
+        inventory(m).is_some() && m.extra.point.is_none() && deposit(m, cx).is_some()
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
         if let Some(p) = deposit(m, cx)
@@ -340,17 +409,22 @@ pub fn travel(m: &mut Mob, w: &MobWorld, input: Vec3, events: &mut Vec<MobEvent>
 /// `Allay.aiStep` / `tick`: healing, cooldowns, the hold and spin clocks.
 pub fn ai_step(m: &mut Mob) {
     if m.alive() && m.age.is_multiple_of(10) {
-        m.health = (m.health + 1.0).min(m.attrs.max_health);
+        m.heal(1.0);
     }
     for i in [2, 3] {
         if m.extra.ints[i] > 0 {
             m.extra.ints[i] -= 1;
         }
     }
+    update_duplication_cooldown(m);
+    animate(m);
+}
+/// `Allay.updateDuplicationCooldown`: the server decrements positive counters,
+/// independently of the AI goal gate.
+pub fn update_duplication_cooldown(m: &mut Mob) {
     if m.extra.egg_time > 0 {
         m.extra.egg_time -= 1;
     }
-    animate(m);
 }
 /// `Allay.tick`'s client half: the hold and spin clocks (the server's and a
 /// client's).
@@ -409,4 +483,106 @@ pub fn anim(m: &Mob, s: &AnimState, p: &mut Poses) {
     p.zrot("right_arm", amount);
     p.yrot("right_arm", 0.279_252_68 * hold);
     p.yrot("left_arm", -0.279_252_68 * hold);
+}
+#[cfg(test)]
+mod allay_parity_tests {
+    use super::*;
+
+    fn potion(id: &str) -> ItemStack {
+        ItemStack::new("minecraft:potion", 1).with_potion(id)
+    }
+
+    #[test]
+    fn pocket_merges_and_splits_full_stacks_without_changing_the_filter() {
+        let mut m = Mob::new(1, super::super::sensor_scan_tests::kind(), Vec3::ZERO, 0.0);
+        register(&mut m);
+        let filter = potion("minecraft:healing");
+        m.extra.set_main_hand_stack(Some(filter.clone()));
+        let pocket = potion("minecraft:swiftness");
+        let st = m.extra.allay.as_mut().unwrap();
+        assert_eq!(st.add(pocket.clone(), 16), 1);
+        assert_eq!(st.add(filter.clone(), 16), 0);
+        assert_eq!(
+            st.add(
+                ItemStack {
+                    count: 20,
+                    ..pocket.clone()
+                },
+                16
+            ),
+            15
+        );
+        let taken = st.take(1).unwrap();
+        assert!(taken.same_item_same_components(&pocket));
+        assert_eq!(taken.count, 1);
+        assert_eq!(st.inventory.as_ref().unwrap().count, 15);
+        assert_eq!(st.take(u32::MAX).unwrap().count, 15);
+        assert!(st.inventory.is_none());
+        assert!(
+            m.extra
+                .main_hand_stack()
+                .unwrap()
+                .same_item_same_components(&filter)
+        );
+        assert_eq!(m.extra.main_hand_stack().unwrap().count, 1);
+    }
+
+    #[test]
+    fn a_held_potion_matches_only_its_own_contents() {
+        assert!(!considers_item_equal(
+            &potion("minecraft:swiftness"),
+            &potion("minecraft:healing")
+        ));
+        assert!(considers_item_equal(
+            &potion("minecraft:swiftness"),
+            &potion("minecraft:swiftness")
+        ));
+    }
+
+    #[test]
+    fn stacks_without_potion_contents_match_by_item() {
+        let stone = ItemStack::new("minecraft:stone", 1);
+        assert!(considers_item_equal(&stone, &stone));
+        assert!(!considers_item_equal(
+            &stone,
+            &ItemStack::new("minecraft:dirt", 1)
+        ));
+        // An empty potion component on both sides matches; one is not enough.
+        assert!(considers_item_equal(
+            &ItemStack::new("minecraft:potion", 1),
+            &ItemStack::new("minecraft:potion", 1)
+        ));
+        assert!(!considers_item_equal(
+            &ItemStack::new("minecraft:potion", 1),
+            &potion("minecraft:swiftness")
+        ));
+    }
+
+    #[test]
+    fn a_no_ai_allay_does_not_dance_to_a_playing_jukebox() {
+        // Beside a playing jukebox and at the edge of its 10-block reach.
+        for distance_sq in [0.0, 1.5 * 1.5, 99.0, 100.0] {
+            assert!(!dances(true, false, distance_sq), "NoAI at {distance_sq}");
+            assert!(dances(false, false, distance_sq), "AI at {distance_sq}");
+        }
+        // Out of reach, or panicking: no allay dances.
+        assert!(!dances(false, false, 100.5));
+        assert!(!dances(false, true, 1.0));
+    }
+
+    #[test]
+    fn a_no_ai_allay_takes_only_a_drop_already_in_pickup_reach() {
+        // An allay at 0.5, 64, 0.5: 0.6 wide and tall.
+        let bounds = Aabb::new(Vec3::new(0.2, 64.0, 0.2), Vec3::new(0.8, 64.6, 0.8));
+        let reach = pickup_reach(bounds);
+        // `Mob.aiStep`'s looting loop takes a drop at its feet, and one just
+        // past the box, with no AI.
+        assert!(reach.contains(Vec3::new(0.5, 64.0, 0.5)));
+        assert!(reach.contains(Vec3::new(0.5, 64.0, 1.7)));
+        // Past the one-block grow it would have to walk (`GoToWantedItem` is
+        // the brain's), and 32 blocks is the sensor's reach, not this one.
+        assert!(!reach.contains(Vec3::new(0.5, 64.0, 1.9)));
+        assert!(!reach.contains(Vec3::new(0.5, 64.0, 20.0)));
+        assert!(!reach.contains(Vec3::new(0.5, 66.0, 0.5)));
+    }
 }

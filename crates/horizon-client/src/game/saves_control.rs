@@ -55,6 +55,7 @@ impl Game<'_> {
                             "last_played": w.modified.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
                             "commands": w.commands,
                             "version": w.version,
+                            "corrupted": w.corrupted,
                         })
                     })
                     .collect();

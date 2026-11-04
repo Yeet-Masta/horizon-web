@@ -209,8 +209,8 @@ conditions, carvers, configured and placed features, structures, structure sets,
 higher pack's file for an id replacing a lower one's, and its block, fluid and biome tag files to the tag bundles in pack order.
 `GeneratorData::load_with` reads the bundles with them; the client caches the result per set of pack entries
 (`vanillagen::shared_data_with`). What Horizon leaves out is logged: a pack's new biomes (the game has no id, colours or sounds for them;
-their tag entries and climate points go with them), dimension types (every dimension keeps its vanilla build height, and noise settings
-taller than it generate only inside it, as `clampToHeightAccessor`), and folders the generator does not read. Sapling growth and bone
+their tag entries and climate points go with them) and folders the generator does not read. A pack's dimension types set each level's
+height ([world-height.md](world-height.md)); noise settings taller than the level generate only inside it, as `clampToHeightAccessor`. Sapling growth and bone
 meal still place vanilla's features.
 
 `tools/test_datapack_worldgen_parity.py` runs the whole-chunk harness with `HORIZON_DATAPACKS=tools/fixtures/datapacks` on both sides
@@ -249,3 +249,11 @@ Horizon entry; `LootTableSeed` without a `LootTable` and a vault's default rewar
 
 Remaining known differences: a handful of single blocks near structure pieces in full generation (abandoned camps, shipwreck, villages) that
 need per-feature tracing, and tree features only through `tools/test_tree_feature_parity.py` (8,898 fixtures, all equal).
+
+## Related docs
+
+- [Noise generation](noise-generation.md)
+- [Density functions](density-functions.md)
+- [Terrain filling](terrain-filling.md)
+- [Heightmaps](heightmaps.md)
+- [Collision geometry](collision-geometry.md)

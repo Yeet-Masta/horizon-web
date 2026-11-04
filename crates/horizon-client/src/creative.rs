@@ -21,6 +21,35 @@ pub struct Tab {
     /// `CreativeModeTab.Type.HOTBAR`: the saved toolbars, filled when the
     /// tab is selected (`set_saved_hotbars`).
     pub hotbar: bool,
+    /// The page of tabs it is on: vanilla's are 0, mods' after, as NeoForge
+    /// pages them.
+    pub page: u32,
+}
+impl Tab {
+    /// The tab without its stacks.
+    fn header(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            title: self.title.clone(),
+            icon: self.icon.clone(),
+            items: Vec::new(),
+            top: self.top,
+            column: self.column,
+            search: self.search,
+            inventory: self.inventory,
+            hotbar: self.hotbar,
+            page: self.page,
+        }
+    }
+}
+/// A tab as exported, built with permissions: `operator` marks the stacks a
+/// build without them leaves out (the export's `permissions_only`).
+#[derive(Clone, Debug)]
+struct Exported {
+    tab: Tab,
+    /// `CreativeModeTab.Type.CATEGORY`: shown only with a stack (`shouldDisplay`).
+    category: bool,
+    operator: Vec<bool>,
 }
 /// What the client's creative search trees (SessionSearchTrees) index for one
 /// stack of the search tab: its creative tooltip lines and its item tags.
@@ -35,8 +64,12 @@ struct SearchEntry {
     tags: Vec<(String, String)>,
 }
 pub struct Creative {
+    /// The tabs shown (`CreativeModeTabs.tabs()`), with the stacks the current
+    /// permissions put in them.
     pub tabs: Vec<Tab>,
     pub selected: usize,
+    /// The page of tabs shown.
+    pub page: u32,
     /// Scroll position 0..1 (scrollOffs).
     pub scroll: f32,
     /// The scrollbar is held (scrolling): dragging moves it.
@@ -46,9 +79,21 @@ pub struct Creative {
     /// The search tab's stacks, in its display order.
     search_items: Vec<ItemStack>,
     search_index: Vec<SearchEntry>,
+    /// Every exported tab, and the search tab's stacks with their entries and
+    /// whether only permissions list them: `rebuild` keeps what is shown.
+    exported: Vec<Exported>,
+    exported_search: Vec<(ItemStack, SearchEntry, bool)>,
+    /// The `hasPermissions` the tabs were last built with
+    /// (`CreativeModeTabs.tryRebuildTabContents`).
+    permissions: bool,
     /// ItemPickerMenu.items: what the grid shows, filled when the tab or the
     /// search changes (selectTab, refreshSearchResults), not on every frame.
     shown: Mutex<Option<Shown>>,
+    /// SessionSearchTrees.creativeByNameSearch: the lower-cased tooltip lines
+    /// of every search item in one language (keyed by the `itemGroup.search`
+    /// string), built on the first search and kept until the language or the
+    /// item list changes.
+    lines_cache: Mutex<Option<(String, Arc<[Vec<String>]>)>>,
 }
 /// The grid's stacks for one tab, search text and language.
 struct Shown {
@@ -200,14 +245,22 @@ impl Creative {
     }
     pub fn from_json(raw: &Value) -> Result<Self> {
         let mut tabs = Vec::new();
-        let mut search_items = Vec::new();
-        let mut search_index = Vec::new();
+        let mut search = Vec::new();
         for t in raw["tabs"].as_array().into_iter().flatten() {
+            // The stacks only a build with permissions lists, by index.
+            let only: Vec<u64> = t["permissions_only"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_u64)
+                .collect();
             let mut items = Vec::new();
-            for v in t["items"].as_array().into_iter().flatten() {
+            let mut operator = Vec::new();
+            for (i, v) in t["items"].as_array().into_iter().flatten().enumerate() {
                 let snbt = v.as_str().unwrap_or("-");
                 if let Some(stack) = crate::item_data::parse_stack(snbt)? {
                     items.push(stack);
+                    operator.push(only.contains(&(i as u64)));
                 }
             }
             let kind = t["type"].as_str().unwrap_or("");
@@ -221,34 +274,36 @@ impl Creative {
                 };
                 for (i, stack) in items.iter().enumerate() {
                     let (namespace, path) = split_id(&java_lower(&stack.item));
-                    search_index.push(SearchEntry {
+                    let entry = SearchEntry {
                         namespace,
                         path,
                         lines: strings(&t["lines"][i]),
                         tags: strings(&t["tags"][i]).iter().map(|t| split_id(t)).collect(),
-                    });
+                    };
+                    search.push((stack.clone(), entry, operator[i]));
                 }
-                search_items = items.clone();
-            }
-            if t["visible"] == false {
-                continue;
             }
             let icon = t["icon"]
                 .as_str()
                 .and_then(|s| crate::item_data::parse_stack(s).ok().flatten());
-            tabs.push(Tab {
-                id: t["id"].as_str().unwrap_or("").to_owned(),
-                title: t["title"].as_str().unwrap_or("").to_owned(),
-                icon: icon.map_or_else(|| "minecraft:stone".to_owned(), |s| s.item.to_string()),
-                items,
-                top: t["row"] == "TOP",
-                column: t["column"].as_u64().unwrap_or(0) as u32,
-                search: kind == "SEARCH",
-                inventory: kind == "INVENTORY",
-                hotbar: kind == "HOTBAR",
+            tabs.push(Exported {
+                tab: Tab {
+                    id: t["id"].as_str().unwrap_or("").to_owned(),
+                    title: t["title"].as_str().unwrap_or("").to_owned(),
+                    icon: icon.map_or_else(|| "minecraft:stone".to_owned(), |s| s.item.to_string()),
+                    items,
+                    top: t["row"] == "TOP",
+                    column: t["column"].as_u64().unwrap_or(0) as u32,
+                    search: kind == "SEARCH",
+                    inventory: kind == "INVENTORY",
+                    hotbar: kind == "HOTBAR",
+                    page: t["page"].as_u64().unwrap_or(0) as u32,
+                },
+                category: kind == "CATEGORY",
+                operator,
             });
         }
-        Ok(Self::new(tabs, search_items, search_index))
+        Ok(Self::new(tabs, search))
     }
     /// The old export: item ids per tab, no components, tooltips or tags.
     fn from_legacy(raw: &Value) -> Result<Self> {
@@ -270,35 +325,42 @@ impl Creative {
                 }
             }
             let kind = t["type"].as_str().unwrap_or("");
-            tabs.push(Tab {
-                id: t["id"].as_str().unwrap_or("").to_owned(),
-                title: t["title"].as_str().unwrap_or("").to_owned(),
-                icon: t["icon"].as_str().unwrap_or("minecraft:stone").to_owned(),
-                items,
-                top: t["row"] == "TOP",
-                column: t["column"].as_u64().unwrap_or(0) as u32,
-                search: kind == "SEARCH",
-                inventory: kind == "INVENTORY",
-                hotbar: false,
+            tabs.push(Exported {
+                operator: vec![false; items.len()],
+                tab: Tab {
+                    id: t["id"].as_str().unwrap_or("").to_owned(),
+                    title: t["title"].as_str().unwrap_or("").to_owned(),
+                    icon: t["icon"].as_str().unwrap_or("minecraft:stone").to_owned(),
+                    items,
+                    top: t["row"] == "TOP",
+                    column: t["column"].as_u64().unwrap_or(0) as u32,
+                    search: kind == "SEARCH",
+                    inventory: kind == "INVENTORY",
+                    hotbar: false,
+                    page: 0,
+                },
+                category: false,
             });
         }
-        let search_index = search_items
-            .iter()
+        let search = search_items
+            .into_iter()
             .map(|s| {
                 let (namespace, path) = split_id(&java_lower(&s.item));
-                SearchEntry {
+                let entry = SearchEntry {
                     namespace,
                     path,
                     ..Default::default()
-                }
+                };
+                (s, entry, false)
             })
             .collect();
-        Ok(Self::new(tabs, search_items, search_index))
+        Ok(Self::new(tabs, search))
     }
-    fn new(tabs: Vec<Tab>, search_items: Vec<ItemStack>, search_index: Vec<SearchEntry>) -> Self {
-        Self {
-            tabs,
+    fn new(exported: Vec<Exported>, exported_search: Vec<(ItemStack, SearchEntry, bool)>) -> Self {
+        let mut creative = Self {
+            tabs: Vec::new(),
             selected: 0,
+            page: 0,
             scroll: 0.0,
             scrolling: false,
             search: {
@@ -308,10 +370,83 @@ impl Creative {
                 search.text_color = u32::MAX;
                 search
             },
-            search_items,
-            search_index,
+            search_items: Vec::new(),
+            search_index: Vec::new(),
+            exported,
+            exported_search,
+            permissions: false,
             shown: Mutex::new(None),
+            lines_cache: Mutex::new(None),
+        };
+        creative.rebuild();
+        creative
+    }
+    /// `CreativeModeTabs.buildAllTabContents` with `permissions`: the operator
+    /// tab's display items generator lists its stacks only with them
+    /// (`hasPermissions`), and the search tab with it; a category tab is
+    /// shown with a stack (`CreativeModeTab.shouldDisplay`).
+    fn rebuild(&mut self) {
+        let permissions = self.permissions;
+        let keep = |operator: bool| permissions || !operator;
+        self.tabs = self
+            .exported
+            .iter()
+            .filter_map(|e| {
+                let items: Vec<ItemStack> = (e.tab.items.iter().zip(&e.operator))
+                    .filter(|(_, o)| keep(**o))
+                    .map(|(s, _)| s.clone())
+                    .collect();
+                (!e.category || !items.is_empty()).then(|| Tab {
+                    items,
+                    ..e.tab.header()
+                })
+            })
+            .collect();
+        *self.lines_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        (self.search_items, self.search_index) = self
+            .exported_search
+            .iter()
+            .filter(|(_, _, o)| keep(*o))
+            .map(|(s, e, _)| (s.clone(), e.clone()))
+            .unzip();
+        self.forget_items();
+    }
+    /// `CreativeModeInventoryScreen.tryRefreshInvalidatedTabs`, which its
+    /// constructor and `containerTick` run with `hasPermissions`
+    /// (`Player.canUseGameMasterBlocks` and the Operator Items Tab option):
+    /// when that changed, the tabs are built again. A selected tab left
+    /// without stacks (the operator tab) gives way to the default tab; any
+    /// other keeps its first row (`refreshCurrentTabContents`). True when the
+    /// tabs were rebuilt.
+    pub fn set_permissions(&mut self, permissions: bool, names: &Names) -> bool {
+        if permissions == self.permissions {
+            return false;
         }
+        let selected = self.tab().id.clone();
+        let row = self.first_row(names);
+        self.permissions = permissions;
+        self.rebuild();
+        match self.tabs.iter().position(|t| t.id == selected) {
+            Some(tab) => {
+                self.selected = tab;
+                // ItemPickerMenu.getScrollForRowIndex.
+                let hidden = self.hidden_rows(names);
+                self.scroll = if hidden > 0 {
+                    (row as f32 / hidden as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
+            None => {
+                // CreativeModeTabs.getDefaultTab.
+                let default = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.id == "minecraft:building_blocks");
+                self.select(default.unwrap_or(0));
+            }
+        }
+        true
     }
     /// Where a stack comes in the creative tabs (the search tab lists them
     /// all, in tab order): the same stack's place, else its item's first.
@@ -325,35 +460,59 @@ impl Creative {
     }
     /// The tabs without their stacks: what the screen draws of them each frame.
     pub fn tab_headers(&self) -> Vec<Tab> {
-        self.tabs
-            .iter()
-            .map(|t| Tab {
-                id: t.id.clone(),
-                title: t.title.clone(),
-                icon: t.icon.clone(),
-                items: Vec::new(),
-                top: t.top,
-                column: t.column,
-                search: t.search,
-                inventory: t.inventory,
-                hotbar: t.hotbar,
-            })
-            .collect()
+        self.tabs.iter().map(Tab::header).collect()
     }
     pub fn tab(&self) -> &Tab {
         &self.tabs[self.selected.min(self.tabs.len() - 1)]
     }
     /// selectTab: a different tab empties the search box; the scrollbar goes to the top.
+    /// A tab on another page shows that page.
     pub fn select(&mut self, tab: usize) {
         if tab != self.selected {
             self.search.set_value("");
         }
         self.selected = tab;
+        if let Some(t) = self.tabs.get(tab)
+            && !Self::on_every_page(t)
+        {
+            self.page = t.page;
+        }
         self.scroll = 0.0;
         if self.tab().search {
             self.search.focused = true;
             self.search.reset_blink();
         }
+    }
+    /// How many pages of tabs there are (1 without mods' tabs).
+    pub fn pages(&self) -> u32 {
+        self.tabs.iter().map(|t| t.page + 1).max().unwrap_or(1)
+    }
+    /// The tabs every page shows (NeoForge's): the right-hand ones, saved
+    /// hotbars, search, operator blocks and the inventory.
+    fn on_every_page(t: &Tab) -> bool {
+        t.column >= 5
+    }
+    /// Whether tab `t` shows on the page shown.
+    pub fn on_page(&self, t: &Tab) -> bool {
+        t.page == self.page || Self::on_every_page(t)
+    }
+    /// Shows page `page` (NeoForge's page buttons) and selects its first tab,
+    /// unless the selected tab is one every page shows.
+    pub fn set_page(&mut self, page: u32) {
+        let page = page.min(self.pages() - 1);
+        let kept = self
+            .tabs
+            .get(self.selected)
+            .is_some_and(Self::on_every_page);
+        if !kept
+            && let Some(first) = self
+                .tabs
+                .iter()
+                .position(|t| t.page == page && !Self::on_every_page(t))
+        {
+            self.select(first);
+        }
+        self.page = page;
     }
     /// The search tab's stacks.
     pub fn search_items(&self) -> &[ItemStack] {
@@ -377,6 +536,46 @@ impl Creative {
     /// the name tree, both over vanilla's suffix arrays (substring matches,
     /// results in the tab's order).
     pub fn search_results(&self, term: &str, names: &Names) -> Vec<usize> {
+        let english =
+            names.display_get("itemGroup.search").as_deref() == names.get("itemGroup.search");
+        let local = if term.is_empty() || term.starts_with('#') {
+            Arc::from([])
+        } else if english && self.search_index.iter().all(|e| !e.lines.is_empty()) {
+            // The exported English lines are the whole index.
+            Arc::from([])
+        } else {
+            let language = names.display_get("itemGroup.search").unwrap_or_default();
+            let mut cache = self.lines_cache.lock().unwrap_or_else(|e| e.into_inner());
+            match cache.as_ref().filter(|(l, _)| *l == language) {
+                Some((_, lines)) => lines.clone(),
+                None => {
+                    let lines = self.localized_lines(&|k| names.display_get(k));
+                    *cache = Some((language, lines.clone()));
+                    lines
+                }
+            }
+        };
+        self.search_results_in(term, names, &local, english)
+    }
+    /// Every search item's tooltip lines through `translate`, lower-cased.
+    fn localized_lines(&self, translate: &dyn Fn(&str) -> Option<String>) -> Arc<[Vec<String>]> {
+        self.search_items
+            .iter()
+            .map(|s| {
+                crate::item_tooltip::lines(s, None, translate)
+                    .iter()
+                    .map(|l| java_lower(l))
+                    .collect()
+            })
+            .collect()
+    }
+    fn search_results_in(
+        &self,
+        term: &str,
+        names: &Names,
+        local: &[Vec<String>],
+        english: bool,
+    ) -> Vec<usize> {
         let all = 0..self.search_index.len();
         if term.is_empty() {
             return all.collect();
@@ -398,18 +597,13 @@ impl Creative {
                 })
                 .collect();
         }
-        // FullTextSearchTree: tooltip lines, and the item id after a colon.
-        // The export's lines are English (they come from the vanilla jars);
-        // the hover name in the selected language is matched too, so a
-        // localized search finds the item. It is the whole name (a tipped
-        // arrow's potion, the ominous banner), as the first line is.
+        // FullTextSearchTree: the creative tooltip lines in the selected
+        // language, and the item id after a colon. The export's lines are
+        // English (they come from the vanilla jars), so they stand in only
+        // while the language is English; otherwise every line (name, lore,
+        // effects, ...) is rebuilt through the language, as vanilla's
+        // getTooltipLines does.
         let text = java_lower(term);
-        let localized = |i: usize| {
-            java_lower(&crate::item_tooltip::name_line(
-                &self.search_items[i],
-                &|k| names.display_get(k),
-            ))
-        };
         all.filter(|&i| {
             let e = &self.search_index[i];
             let fallback;
@@ -419,16 +613,17 @@ impl Creative {
             } else {
                 &e.lines
             };
+            let exported = english || e.lines.is_empty();
+            let local = local.get(i).map_or(&[][..], Vec::as_slice);
+            let hit = |t: &str| {
+                (exported && any(lines.iter().map(String::as_str), t))
+                    || any(local.iter().map(String::as_str), t)
+            };
             match text.split_once(':') {
-                None => {
-                    any(lines.iter().map(String::as_str), &text) || localized(i).contains(&text)
-                }
+                None => hit(&text),
                 Some((ns, path)) => {
                     let (ns, path) = (java_trim(ns), java_trim(path));
-                    e.namespace.contains(ns)
-                        && (e.path.contains(path)
-                            || any(lines.iter().map(String::as_str), path)
-                            || localized(i).contains(path))
+                    e.namespace.contains(ns) && (e.path.contains(path) || hit(path))
                 }
             }
         })
@@ -599,7 +794,7 @@ impl Creative {
     pub fn tab_position(tab: &Tab) -> (f32, f32) {
         let mut x = tab.column as f32 * 27.0;
         if tab.column >= 5 {
-            // Right-aligned tabs (search, inventory).
+            // Right-aligned tabs (search, operator, inventory).
             x = Self::WIDTH - 27.0 * (7 - tab.column) as f32 + 1.0;
         }
         let y = if tab.top { -28.0 } else { Self::HEIGHT - 4.0 };
@@ -1081,6 +1276,84 @@ mod tests {
         assert_eq!(c.search.value, "");
     }
 
+    /// An export built with permissions: the operator tab's stacks, and their
+    /// place at the end of the search tab, only with them.
+    fn with_operator_tab() -> Creative {
+        let stack = |id: &str| format!("{{count:1,id:\"minecraft:{id}\"}}");
+        let raw = serde_json::json!({"schema": 3, "tabs": [
+            {"id": "minecraft:building_blocks", "type": "CATEGORY", "row": "TOP", "column": 0, "title": "Building Blocks",
+             "icon": stack("bricks"), "visible": true, "items": [stack("stone")]},
+            {"id": "minecraft:op_blocks", "type": "CATEGORY", "row": "BOTTOM", "column": 5, "title": "Operator Utilities",
+             "icon": stack("command_block"), "visible": false,
+             "items": [stack("command_block"), stack("barrier")], "permissions_only": [0, 1]},
+            {"id": "minecraft:search", "type": "SEARCH", "row": "TOP", "column": 6, "title": "Search Items",
+             "icon": stack("compass"), "visible": true,
+             "items": [stack("stone"), stack("command_block"), stack("barrier")],
+             "lines": [["Stone"], ["Command Block"], ["Barrier"]], "tags": [[], [], []],
+             "permissions_only": [1, 2]},
+            {"id": "minecraft:inventory", "type": "INVENTORY", "row": "BOTTOM", "column": 6, "title": "Survival Inventory",
+             "icon": stack("chest"), "visible": true, "items": []}
+        ]});
+        Creative::from_json(&raw).unwrap()
+    }
+
+    fn tab_ids(c: &Creative) -> Vec<&str> {
+        c.tabs.iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn operator_stacks_stay_out_without_permissions() {
+        let c = with_operator_tab();
+        let names = Names::default();
+        assert_eq!(
+            tab_ids(&c),
+            [
+                "minecraft:building_blocks",
+                "minecraft:search",
+                "minecraft:inventory"
+            ]
+        );
+        assert_eq!(c.search_items().len(), 1);
+        assert!(c.search_results("command", &names).is_empty());
+        assert_eq!(c.search_results("", &names), [0]);
+    }
+
+    #[test]
+    fn operator_tab_comes_and_goes_with_permissions() {
+        let mut c = with_operator_tab();
+        let names = Names::default();
+        assert!(!c.set_permissions(false, &names));
+        assert!(c.set_permissions(true, &names));
+        assert!(!c.set_permissions(true, &names));
+        assert_eq!(
+            tab_ids(&c),
+            [
+                "minecraft:building_blocks",
+                "minecraft:op_blocks",
+                "minecraft:search",
+                "minecraft:inventory"
+            ]
+        );
+        let op: Vec<&str> = c.tabs[1].items.iter().map(|s| s.item.as_ref()).collect();
+        assert_eq!(op, ["minecraft:command_block", "minecraft:barrier"]);
+        assert_eq!(c.search_results("command", &names), [1]);
+        assert_eq!(c.search_results("", &names), [0, 1, 2]);
+        // The search tab keeps its place across the rebuild.
+        c.select(2);
+        c.search.set_value("block");
+        assert!(c.set_permissions(false, &names));
+        assert!(c.tab().search);
+        assert_eq!(c.search.value, "block");
+        assert!(c.items(&names).is_empty());
+        // The selected operator tab is left empty: the default tab instead.
+        c.set_permissions(true, &names);
+        c.select(1);
+        assert_eq!(c.items(&names).len(), 2);
+        c.set_permissions(false, &names);
+        assert_eq!(c.tab().id, "minecraft:building_blocks");
+        assert_eq!(c.items(&names)[0].item.as_ref(), "minecraft:stone");
+    }
+
     #[test]
     fn saved_hotbars_tab_shows_its_rows_and_locks_the_hint() {
         let mut c = Creative::from_json(&serde_json::json!({"schema": 2, "tabs": [
@@ -1164,13 +1437,31 @@ mod tests {
                 ("item.minecraft.wooden_hoe".to_owned(), "木锄".to_owned()),
             ]),
         };
-        let q = |s: &str| c.search_results(s, &names);
+        let tr = |k: &str| names.get(k).map(str::to_owned);
+        let local = c.localized_lines(&tr);
+        let q = |s: &str| c.search_results_in(s, &names, &local, false);
         assert_eq!(q("铁砧"), [0]);
         assert_eq!(q("木锄"), [2]);
-        // The English tooltip lines the export indexed still match.
-        assert_eq!(q("anvil"), [0]);
+        // Only the selected language's lines count outside English.
+        assert!(q("anvil").is_empty());
+        assert_eq!(c.search_results_in("anvil", &names, &local, true), [0]);
         // A colon's path searches the display name too.
         assert_eq!(q("minecraft:铁砧"), [0]);
+    }
+
+    #[test]
+    fn search_matches_every_localized_tooltip_line() {
+        // Vanilla's FullTextSearchTree indexes the selected language's
+        // tooltip lines; the export's English lines do not apply.
+        let c = creative(0);
+        let names = Names::default();
+        let ru: HashMap<&str, &str> = HashMap::from([("item.minecraft.anvil", "Наковальня")]);
+        let tr = |k: &str| ru.get(k).map(|v| (*v).to_owned());
+        let local = c.localized_lines(&tr);
+        let q = |s: &str, english| c.search_results_in(s, &names, &local, english);
+        assert_eq!(q("наков", false), [0]);
+        assert!(q("anvil", false).is_empty());
+        assert_eq!(q("anvil", true), [0]);
     }
 
     #[test]
@@ -1273,6 +1564,7 @@ mod tests {
             search: false,
             inventory: false,
             hotbar: false,
+            page: 0,
         };
         // Top row, second column: the button spans x 27..53, y -28..4.
         let t = tab(true, 1);

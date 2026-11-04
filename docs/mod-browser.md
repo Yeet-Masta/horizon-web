@@ -81,9 +81,14 @@ start); the hedge places and its recipe crafts 4.
 
 ## The Mods page
 
-The launcher's **Mods** page has the four kinds as tabs (Mods, Modpacks, Resource packs, Shader packs; the last
-searches Horizon's registry), a search field (Enter searches), **Show everything** and
-the source: Modrinth, with **CurseForge (coming soon)** beside it, disabled. Each result is an index row: its summary, author,
+The launcher's **Mods** page has the five kinds as tabs: **Mods**, **Modpacks**, **Resource packs**, **Shader packs**
+and **Data packs**, each with a search field (Enter searches). Mods, Modpacks and Resource packs pick their source:
+Horizon's registry or Modrinth, with **CurseForge (coming soon)** beside them, disabled. Mods start on Horizon's
+registry; **Shader packs** search it only (Horizon's own `.hshader` packs), **Data packs** search Modrinth only and
+install into the world picked under the search. A Java instance's tabs always search Modrinth for its version and
+loader, with the version and loader filters. A Horizon instance searching Modrinth's Java mods sees them all, each
+marked **Works**, **Partly** or **Doesn't run in Horizon** once its jar is checked; **Show everything** adds what was
+made for other Minecraft versions. Each result is an index row: its summary, author,
 downloads, source and licence, how well it runs (and why), **Page** (the project's page on its source) and
 **Install** (**Import** for a modpack). The Modpacks tab lists the imported packs first, with their coverage
 report, **Port** and **Play** ([modpacks.md](modpacks.md)). Installed packs are listed above the results with their version, source,
@@ -110,14 +115,21 @@ is coming soon; its source already maps the order and the game version.
 
 **Icons and gallery images** are the projects' own, fetched at run time from the source's image server
 (`browser::images`): HTTPS from `cdn.modrinth.com` (or CurseForge's `media.forgecdn.net` / `edge.forgecdn.net`) only,
-at most 8 MB each, decoded (PNG, JPEG, WebP, GIF, at most 8192 pixels a side), scaled (icons 128 px, gallery 960 px)
-and kept as PNGs in `mod-browser/images/` under the game folder, which is kept under 128 MB by dropping the oldest
-files. A plate with the project's initial stands in until the icon arrives. Nothing of a project's art is in the
-launcher or the repository.
+at most 8 MB each, decoded (PNG, JPEG, WebP, GIF, at most 8192 pixels a side), scaled (icons 128 px, list rows 80 px,
+gallery 960 px) and kept as PNGs in `mod-browser/images/` under the launcher's data folder, which is kept under 128 MB
+by dropping the oldest files. After a week an image is asked for again with its server's `ETag` and `Last-Modified`:
+an unchanged one costs a 304 and is kept; offline, the cached one stays. A plate with the project's initial stands in
+until the icon arrives. Nothing of a project's art is in the launcher or the repository.
 
-**Vanilla Minecraft** is marked with a grass block drawn at run time from the player's own prepared game files
-(`assets/minecraft/textures/block/grass_block_*.png`, tinted with the plains grass colour): the game-version filter
-shows it. No Mojang file or logo is in the launcher or the repository.
+**Installed mods' icons** (Home's Mods tab, the Mods page's installed list): Modrinth's project icon for what the
+browser installed from it, the URLs asked for in one request (`GET /projects?ids=[…]`) and kept in
+`mod-browser/project-icons.json` so they show offline; else the icon a jar names for itself
+(`fabric.mod.json`/`quilt.mod.json` `icon`, `mods.toml` `logoFile`), read from the jar off the UI thread and scaled to
+the row; else a generic glyph. The tab builds only the rows near the view, so a pack of hundreds costs what a few do.
+
+**Vanilla Minecraft** is marked with Horizon's own grass block (`launcher/assets/logos/grass-block.png`, drawn by
+`tools/launcher_grass_block.py` from our palette, not from Mojang's textures): the game-version filter, the Java Edition
+tab and plain Minecraft instances show it. No Mojang file or logo is in the launcher or the repository.
 
 **Source logos.** Modrinth's logo is not shown: Modrinth's own repository says its branding is all rights reserved and
 "the use of Modrinth branding elements, including but not limited to the wrench-in-labyrinth logo, ... is strictly
@@ -178,9 +190,8 @@ settings) are copied in on the first install only, so the player's changes survi
 down installs nothing. It is listed on the Modpacks tab with **Play** and **Remove**, and plays like an imported pack
 (`modpacks::apply_profile`). A shader pack goes to `shaderpacks/<file>` once `check_file` has run the game's own
 check on it (`horizon_shader_api::check`); a taken-down one is named, for the player to remove.
-A registry `.hmod` that has WebAssembly code (any capability besides `registries`) "needs a native port": Horizon doesn't
-run it any more. The browser neither lists nor installs it alone. A modpack that requires one still installs, and the
-launcher lists the mod as not running, with that reason, and leaves out its code.
+A registry `.hmod` with any capability besides `registries` is neither listed nor installed alone. A modpack that
+requires one still installs, and the launcher lists the mod as not running, with that reason, and leaves out its code.
 
 ```sh
 horizon-launcher mods search --source horizon --kind mod <words>   # with whether it is signed and what it may do

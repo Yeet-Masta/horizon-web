@@ -76,6 +76,15 @@ impl ItemSink for CullBack<'_> {
     }
 }
 
+/// Marks every quad passed on as drawn with a render type that has an `OitPipelineSet`
+/// (`RenderTypes.entityTranslucent`).
+struct OitEntity<'a>(&'a mut dyn ItemSink);
+impl ItemSink for OitEntity<'_> {
+    fn quad(&mut self, quad: ItemQuad) {
+        self.0.quad(ItemQuad { oit: true, ..quad });
+    }
+}
+
 /// A pose override for a named part (`setupAnim`).
 type Adjust<'a> = &'a dyn Fn(&str, &mut [f32; 9]);
 fn none(_: &str, _: &mut [f32; 9]) {}
@@ -127,12 +136,14 @@ fn draw(
                 ]
             }),
             foil_uv: poly.map(|v| [v[3], v[4]]),
+            gui_glint_uv: None,
             normal,
             color,
             foil,
             light_emission: 0,
             cull_back: false,
             translucent: false,
+            oit: false,
         });
     }
     for (child_name, child) in &part.children {
@@ -426,6 +437,30 @@ pub(super) fn submit_banner_result(
     }
 }
 
+/// `GuiBookModelRenderer.renderToTexture`'s book under `pose`: `BookModel`
+/// set up for `BookModel.State.forAnimation(0, page1, page2, open)`.
+pub(super) fn submit_book(
+    renderer: &ItemRenderer,
+    pose: Mat4,
+    open: f32,
+    page1: f32,
+    page2: f32,
+    sprites: &HashMap<String, Rect>,
+    sink: &mut dyn ItemSink,
+) {
+    let (Some(book), Some(r)) = (
+        renderer.part("book"),
+        sprites
+            .get("entity/enchantment/enchanting_table_book")
+            .copied(),
+    ) else {
+        return;
+    };
+    // forAnimation at time 0: (sin(0) * 0.1 + 1.25) * open.
+    let pose_for = book_pose(1.25 * open, page1, page2);
+    draw(book, "root", pose, &pose_for, r, argb(-1), Foil::None, sink);
+}
+
 /// `SpecialModelRenderer.submit`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn submit(
@@ -513,7 +548,19 @@ pub(super) fn submit(
                 .then(|| host.player_skin(argument))
                 .flatten()
                 .unwrap_or_else(|| "entity/player/slim/steve".to_owned());
-            part("player", &none, &skin, white, Foil::None);
+            // `PlayerHeadSpecialRenderer`: the skin's `entityTranslucent` render type.
+            if let (Some(p), Some(r)) = (renderer.part("player"), sprites.get(&skin).copied()) {
+                draw(
+                    p,
+                    "root",
+                    pose,
+                    &none,
+                    r,
+                    white,
+                    Foil::None,
+                    &mut OitEntity(sink),
+                );
+            }
         }
         SpecialKind::Trident => {
             let foil = if has_foil { Foil::Standard } else { Foil::None };
@@ -691,11 +738,11 @@ mod tests {
     /// the glint goes over the patterns, and nothing covers them after.
     #[test]
     fn an_enchanted_banner_shield_keeps_its_patterns_under_the_glint() {
-        let root =
-            std::env::temp_dir().join(format!("horizon-shield-glint-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("items.json"), "{}").unwrap();
-        std::fs::write(
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("horizon-shield-glint-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(&root).unwrap();
+        horizon_platform::fs::write(root.join("items.json"), "{}").unwrap();
+        horizon_platform::fs::write(
             root.join("entity-models.json"),
             serde_json::json!({"minecraft:shield#main": {
                 "pose": [0, 0, 0, 0, 0, 0, 1, 1, 1],
@@ -708,7 +755,7 @@ mod tests {
         .unwrap();
         let library = crate::model_library::ParsedModels::default().into_item_library();
         let renderer = ItemRenderer::load_with_library(&root, library).unwrap();
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = horizon_platform::fs::remove_dir_all(&root);
         let textures = [
             "entity/shield/shield_base",
             "entity/shield/shield_base_nopattern",

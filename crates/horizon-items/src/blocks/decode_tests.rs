@@ -135,3 +135,33 @@ fn raw_shape_capture_keeps_original_json_errors() {
         );
     }
 }
+
+#[test]
+fn the_validation_error_still_fails_the_load_first() {
+    // The typed decode reads this shape (raw), the validation pass rejects
+    // its number, and the empty behaviour document would fail the load next.
+    let facts = br#"{"states":[{"id":0,"outline":[[1e400]]}]}"#;
+    let expected = serde_json::from_slice::<Value>(facts)
+        .unwrap_err()
+        .to_string();
+    let root = horizon_platform::env::temp_dir()
+        .join(format!("horizon-facts-validate-{}", std::process::id()));
+    horizon_platform::fs::create_dir_all(&root).unwrap();
+    horizon_platform::fs::write(root.join("gameplay-facts.json"), facts).unwrap();
+    let registry = horizon_world::registry::BlockRegistry::from_facts_json(
+        &br#"{"states":[["minecraft:air",true,false,"","minecraft:air"]],"defaults":{"minecraft:air":0}}"#[..],
+    )
+    .unwrap();
+    for parallel in [false, true] {
+        let error = super::super::BlockFacts::load_with_projection(
+            &root,
+            &registry,
+            &Value::Null,
+            parallel,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), expected, "parallel: {parallel}");
+    }
+    horizon_platform::fs::remove_dir_all(&root).unwrap();
+}

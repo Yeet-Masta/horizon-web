@@ -10,6 +10,7 @@ description = "Horizon vanilla world data, NBT, regions and chunk storage"
 # std::fs, std::time and std::thread, or the browser's on the web build.
 horizon-platform = { path = "../horizon-platform" }
 libm = "=0.2.16"
+log = "0.4"
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

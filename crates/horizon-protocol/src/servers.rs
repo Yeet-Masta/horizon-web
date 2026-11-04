@@ -183,8 +183,9 @@ mod tests {
 
     #[test]
     fn prepend_keeps_hidden_entries_and_unknown_fields() {
-        let dir = std::env::temp_dir().join(format!("horizon-prepend-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_platform::env::temp_dir()
+            .join(format!("horizon-prepend-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("servers.dat");
         prepend(&path, &ServerEntry::new("First", "a.example")).unwrap();
         assert_eq!(load(&path), [ServerEntry::new("First", "a.example")]);
@@ -200,8 +201,11 @@ mod tests {
         };
         write(&path, &root).unwrap();
         prepend(&path, &ServerEntry::new("Top", "c.example")).unwrap();
-        let (root, _) =
-            nbt::read_named(&std::fs::read(&path).unwrap(), nbt::Limits::default()).unwrap();
+        let (root, _) = nbt::read_named(
+            &horizon_platform::fs::read(&path).unwrap(),
+            nbt::Limits::default(),
+        )
+        .unwrap();
         let Some(Tag::List(list)) = root.tag.get("servers") else {
             panic!("a server list");
         };
@@ -210,10 +214,10 @@ mod tests {
             &[ServerEntry::new("Top", "c.example").to_tag(), hidden]
         );
         // A file that can't be read stays as it is.
-        std::fs::write(&path, b"not nbt").unwrap();
+        horizon_platform::fs::write(&path, b"not nbt").unwrap();
         assert!(prepend(&path, &ServerEntry::new("Top", "c.example")).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"not nbt");
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(horizon_platform::fs::read(&path).unwrap(), b"not nbt");
+        horizon_platform::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

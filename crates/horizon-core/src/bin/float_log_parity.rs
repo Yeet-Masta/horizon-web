@@ -14,7 +14,7 @@ impl DensitySampler for FloatBitsInput {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
+    let mut args = horizon_platform::env::args().skip(1);
     let mut start = args
         .next()
         .ok_or("missing first float bits")?

@@ -364,10 +364,12 @@ mod threads {
 #[cfg(target_feature = "atomics")]
 pub use threads::{hardware_concurrency, horizon_thread_entry, on_page_thread, spawn_thread};
 
-/// getrandom 0.3's source (`--cfg getrandom_backend="custom"`, .cargo/config.toml).
+/// getrandom 0.3's and 0.4's source on wasm64 (`--cfg getrandom_backend="custom"`,
+/// .cargo/config.toml); wasm32 takes their own (`wasm_js`).
 ///
 /// # Safety
 /// `dest` is valid for writes of `len` bytes, as getrandom promises.
+#[cfg(target_arch = "wasm64")]
 #[unsafe(no_mangle)]
 unsafe extern "Rust" fn __getrandom_v03_custom(
     dest: *mut u8,

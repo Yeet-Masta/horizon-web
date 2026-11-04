@@ -1,7 +1,8 @@
 # The web build (web/README.md). getrandom draws from the browser's
-# crypto.getRandomValues through horizon-platform.
+# crypto.getRandomValues: on wasm32 through its own `wasm_js` source (which zip
+# turns on), on wasm64 through horizon-platform.
 [target.wasm32-unknown-unknown]
-rustflags = ['--cfg', 'getrandom_backend="custom"']
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 
 # wasm64 is a nightly target built with -Zbuild-std; zlib-rs's wasm64 SIMD
 # needs the unstable `simd_wasm64` feature there.

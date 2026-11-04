@@ -775,7 +775,7 @@ fn sense_babies(m: &mut Mob, w: &MobWorld) {
     }
     mem(m).visible_villager_babies.set_list(babies);
 }
-/// `SecondaryPoiSensor`: a farmer's farmland within four blocks.
+/// `SecondaryPoiSensor.doTick`: a farmer's farmland within four blocks.
 fn sense_secondary(m: &mut Mob, w: &MobWorld) {
     let mut sites = Vec::new();
     if super::villager::is_farmer(m) {
@@ -784,7 +784,7 @@ fn sense_secondary(m: &mut Mob, w: &MobWorld) {
             for y in -2..=2 {
                 for z in -4..=4 {
                     let p = [c[0] + x, c[1] + y, c[2] + z];
-                    if w.block_name(p[0], p[1], p[2]) == "minecraft:farmland" {
+                    if farmland(w, p) {
                         sites.push(p);
                     }
                 }
@@ -1046,7 +1046,7 @@ pub(super) fn village_sections(m: &Mob, w: &MobWorld) -> Vec<[i32; 3]> {
             }
         }
     }
-    for o in w.others {
+    let mut villager = |o: &super::Seen| {
         if o.alive && o.species == Species::Villager {
             for p in [o.job, o.bed, o.potential_job, o.meeting]
                 .into_iter()
@@ -1057,6 +1057,10 @@ pub(super) fn village_sections(m: &Mob, w: &MobWorld) -> Vec<[i32; 3]> {
                 }
             }
         }
+    };
+    match w.others_villagers {
+        Some(slots) => slots.iter().for_each(|&i| villager(&w.others[i as usize])),
+        None => w.others.iter().for_each(villager),
     }
     out
 }
@@ -1268,6 +1272,12 @@ enum B {
     ShowTrades {
         t: Timed,
         look_time: i32,
+        /// `playerItemStack` (outer `None`: null) and `displayItems`,
+        /// `cycleCounter`, `displayIndex`.
+        player_item: Option<Option<std::sync::Arc<str>>>,
+        items: Vec<crate::items::ItemStack>,
+        cycle: i32,
+        index: usize,
     },
     TradeWithVillager(Timed),
     MakeLove {
@@ -1568,7 +1578,7 @@ impl B {
                     t.begin(cx.lr, cx.now);
                     // start
                     mem(m).path.set_opt(path.clone());
-                    m.nav_move_to_path(path.clone(), f64::from(*speed));
+                    m.nav_move_to_path(cx.w, path.clone(), f64::from(*speed));
                     return true;
                 }
                 let mm = mem(m);
@@ -1647,7 +1657,13 @@ impl B {
                 mm.look_target.set(Tracker::Entity(Who::Player, true));
                 true
             }
-            B::ShowTrades { t, look_time } => {
+            B::ShowTrades {
+                t,
+                look_time,
+                cycle,
+                index,
+                ..
+            } => {
                 if !mem(m).interaction_target.present() || !show_trades_condition(m, cx.w) {
                     return false;
                 }
@@ -1656,6 +1672,8 @@ impl B {
                 if let Some(target) = mem(m).interaction_target.value() {
                     mem(m).look_target.set(Tracker::Entity(target, true));
                 }
+                *cycle = 0;
+                *index = 0;
                 *look_time = 40;
                 true
             }
@@ -2886,7 +2904,7 @@ impl B {
                     if d > 4 && compute_path(m, cx.w, cx.now, &walk, path, speed, cant_reach) {
                         *last_target = Some(now_target);
                         mem(m).path.set_opt(path.clone());
-                        m.nav_move_to_path(path.clone(), f64::from(*speed));
+                        m.nav_move_to_path(cx.w, path.clone(), f64::from(*speed));
                     }
                 }
             }
@@ -2975,7 +2993,14 @@ impl B {
                     });
                 }
             }
-            B::ShowTrades { t, look_time } => {
+            B::ShowTrades {
+                t,
+                look_time,
+                player_item,
+                items,
+                cycle,
+                index,
+            } => {
                 let still = show_trades_condition(m, cx.w)
                     && *look_time > 0
                     && mem(m).interaction_target.present();
@@ -2986,8 +3011,54 @@ impl B {
                 if let Some(target) = mem(m).interaction_target.value() {
                     mem(m).look_target.set(Tracker::Entity(target, true));
                 }
-                // No offer matches the player's item: look for a while only.
-                *look_time = (*look_time).min(40);
+                // findItemsToDisplay: the trades the player's item pays for.
+                let current = cx.w.player.as_ref().and_then(|p| p.main_hand.clone());
+                // getOffers makes the trades on first use: the level rolls
+                // them, and the cost is compared from the next tick on.
+                let unset = m.extra.trade.as_ref().is_none_or(|t| t.unset);
+                if current.is_some() && unset {
+                    cx.events.push(MobEvent::VillagerOffers { mob: m.id });
+                } else if player_item.as_ref() != Some(&current) {
+                    *player_item = Some(current.clone());
+                    items.clear();
+                    if let Some(held) = &current {
+                        if let Some(trade) = &m.extra.trade {
+                            for offer in &trade.offers {
+                                if !offer.out_of_stock()
+                                    && (offer.base_cost_a.stack.item == *held
+                                        || offer
+                                            .cost_b
+                                            .as_ref()
+                                            .is_some_and(|c| c.stack.item == *held))
+                                {
+                                    items.push(offer.result.clone());
+                                }
+                            }
+                        }
+                        if let Some(first) = items.first() {
+                            *look_time = 900;
+                            m.extra.set_main_hand_stack(Some(first.clone()));
+                        }
+                    }
+                }
+                if !items.is_empty() {
+                    // displayCyclingItems
+                    if items.len() >= 2 {
+                        *cycle += 1;
+                        if *cycle >= 40 {
+                            *index += 1;
+                            *cycle = 0;
+                            if *index > items.len() - 1 {
+                                *index = 0;
+                            }
+                            m.extra.set_main_hand_stack(Some(items[*index].clone()));
+                        }
+                    }
+                } else {
+                    // clearHeldItem; no offer matches: look for a while only.
+                    m.extra.set_main_hand(None);
+                    *look_time = (*look_time).min(40);
+                }
                 *look_time -= 1;
             }
             B::TradeWithVillager(t) => {
@@ -3239,9 +3310,12 @@ impl B {
                 mm.walk_target.clear();
                 mm.look_target.clear();
             }
-            B::ShowTrades { t, .. } => {
+            B::ShowTrades { t, player_item, .. } => {
                 t.running = false;
                 mem(m).interaction_target.clear();
+                // clearHeldItem
+                m.extra.set_main_hand(None);
+                *player_item = None;
             }
             B::TradeWithVillager(t) => {
                 t.running = false;
@@ -3424,6 +3498,10 @@ fn restock_if_due(m: &mut Mob, w: &MobWorld) {
         t.restock(w.game_time);
     }
 }
+#[cfg(test)]
+#[path = "villager_farming_tests.rs"]
+mod farming_tests;
+
 /// `HarvestFarmland.validFarmlandAroundVillager`: ripe crops and bare
 /// farmland around the villager.
 fn farmland_around(m: &Mob, w: &MobWorld) -> Vec<[i32; 3]> {
@@ -3444,10 +3522,16 @@ fn farmland_around(m: &Mob, w: &MobWorld) -> Vec<[i32; 3]> {
     }
     valid
 }
+/// Farmland subclasses include mod templates.
+fn farmland(w: &MobWorld, p: [i32; 3]) -> bool {
+    w.facts
+        .get(w.world.block(p[0], p[1], p[2]))
+        .has_class("FarmlandBlock")
+}
+/// `HarvestFarmland.validPos`: a ripe CropBlock or air above farmland.
 fn farmland_valid(w: &MobWorld, p: [i32; 3]) -> bool {
     super::villager::ripe_crop(w, p)
-        || w.facts.is_air(w.world.block(p[0], p[1], p[2]))
-            && w.block_name(p[0], p[1] - 1, p[2]) == "minecraft:farmland"
+        || w.facts.is_air(w.world.block(p[0], p[1], p[2])) && farmland(w, [p[0], p[1] - 1, p[2]])
 }
 /// `HarvestFarmland.getValidFarmland`: one picked by the level random.
 fn pick_farmland(valid: &[[i32; 3]], cx: &mut Bx) -> Option<[i32; 3]> {
@@ -3457,17 +3541,13 @@ fn pick_farmland(valid: &[[i32; 3]], cx: &mut Bx) -> Option<[i32; 3]> {
     let i = cx.lr.next_int_bound(valid.len() as i32).unwrap_or(0) as usize;
     Some(valid[i])
 }
-/// The seeds a villager plants (`VILLAGER_PLANTABLE_SEEDS`) and their crops.
-fn seed_crop(item: &str) -> Option<&'static str> {
-    Some(match item {
-        "minecraft:wheat_seeds" => "minecraft:wheat",
-        "minecraft:potato" => "minecraft:potatoes",
-        "minecraft:carrot" => "minecraft:carrots",
-        "minecraft:beetroot_seeds" => "minecraft:beetroots",
-        "minecraft:torchflower_seeds" => "minecraft:torchflower_crop",
-        "minecraft:pitcher_pod" => "minecraft:pitcher_crop",
-        _ => return None,
-    })
+/// A tagged BlockItem plants its block's default state.
+fn seed_crop(w: &MobWorld, item: &str) -> Option<horizon_world::registry::BlockStateId> {
+    let items = w.items?;
+    if !items.item_in_tag("minecraft:villager_plantable_seeds", item) {
+        return None;
+    }
+    items.get(item)?.block
 }
 /// `HarvestFarmland.tick` at the farmland: harvest a ripe crop, sow bare
 /// farmland, and move on from a growing crop.
@@ -3489,22 +3569,22 @@ fn harvest_tick(
     if ripe {
         cx.events.push(MobEvent::BreakBlock { pos: p, drop: true });
     }
-    if air && w.block_name(p[0], p[1] - 1, p[2]) == "minecraft:farmland" {
+    if air && farmland(w, [p[0], p[1] - 1, p[2]]) {
         let e = super::villager::ext_mut(m);
-        if let Some(slot) = e
+        if let Some((slot, crop)) = e
             .inventory
             .iter()
-            .position(|s| s.count > 0 && seed_crop(&s.item).is_some())
+            .enumerate()
+            .filter(|(_, s)| s.count > 0)
+            .find_map(|(i, s)| seed_crop(w, &s.item).map(|crop| (i, crop)))
         {
-            let crop = seed_crop(&e.inventory[slot].item).unwrap_or("minecraft:wheat");
             e.inventory[slot].count -= 1;
             if e.inventory[slot].count == 0 {
                 e.inventory.remove(slot);
             }
-            cx.events.push(MobEvent::SetBlockName {
+            cx.events.push(MobEvent::SetBlock {
                 pos: p,
-                name: crop,
-                effect: false,
+                state: crop,
             });
             cx.events.push(MobEvent::Sound(
                 "item.crop.plant",
@@ -3926,6 +4006,10 @@ fn show_trades() -> B {
     B::ShowTrades {
         t: timed(400, 1600),
         look_time: 0,
+        player_item: None,
+        items: Vec::new(),
+        cycle: 0,
+        index: 0,
     }
 }
 fn interact(kind: Interact) -> B {

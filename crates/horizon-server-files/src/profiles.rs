@@ -54,6 +54,28 @@ pub fn find_by_name(discovery: &str, name: &str) -> Option<NameAndId> {
     found(&agent.get(&url).call().ok()?.into_string().ok()?, name)
 }
 
+/// YggdrasilMinecraftSessionService.fetchProfile(id, true), as the management protocol finds a player given by
+/// id that the user cache doesn't know: the `session` / `getProfileById` endpoint, or None.
+#[cfg(not(target_family = "wasm"))]
+pub fn find_by_id(discovery: &str, id: u128) -> Option<NameAndId> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .user_agent(&format!("Horizon/{}", horizon_core::release::VERSION))
+        .build();
+    let doc = json::parse(&agent.get(discovery).call().ok()?.into_string().ok()?, true).ok()?;
+    let url =
+        endpoint(&doc, "session", "getProfileById")?.replace("{profileId}", &format!("{id:032x}"));
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let answer = agent
+        .get(&format!("{url}{separator}unsigned=false"))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let name = json::parse(&answer, true).ok()?.get("name")?.as_string()?;
+    found(&answer, &name).filter(|user| user.id == id)
+}
+
 /// MinecraftServicesKeyInfo.get: the services' public keys from the
 /// discovery document's `authentication` / `getPublicKeys` endpoint. The
 /// profile-key keys (`playerCertificateKeys`, ServicesKeyType.PROFILE_KEY)
@@ -77,6 +99,11 @@ pub fn fetch_profile_key_keys(discovery: &str) -> Result<Vec<RsaPublicKey>, &'st
 /// The web build has no sockets of its own: the services never answer there.
 #[cfg(target_family = "wasm")]
 pub fn find_by_name(_discovery: &str, _name: &str) -> Option<NameAndId> {
+    None
+}
+/// The web build reaches no services from here: no profile.
+#[cfg(target_family = "wasm")]
+pub fn find_by_id(_discovery: &str, _id: u128) -> Option<NameAndId> {
     None
 }
 #[cfg(target_family = "wasm")]

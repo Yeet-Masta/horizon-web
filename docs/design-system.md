@@ -147,15 +147,22 @@ Geist (400, 500, 600) and Geist Mono (400), bundled under the SIL Open Font Lice
   sunset) behind the hero. Light and dark follow the system, with a toggle. A giant wordmark in
   pixels sits in the footer.
 - **Game**: vanilla's screens. The on-screen keyboard is a rounded plate of keys in the page
-  colour, the focused key in the accent.
+  colour, the focused key in the accent. Horizon's graphics settings screen takes the Blocks
+  palette below in a lighter form (`graphics_style.rs`).
 
 ## Blocks
 
-A blocky, Minecraft-like look in Horizon's purple, for the website and the redesigned launcher:
+A blocky, Minecraft-like look in Horizon's purple, for the website, the redesigned launcher and
+the game's graphics settings screen:
 Minecraft's inventory rather than a document. Its colours are `horizon_theme::Blocks`
 (`BLOCKS_LIGHT`, `BLOCKS_DARK`), which `tokens.css` carries under the same names as before plus
 `--panel`, `--raised`, `--button`, `--well`, `--bevel`, `--lip`, `--outline` and the `--face`
-of the main action. The game's menus keep `LIGHT` and `DARK`.
+of the main action. The game's other menus keep `LIGHT` and `DARK`.
+
+In the game the graphics settings screen draws the Blocks palette in GUI pixels, lighter than the
+website's blocks so the world stays in view: square panels of the page colour, see-through, with a
+1 px edge and no bevel or lip, flat controls, the violet face on Done, and vanilla's font rather
+than Pixelify. Hover and focus are vanilla's white edge.
 
 - **Pixel type for what names and what you act on.** Headings, navigation, buttons and the
   wordmark use Pixelify Sans (OFL; Medium, SemiBold, Bold); paragraphs and numbers stay in Geist
@@ -169,8 +176,8 @@ of the main action. The game's menus keep `LIGHT` and `DARK`.
 - **Inventory tabs** switch the kinds in Mods: the open tab joins the panel under it.
 - **Slots** hold pictures: a mod's or pack's own icon and gallery images from its source,
   downloaded when first shown and kept on disk (`launcher/src/browser/images.rs`); the launcher
-  ships no third-party pictures. The Horizon instance shows a grass block drawn from the player's
-  own prepared Minecraft textures. Sources are named in text ("from Modrinth"): Modrinth's logo is
+  ships no third-party pictures. Plain Minecraft shows Horizon's own grass block
+  (`tools/launcher_grass_block.py`), Horizon the brand icon (`docs/media/brand/icon.svg`). Sources are named in text ("from Modrinth"): Modrinth's logo is
   all rights reserved, so it is not shown.
 - **Partner banner**: the one exception to shipping no third-party pictures. Sculk, a server host,
   sponsors Horizon: its banner (`launcher/assets/sculk-banner.webp`, `launcher/src/partner.rs`) sits
@@ -178,7 +185,9 @@ of the main action. The game's menus keep `LIGHT` and `DARK`.
   browser. The sidebar of the other pages shows a card made for its width instead: Sculk's characters
   and logo cropped from the same banner, and the text drawn by the launcher in its language, so it
   stays readable; it keeps Sculk's dark card, cyan and rounded corners in both themes, as an ad does,
-  and turns compact (characters beside the text) when the window is too short. The website shows the
+  and turns compact (characters beside the text) when the window is too short. After three minutes
+  on screen, over every start and on any page, a "Hide" appears beside the label of the card and of
+  the Servers banner alike; either one hides both for good (`Settings::partner_hidden`). The website shows the
   banner the same way on Home and the hosting docs, as a `rel="sponsored"` link.
 - **Pixel art drawn in code.** The stone behind the pages is close shades of the page colour
   (`TILE_SHADES`), never Minecraft's stone; the landscape is a banded sky, a sun cut in slices like
@@ -252,6 +261,87 @@ Light); `tokens.css` carries them as `--night-*`. The game's menus don't use it.
   pages has no plate, only a rule. A selected row or tab sits on `card_hi` cut in steps (two for
   rows, one for tabs and icon buttons); a hovered one gets the same shape at half its opacity,
   eased in. A row's second line is its state, after a small square in the state's colour.
+- **Home** (`launcher/src/home.rs`): the selected instance's name in the display cut over the bare
+  sky, a caption above it naming what it plays and its state (the same square), and when it was
+  played below. Play is the main action (`night::PLAY` tall, cut in one step); the version picker
+  is a raised control of the same height; Mods and Folder are quiet buttons. A Horizon instance
+  gets a plate on the right: a release's notes in one line (not a Nightly's) and Join a friend.
+  While it gets ready, Play names it ("Getting ready… 34%") beside Cancel, and below sit the
+  bar, what is happening with the time left, and the steps (game files, Java, sounds, prepare,
+  play), the current one lit, those done ticked: steps, never the log
+  (`HORIZON_LAUNCHER_PAGE=getting-ready` shows it for screenshots, nothing runs).
+- **Instance icons** (`launcher/src/instance_icons.rs`): the sidebar's rows, Home's hero (beside
+  the name) and the instance dialog show the same icon. Its own picture first (`icon.png` in its
+  game folder: one the player chose with Choose image…, scaled to 128 pixels, or its modpack's
+  icon from where it was installed), else the block or colour chosen in the dialog, else its
+  mark: the loader's logo (Fabric, Quilt, Forge, NeoForge), the grass block for plain Minecraft,
+  Horizon's for Horizon. The letter tile is the last resort. The New instance dialog's loader
+  cards show the same logos. Pixel-art logos are scaled by whole
+  pixels; each is decoded once per size.
+- **The instance's tabs** (`launcher/src/home_tabs.rs`): under Home's hero, one tab at a time
+  instead of one long page: Overview (what Play needs: the instance, the game or its resources,
+  the account), Worlds, Multiplayer, Packs, then Screenshots and Console once they have something.
+  A tab names how many it holds ("Worlds 3"); its own buttons (Add server, Open folder) sit at the
+  strip's end, where a list's header would put them (`HORIZON_LAUNCHER_PAGE=worlds`, `packs`...
+  opens one for screenshots).
+- **The Mods tab** (`launcher/src/instance_mods.rs`): the instance's mods on one nearly opaque
+  card, its loader in the header ("Fabric mods", "Horizon mods") beside a filter. A row is the
+  mod's own icon (Modrinth's, else its jar's, else a glyph), its name and version, where it comes from (Modrinth,
+  "needed by another mod", or a local file by name), an update as an amber pill when the browser
+  found one, and a switch (a Java jar turned off is renamed `.disabled`). Update all and Add mods
+  sit at the strip's end (`HORIZON_LAUNCHER_PAGE=instance-mods`).
+- **Sign in with Microsoft** (`launcher/src/microsoft.rs`): every button that signs in is
+  Microsoft's own, drawn as Microsoft publishes it: 41 pixels tall, its four-square symbol, the text
+  semibold at 15 pixels, `#2F2F2F` with white text at night, white with `#5E5E5E` text and a
+  `#8C8C8C` border at dawn, square corners. Not one of the launcher's cut plates: Microsoft's
+  guidelines ask for the button as it is.
+- **The sign-in sheet** (`launcher/src/owner_page.rs`, the owner gate): an opaque plate over the
+  dimmed launcher, never instead of it. It says why (the account that owns Java Edition, no install
+  needed), the code in mono on a raised box with Copy, and Open link as the main action; the window
+  goes on by itself once Microsoft answers (`HORIZON_LAUNCHER_PAGE=sign-in` shows it with a made-up
+  code for screenshots).
+- **New instance** (`launcher/src/new_instance.rs`): an opaque plate over the dimmed launcher,
+  tabs for the kind (Horizon, Vanilla, Modded). A Java kind lists Mojang's versions (search,
+  Snapshots, Old; the newest release chosen), Modded adds the loader (Fabric or Quilt, at its newest
+  stable version), and the name follows the choice ("Fabric 1.21.4") until the player types one.
+  Create is the main action.
+
+## Glass
+
+The launcher's next look, designed by Anthony S. (dezer-x) as a web mockup: playhorizon.dev/launcher,
+source in horizon-site `app/launcher/` and `components/launcher/`. The launcher ports it one to one,
+screen by screen, replacing Night where they differ; the mockup is the reference for every size,
+colour, state and motion. Its tokens are `horizon_theme::glass`; `tokens.css` carries the colours
+as `--glass-*`.
+
+- **The scene is the background**: a pixel sunset over three ridges with trees, clouds, stars, a
+  meteor now and then and fireflies (`launcher/src/scene.rs`), a port of the website's
+  `HorizonScene` with its seeds and sums, so a window shows the picture the mockup shows at the
+  same size. It eases with the pointer and stops 10 s after the window loses focus;
+  `HORIZON_LAUNCHER_MOTION` works as for Night. Dark appearance only so far; Light keeps the dawn.
+- **Frosted plates, round corners, no borders.** A plate is the scene behind it blurred 24 px and
+  saturated 140 %, under white at 6 % and the accent's dark violet (`base`) at 22 %. Menus and
+  popovers take the same glass with a shadow (the mockup's darker `hzl-float` read as another
+  material beside the cards); toasts keep it. Corners (`glass::radius`): dialogs 28, panels 20,
+  menus 16, the Play group 14, rows and chips 12, buttons and tabs 10. No pixel steps, no strokes.
+- **Motion as the website plays it** (`launcher/src/motion.rs`): hovers ease over `quick`'s
+  150 ms curve, toasts and a new page arrive as `hzl-pop` (a fade and a 6 px rise over 200 ms,
+  `cubic-bezier(0.2, 0.7, 0.2, 1)`), a switch's knob slides for 200 ms. Menus open at once. Under
+  reduced motion each is drawn where it ends.
+- **Light**: plates are white at 84 % over the dawn sky washed with white (55 %), so the page
+  reads white; icons and text on the accent keep `on-accent`.
+- **One accent, mixed like the mockup.** `accent` (`#6b4bff`) fills the main action;
+  `accent-soft` (half accent, half white in OKLab) draws progress, ticks, links and the focus ring;
+  text on the accent turns dark when a player's accent is light. `Glass::new` does the mockup's
+  `color-mix` sums, so a player's own accent comes out as the website's would.
+- **White text at a few opacities** (`glass::ink`: 100, 80, 70, 60, 50, 45, 40 %) and white fills
+  for states (`glass::fill`: hover 5 %, field 7 %, button 8 %, selected 10 %, active 12 %).
+  Live `#4ade80`, busy `#f2c46b`, destructive `#ff8a8a`.
+- **Type**: Geist for everything; Bricolage Grotesque SemiBold for page, instance and dialog names,
+  at the optical size a browser picks for them: `Bricolage Grotesque Display` (56) and
+  `Bricolage Grotesque Heading` (28), cut by `tools/bake_bricolage.py`.
+- **Icons**: Hugeicons' free set (MIT), the ones the mockup uses, stroked 1.6 in the text colour
+  (`crates/horizon-theme/icons/glass/`, served as `icons/glass/<name>.svg`).
 
 ## The mark
 

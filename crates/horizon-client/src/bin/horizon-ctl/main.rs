@@ -1,17 +1,13 @@
 //! horizon-ctl: play and script a running Horizon client through its control
 //! socket, from a shell, a script or an AI agent (`horizon-ctl mcp`).
 #![forbid(unsafe_code)]
+extern crate horizon_client_lib as horizon_client;
 mod commands;
 mod launch;
 mod mcp;
 
-use std::{
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-    process::ExitCode,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{io::{BufRead, BufReader, Write}, path::{Path, PathBuf}, process::ExitCode};
+use horizon_platform::{thread, time::{Duration, Instant}};
 
 use horizon_client::control::Stream;
 use serde_json::{Value, json};
@@ -22,6 +18,8 @@ const USAGE: u8 = 2;
 const UNREACHABLE: u8 = 3;
 /// No AI is on (`horizon_core::no_ai`): agent control is off.
 const DENIED: u8 = 4;
+/// `--api LINE`: the game speaks another protocol line.
+const API_MISMATCH: u8 = 5;
 
 /// A failure, with the exit status it maps to.
 #[derive(Debug)]
@@ -103,12 +101,41 @@ impl Client {
     }
 }
 
+/// Whether a game's protocol (`MAJOR.MINOR.PATCH`) is on the requested line (`MAJOR.MINOR`, or a full version):
+/// every part the line names must match. Before 1.0 a patch only adds, so `0.1` takes `0.1.0` and `0.1.4`.
+fn on_line(protocol: &str, line: &str) -> bool {
+    let game: Vec<&str> = protocol.split('.').collect();
+    let want: Vec<&str> = line.split('.').collect();
+    want.len() <= game.len() && want.iter().zip(&game).all(|(w, g)| w == g)
+}
+
+/// Ask the game `hello` and refuse it unless it speaks `line`. A game without the command
+/// (older than protocol 0.1.0) has no protocol line and is refused too.
+fn check_api(client: &mut Client, line: &str) -> Result<(), Failure> {
+    let refuse = |why: String| Failure {
+        reply: json!({ "error": format!("horizon-ctl --api {line}: {why}"), "kind": "api", "wanted": line }),
+        status: API_MISMATCH,
+    };
+    let reply = client.send("hello")?;
+    match reply.get("protocol").and_then(Value::as_str) {
+        Some(p) if on_line(p, line) => Ok(()),
+        Some(p) => Err(refuse(format!(
+            "the game speaks control protocol {p}, not the {line} line; use a horizon-ctl built for it (docs/api/agent-control.md)"
+        ))),
+        None => Err(refuse(
+            "the game does not report a control protocol (it predates hello); update the game or drop --api".to_owned(),
+        )),
+    }
+}
+
 /// Global options and the connection, opened on first use.
 pub struct Session {
     pub socket: PathBuf,
     pub timeout: Option<Duration>,
     /// The game's home, where No AI is read (`horizon_core::no_ai`).
     pub home: PathBuf,
+    /// `--api LINE`: the protocol line this run speaks; a game on another line is refused.
+    pub api: Option<String>,
     client: Option<Client>,
 }
 
@@ -118,6 +145,7 @@ impl Session {
             socket,
             timeout,
             home: horizon_client::logging::game_home(),
+            api: None,
             client: None,
         }
     }
@@ -127,7 +155,11 @@ impl Session {
     }
     fn client(&mut self) -> Result<&mut Client, Failure> {
         if self.client.is_none() {
-            self.client = Some(Client::connect(&self.socket, self.timeout)?);
+            let mut client = Client::connect(&self.socket, self.timeout)?;
+            if let Some(line) = &self.api {
+                check_api(&mut client, line)?;
+            }
+            self.client = Some(client);
         }
         Ok(self.client.as_mut().unwrap())
     }
@@ -299,7 +331,7 @@ fn logs(home: &Path, words: &[String]) -> Result<Value, Failure> {
                 logging::crash_reports_dir(home).display()
             ))
         })?;
-        let text = std::fs::read_to_string(&path)
+        let text = horizon_platform::fs::read_to_string(&path)
             .map_err(|e| missing(format!("{}: {e}", path.display())))?;
         return Ok(json!({ "path": path, "text": text }));
     }
@@ -313,13 +345,26 @@ fn usage(name: &str) -> String {
     commands::find(name).map_or_else(|| name.to_owned(), |c| format!("horizon-ctl {}", c.usage))
 }
 
-/// Screenshot paths are written by the game process: make them absolute here.
+/// Paths are written by the game process: make them absolute here.
 fn absolute_paths(words: &mut [String]) {
-    if words.first().map(String::as_str) == Some("screenshot")
-        && let Some(path) = words.get_mut(1)
-        && let Ok(cwd) = std::env::current_dir()
-    {
-        *path = cwd.join(&*path).display().to_string();
+    let Ok(cwd) = horizon_platform::env::current_dir() else {
+        return;
+    };
+    match words.first().map(String::as_str) {
+        Some("screenshot") => {
+            if let Some(path) = words.get_mut(1) {
+                *path = cwd.join(&*path).display().to_string();
+            }
+        }
+        // `repro-export [NAME] [PATH]`: the second positional is the zip.
+        Some("repro-export") => {
+            if let Some(path) = words.get_mut(2)
+                && (path.contains('/') || path.ends_with(".zip"))
+            {
+                *path = cwd.join(&*path).display().to_string();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -410,10 +455,11 @@ fn script(session: &mut Session, reader: impl BufRead, keep_going: bool, pretty:
 }
 
 fn main() -> ExitCode {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = horizon_platform::env::args().skip(1).collect();
     let mut socket = horizon_client::control::default_path();
     let mut timeout = None;
     let mut pretty = false;
+    let mut api: Option<String> = None;
     // Global options before the command.
     loop {
         match args.first().map(String::as_str) {
@@ -432,6 +478,10 @@ fn main() -> ExitCode {
                 timeout = Some(Duration::from_secs_f64(s.max(0.001)));
                 args.drain(0..2);
             }
+            Some("--api") if args.len() >= 2 => {
+                api = Some(args[1].clone());
+                args.drain(0..2);
+            }
             Some("--pretty") => {
                 pretty = true;
                 args.remove(0);
@@ -439,7 +489,22 @@ fn main() -> ExitCode {
             _ => break,
         }
     }
+    if let Some(line) = &api {
+        let valid = !line.is_empty()
+            && line.split('.').count() <= 3
+            && line
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        if !valid {
+            print(
+                &json!({ "error": "--api takes a protocol line such as 0.1", "kind": "usage" }),
+                false,
+            );
+            return ExitCode::from(USAGE);
+        }
+    }
     let mut session = Session::new(socket, timeout);
+    session.api = api;
     let name = args.first().cloned();
     let status = match name.as_deref() {
         None | Some("-h" | "--help") => {
@@ -500,7 +565,7 @@ fn main() -> ExitCode {
         Some("script") => {
             let keep_going = args.iter().any(|a| a == "--keep-going");
             match args.iter().skip(1).find(|a| !a.starts_with("--")) {
-                Some(file) if file != "-" => match std::fs::File::open(file) {
+                Some(file) if file != "-" => match horizon_platform::fs::File::open(file) {
                     Ok(f) => script(&mut session, BufReader::new(f), keep_going, pretty),
                     Err(e) => {
                         print(
@@ -544,8 +609,8 @@ mod tests {
 
     #[test]
     fn logs_reads_the_end_of_latest_log_and_the_newest_crash_report() {
-        let home = std::env::temp_dir().join(format!("horizon-ctl-logs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = horizon_platform::env::temp_dir().join(format!("horizon-ctl-logs-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&home);
         let words = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
         let failure = logs(&home, &words("")).unwrap_err();
         assert!(
@@ -554,11 +619,11 @@ mod tests {
                 .unwrap()
                 .contains("latest.log")
         );
-        std::fs::create_dir_all(home.join("logs")).unwrap();
+        horizon_platform::fs::create_dir_all(home.join("logs")).unwrap();
         let text: String = (1..=150)
             .map(|i| format!("[10:00:00] [Render thread/INFO]: line {i}\n"))
             .collect();
-        std::fs::write(home.join("logs/latest.log"), text).unwrap();
+        horizon_platform::fs::write(home.join("logs/latest.log"), text).unwrap();
         let reply = logs(&home, &words("")).unwrap();
         let tail = reply["text"].as_str().unwrap();
         assert_eq!(tail.lines().count(), 100);
@@ -572,20 +637,20 @@ mod tests {
         assert_eq!(logs(&home, &words("--lines 0")).unwrap_err().status, USAGE);
         assert_eq!(logs(&home, &words("--tail")).unwrap_err().status, USAGE);
         assert!(logs(&home, &words("--crash")).is_err());
-        std::fs::create_dir_all(home.join("crash-reports")).unwrap();
-        std::fs::write(
+        horizon_platform::fs::create_dir_all(home.join("crash-reports")).unwrap();
+        horizon_platform::fs::write(
             home.join("crash-reports/crash-2026-10-13_10.00.00-client.txt"),
             "old",
         )
         .unwrap();
-        std::fs::write(
+        horizon_platform::fs::write(
             home.join("crash-reports/crash-2026-10-14_10.00.00-client.txt"),
             "new",
         )
         .unwrap();
         let reply = logs(&home, &words("--crash")).unwrap();
         assert_eq!(reply["text"], "new");
-        let _ = std::fs::remove_dir_all(&home);
+        let _ = horizon_platform::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -608,11 +673,123 @@ mod tests {
         assert!(split_line("type \"open").is_err());
     }
 
+    /// A fake game on a Unix socket: answers every line with `reply`, records the lines it got.
+    #[cfg(unix)]
+    fn fake_game(
+        name: &str,
+        reply: &'static str,
+    ) -> (PathBuf, horizon_platform::thread::JoinHandle<Vec<String>>) {
+        let path = horizon_platform::env::temp_dir().join(format!("hctl-{name}-{}.sock", std::process::id()));
+        let _ = horizon_platform::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let handle = horizon_platform::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut lines = Vec::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut out = stream;
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                lines.push(line.trim_end().to_owned());
+                line.clear();
+                writeln!(out, "{reply}").unwrap();
+            }
+            lines
+        });
+        (path, handle)
+    }
+
+    #[cfg(unix)]
+    fn api_session(path: &Path, api: &str) -> Session {
+        let mut s = Session::new(path.to_owned(), Some(Duration::from_secs(5)));
+        s.home = horizon_platform::env::temp_dir().join("horizon-ctl-api-no-home");
+        s.api = Some(api.to_owned());
+        s
+    }
+
+    #[test]
+    fn api_line_matches_whole_parts() {
+        assert!(on_line("0.1.0", "0.1"));
+        assert!(on_line("0.1.4", "0.1"));
+        assert!(on_line("0.1.0", "0.1.0"));
+        assert!(!on_line("0.1.0", "0.1.1"));
+        assert!(!on_line("0.2.0", "0.1"));
+        assert!(!on_line("0.10.0", "0.1"));
+        assert!(!on_line("1.0.0", "0"));
+        assert!(!on_line("0.1", "0.1.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_accepts_a_game_on_the_line() {
+        let (path, game) = fake_game(
+            "match",
+            r#"{"protocol":"0.1.0","release":"x","features":[]}"#,
+        );
+        let mut s = api_session(&path, "0.1");
+        let reply = s.game("hello").unwrap();
+        assert_eq!(reply["protocol"], "0.1.0");
+        drop(s);
+        // hello for the check, then the caller's own line.
+        assert_eq!(game.join().unwrap(), ["hello", "hello"]);
+        let _ = horizon_platform::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_refuses_a_game_on_another_line() {
+        let (path, game) = fake_game(
+            "mismatch",
+            r#"{"protocol":"0.2.0","release":"x","features":[]}"#,
+        );
+        let mut s = api_session(&path, "0.1");
+        let f = s.game("state").unwrap_err();
+        assert_eq!(f.status, API_MISMATCH);
+        assert_eq!(f.reply["kind"], "api");
+        let message = f.reply["error"].as_str().unwrap();
+        assert!(
+            message.contains("0.2.0") && message.contains("0.1"),
+            "{message}"
+        );
+        drop(s);
+        // The refused command never reached the game.
+        assert_eq!(game.join().unwrap(), ["hello"]);
+        let _ = horizon_platform::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_refuses_a_game_with_no_protocol_line() {
+        let (path, game) = fake_game("old", r#"{"error":"unknown command hello"}"#);
+        let mut s = api_session(&path, "0.1");
+        let f = s.game("state").unwrap_err();
+        assert_eq!(f.status, API_MISMATCH);
+        assert!(
+            f.reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("predates hello")
+        );
+        drop(s);
+        assert_eq!(game.join().unwrap(), ["hello"]);
+        let _ = horizon_platform::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn without_api_the_game_is_not_asked_hello() {
+        let (path, game) = fake_game("noapi", r#"{"ok":true}"#);
+        let mut s = Session::new(path.clone(), Some(Duration::from_secs(5)));
+        s.game("state").unwrap();
+        drop(s);
+        assert_eq!(game.join().unwrap(), ["state"]);
+        let _ = horizon_platform::fs::remove_file(path);
+    }
+
     #[test]
     fn unreachable_games_fail_with_status_3() {
         let home =
-            std::env::temp_dir().join(format!("horizon-ctl-unreachable-{}", std::process::id()));
-        std::fs::create_dir_all(&home).unwrap();
+            horizon_platform::env::temp_dir().join(format!("horizon-ctl-unreachable-{}", std::process::id()));
+        horizon_platform::fs::create_dir_all(&home).unwrap();
         let mut s = Session::new(home.join("nobody.sock"), None);
         s.home = home.clone();
         let f = s.run(&["state".to_owned()]).unwrap_err();
@@ -620,14 +797,14 @@ mod tests {
         assert_eq!(f.reply["kind"], "connection");
         let f = s.run(&["sleep".to_owned(), "x".to_owned()]).unwrap_err();
         assert_eq!(f.status, USAGE);
-        std::fs::remove_dir_all(home).unwrap();
+        horizon_platform::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
     fn no_ai_refuses_every_command() {
-        let home = std::env::temp_dir().join(format!("horizon-ctl-no-ai-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        let mut s = Session::new(std::env::temp_dir().join("horizon-ctl-nobody.sock"), None);
+        let home = horizon_platform::env::temp_dir().join(format!("horizon-ctl-no-ai-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&home);
+        let mut s = Session::new(horizon_platform::env::temp_dir().join("horizon-ctl-nobody.sock"), None);
         s.home = home.clone();
         assert_eq!(
             s.run(&["state".to_owned()]).unwrap_err().status,
@@ -641,7 +818,7 @@ mod tests {
             assert_eq!(f.reply["kind"], "denied");
             assert_eq!(f.reply["error"], horizon_core::no_ai::REFUSAL);
         }
-        let _ = std::fs::remove_dir_all(&home);
+        let _ = horizon_platform::fs::remove_dir_all(&home);
     }
 
     #[test]

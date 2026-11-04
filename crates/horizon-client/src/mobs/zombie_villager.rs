@@ -188,7 +188,9 @@ mod tests {
             &horizon_world::loot::PackOverlay::NONE,
         )
         .unwrap();
-        let collision = crate::collisions::load(&root, registry).unwrap();
+        let collision = std::sync::Arc::new(crate::collisions::load(&root, registry).unwrap());
+        let suffocation =
+            crate::mobs::suffocation::bind(collision.clone(), &motion.causes_suffocation).unwrap();
         let air = registry.default_state("minecraft:air").unwrap();
         let world = crate::world::World::new(air, 0);
         let lid_openers = std::collections::HashMap::new();
@@ -200,12 +202,17 @@ mod tests {
             fluid_tables: &motion.fluids,
             movement: &motion.blocks,
             collision: &collision,
+            suffocation: &suffocation,
             data: &data,
             player: None,
+            controlling_player_movement: None,
             nearest_player: None,
             others: &[],
+            dragon: None,
+            leash_boats: &[],
             others_grid: None,
             others_index: None,
+            others_villagers: None,
             daylight: true,
             monsters_burn: false,
             game_time: 1000,
@@ -214,8 +221,10 @@ mod tests {
             thundering: false,
             nether: false,
             block_tags: &items.block_tags,
+            landing: &motion.landing,
             biomes: &biomes,
             mob_griefing: true,
+            universal_anger: false,
             mob_drops: true,
             max_entity_cramming: 24,
             difficulty: super::super::spawning::LocalDifficulty::new(2, 18000, 0, 0.0),
@@ -224,6 +233,8 @@ mod tests {
             sea_level: 63,
             items: Some(&items),
             lid_openers: &lid_openers,
+            mod_effects: None,
+            border: None,
         };
         for no_ai in [false, true] {
             let kind = std::sync::Arc::new(types.types["minecraft:zombie_villager"].clone());

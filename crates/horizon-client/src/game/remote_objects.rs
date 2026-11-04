@@ -11,6 +11,28 @@ use horizon_core::random::RandomSource;
 use horizon_protocol::entity_data::Value;
 use std::sync::Arc;
 
+/// `Mth.rotLerp(alpha, from, to)`: `from` turned `alpha` of the way to `to` by
+/// the shorter arc (`wrapDegrees` of the difference).
+pub(super) fn rot_lerp(alpha: f32, from: f32, to: f32) -> f32 {
+    let mut d = (to - from) % 360.0;
+    if d >= 180.0 {
+        d -= 360.0;
+    } else if d < -180.0 {
+        d += 360.0;
+    }
+    from + alpha * d
+}
+
+/// One `LinearInterpolationHandler` step of a yaw with `steps` ticks left:
+/// a `1 / steps` share of the way to `target`, so the last step lands on it.
+pub(super) fn lerp_yaw_step(yaw: f32, target: f32, steps: u32) -> f32 {
+    if steps == 0 {
+        yaw
+    } else {
+        rot_lerp(1.0 / steps as f32, yaw, target)
+    }
+}
+
 impl Game<'_> {
     /// `handleAddEntity` for an object type; false when `kind` isn't one.
     /// Hanging entities come at their block, with their direction as the
@@ -20,9 +42,10 @@ impl Game<'_> {
         id: i32,
         kind: &str,
         position: [f64; 3],
-        yaw: f32,
+        rotation: (f32, f32),
         data: i32,
     ) -> bool {
+        let (yaw, pitch) = rotation;
         let id = id as u32;
         let at = Vec3::new(position[0], position[1], position[2]);
         let block = position.map(|v| v.floor() as i32);
@@ -37,6 +60,11 @@ impl Game<'_> {
                     m.extra.leash = Some(Holder::Knot(block));
                 }
             }
+            for b in &mut self.boats {
+                if b.leash == Some(Holder::Mob(id)) {
+                    b.leash = Some(Holder::Knot(block));
+                }
+            }
         } else if let Some(shows) = match kind {
             "minecraft:text_display" => Some(super::text_displays::Shows::Text),
             "minecraft:block_display" => Some(super::text_displays::Shows::Block),
@@ -49,10 +77,18 @@ impl Game<'_> {
             );
         } else if kind == "minecraft:ominous_item_spawner" {
             self.add_remote_ominous_item_spawner(id, position);
+        } else if kind == "minecraft:interaction" {
+            // The width, height and response follow in SetEntityData.
+            self.interactions.insert(
+                id as i32,
+                super::interactions::RemoteInteraction::new(position),
+            );
         } else if let Some(cart) = super::minecarts::CartKind::from_id(kind) {
             let mut c = super::minecarts::Minecart::new(id, cart, at);
             c.yaw = yaw;
             c.previous_yaw = yaw;
+            c.pitch = pitch;
+            c.previous_pitch = pitch;
             self.carts.push(c);
         } else if let Some((wood, chest)) = super::boats::any_boat_wood(kind)
             && self.boat_models.has(wood, chest)
@@ -142,6 +178,9 @@ impl Game<'_> {
             }
             return;
         }
+        if self.remote_interaction_data(id, values) {
+            return;
+        }
         let id = id as u32;
         for (index, _, value) in values {
             if let (8, Value::Item(stack)) = (index, value)
@@ -213,13 +252,16 @@ impl Game<'_> {
                     c.color = (*color).clamp(0, 15) as u8;
                 }
             } else if let Some(b) = self.boats.iter_mut().find(|b| b.id == id) {
-                // VehicleEntity's hurt, direction and damage; the paddles.
+                // VehicleEntity's hurt, direction and damage; the paddles and
+                // the bubble time.
                 match (index, value) {
                     (8, Value::Int(v)) => b.hurt_time = *v,
                     (9, Value::Int(v)) => b.hurt_dir = *v,
                     (10, Value::Float(v)) => b.damage = *v,
                     (11, Value::Bool(v)) => b.paddling[0] = *v,
                     (12, Value::Bool(v)) => b.paddling[1] = *v,
+                    // AbstractBoat.DATA_ID_BUBBLE_TIME.
+                    (13, Value::Int(v)) => b.bubble_time = *v,
                     _ => {}
                 }
             } else if let Some(c) = self.carts.iter_mut().find(|c| c.id == id) {
@@ -229,6 +271,20 @@ impl Game<'_> {
                     (10, Value::Float(v)) => c.damage = *v,
                     (13, Value::Bool(lit)) if c.kind == super::minecarts::CartKind::Furnace => {
                         c.fuel = i32::from(*lit);
+                    }
+                    // MinecartCommandBlock.onSyncedDataUpdated: setCommand
+                    // (which resets the success count) and setLastOutput.
+                    (13, Value::String(command))
+                        if c.kind == super::minecarts::CartKind::CommandBlock =>
+                    {
+                        c.command.set_command(command);
+                    }
+                    (14, Value::Text(output))
+                        if c.kind == super::minecarts::CartKind::CommandBlock =>
+                    {
+                        c.command.last_output = Some(horizon_client::scoreboard::comp_text(
+                            &horizon_client::scoreboard::tag_to_json(output),
+                        ));
                     }
                     _ => {}
                 }
@@ -268,29 +324,36 @@ impl Game<'_> {
             if Some(id) == driven {
                 return;
             }
-            if let Some(yaw) = yaw {
-                b.yaw = yaw;
-            }
+            // AbstractBoat keeps a LinearInterpolationHandler: the new yaw is
+            // the target of the three-tick lerp (`tick_remote_objects`), not
+            // the boat's yaw at once.
+            let _ = yaw;
             b.on_ground = on_ground;
-        } else if let Some(c) = self.carts.iter_mut().find(|c| c.id == id) {
-            if let Some(yaw) = yaw {
-                c.yaw = yaw;
-            }
-        } else if let Some(a) = self.armor_stands.iter_mut().find(|a| a.id == id) {
-            if let Some(yaw) = yaw {
-                a.yaw = yaw;
-            }
-            a.on_ground = on_ground;
+        } else if let Some(c) = self.carts.iter_mut().find(|c| c.id == id)
+            && let Some(yaw) = yaw
+        {
+            c.yaw = yaw;
         }
     }
 
     /// One tick of interpolation: `step` moves a position a step toward
-    /// the entity's last sent one, if it has a move in progress.
-    pub(super) fn tick_remote_objects(&mut self, mut step: impl FnMut(u32, Vec3) -> Vec3) {
+    /// the entity's last sent one, if it has a move in progress. A minecart
+    /// on `NewMinecartBehavior` is moved by `lerp_cart` (true when it did)
+    /// instead.
+    pub(super) fn tick_remote_objects(
+        &mut self,
+        mut step: impl FnMut(u32, Vec3) -> Vec3,
+        mut turn: impl FnMut(u32, f32) -> f32,
+        mut lerp_cart: impl FnMut(&mut super::minecarts::Minecart) -> bool,
+    ) {
         for c in &mut self.carts {
             c.previous = c.position;
             c.previous_yaw = c.yaw;
-            c.position = step(c.id, c.position);
+            c.previous_pitch = c.pitch;
+            if !lerp_cart(c) {
+                c.position = step(c.id, c.position);
+            }
+            c.accumulate_rotation();
             if c.kind == super::minecarts::CartKind::Furnace
                 && c.fuel > 0
                 && self.world.random.next_int_bound(4).unwrap_or(1) == 0
@@ -298,6 +361,17 @@ impl Game<'_> {
                 self.particles.add(
                     &ParticleOptions::simple(ParticleType::LargeSmoke),
                     [c.position.x, c.position.y + 0.8, c.position.z],
+                    [0.0; 3],
+                );
+            }
+            // MinecartTNT.tick: a primed cart counts its fuse down and sheds
+            // smoke. The server explodes it; this copy only shows the fuse
+            // (`TntMinecartRenderer`'s flash and swell).
+            if c.kind == super::minecarts::CartKind::Tnt && c.fuse > 0 {
+                c.fuse -= 1;
+                self.particles.add(
+                    &ParticleOptions::simple(ParticleType::Smoke),
+                    [c.position.x, c.position.y + 0.5, c.position.z],
                     [0.0; 3],
                 );
             }
@@ -310,11 +384,15 @@ impl Game<'_> {
             }
             b.previous = b.position;
             b.previous_yaw = b.yaw;
+            // `LinearInterpolationHandler.interpolate`: the rotation moves a
+            // step toward the server's with the position.
+            b.yaw = turn(b.id, b.yaw);
             b.position = step(b.id, b.position);
         }
         for a in &mut self.armor_stands {
             a.position = step(a.id, a.position);
         }
+        self.tick_remote_boat_bubbles();
     }
 
     /// The boats, minecarts, armor stands, item frames and paintings in the
@@ -346,6 +424,11 @@ impl Game<'_> {
                 "yaw": c.yaw, "color": c.color_name()}),
             );
         }
+        for (&id, i) in &self.interactions {
+            out.push(json!({"id": id, "kind": "minecraft:interaction",
+                "position": at(i.position), "width": i.width, "height": i.height,
+                "response": i.response}));
+        }
         for f in &self.item_frames {
             out.push(
                 json!({"id": f.id, "kind": f.kind(), "position": f.pos, "facing": f.facing,
@@ -360,8 +443,14 @@ impl Game<'_> {
     }
 
     /// Every object a server sent (a new connection, level or dimension).
+    /// Experience orbs too: `ClientPacketListener.handleRespawn` replaces the
+    /// `ClientLevel` on a dimension change, and `Hub::change_level` does not
+    /// remove the old level's entities one by one. An orb kept here follows
+    /// the player (`ExperienceOrb.tick` on the client) and is never
+    /// `playerTouch`ed.
     pub(super) fn clear_remote_objects(&mut self) {
         self.text_displays.clear();
+        self.interactions.clear();
         self.ominous_spawners.clear();
         self.remote_knots.clear();
         self.carts.clear();
@@ -370,18 +459,67 @@ impl Game<'_> {
         self.cushions.clear();
         self.item_frames.clear();
         self.paintings.clear();
+        self.orbs.clear();
     }
 
     pub(super) fn remove_remote_object(&mut self, id: u32) {
         self.text_displays.remove(&(id as i32));
+        self.interactions.remove(&(id as i32));
         self.ominous_spawners.retain(|s| s.id != id);
         self.remote_knots.remove(&id);
         self.carts.retain(|c| c.id != id);
         self.boats.retain(|b| b.id != id);
         self.armor_stands.retain(|a| a.id != id);
+        // `Entity.setRemoved`: the cushion's rider gets off where it sat
+        // (`LivingEntity.dismountVehicle`), not inside the block below.
+        if self.riding == Some(id)
+            && let Some(y) = self
+                .cushions
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.position.y)
+        {
+            self.dismount_removed_vehicle(y);
+        }
         self.cushions.retain(|c| c.id != id);
         self.item_frames.retain(|f| f.id != id);
         self.paintings.retain(|p| p.id != id);
         self.bolts.retain(|b| b.id != id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rot_lerp_takes_the_short_way_round() {
+        // 350 to 10 is 20 degrees by the short arc, not -340.
+        assert!((rot_lerp(0.5, 350.0, 10.0) - 360.0).abs() < 1e-4);
+        assert!((rot_lerp(0.5, 10.0, 350.0) - 0.0).abs() < 1e-4);
+        assert!((rot_lerp(0.25, -90.0, 80.0) - -47.5).abs() < 1e-4);
+        assert_eq!(rot_lerp(0.0, 33.0, 200.0), 33.0);
+    }
+
+    #[test]
+    fn a_boat_turns_a_third_of_the_way_each_of_three_ticks() {
+        // The server says 120 degrees while the boat is at 0: 40, 80, 120.
+        let mut yaw = 0.0;
+        let mut seen = Vec::new();
+        for steps in (1..=3).rev() {
+            yaw = lerp_yaw_step(yaw, 120.0, steps);
+            seen.push(yaw);
+        }
+        for (got, want) in seen.iter().zip([40.0, 80.0, 120.0]) {
+            assert!((got - want).abs() < 1e-3, "{seen:?}");
+        }
+        // Across the wrap it still ends on the target, the short way.
+        let mut yaw = 350.0;
+        for steps in (1..=3).rev() {
+            yaw = lerp_yaw_step(yaw, 10.0, steps);
+        }
+        assert!((yaw - 370.0).abs() < 1e-3, "{yaw}");
+        // No steps left: the yaw is left alone.
+        assert_eq!(lerp_yaw_step(5.0, 90.0, 0), 5.0);
     }
 }

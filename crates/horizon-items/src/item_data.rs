@@ -21,6 +21,9 @@ pub struct StackData {
     pub custom_name: Option<Tag>,
     /// `minecraft:potion_contents.potion`.
     pub potion: Option<Arc<str>>,
+    /// The rest of `minecraft:potion_contents` (`custom_color`, `custom_effects`,
+    /// `custom_name`), kept as saved.
+    pub potion_extra: Vec<(String, Tag)>,
     /// `minecraft:trim`: (material, pattern).
     pub trim: Option<(Arc<str>, Arc<str>)>,
     /// `minecraft:container` (shulker boxes): the non-empty slots.
@@ -74,6 +77,10 @@ pub struct Wire(Option<Arc<(ItemStack, Arc<[u8]>)>>);
 impl Wire {
     pub fn new(decoded: ItemStack, patch: Arc<[u8]>) -> Self {
         Self(Some(Arc::new((decoded, patch))))
+    }
+    /// The server's patch, whether or not the stack changed since.
+    pub fn patch(&self) -> Option<&[u8]> {
+        self.0.as_deref().map(|(_, patch)| &**patch)
     }
 }
 impl PartialEq for Wire {
@@ -230,6 +237,24 @@ impl StackData {
     }
 }
 
+/// `BlockItem.onDestroyed` (`ItemStack.onDestroyed` for a container item): the
+/// stack's `container` is emptied and the stacks it held come back in slot
+/// order — `ItemUtils.onContainerDestroyed` drops each where the entity lay.
+pub fn destroyed_container(stack: &mut ItemStack) -> Vec<ItemStack> {
+    let Some(data) = stack.extra.as_deref_mut() else {
+        return Vec::new();
+    };
+    if data.container.is_empty() {
+        return Vec::new();
+    }
+    // `set(CONTAINER, ItemContainerContents.EMPTY)`: no slot left filled.
+    let mut held = std::mem::take(&mut data.container);
+    stack.tidy();
+    // `nonEmptyItemCopyStream` walks the 256 slots in order.
+    held.sort_by_key(|(slot, _)| *slot);
+    held.into_iter().map(|(_, stack)| stack).collect()
+}
+
 impl ItemStack {
     pub fn new(item: &str, count: u32) -> Self {
         Self {
@@ -323,6 +348,11 @@ impl ItemStack {
     pub fn custom_name(&self) -> Option<String> {
         self.data()?.custom_name_plain()
     }
+    /// `ResolvableProfile.name`: a bare profile string or its `name` field.
+    pub fn profile_name(&self) -> Option<String> {
+        let profile = self.data()?.other("minecraft:profile")?;
+        string(profile).or_else(|| profile.get("name").and_then(string))
+    }
     /// `minecraft:item_name` in the current language (`getItemName`'s
     /// component). It stays in the patch as loaded, so a translatable name
     /// saves and reaches clients unchanged; the ominous banner's is modelled
@@ -333,6 +363,42 @@ impl ItemStack {
     }
     pub fn potion(&self) -> Option<&str> {
         self.data().and_then(|d| d.potion.as_deref())
+    }
+    /// `PotionContents.customEffects` as saved: (id, duration, amplifier). Both
+    /// default to 0 like `MobEffectInstance.CODEC`.
+    pub fn custom_potion_effects(&self) -> Vec<(String, i32, i32)> {
+        let Some((_, Tag::List(list))) = self
+            .data()
+            .and_then(|d| d.potion_extra.iter().find(|(k, _)| k == "custom_effects"))
+        else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter_map(|e| {
+                Some((
+                    string(e.get("id")?)?,
+                    e.get("duration").and_then(int).unwrap_or(0) as i32,
+                    e.get("amplifier").and_then(int).unwrap_or(0).clamp(0, 255) as i32,
+                ))
+            })
+            .collect()
+    }
+    /// `DataComponents.POTION_DURATION_SCALE` with the item's default: 0.125
+    /// for a tipped arrow, 0.25 for a lingering potion, else 1.
+    pub fn potion_duration_scale(&self) -> f32 {
+        match self
+            .data()
+            .and_then(|d| d.other("minecraft:potion_duration_scale"))
+        {
+            Some(Tag::Float(bits)) => f32::from_bits(*bits),
+            Some(Tag::Double(bits)) => f64::from_bits(*bits) as f32,
+            Some(t) if int(t).is_some() => int(t).unwrap_or(1) as f32,
+            _ => match &*self.item {
+                "minecraft:tipped_arrow" => 0.125,
+                "minecraft:lingering_potion" => 0.25,
+                _ => 1.0,
+            },
+        }
     }
     pub fn with_potion(mut self, potion: &str) -> Self {
         self.data_mut().potion = Some(Arc::from(potion));
@@ -393,6 +459,8 @@ fn string(t: &Tag) -> Option<String> {
         _ => None,
     }
 }
+/// The persistent `ItemEnchantments` codec uses integer levels in 1..=255.
+/// `TagValueInput.read` keeps the partial map when an entry fails decoding.
 fn read_levels(t: Option<&Tag>) -> Levels {
     let Some(Tag::Compound(map)) = t else {
         return Vec::new();
@@ -405,8 +473,12 @@ fn read_levels(t: Option<&Tag>) -> Levels {
     // The keys are enchantment Identifiers: `knockback` is `minecraft:knockback`.
     map.iter()
         .filter_map(|(k, v)| {
+            let level = horizon_world::datafix::dynamic::as_number(v)?.int_value();
+            if !(1..=255).contains(&level) {
+                return None;
+            }
             let id = horizon_world::datafix::dynamic::namespaced(&k.to_string_lossy());
-            Some((Arc::from(id), int(v)?.clamp(1, 255) as u32))
+            Some((Arc::from(id), level as u32))
         })
         .collect()
 }
@@ -643,10 +715,15 @@ pub fn components_tag(damage: u32, data: Option<&StackData>) -> Option<Tag> {
         if let Some(name) = &d.custom_name {
             entries.push(("minecraft:custom_name", name.clone()));
         }
-        if let Some(potion) = &d.potion {
+        if d.potion.is_some() || !d.potion_extra.is_empty() {
+            let potion = d
+                .potion
+                .as_ref()
+                .map(|p| ("potion", Tag::String((&**p).into())));
+            let extra = d.potion_extra.iter().map(|(k, v)| (k.as_str(), v.clone()));
             entries.push((
                 "minecraft:potion_contents",
-                Tag::compound([("potion", Tag::String((&**potion).into()))]),
+                Tag::compound(potion.into_iter().chain(extra)),
             ));
         }
         if let Some((material, pattern)) = &d.trim {
@@ -839,6 +916,14 @@ pub fn decode_components(components: Option<&Tag>) -> (u32, Option<Box<StackData
             .map(|s| Arc::from(s.as_str())),
         None => None,
     };
+    let potion_extra = match c.get("minecraft:potion_contents") {
+        Some(Tag::Compound(map)) => map
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy() != "potion")
+            .map(|(k, v)| (k.to_string_lossy(), v.clone()))
+            .collect(),
+        _ => Vec::new(),
+    };
     let data = StackData {
         enchantments: read_levels(c.get("minecraft:enchantments")),
         stored_enchantments: read_levels(c.get("minecraft:stored_enchantments")),
@@ -853,6 +938,7 @@ pub fn decode_components(components: Option<&Tag>) -> (u32, Option<Box<StackData
             .cloned()
             .map(collapsed_text),
         potion,
+        potion_extra,
         map_id: c.get("minecraft:map_id").and_then(int).map(|v| v as i32),
         banner_patterns: crate::banner_layer::layers_from_nbt(c.get("minecraft:banner_patterns")),
         base_color: c
@@ -1058,6 +1144,30 @@ mod tests {
         };
         assert_eq!(stack.enchantment_level("minecraft:knockback"), 2);
         assert_eq!(stack.enchantment_level("minecraft:sharpness"), 1);
+    }
+
+    #[test]
+    fn invalid_enchantment_levels_leave_the_other_entries_intact() {
+        for component in ["minecraft:enchantments", "minecraft:stored_enchantments"] {
+            for level in [-1, 0, 256, i32::MAX] {
+                let components = Tag::compound([
+                    ("minecraft:damage", Tag::Int(12)),
+                    (
+                        component,
+                        Tag::compound([("looting", Tag::Int(level)), ("sharpness", Tag::Int(3))]),
+                    ),
+                ]);
+                let (damage, extra) = decode_components(Some(&components));
+                let data = extra.unwrap();
+                let levels = if component == "minecraft:enchantments" {
+                    data.enchantments
+                } else {
+                    data.stored_enchantments
+                };
+                assert_eq!(damage, 12);
+                assert_eq!(levels, vec![(Arc::from("minecraft:sharpness"), 3)]);
+            }
+        }
     }
 
     #[test]

@@ -22,7 +22,11 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
         return Err(not_zip());
     }
     let mut zip = ::zip::ZipArchive::new(Cursor::new(&bytes[..])).map_err(|_| not_zip())?;
-    let names: Vec<String> = zip.file_names().map(|n| n.replace('\\', "/")).collect();
+    let names: Vec<String> = zip
+        .file_names()
+        .flatten()
+        .map(|n| n.replace('\\', "/"))
+        .collect();
     let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
     let folder = |root: &str| {
         let last = root.trim_end_matches('/').rsplit('/').next().unwrap_or("");

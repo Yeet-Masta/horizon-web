@@ -186,67 +186,116 @@ impl Parser<'_> {
         Err("unterminated string".into())
     }
 }
+/// `click_event` / `hover_event`, or the pre-datafixer `clickEvent` /
+/// `hoverEvent` names SNBT and older chat JSON still use.
+fn style_event_object<'a>(
+    o: &'a serde_json::Map<String, Value>,
+    modern: &str,
+    legacy: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    o.get(modern)
+        .or_else(|| o.get(legacy))
+        .and_then(Value::as_object)
+}
+
+/// Style flags from JSON bools, or SNBT `1b`/`0b` which parse as numbers.
+fn style_flag(v: Option<&Value>) -> Option<bool> {
+    match v {
+        Some(Value::Bool(b)) => Some(*b),
+        Some(Value::Number(n)) => n.as_i64().map(|i| i != 0),
+        _ => None,
+    }
+}
+
+fn untrusted_http_url(url: &str) -> bool {
+    // ExtraCodecs.UNTRUSTED_URI / Util.parseAndValidateUntrustedUri: http and
+    // https only, scheme case-insensitive.
+    url.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+    })
+}
+
+/// `ClickEvent.CODEC` plus the legacy `value` field TextComponentHoverAndClickEventFix
+/// renames (`url` / `command` / `page`).
+fn parse_click_event(e: &serde_json::Map<String, Value>) -> Option<crate::text::ClickEvent> {
+    let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_owned);
+    let legacy = || text("value");
+    match e.get("action").and_then(Value::as_str) {
+        Some("open_url") => text("url")
+            .or_else(legacy)
+            .filter(|u| untrusted_http_url(u))
+            .map(crate::text::ClickEvent::OpenUrl),
+        Some("change_page") => e
+            .get("page")
+            .and_then(Value::as_i64)
+            .or_else(|| e.get("value").and_then(Value::as_i64))
+            .or_else(|| {
+                e.get("value")
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.parse().ok())
+            })
+            .and_then(|p| i32::try_from(p).ok())
+            .filter(|p| *p >= 1)
+            .map(crate::text::ClickEvent::ChangePage),
+        Some("suggest_command") => text("command")
+            .or_else(legacy)
+            .map(crate::text::ClickEvent::SuggestCommand),
+        Some("run_command") => text("command")
+            .or_else(legacy)
+            .map(crate::text::ClickEvent::RunCommand),
+        Some("copy_to_clipboard") => text("value").map(crate::text::ClickEvent::CopyToClipboard),
+        // ClickEvent.ShowDialog.CODEC: a `minecraft:dialog` registry id or
+        // the dialog itself; the server may send it (isAllowedFromServer).
+        Some("show_dialog") => e.get("dialog").map(|dialog| {
+            crate::text::ClickEvent::ShowDialog(crate::scoreboard::json_to_tag(dialog))
+        }),
+        Some("custom") => Some(crate::text::ClickEvent::Custom {
+            id: crate::identifier::parse_identifier(&text("id")?)?,
+            payload: e
+                .get("payload")
+                .filter(|value| !value.is_null())
+                .map(crate::scoreboard::json_to_tag),
+        }),
+        _ => None,
+    }
+}
+
 /// The style fields of a component object.
 fn object_style(o: &serde_json::Map<String, Value>) -> Style {
     let mut style = Style::default();
     if let Some(c) = o.get("color").and_then(Value::as_str) {
-        style.color = named_color(c).or_else(|| {
-            c.strip_prefix('#')
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-        });
+        style.color = named_color(c).or_else(|| hex_color(c));
     }
     style.shadow_color = o.get("shadow_color").and_then(shadow_color);
-    let flag = |k: &str| o.get(k).and_then(Value::as_bool);
-    style.bold = flag("bold");
-    style.italic = flag("italic");
-    style.underlined = flag("underlined");
-    style.strikethrough = flag("strikethrough");
-    style.obfuscated = flag("obfuscated");
+    style.bold = style_flag(o.get("bold"));
+    style.italic = style_flag(o.get("italic"));
+    style.underlined = style_flag(o.get("underlined"));
+    style.strikethrough = style_flag(o.get("strikethrough"));
+    style.obfuscated = style_flag(o.get("obfuscated"));
     style.font = o.get("font").and_then(crate::text::font_id);
     // ClickEvent.CODEC: the actions a chat line acts on here. A component
     // from a server never opens a file.
-    if let Some(e) = o.get("click_event").and_then(Value::as_object) {
-        let text = |k: &str| e.get(k).and_then(Value::as_str).map(str::to_owned);
-        style.click = match e.get("action").and_then(Value::as_str) {
-            // ClickEvent.OpenUrl.CODEC: ExtraCodecs.UNTRUSTED_URI allows http and
-            // https only, the scheme in any case (Util.parseAndValidateUntrustedUri).
-            Some("open_url") => text("url")
-                .filter(|u| {
-                    u.split_once(':').is_some_and(|(scheme, _)| {
-                        scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
-                    })
-                })
-                .map(crate::text::ClickEvent::OpenUrl),
-            // ClickEvent.ChangePage.CODEC: ExtraCodecs.POSITIVE_INT.
-            Some("change_page") => e
-                .get("page")
-                .and_then(Value::as_i64)
-                .and_then(|p| i32::try_from(p).ok())
-                .filter(|p| *p >= 1)
-                .map(crate::text::ClickEvent::ChangePage),
-            Some("suggest_command") => text("command").map(crate::text::ClickEvent::SuggestCommand),
-            Some("run_command") => text("command").map(crate::text::ClickEvent::RunCommand),
-            Some("copy_to_clipboard") => {
-                text("value").map(crate::text::ClickEvent::CopyToClipboard)
-            }
-            // ClickEvent.ShowDialog.CODEC: a `minecraft:dialog` registry id or
-            // the dialog itself; the server may send it (isAllowedFromServer).
-            Some("show_dialog") => e.get("dialog").map(|dialog| {
-                crate::text::ClickEvent::ShowDialog(crate::scoreboard::json_to_tag(dialog))
-            }),
-            _ => None,
-        };
+    if let Some(e) = style_event_object(o, "click_event", "clickEvent") {
+        style.click = parse_click_event(e);
     }
-    // HoverEvent.ShowText and ShowItem.
-    if let Some(e) = o.get("hover_event").and_then(Value::as_object) {
+    // HoverEvent.ShowText, ShowItem and ShowEntity.
+    if let Some(e) = style_event_object(o, "hover_event", "hoverEvent") {
         match e.get("action").and_then(Value::as_str) {
             Some("show_text") => {
-                if let Some(value) = e.get("value") {
+                // Modern `value`, or the older `contents` / nested `text`.
+                let value = e
+                    .get("value")
+                    .or_else(|| e.get("contents"))
+                    .or_else(|| e.get("text"));
+                if let Some(value) = value {
                     style.hover = Some(Box::new(to_text(value, &mut |s| Text::literal(s))));
                 }
             }
             Some("show_item") if e.get("id").is_some_and(Value::is_string) => {
                 style.hover_item = Some(Box::new(Value::Object(e.clone())));
+            }
+            Some("show_entity") if e.get("id").is_some_and(Value::is_string) => {
+                style.hover_entity = Some(Box::new(Value::Object(e.clone())));
             }
             _ => {}
         }
@@ -256,6 +305,13 @@ fn object_style(o: &serde_json::Map<String, Value>) -> Style {
         .and_then(Value::as_str)
         .map(str::to_owned);
     style
+}
+
+/// `TextColor.parseColor` for `#...`: `Integer.parseInt(rest, 16)` (so a sign
+/// and any digit count are accepted), kept only within `0..=0xFFFFFF`.
+pub(crate) fn hex_color(c: &str) -> Option<u32> {
+    let value = i64::from_str_radix(c.strip_prefix('#')?, 16).ok()?;
+    (0..=0xFF_FFFF).contains(&value).then_some(value as u32)
 }
 
 /// `Style.shadow_color`: a packed ARGB int or normalized RGBA array.
@@ -441,6 +497,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hex_color_follows_text_color_parse_color() {
+        for bad in [
+            "#1000000",
+            "#FFFFFFFF",
+            "#-FF",
+            "#",
+            "#zz",
+            "FFFFFF",
+            "#99999999999",
+        ] {
+            assert_eq!(hex_color(bad), None, "{bad}");
+        }
+        for (good, want) in [
+            ("#FFFFFF", 0xFFFFFF),
+            ("#000000", 0),
+            ("#F", 15),
+            ("#+FF", 255),
+            ("#-0", 0),
+        ] {
+            assert_eq!(hex_color(good), Some(want), "{good}");
+        }
+        let out = serde_json::json!({"text": "A", "color": "#1000000"});
+        let text = to_text(&out, &mut |_| Text::empty());
+        assert_eq!(text.spans[0].style.color, None);
+    }
+
+    #[test]
     fn shadow_color_accepts_packed_and_rgba_styles() {
         let packed = serde_json::json!({"text": "A", "shadow_color": -16711936});
         let text = to_text(&packed, &mut |_| Text::empty());
@@ -503,8 +586,98 @@ mod tests {
         let t = to_text(&v, &mut |_| Text::empty());
         assert_eq!(t.plain(), "Hi there");
         assert_eq!(t.spans[1].style.color, named_color("red"));
+        // SNBT `1b` is a number in JSON; style flags still take it as true.
+        assert_eq!(t.spans[1].style.bold, Some(true));
         let (v, _) = parse_snbt("[\"a\",{\"text\":\"b\"}]").unwrap();
         assert_eq!(to_text(&v, &mut |_| Text::empty()).plain(), "ab");
+    }
+
+    #[test]
+    fn legacy_click_event_open_url_uses_value_field() {
+        use crate::text::ClickEvent;
+        let modern = serde_json::json!({
+            "text": "site",
+            "click_event": {"action": "open_url", "url": "https://example.com"},
+            "underlined": true
+        });
+        let legacy = serde_json::json!({
+            "text": "site",
+            "clickEvent": {"action": "open_url", "value": "https://example.com"},
+            "underlined": 1
+        });
+        for component in [modern, legacy] {
+            let text = to_text(&component, &mut |_| Text::empty());
+            assert_eq!(
+                text.spans[0].style.click,
+                Some(ClickEvent::OpenUrl("https://example.com".into()))
+            );
+            assert_eq!(text.spans[0].style.underlined, Some(true));
+        }
+        let snbt = r#"{text:"site",underlined:1b,clickEvent:{action:open_url,value:"https://example.com"}}"#;
+        let (v, _) = parse_snbt(snbt).unwrap();
+        let text = to_text(&v, &mut |_| Text::empty());
+        assert_eq!(
+            text.spans[0].style.click,
+            Some(ClickEvent::OpenUrl("https://example.com".into()))
+        );
+        assert_eq!(text.spans[0].style.underlined, Some(true));
+    }
+
+    #[test]
+    fn custom_click_events_keep_payloads_and_inherit_to_inline_objects() {
+        use crate::text::ClickEvent;
+        use horizon_world::nbt::Tag;
+
+        for (payload, expected) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!(42)), Some(Tag::Int(42))),
+            (
+                Some(serde_json::json!({"shop": "potions", "amount": 3})),
+                Some(Tag::Compound(
+                    [
+                        ("amount".into(), Tag::Int(3)),
+                        ("shop".into(), Tag::String("potions".into())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )),
+            ),
+        ] {
+            let mut event = serde_json::json!({"action": "custom", "id": "test:shop"});
+            if let Some(payload) = payload {
+                event["payload"] = payload;
+            }
+            let component = serde_json::json!({
+                "text": "", "click_event": event,
+                "extra": [{"object": "atlas", "sprite": "minecraft:item/potion"}, "Shop"]
+            });
+            let text = to_text(&component, &mut |_| Text::empty());
+            for (_, style) in text.chars() {
+                assert_eq!(
+                    style.click,
+                    Some(ClickEvent::Custom {
+                        id: "test:shop".into(),
+                        payload: expected.clone(),
+                    })
+                );
+            }
+            let encoded = text.component();
+            let decoded = to_text(&encoded, &mut |_| Text::empty());
+            assert_eq!(decoded, text);
+            if expected.is_none() {
+                assert!(!encoded.to_string().contains("\"payload\""));
+            }
+        }
+        for id in ["Bad ID", "Uppercase:shop"] {
+            let text = to_text(
+                &serde_json::json!({
+                    "text": "Shop", "click_event": {"action": "custom", "id": id}
+                }),
+                &mut |_| Text::empty(),
+            );
+            assert_eq!(text.spans[0].style.click, None);
+        }
     }
 
     #[test]
@@ -545,5 +718,16 @@ mod tests {
         assert_eq!(v["text"], Value::String("Infinity".into()));
         let (v, _) = parse_snbt("{n:1.5}").unwrap();
         assert_eq!(v["n"], Value::from(1.5));
+    }
+
+    #[test]
+    fn name_text_preserves_legacy_and_decodes_components() {
+        let legacy = Tag::String("§6Golden Name".into());
+        let text = name_text(&legacy);
+        assert_eq!(text.plain(), "Golden Name");
+
+        let comp = Tag::compound([("text", Tag::String("Custom Name".into()))]);
+        let text = name_text(&comp);
+        assert_eq!(text.plain(), "Custom Name");
     }
 }

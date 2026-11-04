@@ -127,6 +127,42 @@ fn imitate_nearby_mobs(
     }
 }
 
+/// The sound a parrot on a player's shoulder makes (`ServerPlayer.
+/// playShoulderEntityAmbientSound` after its one-in-200 draw): the voice of a
+/// random imitable mob in `nearby` (`Parrot.imitateNearbyMobs`, half the time,
+/// those with a `silent` flag excluded after being picked), else its own
+/// ambient sound or a rare imitation (`Parrot.getAmbient`). `random` is drawn
+/// from in vanilla's order. Returns the sound, its volume and its pitch; the
+/// happy ghast's imitation is silent (`""`).
+pub fn shoulder_sound(
+    random: &mut LegacyRandom,
+    player_alive: bool,
+    player_silent: bool,
+    peaceful: bool,
+    nearby: &[(Species, bool)],
+) -> Option<(&'static str, f32, f32)> {
+    if player_alive && !player_silent && random.next_int_bound(2).unwrap_or(1) == 0 {
+        let candidates: Vec<_> = nearby
+            .iter()
+            .filter(|(s, _)| imitation(*s).is_some())
+            .collect();
+        if !candidates.is_empty() {
+            let (species, silent) =
+                *candidates[random.next_int_bound(candidates.len() as i32).unwrap_or(0) as usize];
+            if !silent {
+                let sound = imitation(species).filter(|s| !s.is_empty())?;
+                return Some((sound, 0.7, pitch(random)));
+            }
+        }
+    }
+    let sound = if !peaceful && random.next_int_bound(1000).unwrap_or(1) == 0 {
+        IMITATIONS[random.next_int_bound(IMITATIONS.len() as i32).unwrap_or(0) as usize].1
+    } else {
+        "entity.parrot.ambient"
+    };
+    Some((sound, 1.0, pitch(random))).filter(|s| !s.0.is_empty())
+}
+
 /// `Parrot.getAmbient`: now and then (outside peaceful) the voice of a random
 /// imitable mob instead of the parrot's own.
 pub fn ambient(m: &mut Mob, w: &MobWorld) -> &'static str {
@@ -183,15 +219,18 @@ pub fn calculate_flapping(m: &mut Mob) {
     }
 }
 
-/// `Parrot.isFlapping` and `onFlap` (from `Entity.processFlappingMovement`,
-/// when a move ends in the air): a wing beat each half `flapSpeed` flown.
-pub fn process_flapping(m: &mut Mob, events: &mut Vec<MobEvent>) {
+/// `Parrot.isFlapping` and `Parrot.onFlap`: a wing beat each half
+/// `flapSpeed` flown. The caller emits the movement game event on a flap.
+pub fn process_flapping(m: &mut Mob, events: &mut Vec<MobEvent>) -> bool {
     if m.ai.steps.fly_dist > m.ai.steps.next_flap {
         if !m.silent {
             let at = [m.position.x, m.position.y, m.position.z];
             events.push(MobEvent::Sound("entity.parrot.fly", at, 0.15, 1.0));
         }
         m.ai.steps.next_flap = m.ai.steps.fly_dist + m.anim.flap_speed / 2.0;
+        true
+    } else {
+        false
     }
 }
 
@@ -275,6 +314,34 @@ mod tests {
         assert!(m.ai.goals.has("ParrotWander"));
     }
 
+    /// `Parrot.getVoicePitch` is `getPitch(random)`, the plain 1.0 ± 0.2, and
+    /// `getPitch` takes no age into account: a baby parrot does not get the
+    /// 1.5 that `LivingEntity.getVoicePitch` raises every other baby's voice
+    /// by. A baby chicken is the control.
+    #[test]
+    fn a_baby_parrot_keeps_the_plain_voice_pitch() {
+        let mut parrot = parrot();
+        parrot.extra.age = -24_000;
+        assert!(parrot.is_baby());
+        let mut baby = parrot.clone();
+        let pitches: Vec<f32> = (0..64).map(|_| baby.voice_pitch()).collect();
+        assert!(
+            pitches.iter().all(|p| (0.8..=1.2).contains(p)),
+            "{pitches:?}"
+        );
+        // It is not a constant: the two draws move it around 1.0.
+        assert!(pitches.iter().any(|&p| p != pitches[0]));
+        assert!((pitches.iter().sum::<f32>() / pitches.len() as f32 - 1.0).abs() < 0.1);
+
+        let mut k = (*kind()).clone();
+        k.id = "minecraft:chicken".into();
+        k.species = Species::Chicken;
+        let mut chicken = Mob::new(1, Arc::new(k), Vec3::ZERO, 0.0);
+        chicken.extra.age = -24_000;
+        let raised: Vec<f32> = (0..64).map(|_| chicken.voice_pitch()).collect();
+        assert!(raised.iter().all(|p| (1.3..=1.7).contains(p)), "{raised:?}");
+    }
+
     /// `Parrot.calculateFlapping`: in the air the wings beat and a fall is
     /// slowed to 0.6; on the ground or a shoulder they fold.
     #[test]
@@ -313,14 +380,63 @@ mod tests {
         m.anim.flap_speed = 1.0;
         let mut events = Vec::new();
         m.ai.steps.fly_dist = 0.5;
-        process_flapping(&mut m, &mut events);
+        assert!(!process_flapping(&mut m, &mut events));
         assert!(events.is_empty(), "nextFlap starts at 1");
+        m.ai.steps.fly_dist = 1.0;
+        assert!(!process_flapping(&mut m, &mut events), "strict threshold");
         m.ai.steps.fly_dist = 1.2;
-        process_flapping(&mut m, &mut events);
+        assert!(process_flapping(&mut m, &mut events));
         assert!(matches!(
             events.as_slice(),
             [MobEvent::Sound("entity.parrot.fly", _, v, _)] if *v == 0.15
         ));
         assert!((m.ai.steps.next_flap - 1.7).abs() < 1.0e-6);
+        events.clear();
+        assert!(
+            !process_flapping(&mut m, &mut events),
+            "no second flap without moving"
+        );
+        m.silent = true;
+        m.ai.steps.fly_dist = 1.8;
+        assert!(process_flapping(&mut m, &mut events), "silent still flaps");
+        assert!(events.is_empty());
+        assert!((m.ai.steps.next_flap - 2.3).abs() < 1.0e-6);
+    }
+
+    /// `ServerPlayer.playShoulderEntityAmbientSound`: with a mob to imitate
+    /// and a coin flip won, the mob's voice at 0.7; otherwise the parrot's own.
+    #[test]
+    fn a_shoulder_parrot_imitates_or_chirps() {
+        let nearby = [(Species::Zombie, false)];
+        let mut imitated = 0;
+        let mut chirped = 0;
+        for n in 0..64_i64 {
+            let seed = n.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64);
+            let mut probe = LegacyRandom::new(seed);
+            let flip = probe.next_int_bound(2).unwrap();
+            let mut random = LegacyRandom::new(seed);
+            let (sound, volume, _) =
+                shoulder_sound(&mut random, true, false, true, &nearby).unwrap();
+            if flip == 0 {
+                assert_eq!((sound, volume), ("entity.parrot.imitate.zombie", 0.7));
+                imitated += 1;
+            } else {
+                assert_eq!((sound, volume), ("entity.parrot.ambient", 1.0));
+                chirped += 1;
+            }
+        }
+        assert!(imitated > 0 && chirped > 0);
+        // A silent player (or a dead one) imitates nothing and only chirps.
+        let mut random = LegacyRandom::new(1);
+        let (sound, volume, _) = shoulder_sound(&mut random, true, true, true, &nearby).unwrap();
+        assert_eq!((sound, volume), ("entity.parrot.ambient", 1.0));
+        // The happy ghast's imitation is silent.
+        let ghast = [(Species::HappyGhast, false)];
+        let silent = (0..64_i64).filter(|&n| {
+            let seed = n.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64 as i64);
+            let mut r = LegacyRandom::new(seed);
+            shoulder_sound(&mut r, true, false, true, &ghast).is_none()
+        });
+        assert!(silent.count() > 0);
     }
 }

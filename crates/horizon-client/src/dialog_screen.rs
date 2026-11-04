@@ -5,8 +5,32 @@
 use crate::{
     dialog::{Body, Control, Dialog, Kind},
     font::Font,
-    text::Text,
+    text::{Style, Text},
 };
+
+/// `ActiveTextCollector.ClickableStyleFinder.accept`: the style under a drawn
+/// message glyph, using the same visual order and advances as rendering.
+pub fn line_style_at(
+    font: &Font,
+    text: &Text,
+    x: f32,
+    y: f32,
+    cursor: (f32, f32),
+) -> Option<Style> {
+    let mut left = cursor.0 - x;
+    if left < 0.0 || !(0.0..9.0).contains(&(cursor.1 - y)) {
+        return None;
+    }
+    let text = text.resolve_legacy();
+    let visual = crate::bidi::visual(&text);
+    for (c, style) in visual.chars() {
+        left -= font.advance(c, style);
+        if left < 0.0 {
+            return Some(style.clone());
+        }
+    }
+    None
+}
 
 /// `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT`.
 const BAR: f32 = 33.0;
@@ -158,6 +182,18 @@ fn item(
     }
 }
 
+/// `TextInputHandler.addControl`: the 20 high `EditBox`, or the
+/// `MultiLineEditBox` of the options' height, by default as tall as their most
+/// lines (4 without a limit) need, at most 512.
+pub fn text_height(multiline: Option<(Option<i32>, Option<i32>)>) -> f32 {
+    match multiline {
+        None => 20.0,
+        Some((max_lines, height)) => {
+            height.unwrap_or_else(|| (9 * max_lines.unwrap_or(4) + 8).min(512)) as f32
+        }
+    }
+}
+
 /// `InputControlHandlers`: the control for input `i`.
 fn input(font: &Font, i: usize, control: &Control) -> Element {
     match control {
@@ -165,16 +201,18 @@ fn input(font: &Font, i: usize, control: &Control) -> Element {
             width,
             label,
             label_visible,
+            multiline,
             ..
         } => {
             let w = *width as f32;
+            let h = text_height(*multiline);
             if !label_visible {
                 return Element {
                     w,
-                    h: 20.0,
+                    h,
                     parts: vec![Part::Field {
                         input: i,
-                        rect: [0.0, 0.0, w, 20.0],
+                        rect: [0.0, 0.0, w, h],
                     }],
                 };
             }
@@ -187,12 +225,12 @@ fn input(font: &Font, i: usize, control: &Control) -> Element {
             }
             Element {
                 w: w.max(font.width_text(label)),
-                h: 9.0 + 4.0 + 20.0,
+                h: 9.0 + 4.0 + h,
                 parts: vec![
                     Part::Line(shown, 0.0, 0.0),
                     Part::Field {
                         input: i,
-                        rect: [0.0, 13.0, w, 20.0],
+                        rect: [0.0, 13.0, w, h],
                     },
                 ],
             }
@@ -420,6 +458,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn message_hit_testing_respects_sprite_advances_and_glyph_bounds() {
+        use crate::{component, hud::Rect, text::ClickEvent};
+        let font = Font::load(
+            std::path::Path::new("/nonexistent-horizon-dialog-test-resources"),
+            &std::collections::HashMap::new(),
+            &[],
+            (1, 1),
+            (0, 0),
+            Rect {
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+                w: 1,
+                h: 1,
+            },
+        );
+        let text = component::to_text(
+            &serde_json::json!([
+                {"object": "atlas", "sprite": "minecraft:item/potion"},
+                {"object": "atlas", "sprite": "minecraft:item/potion", "click_event": {
+                    "action": "custom", "id": "test:shop"
+                }},
+                {"object": "atlas", "sprite": "minecraft:item/potion"},
+            ]),
+            &mut |_| Text::empty(),
+        );
+        let style = |x, y| line_style_at(&font, &text, 10.0, 20.0, (x, y));
+        assert!(style(9.9, 20.0).is_none());
+        assert_eq!(style(17.9, 20.0).unwrap().click, None);
+        for x in [18.0, 21.0, 25.9] {
+            assert_eq!(
+                style(x, 24.0).unwrap().click,
+                Some(ClickEvent::Custom {
+                    id: "test:shop".into(),
+                    payload: None,
+                })
+            );
+        }
+        assert_eq!(style(26.0, 20.0).unwrap().click, None);
+        assert!(style(34.0, 20.0).is_none());
+        assert!(style(21.0, 19.9).is_none());
+        assert!(style(21.0, 29.0).is_none());
+    }
+
+    #[test]
     fn grids_pack_full_rows_and_centre_the_rest() {
         // AuthMe's two buttons: one row, 2 apart.
         let two = columns(&[150.0, 150.0], 2, 0);
@@ -437,6 +521,17 @@ mod tests {
         // One in two columns spreads over both.
         let one = columns(&[100.0], 2, 0);
         assert_eq!(one.w, 100.0);
+    }
+
+    #[test]
+    fn a_multiline_input_is_as_tall_as_its_lines_or_its_height() {
+        assert_eq!(text_height(None), 20.0);
+        // No options: four lines and the padding.
+        assert_eq!(text_height(Some((None, None))), 44.0);
+        assert_eq!(text_height(Some((Some(10), None))), 98.0);
+        // Never over 512; a height wins over the lines.
+        assert_eq!(text_height(Some((Some(100), None))), 512.0);
+        assert_eq!(text_height(Some((Some(2), Some(70)))), 70.0);
     }
 
     #[test]

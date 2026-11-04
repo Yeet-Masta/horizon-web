@@ -2,6 +2,7 @@
 //! campfire smoke and rain splashes (`ClientLevel.tickWeatherEffects`).
 use super::{Dim, Game};
 use horizon_client::assets::Properties;
+use horizon_client::camera::NearPlane;
 use horizon_client::fog::{FogData, FogInputs, FogType, fog_type, update_rain_fog};
 use horizon_client::{
     animate_tick::{AnimateContext, animate_tick, campfire_particles, marker_particle_target},
@@ -13,7 +14,7 @@ use horizon_client::{
 };
 use horizon_client::{
     hud_overlays,
-    screen_effects::{ScreenInputs, ScreenQuad, lightmap_brightness},
+    screen_effects::{ScreenInputs, ScreenQuad, lightmap_brightness, nausea_has_effect},
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
 use horizon_world::{heightmap::HeightmapType, worldgen::terrain::TerrainBlockStates};
@@ -85,6 +86,18 @@ impl Game<'_> {
             yaw.cos() * pitch.cos(),
         ]
     }
+    /// `Camera.getNearPlane` at the FOV option, as `getFluidInCamera` asks for it.
+    pub(super) fn near_plane(&self) -> NearPlane {
+        let [width, height] = self
+            .renderer
+            .as_ref()
+            .map_or([1, 1], |r| [r.config.width, r.config.height]);
+        self.view.near_plane(
+            self.settings.fov as i32 as f32,
+            width as f32,
+            height.max(1) as f32,
+        )
+    }
     /// `FogRenderer.setupFog` for the frame's camera, and Horizon's Fog option.
     pub(super) fn frame_fog(
         &self,
@@ -95,12 +108,8 @@ impl Game<'_> {
     ) -> FogData {
         let forward = self.forward();
         let at = [camera.x, camera.y, camera.z];
-        let fog_type = fog_type(&self.world, self.res.facts(), at, forward);
-        let (rain, thunder) = if self.dim == Dim::Overworld {
-            self.world.weather.levels(self.clock.fraction() as f32)
-        } else {
-            (0.0, 0.0)
-        };
+        let fog_type = fog_type(&self.world, self.res.facts(), at, &self.near_plane());
+        let (rain, thunder) = self.weather_levels(self.clock.fraction() as f32);
         let title_fog = horizon_client::fog::FogTables::default();
         let tables = if self.title.is_some() {
             &title_fog
@@ -140,7 +149,59 @@ impl Game<'_> {
         if !self.settings.horizon.fog {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
         }
+        if self.title.is_none() {
+            fog.color =
+                self.native_fog_color_now(self.clock.fraction() as f32, at, fog_type, fog.color);
+            fog = self.native_fog_now(self.clock.fraction() as f32, at, fog_type, fog);
+        }
         fog
+    }
+    fn native_fog_color_now(
+        &self,
+        partial: f32,
+        camera: [f64; 3],
+        fog_type: FogType,
+        color: [f32; 4],
+    ) -> [f32; 4] {
+        let mut rgb = [color[0], color[1], color[2]];
+        self.native_compute_fog_color(partial, camera, fog_type, &mut rgb);
+        if rgb.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) {
+            [rgb[0], rgb[1], rgb[2], color[3]]
+        } else {
+            color
+        }
+    }
+    fn native_fog_now(
+        &self,
+        partial: f32,
+        camera: [f64; 3],
+        fog_type: FogType,
+        original: FogData,
+    ) -> FogData {
+        let mut fog = original;
+        self.native_render_fog(partial, camera, fog_type, &mut fog);
+        let distances = [
+            fog.environmental_start,
+            fog.environmental_end,
+            fog.render_distance_start,
+            fog.render_distance_end,
+            fog.sky_end,
+            fog.cloud_end,
+        ];
+        if fog
+            .color
+            .iter()
+            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            && distances.iter().all(|v| v.is_finite())
+            && fog.environmental_end > fog.environmental_start
+            && fog.render_distance_end > fog.render_distance_start
+            && fog.sky_end >= 0.0
+            && fog.cloud_end >= 0.0
+        {
+            fog
+        } else {
+            original
+        }
     }
     /// `FogRenderer.computeFogColor`'s night vision brightenFactor:
     /// `GameRenderer.nightVisionScale`, but not while Darkness is on.
@@ -169,7 +230,7 @@ impl Game<'_> {
     fn level_min_y(&self) -> i32 {
         match self.remote.as_ref() {
             Some(r) => r.dimension.min_y,
-            None => self.dim.min_y(),
+            None => self.world.shape.min_y,
         }
     }
     /// `SkyRenderer.shouldRenderDarkDisc`: eye below the horizon and not under
@@ -187,11 +248,12 @@ impl Game<'_> {
                 &self.world,
                 self.res.facts(),
                 [camera.x, camera.y, camera.z],
-                self.forward(),
+                &self.near_plane(),
             ) != FogType::Water
     }
     /// `ScreenEffectRenderer` + `Hud` camera overlays for this frame.
-    pub(super) fn screen_quads(&self, partial: f32, size: [u32; 2]) -> Vec<ScreenQuad> {
+    /// `scale` is the player's `LivingEntity.getScale`.
+    pub(super) fn screen_quads(&self, partial: f32, size: [u32; 2], scale: f32) -> Vec<ScreenQuad> {
         let Some(p) = self.player.as_ref() else {
             return Vec::new();
         };
@@ -200,41 +262,73 @@ impl Game<'_> {
             p.position.y + f64::from(p.dimensions.eye_height),
             p.position.z,
         ];
-        // LevelExtractor.getViewBlockingState: 8 points around the eye.
+        // `LevelExtractor.getViewBlockingState`: 8 points around the eye, each
+        // tested with `BlockState.isViewBlocking` against the near plane.
         // ScreenEffectRenderer: none of it for a spectator (noPhysics).
         let spectator = self.spectator();
         let mut block_overlay = None;
-        let w = f64::from(p.dimensions.width) * 0.8;
-        for i in (0..8).filter(|_| !spectator) {
-            let t = [
-                p.position.x + (f64::from(i & 1) - 0.5) * w,
-                eye[1] + (f64::from((i >> 1) & 1) - 0.5) * 0.1,
-                p.position.z + (f64::from((i >> 2) & 1) - 0.5) * w,
-            ];
-            let state = self.world.block(
-                t[0].floor() as i32,
-                t[1].floor() as i32,
-                t[2].floor() as i32,
+        if !spectator {
+            // Frustum.getNearPlaneBounds, moved to the eye.
+            let (near_min, near_max) = horizon_client::camera::near_plane_bounds(
+                self.fov_degrees(partial, eye),
+                size[0] as f32,
+                size[1] as f32,
+                self.yaw,
+                self.pitch,
+                horizon_client::camera::depth_far(
+                    self.terrain_distance(),
+                    self.settings.cloud_range,
+                ),
             );
-            let f = self.res.facts().get(state);
-            if f.render_shape != horizon_client::blocks::RenderShape::Invisible
-                && f.solid_render
-                && f.full_collision
-            {
-                // ScreenEffectRenderer: the block's particle material.
-                block_overlay = Self::block_particle_sprite(&self.pack, state);
-                break;
+            let near_plane = horizon_core::geometry::Aabb::new(
+                horizon_core::geometry::Vec3::new(
+                    near_min[0] + eye[0],
+                    near_min[1] + eye[1],
+                    near_min[2] + eye[2],
+                ),
+                horizon_core::geometry::Vec3::new(
+                    near_max[0] + eye[0],
+                    near_max[1] + eye[1],
+                    near_max[2] + eye[2],
+                ),
+            );
+            // The test points use float maths: `(i % 2 - 0.5F) * width * 0.8F`.
+            // The height spread is `0.1F * getScale()`: a tiny player's eye is
+            // closer to the ground than 0.05.
+            let width = p.dimensions.width;
+            for i in 0..8 {
+                let t = [
+                    p.position.x + f64::from(((i & 1) as f32 - 0.5) * width * 0.8),
+                    p.position.y
+                        + f64::from(p.dimensions.eye_height)
+                        + f64::from((((i >> 1) & 1) as f32 - 0.5) * 0.1 * scale),
+                    p.position.z + f64::from((((i >> 2) & 1) as f32 - 0.5) * width * 0.8),
+                ];
+                let pos = [
+                    t[0].floor() as i32,
+                    t[1].floor() as i32,
+                    t[2].floor() as i32,
+                ];
+                let state = self.world.block(pos[0], pos[1], pos[2]);
+                if self.res.facts().get(state).render_shape
+                    != horizon_client::blocks::RenderShape::Invisible
+                    && self.state_view_blocking(state, pos, near_plane)
+                {
+                    // ScreenEffectRenderer: the block's particle material.
+                    block_overlay = Self::block_particle_sprite(&self.pack, state);
+                    break;
+                }
             }
         }
         let in_water =
-            fog_type(&self.world, self.res.facts(), eye, self.forward()) == FogType::Water;
+            fog_type(&self.world, self.res.facts(), eye, &self.near_plane()) == FogType::Water;
         let water =
             (in_water && !spectator).then(|| (self.eye_brightness(eye), self.yaw, self.pitch));
         // Hud.extractCameraOverlays; the spyglass scope (and its easing) is
         // drawn on the HUD by draw_spyglass.
         let fx = &self.screen_fx;
         let overlays = hud_overlays::CameraOverlays {
-            vignette: self.settings.vignette.then_some((
+            vignette: self.vignette_shown().then_some((
                 fx.vignette_brightness,
                 self.border.warning_strength(p.position.x, p.position.z),
             )),
@@ -294,32 +388,24 @@ impl Game<'_> {
             if self.remote.is_some() && self.portals.player.cooldown > 0 {
                 self.portals.player.cooldown -= 1;
             }
-            let nausea = self
-                .potions
-                .effects
-                .get("nausea")
-                .map(|e| !e.ends_within(60));
+            let nausea = self.potions.effects.get("nausea").map(nausea_has_effect);
             self.screen_fx.tick_spinning(nausea);
             // LocalPlayer water vision and AtmosphericFogEnvironment rain fog.
             let in_water =
-                fog_type(&self.world, self.res.facts(), e, self.forward()) == FogType::Water;
+                fog_type(&self.world, self.res.facts(), e, &self.near_plane()) == FogType::Water;
             self.fog.tick(in_water);
             let b = [
                 e[0].floor() as i32,
                 e[1].floor() as i32,
                 e[2].floor() as i32,
             ];
-            let rain = if self.dim == Dim::Overworld {
-                self.world.weather.levels(1.0).0
-            } else {
-                0.0
-            };
+            let rain = self.weather_levels(1.0).0;
             let biome = self
                 .world
                 .chunks
                 .get(&(b[0] >> 4, b[2] >> 4))
                 .map_or(0, |c| c.biome(b[0], b[1], b[2]));
-            let rains = self.res.biomes().get(biome).precipitation;
+            let rains = world_biomes!(self).get(biome).precipitation;
             update_rain_fog(
                 &mut self.fog,
                 rain,
@@ -332,11 +418,7 @@ impl Game<'_> {
         if let Some(e) = eye {
             self.particles.camera = e;
         }
-        let (rain, _) = if self.dim == Dim::Overworld {
-            self.world.weather.levels(1.0)
-        } else {
-            (0.0, 0.0)
-        };
+        let (rain, _) = self.weather_levels(1.0);
         let marker = marker_particle_target(self.mode, self.stack_in(self.selected));
         let marker_options = |state| {
             // BlockMarker: the particle sprite, untinted.
@@ -349,7 +431,7 @@ impl Game<'_> {
         };
         let world = &self.world;
         let facts = self.res.facts();
-        let biomes = self.res.biomes();
+        let biomes = world_biomes!(self);
         let properties = &self.pack.assets.properties;
         let raining = rain > 0.2;
         let raining_at = |p: [i32; 3]| {
@@ -362,6 +444,9 @@ impl Game<'_> {
         // The day timeline: firefly bush sounds from 12600 to 23400.
         let firefly_bush_sounds = self.dim == Dim::Overworld
             && (12600..23401).contains(&self.world.day_time.rem_euclid(24000));
+        // EnvironmentAttributes.CREAKING_ACTIVE: the same overworld night.
+        let creaking_active = self.dim == Dim::Overworld
+            && (12600..23401).contains(&self.world.day_time.rem_euclid(24000));
         let tables = &self.pack.context.tables;
         let model_offset = |state, x, z| tables.offset(state, x, z);
         let gateway_particles = |state, p| {
@@ -371,7 +456,7 @@ impl Game<'_> {
                 .len()
         };
         // Level.isThundering: a thunder level above 0.9 where the sky is open.
-        let thundering = self.dim == Dim::Overworld && world.weather.levels(1.0).1 > 0.9;
+        let thundering = self.can_have_weather() && world.weather.levels(1.0).1 > 0.9;
         let ctx = AnimateContext {
             world,
             facts,
@@ -381,6 +466,7 @@ impl Game<'_> {
             raining_at: &raining_at,
             height_no_leaves: &height_no_leaves,
             firefly_bush_sounds,
+            creaking_active,
             sky_darken: self.sky_darken(),
             marker: marker.map(|name| (name, &marker_options as &dyn Fn(_) -> _)),
             model_offset: &model_offset,
@@ -485,6 +571,20 @@ impl Game<'_> {
                 },
             );
         }
+        // SpellParticle.isCloseToScopingPlayer: the eye of a local player looking
+        // through a spyglass in first person.
+        let scope_eye = self
+            .player
+            .as_ref()
+            .filter(|_| self.camera_type.first_person() && self.scoping())
+            .map(|p| {
+                [
+                    p.position.x,
+                    p.position.y + f64::from(p.dimensions.eye_height),
+                    p.position.z,
+                ]
+            });
+        self.particles.set_scope_eye(scope_eye);
         let level = ParticleLevel {
             world,
             facts,
@@ -496,8 +596,14 @@ impl Game<'_> {
         };
         self.particles.tick(&level);
         self.tick_pickups();
-        for (name, at, volume, pitch) in std::mem::take(&mut self.particles.sounds) {
-            self.audio.play(name, Some(at), volume, pitch);
+        let camera = self.particles.camera;
+        for (name, at, volume, pitch, delayed) in std::mem::take(&mut self.particles.sounds) {
+            if delayed {
+                self.audio
+                    .play_distance_delayed(name, at, volume, pitch, camera);
+            } else {
+                self.audio.play(name, Some(at), volume, pitch);
+            }
         }
     }
 }

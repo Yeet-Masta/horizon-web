@@ -714,7 +714,12 @@ fn environmental(m: &Mob) -> bool {
         || m.last_damage.is_some_and(|(d, t)| {
             matches!(
                 d.kind,
-                DamageKind::OnFire | DamageKind::InFire | DamageKind::Lava | DamageKind::Cactus
+                DamageKind::OnFire
+                    | DamageKind::InFire
+                    | DamageKind::Lava
+                    | DamageKind::Cactus
+                    | DamageKind::LightningBolt
+                    | DamageKind::HotFloor
             ) && i64::from(m.age) - t <= 40
         })
 }
@@ -861,6 +866,7 @@ impl Goal for PandaSit {
         if let Some(item) = m.extra.main_hand.clone() {
             let count = held_count(m);
             cx.events.push(MobEvent::DropItem {
+                mob: m.id,
                 item,
                 count,
                 at: [m.position.x, m.position.y, m.position.z],

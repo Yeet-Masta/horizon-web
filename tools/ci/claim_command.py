@@ -10,8 +10,10 @@ A comment on an issue, on its first line:
     /unclaim           unassigns the commenter
     /unclaim @login    Ludovic and the trusted reviewers (.github/trusted-reviewers.txt) release someone else's claim
 
-An assigned issue is taken, and so is one claimed on Discord (Kira's `in progress` label). Refused with a one-line
-answer: a pull request (claim the issue it fixes), a closed or locked issue, an issue someone else holds, more than 5 open claims at once (Ludovic and the trusted reviewers have no
+An assigned issue is taken, and so is one claimed on Discord (Kira's `in progress` label). Trackers and proposals
+(labels `tracker`, `proposal`, `not claimable`, set by maintainers) are never claimed whole. Refused with a one-line
+answer: a pull request (claim the issue it fixes), a closed or locked issue, an issue someone else holds, more than
+8 open claims at once, not counting issues a pull request already fixes (Ludovic and the trusted reviewers have no
 limit). A success answers with a 👍 on the comment; the assignment shows in the thread.
 A claim made here is released after 5 days unless an open pull request links the issue (`Fixes #N`, a mention, or the
 sidebar's link); assignments made by hand are never released. No code of any pull request is read or run: only the
@@ -32,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nightly_set as ns  # noqa: E402  (the same trusted reviewers and owner)
 
 PREFIX = "🤖 Claims: "
-MAX_CLAIMS = 5
+MAX_CLAIMS = 8
 STALE = timedelta(days=5)
 LOGIN = re.compile(r"^@?([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))$")
 USAGE = "Use `/claim` or `/unclaim` (the trusted reviewers: `/unclaim @login`)."
@@ -40,6 +42,8 @@ USAGE = "Use `/claim` or `/unclaim` (the trusted reviewers: `/unclaim @login`)."
 BOT_LOGINS = ("github-actions", "github-actions[bot]")
 # Kira's Discord `/claim` marks an issue with this label (horizon-rust/kira, WORK.label): it is taken too.
 KIRA_LABEL = "in progress"
+# Issues nobody claims whole (ari, 2026-11-02): a tracker lists other issues, a proposal waits for a decision.
+UNCLAIMABLE = ("tracker", "proposal", "not claimable")
 
 
 class Refused(Exception):
@@ -145,7 +149,9 @@ class Api:
         gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{n}/assignees", "-f", f"assignees[]={login}")
 
     def open_claims(self, login: str) -> int:
-        q = f"repo:{self.repo} is:issue is:open assignee:{login}"
+        # An issue a pull request already fixes (linked by "Fixes #N") is done on the contributor's side: it no
+        # longer counts, since a review can take days (rdbtCVS, 2026-10-30).
+        q = f"repo:{self.repo} is:issue is:open assignee:{login} -linked:pr"
         return int(gh("api", "-X", "GET", "search/issues", "-f", f"q={q}", "-f", "per_page=1", "--jq", ".total_count"))
 
     def react(self, comment_id: int) -> None:
@@ -183,7 +189,11 @@ def run(api, cmd: Command, login: str, number: int, reviewers: ns.Reviewers) -> 
         if holders:
             names = ", ".join(f"@{h}" for h in holders)
             raise Refused(f"{names} already claimed this issue: pick another, or ask them here.")
-        if KIRA_LABEL in {str(l.get("name", "")).lower() for l in issue.get("labels") or []}:
+        labels = {str(l.get("name", "")).lower() for l in issue.get("labels") or []}
+        if (kind := next((u for u in UNCLAIMABLE if u in labels), None)):
+            raise Refused(f"this issue is labelled `{kind}`, so it isn't claimed as a whole: claim one of the issues "
+                          "it lists, or open one for the part you take.")
+        if KIRA_LABEL in labels:
             raise Refused(f"someone claimed this issue on Discord (Kira's `{KIRA_LABEL}` label): pick another, or ask "
                           "in the thread.")
         if not is_team(login, reviewers) and api.open_claims(login) >= MAX_CLAIMS:

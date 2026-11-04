@@ -83,6 +83,15 @@ class ClaimTests(unittest.TestCase):
             do("/claim", api)
         self.assertEqual(api.calls, [])
 
+    def test_trackers_and_proposals_are_not_claimed(self):
+        for name in ("Tracker", "proposal", "not claimable"):
+            t = thread()
+            t["labels"] = [{"name": "bug"}, {"name": name}]
+            api = Fake({5: t})
+            with self.assertRaisesRegex(cc.Refused, "isn't claimed as a whole"):
+                do("/claim", api)
+            self.assertEqual(api.calls, [], name)
+
     def test_already_yours(self):
         with self.assertRaisesRegex(cc.Refused, "already hold"):
             do("/claim", Fake({5: thread(holders=("NewComer",))}))
@@ -98,7 +107,7 @@ class ClaimTests(unittest.TestCase):
 
     def test_five_claims_at_most(self):
         api = Fake(claims=cc.MAX_CLAIMS)
-        with self.assertRaisesRegex(cc.Refused, "5 open issues"):
+        with self.assertRaisesRegex(cc.Refused, "8 open issues"):
             do("/claim", api)
         self.assertEqual(api.calls, [])
         do("/claim", Fake(claims=cc.MAX_CLAIMS - 1))

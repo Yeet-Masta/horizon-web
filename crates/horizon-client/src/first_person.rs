@@ -28,6 +28,12 @@ pub enum ItemPose {
     Bow {
         ticks_used: f32,
     },
+    /// A brush in use (`ItemUseAnimation.BRUSH`): the ticks left of the use
+    /// and the partial tick.
+    Brush {
+        remaining: f32,
+        partial: f32,
+    },
     /// A spear being charged (`ItemUseAnimation.SPEAR`): the time held and
     /// the ticks since its last hit's feedback.
     Spear {
@@ -77,6 +83,9 @@ pub fn item_pose(left: bool, inverse_height: f32, attack: f32, pose: ItemPose) -
     }
     if matches!(pose, ItemPose::Using) {
         return m;
+    }
+    if let ItemPose::Brush { remaining, partial } = pose {
+        return m * brush_transform(left, remaining, partial);
     }
     // The spear's own place in the hand, without the equip height.
     if let ItemPose::Spear {
@@ -174,6 +183,30 @@ impl MapHold {
         } else {
             Self::OneHanded
         }
+    }
+}
+
+/// `FirstPersonHandsAndItemsRenderer.applyBrushTransform`: the brush in use,
+/// swept back and forth by the ticks left of its use (`remaining`).
+fn brush_transform(left: bool, remaining: f32, partial: f32) -> glam::Mat4 {
+    use glam::{Mat4, Vec3};
+    use horizon_core::geometry::trig::Mth;
+    let ticks = remaining % 10.0;
+    let delta = ticks - partial + 1.0;
+    let scaled = 1.0 - delta / 10.0;
+    let swipe = -15.0 + 75.0 * (scaled * 2.0 * std::f32::consts::PI).mcos();
+    let sweep = Mat4::from_rotation_x(swipe.to_radians());
+    if left {
+        Mat4::from_translation(Vec3::new(0.1, 0.83, 0.35))
+            * Mat4::from_rotation_x((-80.0f32).to_radians())
+            * Mat4::from_rotation_y((-90.0f32).to_radians())
+            * sweep
+            * Mat4::from_translation(Vec3::new(-0.3, 0.22, 0.35))
+    } else {
+        Mat4::from_translation(Vec3::new(-0.25, 0.22, 0.35))
+            * Mat4::from_rotation_x((-80.0f32).to_radians())
+            * Mat4::from_rotation_y(90.0f32.to_radians())
+            * sweep
     }
 }
 
@@ -481,6 +514,23 @@ impl HandHeights {
     }
 }
 
+/// `FirstPersonHandsAndItemsRenderer.submit`: the displayed stack's model
+/// scales the interpolated equip displacement independently for each hand.
+pub fn equip_displacement(height: f32, swap_animation_scale: f32) -> f32 {
+    swap_animation_scale * (1.0 - height)
+}
+
+/// `Mth.wrapDegrees`: an angle difference in -180..=180.
+fn wrap_degrees(d: f32) -> f32 {
+    let d = d % 360.0;
+    if d >= 180.0 {
+        d - 360.0
+    } else if d < -180.0 {
+        d + 360.0
+    } else {
+        d
+    }
+}
 /// `LocalPlayer.xBob` and `yBob`: the hands lag behind the view when it
 /// turns. `LocalPlayer.applyInput` eases them halfway to the rotation every
 /// tick; `FirstPersonHandsAndItemsRenderer` turns the hands by a tenth of
@@ -491,6 +541,8 @@ pub struct HandSway {
     pub y_bob: f32,
     pub x_bob_o: f32,
     pub y_bob_o: f32,
+    /// The yaw `tick_wrapped` has followed so far, unwrapped like vanilla's.
+    y_rot: f32,
 }
 impl HandSway {
     /// `LocalPlayer.applyInput` with the player's `getXRot` and `getYRot`.
@@ -500,13 +552,34 @@ impl HandSway {
         self.x_bob += (x_rot - self.x_bob) * 0.5;
         self.y_bob += (y_rot - self.y_bob) * 0.5;
     }
+    /// `tick` for a yaw kept in -180..180 (a boat turns its rider through the wrap). Vanilla's
+    /// yaw runs on without wrapping, so `yRot - yBob` is always the short way round; this
+    /// follows the wrapped yaw by its short steps to give `tick` the same unwrapped yaw.
+    pub fn tick_wrapped(&mut self, x_rot: f32, y_rot: f32) {
+        self.y_rot += wrap_degrees(y_rot - self.y_rot);
+        self.tick(x_rot, self.y_rot);
+    }
     /// The degrees the hands turn about X, then Y, before either is drawn:
     /// `(viewXRot - xBob) * 0.1` and `(viewYRot - yBob) * 0.1`, the bobs
     /// interpolated as `extractRenderState` does.
     pub fn rotation(&self, partial: f32, view_x_rot: f32, view_y_rot: f32) -> [f32; 2] {
         let x_bob = crate::camera::lerp(partial, self.x_bob_o, self.x_bob);
         let y_bob = crate::camera::lerp(partial, self.y_bob_o, self.y_bob);
-        [(view_x_rot - x_bob) * 0.1, (view_y_rot - y_bob) * 0.1]
+        [
+            (view_x_rot - x_bob) * 0.1,
+            wrap_degrees(view_y_rot - y_bob) * 0.1,
+        ]
+    }
+    /// The hands' view space to camera-relative world space, turned by the
+    /// sway. The hand pass draws with the camera's view, whose rotation a
+    /// ridden boat's turn spreads over the frames of a tick
+    /// (`LocalPlayer.getViewYRot`): anything else swings the hands back and
+    /// forth by that turn, up to 10 degrees, 20 times a second (#4583).
+    pub fn to_world(&self, partial: f32, camera: &crate::camera::Camera) -> glam::Mat4 {
+        let [x, y] = self.rotation(partial, camera.x_rot, camera.y_rot);
+        crate::camera::view_matrix(camera.y_rot, camera.x_rot).inverse()
+            * glam::Mat4::from_rotation_x(x.to_radians())
+            * glam::Mat4::from_rotation_y(y.to_radians())
     }
 }
 
@@ -877,6 +950,80 @@ impl Clicks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn equip_displacement_uses_the_visible_items_scale() {
+        use horizon_assets::item_model::{ClientItem, ItemModels, StackView};
+        use serde_json::json;
+
+        let mut models = ItemModels::default();
+        for (item, scale) in [("minecraft:spear", 1.95), ("minecraft:sword", 1.0)] {
+            models.definitions.insert(
+                item.into(),
+                ClientItem::decode(&json!({
+                    "model": { "type": "minecraft:empty" },
+                    "swap_animation_scale": scale,
+                }))
+                .unwrap(),
+            );
+            models.prototypes.insert(
+                item.into(),
+                [("minecraft:item_model".into(), json!(item))].into(),
+            );
+        }
+        let spear = StackView::new("minecraft:spear", 1);
+        let sword = StackView::new("minecraft:sword", 1);
+        let height = 0.5;
+        // The model of the visible stack determines each hand's displacement.
+        assert_eq!(
+            equip_displacement(height, models.swap_animation_scale(&spear)),
+            0.975
+        );
+        assert_eq!(
+            equip_displacement(height, models.swap_animation_scale(&sword)),
+            0.5
+        );
+        assert_eq!(
+            equip_displacement(1.0, models.swap_animation_scale(&spear)),
+            0.0
+        );
+
+        // A component override (such as a resource-pack model) takes precedence.
+        let mut overridden = spear;
+        overridden.patch.insert(
+            "minecraft:item_model".into(),
+            Some(json!("minecraft:sword")),
+        );
+        assert_eq!(
+            equip_displacement(height, models.swap_animation_scale(&overridden)),
+            0.5
+        );
+    }
+
+    /// #4583: while a boat turns the player steadily, the hands keep their
+    /// place on screen through every frame of a tick.
+    #[test]
+    fn the_hands_hold_still_on_screen_while_a_boat_turns() {
+        const TURN: f32 = 10.0;
+        let mut sway = HandSway::default();
+        let mut yaw = 0.0;
+        for _ in 0..30 {
+            sway.tick(0.0, yaw);
+            yaw += TURN;
+        }
+        let on_screen = |partial: f32| {
+            let camera = crate::camera::Camera {
+                y_rot: yaw - TURN * (1.0 - partial),
+                ..Default::default()
+            };
+            crate::camera::view_matrix(camera.y_rot, 0.0) * sway.to_world(partial, &camera)
+        };
+        let first = on_screen(0.0);
+        for partial in [0.25, 0.5, 0.75, 0.99] {
+            let frame = on_screen(partial);
+            assert!(frame.abs_diff_eq(first, 1.0e-3), "{partial}: {frame:?}");
+        }
+    }
     #[test]
     fn drawing_a_bow_or_holding_a_charged_crossbow_hides_a_hand() {
         let (bow, apple) = (
@@ -1259,5 +1406,23 @@ mod action_result_tests {
                 None
             );
         }
+    }
+
+    /// The hands' sway turns the short way round when the yaw wraps from 179 to -179 degrees (a
+    /// boat turning its rider), instead of swinging them 36 degrees the long way.
+    #[test]
+    fn hand_sway_takes_the_short_way_over_the_yaw_wrap() {
+        let mut sway = HandSway::default();
+        sway.tick_wrapped(0.0, 179.0);
+        for _ in 0..20 {
+            sway.tick_wrapped(0.0, 179.0);
+        }
+        // The view is still at 179; one tick later it reads -179 (2 degrees on).
+        sway.tick_wrapped(0.0, -179.0);
+        let [_, y] = sway.rotation(1.0, 0.0, -179.0);
+        assert!(
+            y.abs() < 0.5,
+            "a 2 degree turn sways the hands by under half a degree: {y}"
+        );
     }
 }
