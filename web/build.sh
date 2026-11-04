@@ -92,4 +92,17 @@ commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 threads_json=false
 [ "$threads" = 1 ] && threads_json=true
 printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"tailCall":true,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
+# Brotli beside each text and module file (`.br`): web/serve.py and the .htaccess serve it to
+# browsers that accept it (all current ones), with `Content-Encoding: br`, so the module downloads
+# at about a quarter of its size and still compiles as it streams. Quality 11 for a release,
+# 9 (seconds, not minutes) for --fast; BROTLI_QUALITY sets it. Without the `brotli` tool the
+# files are served as they are.
+if command -v brotli > /dev/null; then
+  quality="${BROTLI_QUALITY:-$([ "$profile" = release ] && echo 11 || echo 9)}"
+  find "$dist" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) \
+    -print0 | xargs -0 -n 1 -P "$(nproc 2>/dev/null || echo 2)" brotli -f -k -q "$quality" --lgwin=24
+  echo "web/dist: Brotli at quality $quality: $(du -sh "$dist/pkg/horizon-client_bg.wasm.br" | cut -f1) to download"
+else
+  echo "brotli not found: the module is served uncompressed (install brotli to compress it)" >&2
+fi
 echo "web/dist: $(du -sh "$dist/pkg/horizon-client_bg.wasm" | cut -f1) module ($target, $profile, $([ "$threads" = 1 ] && echo threads || echo one thread))"

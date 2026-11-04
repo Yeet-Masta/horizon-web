@@ -15,6 +15,9 @@ runs:
         rustup toolchain install stable --profile minimal --component clippy
         rustup target add wasm32-unknown-unknown
         rustup toolchain install nightly --profile minimal --component rust-src
+    - name: Brotli, for the page's compressed module (web/build.sh)
+      shell: bash
+      run: sudo apt-get install -y -q brotli > /dev/null
     - uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.cache-key }}

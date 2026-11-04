@@ -224,6 +224,13 @@ until a person merges it.
   own responses, and the page reloads once. Service workers need HTTPS (or
   `localhost`); without one, use `--no-threads`.
 
+- The module downloads at about a fifth of its size when the server sends the
+  Brotli files `web/build.sh` writes beside it (`*.br`, when the `brotli` tool is
+  installed) as the file asked for, with `Content-Encoding: br`. `web/serve.py`
+  and `web/apache.htaccess` do; nginx does with `brotli_static on` (the
+  ngx_brotli module), Caddy with `file_server { precompressed br }`. Other hosts
+  send the module as it is, or compress it themselves (GitHub Pages: gzip).
+
 The page checks all of these and says what is missing.
 
 ## What differs from the native game

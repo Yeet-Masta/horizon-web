@@ -11,6 +11,7 @@ game: never put them on a public server.
 import argparse
 import functools
 import http.server
+import os
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -34,6 +35,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
         self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         super().end_headers()
+
+    def send_head(self):
+        # web/build.sh writes Brotli beside the module and the page's text (`.br`): sent as
+        # the file itself, with `Content-Encoding: br`, to a browser that accepts it.
+        path = self.translate_path(self.path)
+        if "br" in self.headers.get("Accept-Encoding", "") and os.path.isfile(path + ".br"):
+            f = open(path + ".br", "rb")
+            stat = os.fstat(f.fileno())
+            self.send_response(200)
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Encoding", "br")
+            self.send_header("Content-Length", str(stat.st_size))
+            self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+            self.send_header("Vary", "Accept-Encoding")
+            self.end_headers()
+            return f
+        return super().send_head()
 
     def serve_resources(self, body):
         if self.resources is None or not self.resources.is_file():

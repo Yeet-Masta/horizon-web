@@ -9,17 +9,48 @@ AddType text/javascript .js
 # No listing: the resources zip is found by its name only.
 Options -Indexes
 
-# The module and the page compress well; the resources zip is compressed already.
+# web/build.sh writes Brotli beside the module and the page's text (`.br`): a browser that
+# accepts it gets that file, a quarter of the module's size, with `Content-Encoding: br`.
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTP:Accept-Encoding} br
+  RewriteCond %{REQUEST_FILENAME}.br -f
+  RewriteRule ^(.+)\.(wasm|js|html|json|svg)$ $1.$2.br [L]
+</IfModule>
+<FilesMatch "\.wasm\.br$">
+  ForceType application/wasm
+</FilesMatch>
+<FilesMatch "\.js\.br$">
+  ForceType text/javascript
+</FilesMatch>
+<FilesMatch "\.html\.br$">
+  ForceType text/html
+</FilesMatch>
+<FilesMatch "\.json\.br$">
+  ForceType application/json
+</FilesMatch>
+<FilesMatch "\.svg\.br$">
+  ForceType image/svg+xml
+</FilesMatch>
+<IfModule mod_headers.c>
+  <FilesMatch "\.br$">
+    Header set Content-Encoding br
+    Header append Vary Accept-Encoding
+  </FilesMatch>
+</IfModule>
+
+# Otherwise the module and the page compress as they are sent; the resources zip and the
+# Brotli files are compressed already.
 <IfModule mod_deflate.c>
   AddOutputFilterByType DEFLATE application/wasm text/javascript text/html application/json
-  SetEnvIfNoCase Request_URI "\.zip$" no-gzip
+  SetEnvIfNoCase Request_URI "\.(zip|br)$" no-gzip
 </IfModule>
 
 # Every build replaces the page and the module: ask each time (an unchanged file is a 304).
 # Cross-origin isolation (COOP and COEP) on every response: the threaded build's shared memory
 # exists only on an isolated page, so without mod_headers only a --no-threads build runs.
 <IfModule mod_headers.c>
-  <FilesMatch "\.(html|js|json|wasm)$">
+  <FilesMatch "\.(html|js|json|wasm|br)$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
   Header always set Cross-Origin-Opener-Policy "same-origin"
