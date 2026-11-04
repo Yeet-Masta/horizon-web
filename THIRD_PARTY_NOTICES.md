@@ -19,6 +19,13 @@ variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
 
+## winit
+
+`third_party/winit` is [winit](https://github.com/rust-windowing/winit) 0.30.13 by the winit
+contributors, under the Apache License 2.0 (`third_party/winit/LICENSE`). Its web callbacks are
+made with wasm-bindgen's `own_assert_unwind_safe` / `once_assert_unwind_safe`, so the web build
+compiles with panics that unwind (web/unwind.toml).
+
 ## xxhash-rust
 
 `third_party/xxhash-rust` is [xxhash-rust](https://github.com/DoumanAsh/xxhash-rust) 0.8.19 by Douman,

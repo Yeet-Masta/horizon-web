@@ -262,12 +262,11 @@ impl Game<'_> {
             if due && o.asking.is_none() && c.mine.sending.is_none() {
                 let (tx, rx) = channel();
                 o.asking = Some(rx);
-                horizon_platform::thread::Builder::new()
-                    .name("Cosmetics account".into())
-                    .spawn(move || {
-                        let _ = tx.send(check_owner());
-                    })
-                    .ok();
+                // A Web Worker on the web build, whose requests wait there.
+                horizon_platform::thread::spawn_worker("Cosmetics account", move || {
+                    let _ = tx.send(check_owner());
+                })
+                .ok();
             }
         }
         // Read every frame: the settings button shows it, and it is never saved.
@@ -288,12 +287,10 @@ impl Game<'_> {
                 m.wish = Some(wish);
                 let (tx, rx) = channel();
                 m.sending = Some(rx);
-                horizon_platform::thread::Builder::new()
-                    .name("Cosmetics account".into())
-                    .spawn(move || {
-                        let _ = tx.send(send_mine(wish));
-                    })
-                    .ok();
+                horizon_platform::thread::spawn_worker("Cosmetics account", move || {
+                    let _ = tx.send(send_mine(wish));
+                })
+                .ok();
             }
         }
         let uploads = std::mem::take(&mut *c.uploads.borrow_mut());

@@ -779,12 +779,8 @@ impl BlueMap {
     }
     /// Downloads what lookups want, on a thread that ends with the map.
     pub fn start(&self) {
-        // The web build has no HTTP client for a server's web map.
-        #[cfg(target_family = "wasm")]
-        return;
-        #[cfg(not(target_family = "wasm"))]
         let inner = Arc::downgrade(&self.inner);
-        #[cfg(not(target_family = "wasm"))]
+        // A Web Worker on the web build, whose requests wait there (horizon_platform's HTTP).
         if let Err(e) = horizon_platform::thread::spawn_worker("BlueMap", move || fetch(inner)) {
             log::warn!("Horizon: BlueMap worker: {e}");
         }
@@ -1165,8 +1161,8 @@ fn read_cached(file: &Path, lowres: &Lowres) -> Option<(Option<Tile>, bool)> {
 }
 
 /// The download worker's own state.
-#[cfg(not(target_family = "wasm"))]
 struct Worker {
+    #[cfg(not(target_family = "wasm"))]
     agent: ureq::Agent,
     backoff: Duration,
     /// Bytes in the disk cache, counted on the first download.
@@ -1183,9 +1179,9 @@ struct Worker {
 /// The download worker: settings first, then the wanted tile nearest the
 /// player, one request at a time. A failure leaves the server alone for a
 /// while, and lookups stop waiting for it meanwhile.
-#[cfg(not(target_family = "wasm"))]
 fn fetch(inner: Weak<Inner>) {
     let mut worker = Worker {
+        #[cfg(not(target_family = "wasm"))]
         agent: ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(10))
             .user_agent(&format!("Horizon/{}", horizon_core::release::VERSION))
@@ -1207,9 +1203,24 @@ fn fetch(inner: Weak<Inner>) {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl Worker {
     /// `Err`: the server didn't answer; `Ok(None)`: it has nothing there.
+    #[cfg(target_family = "wasm")]
+    fn get(&self, inner: &Inner, path: &str) -> Result<Option<Vec<u8>>, ()> {
+        let base = inner.base.get().ok_or(())?;
+        let request = horizon_platform::web::http::Request::get(&format!("{base}/{path}"))
+            .header(
+                "User-Agent",
+                &format!("Horizon/{}", horizon_core::release::VERSION),
+            )
+            .timeout(Duration::from_secs(10));
+        match horizon_platform::web::http::request(request) {
+            Ok(r) if r.status == 204 || r.status == 404 => Ok(None),
+            Ok(r) if (200..300).contains(&r.status) && r.body.len() <= 8 << 20 => Ok(Some(r.body)),
+            _ => Err(()),
+        }
+    }
+    #[cfg(not(target_family = "wasm"))]
     fn get(&self, inner: &Inner, path: &str) -> Result<Option<Vec<u8>>, ()> {
         use std::io::Read;
         let base = inner.base.get().ok_or(())?;
@@ -1449,7 +1460,6 @@ impl Worker {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl Worker {
     /// One step of looking for the map: the next candidate, one at a time
     /// and one look a server at a time (another level's map may be looking).
@@ -1480,7 +1490,11 @@ impl Worker {
         };
         self.probed += 1;
         let started = Instant::now();
-        if detect::probe(&self.agent, candidate) {
+        #[cfg(not(target_family = "wasm"))]
+        let found = detect::probe(&self.agent, candidate);
+        #[cfg(target_family = "wasm")]
+        let found = detect::probe_web(candidate);
+        if found {
             log::info!("Horizon: found the server's BlueMap");
             log::debug!("Horizon: BlueMap at {candidate}");
             detect::remember(&inner.dir, Some(candidate), SystemTime::now());

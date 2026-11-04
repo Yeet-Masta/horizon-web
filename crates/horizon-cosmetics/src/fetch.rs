@@ -15,10 +15,11 @@
 //!   changes for a hash.
 
 use crate::Item;
+use horizon_platform::sync::Mutex;
+use horizon_platform::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, PoisonError};
 
 /// Players per request.
 pub const BATCH: usize = 64;
@@ -77,33 +78,44 @@ impl Cosmetics {
         let mut c = Self::manual(transport, cache, Arc::new(Instant::now));
         let mut work = c.worker.take().expect("worker");
         let shared = c.shared.clone();
-        let _ = std::thread::Builder::new()
-            .name("Cosmetics".into())
-            .spawn(move || {
-                loop {
-                    {
-                        let state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
-                        let state = shared
-                            .wake
-                            .wait_while(state, |s| !s.stop && !ready(s, (shared.clock)()))
-                            .unwrap_or_else(PoisonError::into_inner);
-                        if state.stop {
-                            return;
-                        }
-                    }
-                    work();
-                    // A failure sets retry_at: sleep until then.
-                    let wait = {
-                        let s = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
-                        s.retry_at
-                            .map(|t| t.saturating_duration_since((shared.clock)()))
-                    };
-                    if let Some(wait) = wait {
-                        let s = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
-                        let _ = shared.wake.wait_timeout_while(s, wait, |s| !s.stop);
+        // A Web Worker on the web build, where a Builder's spawn runs in place.
+        let _ = horizon_platform::thread::spawn_worker("Cosmetics", move || {
+            loop {
+                {
+                    let state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    let state = shared
+                        .wake
+                        .wait_while(state, |s| !s.stop && !ready(s, (shared.clock)()))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if state.stop {
+                        return;
                     }
                 }
-            });
+                work();
+                // A failure sets retry_at: sleep until then.
+                let wait = {
+                    let s = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    s.retry_at
+                        .map(|t| t.saturating_duration_since((shared.clock)()))
+                };
+                if let Some(wait) = wait {
+                    // std's wait_timeout_while reads std's clock, which panics on the web.
+                    let until = (shared.clock)() + wait;
+                    let mut s = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    while !s.stop {
+                        let left = until.saturating_duration_since((shared.clock)());
+                        if left.is_zero() {
+                            break;
+                        }
+                        s = shared
+                            .wake
+                            .wait_timeout(s, left)
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .0;
+                    }
+                }
+            }
+        });
         c
     }
 
@@ -217,19 +229,22 @@ impl Saved {
     fn load(cache: &Option<PathBuf>) -> Self {
         cache
             .as_ref()
-            .and_then(|d| std::fs::read(d.join(Self::FILE)).ok())
+            .and_then(|d| horizon_platform::fs::read(d.join(Self::FILE)).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
 
     fn save(&self, cache: &Option<PathBuf>) {
         let Some(dir) = cache else { return };
-        let (Ok(text), Ok(())) = (serde_json::to_vec(self), std::fs::create_dir_all(dir)) else {
+        let (Ok(text), Ok(())) = (
+            serde_json::to_vec(self),
+            horizon_platform::fs::create_dir_all(dir),
+        ) else {
             return;
         };
         let part = dir.join("worn.part");
-        if std::fs::write(&part, text).is_ok() {
-            let _ = std::fs::rename(&part, dir.join(Self::FILE));
+        if horizon_platform::fs::write(&part, text).is_ok() {
+            let _ = horizon_platform::fs::rename(&part, dir.join(Self::FILE));
         }
     }
 }
@@ -427,7 +442,9 @@ fn item(
     let file = cache
         .as_ref()
         .map(|d| d.join(format!("{}-{}.json", r.id, r.hash)));
-    let from_disk = file.as_ref().and_then(|f| std::fs::read(f).ok());
+    let from_disk = file
+        .as_ref()
+        .and_then(|f| horizon_platform::fs::read(f).ok());
     let bytes = match from_disk {
         Some(b) => Some(b),
         None => {
@@ -437,11 +454,11 @@ fn item(
             if let Some(f) = &file
                 && Item::parse(&fetched).is_ok()
                 && let Some(dir) = f.parent()
-                && std::fs::create_dir_all(dir).is_ok()
+                && horizon_platform::fs::create_dir_all(dir).is_ok()
             {
                 let part = f.with_extension("part");
-                if std::fs::write(&part, &fetched).is_ok() {
-                    let _ = std::fs::rename(&part, f);
+                if horizon_platform::fs::write(&part, &fetched).is_ok() {
+                    let _ = horizon_platform::fs::rename(&part, f);
                 }
             }
             Some(fetched)
@@ -514,14 +531,39 @@ impl Http {
     }
 }
 
-/// The web build has no HTTPS client here (`enabled` is false there).
+/// The web build's transport: horizon_platform's HTTP from the Cosmetics worker (the
+/// browser's fetch, else the relay).
+#[cfg(target_family = "wasm")]
+impl Http {
+    pub(crate) fn web(
+        &self,
+        request: horizon_platform::web::http::Request,
+    ) -> Result<Vec<u8>, String> {
+        let response =
+            horizon_platform::web::http::request(request.timeout(Duration::from_secs(10)))?;
+        if !(200..300).contains(&response.status) {
+            return Err(format!("HTTP {}", response.status));
+        }
+        if response.body.len() as u64 > MAX_ANSWER {
+            return Err("answer too long".into());
+        }
+        Ok(response.body)
+    }
+}
 #[cfg(target_family = "wasm")]
 impl Transport for Http {
-    fn post(&self, _: &str, _: &[u8]) -> Result<Vec<u8>, String> {
-        Err(format!("no cosmetics service at {} on the web", self.base))
+    fn post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+        let url = format!("{}{path}", self.base);
+        self.web(
+            horizon_platform::web::http::Request::post(&url, body.to_vec())
+                .header("Content-Type", "application/json"),
+        )
     }
-    fn get(&self, _: &str) -> Result<Vec<u8>, String> {
-        Err(format!("no cosmetics service at {} on the web", self.base))
+    fn get(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.web(horizon_platform::web::http::Request::get(&format!(
+            "{}{path}",
+            self.base
+        )))
     }
 }
 
@@ -555,7 +597,7 @@ impl Local {
 
     /// The first item file of each slot, by file name.
     fn worn(&self) -> Vec<String> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&self.dir)
+        let mut files: Vec<PathBuf> = horizon_platform::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -566,7 +608,9 @@ impl Local {
         let mut slots = Vec::new();
         let mut ids = Vec::new();
         for file in files {
-            if let Some(item) = std::fs::read(&file).ok().and_then(|b| Item::parse(&b).ok())
+            if let Some(item) = horizon_platform::fs::read(&file)
+                .ok()
+                .and_then(|b| Item::parse(&b).ok())
                 && !slots.contains(&item.slot)
                 && file.file_stem().is_some_and(|s| *s == *item.id)
             {
@@ -606,7 +650,7 @@ impl Transport for Local {
             .split('?')
             .next()
             .unwrap_or_default();
-        std::fs::read(self.dir.join(format!("{id}.json"))).map_err(|e| e.to_string())
+        horizon_platform::fs::read(self.dir.join(format!("{id}.json"))).map_err(|e| e.to_string())
     }
 }
 

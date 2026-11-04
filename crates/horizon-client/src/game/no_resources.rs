@@ -32,8 +32,18 @@ pub(super) fn show(looked_in: &std::path::Path, settings: &Settings) -> Result<(
         error: None,
     };
     horizon_client::hud::GUI_SCALE.store(settings.gui_scale, Ordering::Relaxed);
-    EventLoop::new()?.run_app(&mut app)?;
-    app.error.map_or(Ok(()), Err)
+    // The web build's page asks for the resources before the game starts, and its event loop
+    // can't run in place (winit's run_app needs a JS exception to leave the stack).
+    #[cfg(target_family = "wasm")]
+    {
+        drop(app);
+        Err("no prepared resources: the page asks for them before the game starts".into())
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        EventLoop::new()?.run_app(&mut app)?;
+        app.error.map_or(Ok(()), Err)
+    }
 }
 
 impl Missing {

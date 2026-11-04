@@ -181,6 +181,24 @@ Each run keeps the page (`web/dist`: the game's module, its page and fonts, neve
 resources, which every player brings) as a zip artifact, and a push to `web` that passes
 replaces the zip of the `web-latest` release.
 
+## Panics
+
+The threaded builds' panics unwind (`web/unwind.toml`: WebAssembly exception handling, std
+built with `panic_unwind`), so `catch_unwind` works as it does natively: a panic in a chunk
+job or a server tick is caught where the game catches it, and what the code held (locks,
+borrows) is let go, where an abort left the thread dead and its state held. wasm-bindgen
+then asks every JS callback to be unwind-safe: winit's are, in `third_party/winit`.
+`web/build.sh --abort` builds the old way; the one-thread build always aborts.
+
+## HTTP
+
+What the game asks of web services natively with ureq (Realms, cosmetics, the resource pack
+sites, a server's BlueMap) goes through `horizon_platform::web::http`: the browser's `fetch`,
+or, for a site that refuses a page's requests (no CORS headers, an `http://` address from an
+https page, a cookie), the relay's TCP tunnel with TLS spoken in the module, so the relay
+carries ciphertext. Those requests run on the page's thread, whose event loop has `fetch` and
+the sockets; a Web Worker hands its request there and waits for the answer.
+
 ## Merging upstream
 
 Upstream merges hundreds of pull requests a day. What they bring compiles for the web, but

@@ -7,6 +7,9 @@ import init, { horizon_thread_entry } from "./pkg/horizon-client.js";
 globalThis.horizonSpawnThread = (name, _module, _memory, work) => postMessage({ spawn: [name, work] });
 // What goes over the page (a crash on the integrated server's thread, say): the page shows it.
 globalThis.horizonStatus = (text, error) => postMessage({ status: [text, error] });
+// Work for the page's thread, whose event loop has fetch and the relay's sockets
+// (horizon_platform::web::run_on_page): the page runs it by its number.
+globalThis.horizonRunOnPage = (task) => postMessage({ page: task });
 
 // The page's Blobs (horizon.js): the resources zip and the game folder's larger files, read as
 // the game opens them (crates/horizon-platform/src/web/blobs.rs).

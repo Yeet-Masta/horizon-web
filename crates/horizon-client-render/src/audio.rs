@@ -2085,7 +2085,7 @@ mod web_output {
             }
             let resume = {
                 let context = context.clone();
-                Closure::<dyn FnMut()>::new(move || {
+                Closure::<dyn FnMut()>::own_assert_unwind_safe(move || {
                     if context.state() != web_sys::AudioContextState::Running {
                         let _ = context.resume();
                     }
@@ -2130,7 +2130,7 @@ mod web_output {
         let mut scratch = Vec::new();
         let mut channel = Vec::new();
         let mut staging = js_sys::Float32Array::new_with_length(FRAMES);
-        let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
+        let process = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::own_assert_unwind_safe(
             move |event: web_sys::AudioProcessingEvent| {
                 let Ok(buffer) = event.output_buffer() else {
                     return;

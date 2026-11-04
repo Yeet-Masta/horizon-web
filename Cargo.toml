@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust", "third_party/winit"]
 members = [
     "crates/horizon-core",
     "crates/horizon-platform",
@@ -96,6 +96,10 @@ libmimalloc-sys = { path = "third_party/libmimalloc-sys" }
 # `target_family = "wasm"`: they use `core::arch::wasm32`, so the web build on wasm64 (web/README.md)
 # didn't compile. Drop this and the folder once a release has the fix.
 xxhash-rust = { path = "third_party/xxhash-rust" }
+# winit 0.30.13 whose web callbacks (wasm-bindgen closures) assert unwind safety, as
+# wasm-bindgen asks of a build whose panics unwind (web/unwind.toml): unwinding through them
+# drops what they hold, where an abort left it held. Drop this and the folder with winit 0.31.
+winit = { path = "third_party/winit" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.

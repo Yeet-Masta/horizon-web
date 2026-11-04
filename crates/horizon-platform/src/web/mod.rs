@@ -5,6 +5,7 @@
 mod alloc;
 #[cfg(target_feature = "atomics")]
 mod blobs;
+pub mod http;
 pub mod https;
 pub mod rtc;
 pub mod socket;
@@ -182,7 +183,14 @@ pub async fn boot() -> Result<(), String> {
         get(&boot, "resourcesBlob").as_f64(),
         get(&boot, "resourcesSize").as_f64(),
     ) {
-        vfs::mount_zip_blob(
+        // Game data in memory (the page's Options): all of the zip but its sounds, which
+        // are read as they are first played.
+        let mount = if get(&boot, "resourcesEager").as_bool() == Some(true) {
+            vfs::mount_zip_blob_eager
+        } else {
+            vfs::mount_zip_blob
+        };
+        mount(
             Path::new(RESOURCES),
             id as u32,
             len as u64,
@@ -231,7 +239,7 @@ pub async fn boot() -> Result<(), String> {
         }
     }
     vfs::persist(Path::new(crate::env::HOME));
-    let flush = Closure::<dyn FnMut()>::new(flush);
+    let flush = Closure::<dyn FnMut()>::own_assert_unwind_safe(flush);
     set_interval(&flush, 2000);
     let _ = Reflect::set(
         &js_sys::global(),
@@ -363,6 +371,75 @@ mod threads {
 }
 #[cfg(target_feature = "atomics")]
 pub use threads::{hardware_concurrency, horizon_thread_entry, on_page_thread, spawn_thread};
+/// Whether this build's panics unwind (web/unwind.toml): one is raised and caught here, quietly.
+/// The smoke test (tools/web_smoke.py) asks a build whose build.json says they do. A build whose
+/// panics abort must not call it: the panic would stop the page.
+#[wasm_bindgen]
+pub fn horizon_panics_unwind() -> bool {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let caught = std::panic::catch_unwind(|| panic!("the web build's unwind check")).is_err();
+    std::panic::set_hook(hook);
+    caught
+}
+
+/// Without threads every thread is the page's.
+#[cfg(not(target_feature = "atomics"))]
+pub fn on_page_thread() -> bool {
+    true
+}
+
+/// Work handed to the page's thread ([`run_on_page`]), by number.
+#[cfg(target_feature = "atomics")]
+static PAGE_TASKS: crate::sync::Mutex<Vec<Option<Box<dyn FnOnce() + Send>>>> =
+    crate::sync::Mutex::new(Vec::new());
+
+#[cfg(target_feature = "atomics")]
+#[wasm_bindgen]
+extern "C" {
+    /// worker.js: posts the task's number to the page, which runs it ([`horizon_page_task`]).
+    #[wasm_bindgen(js_namespace = globalThis, js_name = horizonRunOnPage)]
+    fn horizon_run_on_page(task: u32);
+}
+
+/// Runs `task` on the page's thread, whose event loop has the browser's `fetch`, sockets and
+/// promises (a worker's never turns while it waits): at once there; from a worker, once the
+/// page's event loop takes worker.js's message.
+pub fn run_on_page(task: Box<dyn FnOnce() + Send>) {
+    #[cfg(target_feature = "atomics")]
+    if !on_page_thread() {
+        let id = {
+            let mut tasks = PAGE_TASKS.lock().unwrap();
+            match tasks.iter().position(Option::is_none) {
+                Some(free) => {
+                    tasks[free] = Some(task);
+                    free
+                }
+                None => {
+                    tasks.push(Some(task));
+                    tasks.len() - 1
+                }
+            }
+        };
+        horizon_run_on_page(id as u32);
+        return;
+    }
+    task();
+}
+
+/// horizon.js runs this on the page's thread for a worker's [`run_on_page`].
+#[cfg(target_feature = "atomics")]
+#[wasm_bindgen]
+pub fn horizon_page_task(task: u32) {
+    let task = PAGE_TASKS
+        .lock()
+        .unwrap()
+        .get_mut(task as usize)
+        .and_then(Option::take);
+    if let Some(task) = task {
+        task();
+    }
+}
 
 /// getrandom 0.3's and 0.4's source on wasm64 (`--cfg getrandom_backend="custom"`,
 /// .cargo/config.toml); wasm32 takes their own (`wasm_js`).

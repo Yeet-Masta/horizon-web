@@ -11,6 +11,8 @@ glam = "0.30"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
+# Files, clocks, threads and HTTP: std's natively, the browser's on the web build.
+horizon-platform = { path = "../horizon-platform" }
 
 # The service over HTTPS; the web build has none (`enabled`).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

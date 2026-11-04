@@ -5,7 +5,8 @@
 //! with TLS spoken here, end to end with the service: the relay carries
 //! ciphertext, so a relay run by someone else never sees a token. One
 //! HTTP/1.1 request per connection. The sockets are the page's, so this
-//! runs on the page's thread.
+//! runs on the page's thread. A plain `http://` address goes through the
+//! tunnel as it is (web/http.rs: a page on https may not fetch one).
 use super::socket::Socket;
 use crate::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rustls::{
@@ -17,14 +18,22 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// A response: its status and its body (chunked transfer decoded).
+/// A response: its status, its headers and its body (chunked transfer decoded).
 pub struct Response {
     pub status: u16,
+    pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
 }
 impl Response {
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
+    }
+    /// The first header named `name` (any case).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -59,11 +68,17 @@ fn config() -> Result<Arc<ClientConfig>, String> {
     Ok(CONFIG.get_or_init(|| Arc::new(config)).clone())
 }
 
-/// `https://host[:port]/path?query` as (host, port, path and query).
-fn split_url(url: &str) -> Result<(String, u16, String), String> {
-    let rest = url
-        .strip_prefix("https://")
-        .ok_or_else(|| format!("not an https address: {url}"))?;
+/// `https://host[:port]/path?query` (or `http://`) as (whether it is https,
+/// host, port, path and query).
+fn split_url(url: &str) -> Result<(bool, String, u16, String), String> {
+    let (secure, rest) = match url.strip_prefix("https://") {
+        Some(rest) => (true, rest),
+        None => (
+            false,
+            url.strip_prefix("http://")
+                .ok_or_else(|| format!("not an http(s) address: {url}"))?,
+        ),
+    };
     let (authority, path) = match rest.find(['/', '?']) {
         Some(i) => rest.split_at(i),
         None => (rest, "/"),
@@ -79,12 +94,12 @@ fn split_url(url: &str) -> Result<(String, u16, String), String> {
             port.parse()
                 .map_err(|_| format!("not an https address: {url}"))?,
         ),
-        None => (authority, 443),
+        None => (authority, if secure { 443 } else { 80 }),
     };
     if host.is_empty() {
-        return Err(format!("not an https address: {url}"));
+        return Err(format!("not an http(s) address: {url}"));
     }
-    Ok((host.to_ascii_lowercase(), port, path))
+    Ok((secure, host.to_ascii_lowercase(), port, path))
 }
 
 /// `method url` with `headers` and `body` (sent with its length), through
@@ -98,10 +113,10 @@ pub async fn request(
     body: &[u8],
     timeout: Duration,
 ) -> Result<Response, String> {
-    let (host, port, path) = split_url(url)?;
+    let (secure, host, port, path) = split_url(url)?;
     let deadline = Instant::now() + timeout;
     let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}");
-    if port != 443 {
+    if port != if secure { 443 } else { 80 } {
         head.push_str(&format!(":{port}"));
     }
     head.push_str("\r\nConnection: close\r\n");
@@ -126,9 +141,48 @@ pub async fn request(
     let socket = Socket::connect(&format!("{relay}{join}target={host}:{port}"), timeout)
         .await
         .map_err(|e| format!("The relay can't reach {host}: {e}"))?;
-    let result = exchange(&socket, &host, &bytes, deadline).await;
+    let result = if secure {
+        exchange(&socket, &host, &bytes, deadline).await
+    } else {
+        exchange_plain(&socket, &host, &bytes, deadline).await
+    };
     socket.close();
     result
+}
+
+/// [`exchange`] for a plain `http://` address: the request and the response as they are.
+async fn exchange_plain(
+    socket: &Socket,
+    host: &str,
+    request: &[u8],
+    deadline: Instant,
+) -> Result<Response, String> {
+    socket
+        .write(request)
+        .map_err(|e| format!("Lost {host}: {e}"))?;
+    let mut data = Vec::new();
+    let mut buf = vec![0u8; 16 << 10];
+    loop {
+        let ended = match socket.read(&mut buf) {
+            Ok(0) => true,
+            Ok(n) => {
+                data.extend_from_slice(&buf[..n]);
+                false
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
+            Err(e) => return Err(format!("Lost {host}: {e}")),
+        };
+        if let Some(response) = parse(&data, ended)? {
+            return Ok(response);
+        }
+        if ended {
+            return Err(format!("{host} closed the connection before it answered"));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || !socket.readable_within(left).await {
+            return Err(format!("{host} did not answer in time"));
+        }
+    }
 }
 
 /// The TLS session over `socket`: send `request`, read the response.
@@ -225,11 +279,13 @@ fn parse(data: &[u8], ended: bool) -> Result<Option<Response>, String> {
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or("Not an HTTP answer")?;
     let (mut length, mut chunked) = (None, false);
+    let mut headers = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         let (name, value) = (name.trim(), value.trim());
+        headers.push((name.to_owned(), value.to_owned()));
         if name.eq_ignore_ascii_case("content-length") {
             length = value.parse::<usize>().ok();
         } else if name.eq_ignore_ascii_case("transfer-encoding") {
@@ -247,7 +303,11 @@ fn parse(data: &[u8], ended: bool) -> Result<Option<Response>, String> {
         None
     };
     match body {
-        Some(body) => Ok(Some(Response { status, body })),
+        Some(body) => Ok(Some(Response {
+            status,
+            headers,
+            body,
+        })),
         None if ended => Err("The answer was cut off".into()),
         None => Ok(None),
     }
@@ -280,13 +340,17 @@ mod tests {
     fn urls_and_answers() {
         assert_eq!(
             split_url("https://Login.Example.com/a/b?c=d").unwrap(),
-            ("login.example.com".into(), 443, "/a/b?c=d".into())
+            (true, "login.example.com".into(), 443, "/a/b?c=d".into())
         );
         assert_eq!(
             split_url("https://h:8443?x").unwrap(),
-            ("h".into(), 8443, "/?x".into())
+            (true, "h".into(), 8443, "/?x".into())
         );
-        assert!(split_url("http://h/").is_err());
+        assert_eq!(
+            split_url("http://h/").unwrap(),
+            (false, "h".into(), 80, "/".into())
+        );
+        assert!(split_url("ftp://h/").is_err());
         let plain = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
         assert_eq!(parse(plain, false).unwrap().unwrap().body, b"hi");
         assert!(parse(&plain[..plain.len() - 1], false).unwrap().is_none());

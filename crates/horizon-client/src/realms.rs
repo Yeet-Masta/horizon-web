@@ -40,7 +40,8 @@ type Job<T> = Arc<Mutex<Option<T>>>;
 fn spawn<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Job<T> {
     let job = Arc::new(Mutex::new(None));
     let out = Arc::clone(&job);
-    let started = thread::Builder::new().name("Realms".into()).spawn(move || {
+    // A Web Worker on the web build, whose requests wait there (horizon_platform's HTTP).
+    let started = thread::spawn_worker("Realms", move || {
         let result = work();
         if let Ok(mut slot) = out.lock() {
             *slot = Some(result);

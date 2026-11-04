@@ -66,13 +66,15 @@ pub struct RealmServer {
     pub minigame_image: Option<String>,
 }
 
-/// What [`RealmsClient::request`] makes on the web build, which sends nothing.
+/// What [`RealmsClient::request`] makes on the web build: horizon_platform's HTTP, whose
+/// requests with the session cookie go through the relay's TLS tunnel (a browser won't send a
+/// cookie a page sets, and the relay sees only ciphertext).
 #[cfg(target_family = "wasm")]
-struct WebRequest;
+struct WebRequest(horizon_platform::web::http::Request);
 #[cfg(target_family = "wasm")]
 impl WebRequest {
-    fn set(self, _header: &str, _value: &str) -> Self {
-        self
+    fn set(self, header: &str, value: &str) -> Self {
+        Self(self.0.header(header, value))
     }
 }
 
@@ -302,17 +304,48 @@ impl RealmsClient {
         ]
     }
 
-    /// The web build has no HTTP client for the Realms service yet: every
-    /// request fails as a connection would.
+    /// The web build's request (horizon_platform's HTTP): the same headers, through the relay.
     #[cfg(target_family = "wasm")]
-    fn request(&self, _method: &str, _url: &str, _read_timeout: Duration) -> WebRequest {
-        WebRequest
+    fn request(&self, method: &str, url: &str, read_timeout: Duration) -> WebRequest {
+        let mut request = horizon_platform::web::http::Request::get(url)
+            .header("User-Agent", &user_agent())
+            .timeout(CONNECT_TIMEOUT + read_timeout);
+        request.method = method.to_owned();
+        request.relay = crate::net::web_relay();
+        self.headers()
+            .into_iter()
+            .fold(WebRequest(request), |r, (k, v)| r.set(k, &v))
     }
+    /// [`Self::execute`] for the web build: the same answers, from horizon_platform's HTTP.
     #[cfg(target_family = "wasm")]
-    fn execute(_request: WebRequest, _body: Option<&str>) -> Result<String, RealmsError> {
-        Err(RealmsError::Connectivity(
-            "Realms are not available in the web build".into(),
-        ))
+    fn execute(request: WebRequest, body: Option<&str>) -> Result<String, RealmsError> {
+        let mut request = request.0;
+        if let Some(body) = body {
+            request.body = body.as_bytes().to_vec();
+        }
+        let response =
+            horizon_platform::web::http::request(request).map_err(RealmsError::Connectivity)?;
+        let status = response.status;
+        if status == 503 || status == 277 {
+            let pause = response
+                .header("Retry-After")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(5);
+            return Err(RealmsError::Retry(pause));
+        }
+        let auth =
+            (status == 401).then(|| response.header("WWW-Authenticate").unwrap_or("").to_owned());
+        let html = response
+            .header("Content-Type")
+            .is_some_and(|t| t.starts_with("text/html"));
+        let text = response.text();
+        if (200..300).contains(&status) {
+            return Ok(text);
+        }
+        if let Some(header) = auth {
+            return Err(RealmsError::Authentication(header));
+        }
+        Err(RealmsError::from_answer(status, &text, html))
     }
 
     #[cfg(not(target_family = "wasm"))]

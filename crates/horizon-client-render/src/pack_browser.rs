@@ -471,15 +471,29 @@ fn https_only(url: &str) -> Result<(), String> {
     }
 }
 
-/// The web build has no HTTP client of its own for the pack sites.
+/// The web build's GET: horizon_platform's HTTP from this Web Worker (the browser's fetch:
+/// the pack sites allow a page's requests; else the relay).
 #[cfg(target_family = "wasm")]
-fn get_text(url: &str) -> Result<String, String> {
-    Err(format!("{url}: not on the web build"))
+fn web_get(url: &str) -> Result<horizon_platform::web::http::Response, String> {
+    let request = horizon_platform::web::http::Request::get(url).header("User-Agent", AGENT);
+    let response = horizon_platform::web::http::request(request)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!("{url}: HTTP {}", response.status));
+    }
+    Ok(response)
 }
 #[cfg(target_family = "wasm")]
-fn get_bytes(url: &str, _max: usize) -> Result<Vec<u8>, String> {
+fn get_text(url: &str) -> Result<String, String> {
+    web_get(url).map(|r| r.text())
+}
+#[cfg(target_family = "wasm")]
+fn get_bytes(url: &str, max: usize) -> Result<Vec<u8>, String> {
     https_only(url)?;
-    Err(format!("{url}: not on the web build"))
+    let body = web_get(url)?.body;
+    if body.len() > max {
+        return Err(format!("{url} is larger than {max} bytes"));
+    }
+    Ok(body)
 }
 
 #[cfg(not(target_family = "wasm"))]

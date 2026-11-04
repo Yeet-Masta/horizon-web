@@ -136,7 +136,7 @@ impl Alarm {
         fire: impl Fn(&mut State) + 'static,
     ) -> Self {
         let state = state.clone();
-        let handler = Closure::<dyn FnMut()>::new(move || {
+        let handler = Closure::<dyn FnMut()>::own_assert_unwind_safe(move || {
             let mut state = state.lock().unwrap();
             fire(&mut state);
             state.wake();
@@ -254,7 +254,7 @@ impl Socket {
             state.closed = true;
             state.reason = event.reason().as_string().filter(|r| !r.is_empty());
         });
-        let low = Closure::<dyn FnMut(Event)>::new(move |_| {
+        let low = Closure::<dyn FnMut(Event)>::own_assert_unwind_safe(move |_| {
             SOCKETS.with(|s| {
                 if let Some(entry) = s.borrow_mut().get_mut(&id) {
                     entry.drain();
@@ -418,7 +418,7 @@ fn handler(
     update: impl Fn(&mut State, Event) + 'static,
 ) -> Closure<dyn FnMut(Event)> {
     let state = state.clone();
-    Closure::new(move |event| {
+    Closure::own_assert_unwind_safe(move |event| {
         let mut state = state.lock().unwrap();
         update(&mut state, event);
         state.wake();

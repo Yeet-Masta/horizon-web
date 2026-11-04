@@ -125,7 +125,7 @@ impl<T> Slot<T> {
     {
         let late = self.clone();
         let mut on_timeout = Some(on_timeout);
-        let timer = Closure::<dyn FnMut()>::new(move || {
+        let timer = Closure::<dyn FnMut()>::own_assert_unwind_safe(move || {
             if let Some(value) = on_timeout.take() {
                 late.fill(value);
             }
@@ -157,7 +157,7 @@ async fn described(pc: &RTCPeerConnection) -> Result<String, String> {
         let done = Slot::new();
         let fill = done.clone();
         let pc_for_state: RTCPeerConnection = JsValue::clone(pc.as_ref()).unchecked_into();
-        let on_change = Closure::<dyn FnMut()>::new(move || {
+        let on_change = Closure::<dyn FnMut()>::own_assert_unwind_safe(move || {
             if pc_for_state.ice_gathering_state() == "complete" {
                 fill.fill(());
             }
@@ -333,9 +333,11 @@ async fn answer(id: &str, offer: &str, ice: &[String], signal: &Socket) -> Resul
     let channel = Slot::<Option<Socket>>::new();
     let fill = channel.clone();
     let peer = JsValue::clone(pc.as_ref());
-    let on_channel = Closure::<dyn FnMut(DataChannelEvent)>::new(move |e: DataChannelEvent| {
-        fill.fill(Some(Socket::adopt(e.channel(), peer.clone())));
-    });
+    let on_channel = Closure::<dyn FnMut(DataChannelEvent)>::own_assert_unwind_safe(
+        move |e: DataChannelEvent| {
+            fill.fill(Some(Socket::adopt(e.channel(), peer.clone())));
+        },
+    );
     pc.set_ondatachannel(Some(on_channel.as_ref().unchecked_ref()));
     wait(pc.set_remote_description(&parse(offer)?)).await?;
     let answer = wait(pc.create_answer()).await?;

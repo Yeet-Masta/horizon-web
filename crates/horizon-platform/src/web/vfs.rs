@@ -54,12 +54,17 @@ impl Stored {
 enum Source {
     Memory(Arc<[u8]>),
     Blob(u32),
+    /// The zip's first bytes in memory, the rest in Blob `1` ([`mount_zip_blob_eager`]).
+    Split(Arc<[u8]>, u32),
 }
 impl Source {
     fn read(&self, start: usize, len: usize) -> Option<io::Result<std::borrow::Cow<'_, [u8]>>> {
         Some(match self {
             Source::Memory(bytes) => Ok(bytes.get(start..start + len)?.into()),
-            Source::Blob(id) => {
+            Source::Split(bytes, _) if start + len <= bytes.len() => {
+                Ok(bytes[start..start + len].into())
+            }
+            Source::Blob(id) | Source::Split(_, id) => {
                 read_window(*id, start as u64, (start + len) as u64).map(Into::into)
             }
         })
@@ -618,6 +623,37 @@ pub(crate) fn mount_zip_blob(at: &Path, id: u32, len: u64, marker: Option<&str>)
     let index = index_zip(&mut archive, marker)?;
     mount(at, None, Source::Blob(id), index);
     Ok(())
+}
+
+/// [`mount_zip_blob`] with the zip's start in memory: every entry but the sounds lies there,
+/// read from the Blob once as the game starts, and the sounds are read from the Blob as
+/// they are first played. The resources zip has its sounds last (web/pack-resources.sh): a
+/// zip with them among the rest has more of it in memory, up to all of it.
+pub(crate) fn mount_zip_blob_eager(
+    at: &Path,
+    id: u32,
+    len: u64,
+    marker: Option<&str>,
+) -> io::Result<()> {
+    let mut archive = zip::ZipArchive::new(BlobReader::new(id, len))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let index = index_zip(&mut archive, marker)?;
+    let (raw, files, _) = &index;
+    // Past the last byte of every file that isn't a sound.
+    let cut = files
+        .iter()
+        .filter(|(name, _)| !is_sound(name))
+        .filter_map(|(_, (i, _))| raw.get(*i)?.as_ref().map(|r| r.start + r.len))
+        .max()
+        .unwrap_or(0);
+    let start: Arc<[u8]> = super::read_blob(id, 0, cut as u64)?.into();
+    mount(at, None, Source::Split(start, id), index);
+    Ok(())
+}
+
+/// A sound file, which the game reads only when it first plays it.
+fn is_sound(name: &str) -> bool {
+    name.ends_with(".ogg") && name.contains("/sounds/")
 }
 
 /// A zip's entries as a mount holds them: where each one's bytes are, its

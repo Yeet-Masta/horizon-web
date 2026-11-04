@@ -373,15 +373,26 @@ fn aborted(signal: &JsValue) -> bool {
 /// record (JSON, with its tokens: the page keeps it encrypted), rejects with
 /// a message for the player.
 #[wasm_bindgen]
-pub async fn horizon_account_sign_in(
+pub fn horizon_account_sign_in(
     relay: String,
     client_id: String,
     on_code: js_sys::Function,
     signal: JsValue,
-) -> Result<String, JsValue> {
-    sign_in(&relay, &client_id, &on_code, &signal)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
+) -> js_sys::Promise {
+    promise(async move { sign_in(&relay, &client_id, &on_code, &signal).await })
+}
+
+/// A Promise of `task`, which resolves to its text or rejects with its message. A panic in it
+/// rejects too (the build's panics unwind, web/unwind.toml): what it holds is its own, and the
+/// sign-in's state is the page's record, so nothing is left half done.
+fn promise(
+    task: impl std::future::Future<Output = Result<String, String>> + 'static,
+) -> js_sys::Promise {
+    wasm_bindgen_futures::future_to_promise(std::panic::AssertUnwindSafe(async move {
+        task.await
+            .map(|text| JsValue::from_str(&text))
+            .map_err(|e| JsValue::from_str(&e))
+    }))
 }
 
 async fn sign_in(
@@ -479,14 +490,12 @@ async fn sign_in(
 /// rejects with a message when the account can't play online, and the game
 /// then starts offline.
 #[wasm_bindgen]
-pub async fn horizon_account_session(
+pub fn horizon_account_session(
     relay: String,
     client_id: String,
     record: String,
-) -> Result<String, JsValue> {
-    session(&relay, &client_id, &record)
-        .await
-        .map_err(|e| JsValue::from_str(&e))
+) -> js_sys::Promise {
+    promise(async move { session(&relay, &client_id, &record).await })
 }
 
 async fn session(relay: &str, client_id: &str, record: &str) -> Result<String, String> {

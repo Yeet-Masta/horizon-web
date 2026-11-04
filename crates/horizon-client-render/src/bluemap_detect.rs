@@ -168,6 +168,15 @@ pub fn is_web_app_settings(json: &[u8]) -> bool {
         && v.get("mapDataRoot").is_some_and(|r| r.is_string())
 }
 
+/// [`probe`] for the web build: horizon_platform's HTTP, from the BlueMap worker.
+#[cfg(target_family = "wasm")]
+pub fn probe_web(base: &str) -> bool {
+    let request = horizon_platform::web::http::Request::get(&format!("{base}/settings.json"))
+        .timeout(TIMEOUT);
+    horizon_platform::web::http::request(request)
+        .is_ok_and(|r| r.status == 200 && r.body.len() <= 256 << 10 && is_web_app_settings(&r.body))
+}
+
 /// Whether a BlueMap web app answers at `base`.
 #[cfg(not(target_family = "wasm"))]
 pub fn probe(agent: &ureq::Agent, base: &str) -> bool {

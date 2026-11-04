@@ -261,6 +261,7 @@ globalThis.horizonSpawnThread = (name, module, memory, work) => {
   worker.onmessage = ({ data }) => {
     if (data?.spawn) globalThis.horizonSpawnThread(data.spawn[0], threadModule, threadMemory, data.spawn[1]);
     if (data?.status) globalThis.horizonStatus(...data.status);
+    if (data?.page !== undefined) globalThis.horizonGlue?.horizon_page_task(data.page);
   };
   worker.postMessage([module, memory, work, globalThis.horizonBlobs]);
 };
@@ -807,6 +808,8 @@ else setStatus(resourceProblem ?? "", !!resourceProblem);
 // it runs `main`, which waits in horizonBoot until Play.
 try {
   const glue = await import("./pkg/horizon-client.js");
+  // Workers hand the page work by number (worker.js's horizonRunOnPage).
+  globalThis.horizonGlue = glue;
   const ready = () => {
     game = glue;
     $("sign-in").disabled = false;

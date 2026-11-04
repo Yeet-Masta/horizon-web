@@ -186,8 +186,9 @@ fn offline_keeps_the_last_answers_and_backs_off() {
 
 #[test]
 fn item_files_are_kept_on_disk() {
-    let dir = std::env::temp_dir().join(format!("horizon-cosmetics-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir =
+        horizon_platform::env::temp_dir().join(format!("horizon-cosmetics-{}", std::process::id()));
+    let _ = horizon_platform::fs::remove_dir_all(&dir);
     let (fake, mut c, _) = setup(Some(dir.clone()));
     let _ = c.frame().worn(5);
     run(&mut c);
@@ -199,7 +200,7 @@ fn item_files_are_kept_on_disk() {
     run(&mut c);
     assert_eq!(fake.log(), ["POST /v1/worn 1"]);
     assert_eq!(ids(c.frame().worn(5)), ["hat", "pet"]);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = horizon_platform::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -253,15 +254,16 @@ fn the_thread_answers_a_frame() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while c.frame().worn(9).is_none() {
         assert!(Instant::now() < deadline, "no answer");
-        std::thread::sleep(Duration::from_millis(5));
+        horizon_platform::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(ids(c.frame().worn(9)), ["hat"]);
 }
 
 #[test]
 fn a_new_game_shows_the_last_outfits_while_the_service_is_down() {
-    let dir = std::env::temp_dir().join(format!("horizon-cosmetics-worn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = horizon_platform::env::temp_dir()
+        .join(format!("horizon-cosmetics-worn-{}", std::process::id()));
+    let _ = horizon_platform::fs::remove_dir_all(&dir);
     let (fake, mut c, _) = setup(Some(dir.clone()));
     let _ = c.frame().worn(5);
     let _ = c.frame().worn(42);
@@ -292,5 +294,5 @@ fn a_new_game_shows_the_last_outfits_while_the_service_is_down() {
     run(&mut c);
     assert!(c.frame().worn(5).is_none());
     drop(fake);
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = horizon_platform::fs::remove_dir_all(&dir);
 }

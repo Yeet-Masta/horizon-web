@@ -7,6 +7,8 @@
 #   web/build.sh --no-threads    one thread: no shared memory, so no COOP/COEP headers needed
 #   web/build.sh --fast          the quicker-to-build `fast` profile (no LTO) instead of release
 #   web/build.sh --config=FILE   adds a cargo config (rustflags, say), as web/simd.toml does
+#   web/build.sh --abort         panics abort the thread they happen on instead of unwinding
+#                                (web/unwind.toml; the one-thread build always aborts)
 #
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
 # WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
@@ -21,6 +23,7 @@ root="$(dirname "$here")"
 target=wasm32-unknown-unknown
 profile=release
 threads=1
+unwind=1
 extra=()
 for arg in "$@"; do
   case "$arg" in
@@ -31,7 +34,8 @@ for arg in "$@"; do
     --release) profile=release ;;
     --fast) profile=fast ;;
     --config=*) extra+=(--config "${arg#--config=}") ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --abort) unwind=0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -59,7 +63,10 @@ if [ "$threads" = 1 ] || [ "$target" = wasm64-unknown-unknown ]; then
   rustup component add rust-src --toolchain nightly >/dev/null
   rustup target add "$target" --toolchain nightly >/dev/null 2>&1 || true
   [ "$threads" = 1 ] && args+=(--config web/threads.toml)
-  cargo +nightly build -Zbuild-std=std,panic_abort "${args[@]}"
+  # Panics unwind (web/unwind.toml) unless --abort: std is built with what that needs.
+  panic_std=panic_unwind
+  if [ "$unwind" = 1 ]; then args+=(--config web/unwind.toml); else panic_std=panic_abort; fi
+  cargo +nightly build -Zbuild-std=std,$panic_std "${args[@]}"
 else
   rustup target add wasm32-unknown-unknown >/dev/null
   cargo build "${args[@]}"
@@ -78,6 +85,7 @@ if command -v wasm-opt >/dev/null; then
   flags=(-O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const)
   [ "$target" = wasm64-unknown-unknown ] && flags+=(--enable-memory64)
   [ "$threads" = 1 ] && flags+=(--enable-threads)
+  [ "$threads" = 1 ] && [ "$unwind" = 1 ] && flags+=(--enable-exception-handling)
   wasm-opt "${flags[@]}" "$dist/pkg/horizon-client_bg.wasm" -o "$dist/pkg/horizon-client_bg.wasm"
 else
   echo "wasm-opt not found: the module is not optimized further (install binaryen to shrink it)" >&2
@@ -91,7 +99,9 @@ cp crates/horizon-theme/fonts/Geist-Regular.ttf crates/horizon-theme/fonts/Pixel
 commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 threads_json=false
 [ "$threads" = 1 ] && threads_json=true
-printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"tailCall":true,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$commit" > "$dist/build.json"
+unwind_json=false
+[ "$threads" = 1 ] && [ "$unwind" = 1 ] && unwind_json=true
+printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"tailCall":true,"unwind":%s,"commit":"%s"}\n' "$target" "$profile" "$threads_json" "$unwind_json" "$commit" > "$dist/build.json"
 # Brotli beside each text and module file (`.br`): web/serve.py and the .htaccess serve it to
 # browsers that accept it (all current ones), with `Content-Encoding: br`, so the module downloads
 # at about a quarter of its size and still compiles as it streams. Quality 11 for a release,

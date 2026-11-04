@@ -13,6 +13,7 @@ drawing afterwards: what a blocking call on the page's thread, a panic or a hang
 Needs Playwright for Python (pip install playwright; python3 -m playwright install chromium).
 """
 import argparse
+import json
 import os
 import pathlib
 import socket
@@ -92,6 +93,20 @@ def main():
             # The module loaded: its sign-in button turns on once it is instantiated.
             page.wait_for_selector("#sign-in:not([disabled])", timeout=120_000)
             print(f"web_smoke: the module loaded in {time.time() - started:.1f} s", flush=True)
+            # A build whose panics unwind (web/unwind.toml) catches one: std's catch_unwind works.
+            build = json.loads((ROOT / "web" / "dist" / "build.json").read_text())
+            if build.get("unwind"):
+                if page.evaluate("globalThis.horizonGlue.horizon_panics_unwind()"):
+                    print("web_smoke: a panic unwound and was caught", flush=True)
+                else:
+                    failures.append("the build says its panics unwind, but one was not caught")
+            # A Web Worker's HTTP (horizon_platform::web::http): its request runs on the page.
+            if build.get("threads"):
+                answer = page.evaluate("globalThis.horizonGlue.horizon_http_check('/build.json')")
+                if answer.startswith("200 "):
+                    print(f"web_smoke: a worker's HTTP request was answered ({answer})", flush=True)
+                else:
+                    failures.append(f"a worker's HTTP request failed: {answer}")
             if args.resources and not failures:
                 page.wait_for_selector("#play:not([disabled])", timeout=120_000)
                 page.evaluate(

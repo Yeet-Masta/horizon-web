@@ -19,11 +19,28 @@ pub trait Call {
     ) -> Result<Value, String>;
 }
 
-/// The web build has no HTTPS client here (`enabled` is false there).
+/// The web build's calls: horizon_platform's HTTP (the browser's fetch, else the relay's TLS
+/// tunnel, which carries the session only as ciphertext).
 #[cfg(target_family = "wasm")]
 impl Call for crate::Http {
-    fn call(&self, _: &str, _: &str, _: Option<&str>, _: &Value) -> Result<Value, String> {
-        Err("no cosmetics service on the web".into())
+    fn call(
+        &self,
+        method: &str,
+        path: &str,
+        session: Option<&str>,
+        body: &Value,
+    ) -> Result<Value, String> {
+        let mut request = horizon_platform::web::http::Request::post(
+            &format!("{}{path}", self.base()),
+            body.to_string().into_bytes(),
+        )
+        .header("Content-Type", "application/json");
+        request.method = method.to_owned();
+        if let Some(s) = session {
+            request = request.header("Authorization", &format!("Bearer {s}"));
+        }
+        let bytes = self.web(request)?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
     }
 }
 

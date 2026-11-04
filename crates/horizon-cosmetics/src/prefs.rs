@@ -10,7 +10,8 @@
 //! signed-in account owns a cosmetic (`effective`), as the service last said (`cosmetics-owned.txt`
 //! per account). A player who owns none sees a vanilla game, as CONTRIBUTING.md asks of Horizon-only
 //! features that change the look (Ludovic, 2026-11-04).
-use std::{fs, io, path::Path};
+use horizon_platform::fs;
+use std::{io, path::Path};
 
 /// The game's extras file.
 pub const FILE: &str = "horizon-extras.txt";
@@ -257,7 +258,8 @@ mod tests {
 
     #[test]
     fn a_wish_waits_until_the_service_confirms_it() {
-        let home = std::env::temp_dir().join(format!("cosmetics-prefs-{}", std::process::id()));
+        let home = horizon_platform::env::temp_dir()
+            .join(format!("cosmetics-prefs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         let (alex, steve) = ("a".repeat(32), "b".repeat(32));
         // Nothing asked: shown, which the service assumes too.
