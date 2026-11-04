@@ -6,7 +6,10 @@
 #            built (web/build.sh), and
 #            the page opened in Chromium (tools/web_smoke.py): the module loads, and with prepared
 #            resources (the HORIZON_WEB_RESOURCES_URL secret: a zip web/pack-resources.sh made, from
-#            the account's own game, kept private) a new world opens and keeps drawing.
+#            the account's own game, kept private) a new world opens and keeps drawing. The page
+#            (web/dist: the game's module, its page and fonts, never Minecraft's resources, which each
+#            player brings) is kept as the run's artifact, and a push to `web` that passes replaces
+#            the `web-latest` release's zip with it.
 name: Web
 
 on:
@@ -19,6 +22,9 @@ on:
 concurrency:
   group: web-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   hazards:
@@ -38,28 +44,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    permissions:
+      # The web-latest release (on pushes to `web` only).
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust (stable for wasm32, nightly with std's source for threads and wasm64)
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add wasm32-unknown-unknown
-          rustup toolchain install nightly --profile minimal --component rust-src
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/web-toolchain
         with:
-          key: web-build
-      - name: The wasm-bindgen CLI Cargo.lock pins
-        id: bindgen
-        run: |
-          rev=$(awk '/^name = "wasm-bindgen"$/ { getline; getline; if (match($0, /#[0-9a-f]+/)) print substr($0, RSTART + 1, RLENGTH - 1); exit }' Cargo.lock)
-          echo "rev=$rev" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        id: bindgen-cache
-        with:
-          path: ~/.cargo/bin/wasm-bindgen
-          key: wasm-bindgen-${{ steps.bindgen.outputs.rev }}
-      - if: steps.bindgen-cache.outputs.cache-hit != 'true'
-        run: cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force
+          cache-key: web-build
       - name: The one-thread wasm32 build compiles
         run: cargo check --config web/simd.toml -p horizon-client --bin horizon-client --no-default-features --target wasm32-unknown-unknown
       - name: The threaded wasm64 build compiles (web/build.sh --wasm64)
@@ -83,3 +75,36 @@ jobs:
           fi
       - name: Smoke test in Chromium
         run: xvfb-run -a python tools/web_smoke.py $SMOKE_ARGS
+      - name: The page as a zip
+        run: |
+          short=$(git rev-parse --short HEAD)
+          echo "ZIP=$RUNNER_TEMP/horizon-web-$short.zip" >> "$GITHUB_ENV"
+          (cd web/dist && zip -qr "$RUNNER_TEMP/horizon-web-$short.zip" .)
+          ls -l "$RUNNER_TEMP"/horizon-web-*.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: horizon-web-${{ github.sha }}
+          path: ${{ env.ZIP }}
+          # Already a zip: stored as it is.
+          compression-level: 0
+          retention-days: 30
+      - name: Publish it as the web-latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/web'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="The web build of \`web\` at ${GITHUB_SHA::9}, built and smoke-tested by the Web workflow.
+          Unzip it and serve the folder with cross-origin isolation (web/serve.py, or web/README.md for a
+          static host); the page asks each player for their own Minecraft resources."
+          git tag -f web-latest "$GITHUB_SHA"
+          git push -f origin refs/tags/web-latest
+          if gh release view web-latest > /dev/null 2>&1; then
+            gh release edit web-latest --prerelease --title "Horizon web (latest)" --notes "$notes"
+            # Only the newest zip stays.
+            gh release view web-latest --json assets --jq '.assets[].name' | while read -r old; do
+              gh release delete-asset web-latest "$old" --yes
+            done
+          else
+            gh release create web-latest --prerelease --title "Horizon web (latest)" --notes "$notes" --verify-tag
+          fi
+          gh release upload web-latest "$ZIP#horizon-web.zip" --clobber

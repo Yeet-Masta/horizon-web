@@ -177,6 +177,37 @@ without a display): headless, SwiftShader's WebGPU device is lost. In CI it play
 repository has a `HORIZON_WEB_RESOURCES_URL` secret pointing at your own prepared zip,
 which must stay private.
 
+Each run keeps the page (`web/dist`: the game's module, its page and fonts, never Minecraft's
+resources, which every player brings) as a zip artifact, and a push to `web` that passes
+replaces the zip of the `web-latest` release.
+
+## Merging upstream
+
+Upstream merges hundreds of pull requests a day. What they bring compiles for the web, but
+some of it hangs or crashes there:
+
+- a loop on a thread started with `thread::Builder`: horizon_platform's runs it where it is
+  called on the web, so it never returns. A loop goes through `spawn_thread` or `spawn_worker`
+  (a Web Worker);
+- a blocking wait on the page's thread (`pollster::block_on`, a channel's `recv`, a `Condvar`):
+  a browser refuses `Atomics.wait` there. `horizon_platform::block_on_or` doesn't wait;
+- std's or chrono's clocks in a crate that doesn't go through horizon_platform;
+- a socket or HTTP client (`ureq`, `std::net`, `mio`) the browser build doesn't have.
+
+```sh
+base=$(git merge-base HEAD upstream/main)
+git merge upstream/main                                       # resolve what conflicts
+python3 tools/web_rewrite.py --changed $base upstream/main    # std::{fs,time,thread,env,sync} -> horizon_platform
+python3 tools/upstream_watch.py --base $base --head upstream/main   # what the merge brings to look at
+python3 tools/upstream_watch.py --open-prs ludovic111/horizon       # the open pull requests that will
+```
+
+then the checks above. `.github/workflows/upstream-sync.yml` does this every six hours: it
+merges into the `upstream-sync` branch, runs the checks there (with a token that can only
+read: it builds upstream's code), and opens a pull request into `web` with the results and
+the watch list, or an issue naming the files when the merge conflicts. Nothing reaches `web`
+until a person merges it.
+
 ## Browsers
 
 - WebGPU: Chrome and Edge 113+, Firefox 141+ on Windows, Safari 26+. Every build

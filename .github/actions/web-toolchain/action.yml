@@ -1,0 +1,34 @@
+name: Web toolchain
+description: >-
+  What web/build.sh needs: Rust stable with wasm32, nightly with std's source (threads and wasm64),
+  the wasm-bindgen CLI at the commit Cargo.lock pins, and a cache of the builds.
+inputs:
+  cache-key:
+    description: The rust-cache key (one per job, so jobs don't evict each other).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Rust stable for wasm32, nightly with std's source for threads and wasm64
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy
+        rustup target add wasm32-unknown-unknown
+        rustup toolchain install nightly --profile minimal --component rust-src
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+    - name: The wasm-bindgen CLI Cargo.lock pins
+      id: bindgen
+      shell: bash
+      run: |
+        rev=$(awk '/^name = "wasm-bindgen"$/ { getline; getline; if (match($0, /#[0-9a-f]+/)) print substr($0, RSTART + 1, RLENGTH - 1); exit }' Cargo.lock)
+        echo "rev=$rev" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      id: bindgen-cache
+      with:
+        path: ~/.cargo/bin/wasm-bindgen
+        key: wasm-bindgen-${{ steps.bindgen.outputs.rev }}
+    - if: steps.bindgen-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force

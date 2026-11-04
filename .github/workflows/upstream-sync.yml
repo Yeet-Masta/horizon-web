@@ -1,0 +1,267 @@
+# Upstream sync (web/README.md, "Merging upstream"): upstream merges hundreds of pull requests a day,
+# and some of what they bring hangs or crashes the web build where native builds are fine (a loop on a
+# thread spawned in place, a blocking wait on the page's thread, std's clocks). Every few hours:
+#   merge:  merges upstream's main into a copy of `web` (the `upstream-sync` branch), routes the new
+#           std calls through horizon_platform (tools/web_rewrite.py), and lists what a person must
+#           look at: thread spawns, blocking waits, clocks, sockets and crates the merge brings, and
+#           the open upstream pull requests that add them (tools/upstream_watch.py). A merge that
+#           conflicts opens (or updates) an issue naming the files instead.
+#   checks: the merged code as the Web workflow checks it: the threaded wasm32 and wasm64 builds
+#           compile, the hazard check (tools/web_hazards.py), the page built and played in Chromium.
+#           It runs upstream's code (build scripts too), so its token can only read.
+#   report: opens (or updates) a pull request from `upstream-sync` into `web` with the results.
+# Nothing reaches `web` until a person merges that pull request. A pull request made with the
+# workflow's token starts no other workflow: the checks run here.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: ludovic111/horizon
+  CONFLICTS_TITLE: "Upstream sync: merging upstream conflicts"
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      issues: write
+    outputs:
+      count: ${{ steps.behind.outputs.count }}
+      head: ${{ steps.behind.outputs.head }}
+      conflicts: ${{ steps.merge.outputs.conflicts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: web
+          fetch-depth: 0
+      - name: What upstream has that web doesn't
+        id: behind
+        run: |
+          git remote add upstream "https://github.com/$UPSTREAM"
+          git fetch -q --no-tags upstream main
+          echo "base=$(git merge-base HEAD upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "count=$(git rev-list --count HEAD..upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse --short upstream/main)" >> "$GITHUB_OUTPUT"
+      - name: Merge upstream/main
+        id: merge
+        if: steps.behind.outputs.count != '0'
+        run: |
+          mkdir -p report
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B upstream-sync
+          if git merge -q --no-commit --no-ff upstream/main; then
+            echo "conflicts=0" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > report/conflicts.txt
+            echo "conflicts=$(wc -l < report/conflicts.txt)" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          fi
+      - name: Route upstream's std calls through horizon_platform
+        if: steps.merge.outputs.conflicts == '0'
+        run: |
+          python3 tools/web_rewrite.py --changed "${{ steps.behind.outputs.base }}" upstream/main > report/rewritten.txt
+          git add -A -- . ':!report'
+          git commit -q -m "Merge upstream/main into web (${{ steps.behind.outputs.count }} commits)" \
+            -m "std calls in upstream's new code go through horizon_platform (tools/web_rewrite.py: $(wc -l < report/rewritten.txt) files)."
+          git push -f origin upstream-sync
+      - name: What a person must look at
+        if: steps.behind.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/upstream_watch.py --base "${{ steps.behind.outputs.base }}" --head upstream/main \
+            --open-prs "$UPSTREAM" > report/watch.md
+          cat report/watch.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: steps.behind.outputs.count != '0'
+        with:
+          name: upstream-sync-merge
+          path: report/
+      - name: The conflicts, as an issue
+        if: steps.merge.outputs.conflicts != '0' && steps.merge.outputs.conflicts != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Merging upstream's main (\`${{ steps.behind.outputs.head }}\`, ${{ steps.behind.outputs.count }} commits) into web conflicts in ${{ steps.merge.outputs.conflicts }} files:"
+            echo
+            sed 's/^/- `/; s/$/`/' report/conflicts.txt
+            echo
+            echo "Merge by hand (web/README.md, \"Merging upstream\"): before \`git merge upstream/main\`, note \`base=\$(git merge-base HEAD upstream/main)\`; resolve, then \`python3 tools/web_rewrite.py --changed \$base upstream/main\`."
+            echo
+            cat report/watch.md
+          } | head -c 60000 > report/issue.md
+          cat report/issue.md >> "$GITHUB_STEP_SUMMARY"
+          number=$(gh issue list --state open --search "in:title \"$CONFLICTS_TITLE\"" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file report/issue.md
+          else
+            gh issue create --title "$CONFLICTS_TITLE" --body-file report/issue.md
+          fi
+
+  checks:
+    needs: merge
+    if: needs.merge.outputs.conflicts == '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: upstream-sync
+          persist-credentials: false
+      - uses: ./.github/actions/web-toolchain
+        with:
+          cache-key: web-sync
+      - name: The threaded wasm32 build compiles
+        id: wasm32
+        continue-on-error: true
+        run: |
+          mkdir -p results
+          set +e
+          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features \
+            --target wasm32-unknown-unknown --config web/simd.toml --config web/threads.toml --message-format short \
+            > results/wasm32.log 2>&1
+          status=$?
+          grep -E 'error' results/wasm32.log | head -60
+          exit $status
+      - name: The threaded wasm64 build compiles
+        id: wasm64
+        continue-on-error: true
+        run: |
+          set +e
+          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features \
+            --target wasm64-unknown-unknown --profile fast --config web/simd.toml --config web/threads.toml \
+            --message-format short > results/wasm64.log 2>&1
+          status=$?
+          grep -E 'error' results/wasm64.log | head -60
+          exit $status
+      - name: Native-only calls the web build would make
+        id: hazards
+        continue-on-error: true
+        run: python3 tools/web_hazards.py > results/hazards.log 2>&1
+      - name: Build the threaded wasm32 page
+        id: build
+        if: steps.wasm32.outcome == 'success'
+        continue-on-error: true
+        run: bash web/build.sh --fast
+      - uses: actions/setup-python@v5
+        if: steps.build.outcome == 'success'
+        with:
+          python-version: '3.12'
+      - name: Smoke test in Chromium
+        id: smoke
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        env:
+          RESOURCES_URL: ${{ secrets.HORIZON_WEB_RESOURCES_URL }}
+        run: |
+          pip install -q playwright
+          python -m playwright install --with-deps chromium > /dev/null
+          args=""
+          if [ -n "$RESOURCES_URL" ]; then
+            curl -fsSL "$RESOURCES_URL" -o "$RUNNER_TEMP/resources.zip"
+            args="--resources $RUNNER_TEMP/resources.zip"
+          fi
+          set +e
+          xvfb-run -a python tools/web_smoke.py $args > results/smoke.log 2>&1
+          status=$?
+          tail -40 results/smoke.log
+          exit $status
+      - name: The results
+        if: always()
+        run: |
+          mkdir -p results
+          printf '%s\n' \
+            "wasm32=${{ steps.wasm32.outcome }}" "wasm64=${{ steps.wasm64.outcome }}" \
+            "hazards=${{ steps.hazards.outcome }}" "build=${{ steps.build.outcome }}" \
+            "smoke=${{ steps.smoke.outcome }}" > results/outcomes.txt
+          if [ -d web/dist ] && [ "${{ steps.build.outcome }}" = success ]; then
+            (cd web/dist && zip -qr "$GITHUB_WORKSPACE/horizon-web-upstream-sync.zip" .)
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: upstream-sync-checks
+          path: results/
+      - uses: actions/upload-artifact@v4
+        if: steps.build.outcome == 'success'
+        with:
+          name: horizon-web-upstream-sync-${{ needs.merge.outputs.head }}
+          path: horizon-web-upstream-sync.zip
+          compression-level: 0
+          retention-days: 14
+
+  report:
+    needs: [merge, checks]
+    if: always() && needs.merge.outputs.conflicts == '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: upstream-sync-*
+          path: in
+      - name: The pull request into web
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          outcome() { sed -n "s/^$1=//p" in/upstream-sync-checks/outcomes.txt 2>/dev/null; }
+          mark() { case "$(outcome "$1")" in success) echo "passed" ;; skipped|'') echo "not run" ;; *) echo "**failed**" ;; esac; }
+          {
+            echo "Upstream's main at \`${{ needs.merge.outputs.head }}\`: ${{ needs.merge.outputs.count }} commits web doesn't have, merged without conflicts."
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            echo "| threaded wasm32 compiles | $(mark wasm32) |"
+            echo "| threaded wasm64 compiles | $(mark wasm64) |"
+            echo "| hazard check (tools/web_hazards.py) | $(mark hazards) |"
+            echo "| page built | $(mark build) |"
+            echo "| smoke test in Chromium | $(mark smoke) |"
+            echo
+            echo "The run, its logs and the page's zip: $RUN_URL"
+            echo
+            echo "Rewritten for horizon_platform (tools/web_rewrite.py): $(wc -l < in/upstream-sync-merge/rewritten.txt) files."
+            echo
+            cat in/upstream-sync-merge/watch.md
+            for log in wasm32 wasm64 smoke; do
+              f="in/upstream-sync-checks/$log.log"
+              if [ "$(outcome "$log")" = failure ] && [ -f "$f" ]; then
+                echo; echo "<details><summary>$log</summary>"; echo; echo '```'
+                grep -E 'error|FAILED|page error' "$f" | head -40
+                echo '```'; echo "</details>"
+              fi
+            done
+          } | head -c 60000 > body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+          title="Merge upstream (${{ needs.merge.outputs.count }} commits, ${{ needs.merge.outputs.head }})"
+          number=$(gh pr list --head upstream-sync --base web --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file body.md
+          elif ! gh pr create --head upstream-sync --base web --title "$title" --body-file body.md; then
+            echo "::warning::No pull request: allow GitHub Actions to create pull requests (Settings, Actions, General), or open one from upstream-sync."
+          fi
+          # A clean merge settles an earlier conflict.
+          old=$(gh issue list --state open --search "in:title \"$CONFLICTS_TITLE\"" --json number --jq '.[0].number')
+          if [ -n "$old" ]; then
+            gh issue close "$old" --comment "Upstream merged cleanly at \`${{ needs.merge.outputs.head }}\`: see the upstream-sync pull request."
+          fi
