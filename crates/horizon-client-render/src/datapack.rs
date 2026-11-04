@@ -280,10 +280,14 @@ pub fn temp_folder() -> std::io::Result<PathBuf> {
 /// `PackSelectionScreen.onFilesDrop`'s `PackDetector`: a zip is a pack; a
 /// folder is one when it holds a `pack.mcmeta`, or exactly one folder that
 /// does (a folder zipped by the system, which adds a wrapper). Copied into
-/// `dir`; false when `path` is no pack.
+/// `dir`; false when `path` is no pack, or when part of it could not be copied.
 pub fn copy_pack(path: &Path, dir: &Path) -> bool {
-    fn copy_dir(from: &Path, at: &Path) {
-        let _ = horizon_platform::fs::create_dir_all(at);
+    fn copy_dir(from: &Path, at: &Path) -> bool {
+        let mut whole = true;
+        if let Err(e) = horizon_platform::fs::create_dir_all(at) {
+            log::warn!("Horizon: {} is not made: {e}", at.display());
+            whole = false;
+        }
         for entry in horizon_platform::fs::read_dir(from)
             .into_iter()
             .flatten()
@@ -291,12 +295,23 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
         {
             let path = entry.path();
             let to = at.join(entry.file_name());
-            if path.is_dir() {
-                copy_dir(&path, &to);
+            let copied = if path.is_dir() {
+                copy_dir(&path, &to)
             } else {
-                let _ = horizon_platform::fs::copy(&path, &to);
-            }
+                match horizon_platform::fs::copy(&path, &to) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        log::warn!(
+                            "Horizon: {} is not copied into the pack: {e}",
+                            path.display()
+                        );
+                        false
+                    }
+                }
+            };
+            whole &= copied;
         }
+        whole
     }
     let name = || {
         path.file_name()
@@ -316,8 +331,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
         return false;
     }
     if path.join("pack.mcmeta").is_file() {
-        copy_dir(path, &dir.join(name()));
-        return true;
+        return copy_dir(path, &dir.join(name()));
     }
     let own: Vec<PathBuf> = horizon_platform::fs::read_dir(path)
         .into_iter()
@@ -327,10 +341,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
         .filter(|p| p.is_dir() && p.join("pack.mcmeta").is_file())
         .collect();
     match own.as_slice() {
-        [one] => {
-            copy_dir(one, &dir.join(one.file_name().unwrap_or_default()));
-            true
-        }
+        [one] => copy_dir(one, &dir.join(one.file_name().unwrap_or_default())),
         _ => false,
     }
 }
@@ -921,6 +932,25 @@ mod tests {
             Some("data_maps/mymod:item/fuel")
         );
         assert_eq!(content_id("data/mymod/data_maps/item/fuel.txt"), None);
+    }
+
+    #[test]
+    fn a_pack_that_cannot_be_copied_is_reported() {
+        let root = horizon_platform::env::temp_dir()
+            .join(format!("hz-datapack-copy-{}", std::process::id()));
+        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let pack = root.join("pack");
+        horizon_platform::fs::create_dir_all(pack.join("data")).unwrap();
+        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_platform::fs::write(pack.join("data/functions.mcfunction"), "").unwrap();
+        // A file where the pack's folder goes: every copy under it fails.
+        let blocked = root.join("blocked");
+        horizon_platform::fs::write(&blocked, "").unwrap();
+        assert!(!copy_pack(&pack, &blocked));
+        let dir = root.join("packs");
+        assert!(copy_pack(&pack, &dir));
+        assert!(dir.join("pack/pack.mcmeta").is_file());
+        let _ = horizon_platform::fs::remove_dir_all(&root);
     }
 
     #[test]

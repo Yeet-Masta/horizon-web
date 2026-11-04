@@ -535,6 +535,10 @@ pub struct Streaming {
     pub radius: i32,
     /// `/forceload`ed chunks: kept loaded whatever the distance.
     pub forced: HashSet<(i32, i32)>,
+    /// Chunks a native mod's tickets hold (NeoForge's `TicketController`):
+    /// kept loaded and ticking as forced ones are, but neither saved with
+    /// them nor listed by `/forceload`.
+    pub mod_forced: HashSet<(i32, i32)>,
     /// No work is scheduled while paused (title screen).
     pub paused: bool,
     /// Dimension flags: sky light, Nether face shading.
@@ -602,6 +606,7 @@ struct GenerationScan {
     radius: i32,
     extra: Vec<((i32, i32), i32)>,
     forced: HashSet<(i32, i32)>,
+    mod_forced: HashSet<(i32, i32)>,
     band: Option<Band>,
     chunk_revision: u64,
     plan: Vec<(i64, i32, i32)>,
@@ -617,6 +622,7 @@ impl GenerationScan {
             && self.radius == ranges.radius
             && self.extra == ranges.extra
             && self.forced == *ranges.forced
+            && self.mod_forced == *ranges.mod_forced
             && self.band.as_ref() == ranges.band
     }
     fn unchanged(&self, ranges: &Ranges<'_>, world: &World) -> bool {
@@ -655,6 +661,7 @@ impl GenerationScan {
         self.extra.clear();
         self.extra.extend_from_slice(ranges.extra);
         self.forced.clone_from(ranges.forced);
+        self.mod_forced.clone_from(ranges.mod_forced);
         self.band = ranges.band.copied();
         self.chunk_revision = world.chunks.membership_revision();
     }
@@ -752,7 +759,7 @@ impl GenerationScan {
             } else {
                 FORCED_FEATURES_RING
             };
-            for &(fx, fz) in input.ranges.forced {
+            for &(fx, fz) in input.ranges.forced_chunks() {
                 for dz in -reach..=reach {
                     for dx in -reach..=reach {
                         let (x, z) = (fx + dx, fz + dz);
@@ -772,6 +779,7 @@ impl GenerationScan {
                 radius: input.ranges.radius,
                 extra: input.ranges.extra,
                 forced: input.ranges.forced,
+                mod_forced: input.ranges.mod_forced,
                 cover: input.ranges.cover,
                 band: input.ranges.band,
             };
@@ -1096,6 +1104,7 @@ impl Streaming {
             center: (0, 0),
             radius: 8,
             forced: HashSet::new(),
+            mod_forced: HashSet::new(),
             paused: false,
             sky_light: true,
             nether_shading: false,
@@ -1787,7 +1796,7 @@ impl Streaming {
                                 > r4 * r4)
                         && !ranges.in_extra(x, z, 4)
                         && !ranges.in_band(x, z, 4)
-                        && !ranges.forced.iter().any(|f| {
+                        && !ranges.forced_chunks().any(|f| {
                             (x - f.0).abs() <= FORCED_TERRAIN_RING
                                 && (z - f.1).abs() <= FORCED_TERRAIN_RING
                         })
@@ -1858,6 +1867,7 @@ impl Streaming {
                 radius: self.radius,
                 extra: &self.extra,
                 forced: &self.forced,
+                mod_forced: &self.mod_forced,
                 cover: ExtraCover::matching(&self.cover, &self.extra),
                 band: self.band.as_ref(),
             };
@@ -2024,7 +2034,11 @@ impl Streaming {
         // vanilla draws). Sections set aside past it come back
         // when the player moves: a column that loads with its light gets no
         // other request (#228).
-        let area = (self.center, self.radius, self.forced.len());
+        let area = (
+            self.center,
+            self.radius,
+            self.forced.len() + self.mod_forced.len(),
+        );
         if self.waiting_area != area {
             self.waiting_area = area;
             let ranges = Ranges {
@@ -2032,6 +2046,7 @@ impl Streaming {
                 radius: self.radius,
                 extra: &self.extra,
                 forced: &self.forced,
+                mod_forced: &self.mod_forced,
                 cover: ExtraCover::matching(&self.cover, &self.extra),
                 band: self.band.as_ref(),
             };
@@ -2127,6 +2142,7 @@ impl Streaming {
                 radius: self.radius,
                 extra: &self.extra,
                 forced: &self.forced,
+                mod_forced: &self.mod_forced,
                 cover: ExtraCover::matching(&self.cover, &self.extra),
                 band: self.band.as_ref(),
             },
@@ -2260,6 +2276,7 @@ impl Streaming {
             radius: self.radius,
             extra: &self.extra,
             forced: &self.forced,
+            mod_forced: &self.mod_forced,
             cover: ExtraCover::matching(&self.cover, &self.extra),
             band: self.band.as_ref(),
         }
@@ -2553,6 +2570,8 @@ struct Ranges<'a> {
     radius: i32,
     extra: &'a [((i32, i32), i32)],
     forced: &'a HashSet<(i32, i32)>,
+    /// The chunks native mods' tickets hold, kept as forced ones are.
+    mod_forced: &'a HashSet<(i32, i32)>,
     /// `extra` indexed by a grid or buckets: coverage queries without a
     /// scan of every area.
     cover: Option<&'a ExtraCover>,
@@ -2897,10 +2916,20 @@ impl Ranges<'_> {
             .iter()
             .any(|&(c, radius)| (x - c.0).abs().max((z - c.1).abs()) <= radius + margin)
     }
+    /// Whether a `/forceload` or a native mod's ticket holds the chunk.
+    fn is_forced(&self, x: i32, z: i32) -> bool {
+        self.forced.contains(&(x, z)) || self.mod_forced.contains(&(x, z))
+    }
+    /// Every chunk a `/forceload` or a native mod's ticket holds, once each.
+    fn forced_chunks(&self) -> impl Iterator<Item = &(i32, i32)> + '_ {
+        self.forced
+            .iter()
+            .chain(self.mod_forced.iter().filter(|c| !self.forced.contains(c)))
+    }
     /// The columns meshed for drawing: those vanilla draws around the
     /// player (`in_view_distance`), and forced ones.
     fn in_view(&self, x: i32, z: i32) -> bool {
-        in_view_distance(self.center, self.radius, x, z) || self.forced.contains(&(x, z))
+        in_view_distance(self.center, self.radius, x, z) || self.is_forced(x, z)
     }
     fn in_main_range(&self, x: i32, z: i32, margin: i32) -> bool {
         let r = i64::from(self.radius + margin);
@@ -2918,8 +2947,7 @@ impl Ranges<'_> {
             3 => FORCED_TERRAIN_RING,
             _ => margin + 1,
         };
-        self.forced
-            .iter()
+        self.forced_chunks()
             .any(|f| (x - f.0).abs() <= reach && (z - f.1).abs() <= reach)
     }
 }
@@ -3143,6 +3171,10 @@ fn forget_pending_sections(
     }
 }
 
+/// No chunk held by a native mod's ticket, for the tests' ranges.
+#[cfg(test)]
+static NO_CHUNKS: std::sync::LazyLock<HashSet<(i32, i32)>> = std::sync::LazyLock::new(HashSet::new);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3359,6 +3391,7 @@ mod tests {
             radius: 32,
             extra: &[],
             forced: &forced,
+            mod_forced: &NO_CHUNKS,
             cover: None,
             band: None,
         };
@@ -3632,6 +3665,7 @@ mod tests {
                     radius: self.radius,
                     extra: &self.extra,
                     forced: &self.forced,
+                    mod_forced: &NO_CHUNKS,
                     cover: None,
                     band: None,
                 },
@@ -3708,7 +3742,7 @@ mod tests {
         } else {
             FORCED_FEATURES_RING
         };
-        for &(fx, fz) in input.ranges.forced {
+        for &(fx, fz) in input.ranges.forced_chunks() {
             for dz in -forced_reach..=forced_reach {
                 for dx in -forced_reach..=forced_reach {
                     let (x, z) = (fx + dx, fz + dz);
@@ -4015,6 +4049,7 @@ mod tests {
                     radius,
                     extra: &[],
                     forced: &forced,
+                    mod_forced: &NO_CHUNKS,
                     cover: None,
                     band: None,
                 };
@@ -4071,6 +4106,7 @@ mod tests {
                     radius,
                     extra: &[((radius * 2 + 9, 3), 4)],
                     forced: &forced,
+                    mod_forced: &NO_CHUNKS,
                     cover: None,
                     band: None,
                 };
@@ -4107,6 +4143,7 @@ mod tests {
             radius: -1,
             extra: &extra,
             forced: &forced,
+            mod_forced: &NO_CHUNKS,
             cover: None,
             band: None,
         };
@@ -4140,6 +4177,7 @@ mod tests {
                 radius: 2,
                 extra: &extra,
                 forced: &forced,
+                mod_forced: &NO_CHUNKS,
                 cover: None,
                 band: None,
             };
@@ -4194,6 +4232,7 @@ mod tests {
             radius: 2,
             extra: &[],
             forced: &forced,
+            mod_forced: &NO_CHUNKS,
             cover: None,
             band: None,
         };
@@ -4265,6 +4304,7 @@ mod cover_tests {
                 radius: 10,
                 extra: &extra,
                 forced: &forced,
+                mod_forced: &NO_CHUNKS,
                 cover,
                 band: None,
             };
@@ -4307,6 +4347,7 @@ mod cover_tests {
                 radius: 10,
                 extra: &extra,
                 forced: &forced,
+                mod_forced: &NO_CHUNKS,
                 cover,
                 band: None,
             };
@@ -4372,6 +4413,7 @@ mod cover_tests {
                 radius: 10,
                 extra: &extra,
                 forced: &forced,
+                mod_forced: &NO_CHUNKS,
                 cover,
                 band: None,
             };
