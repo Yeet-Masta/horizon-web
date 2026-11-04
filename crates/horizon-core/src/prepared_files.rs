@@ -280,7 +280,7 @@ pub fn write(root: &Path) -> io::Result<()> {
         + pad(source.len() as u64)
         + (files.len() * ENTRY) as u64
         + pad(pool_len as u64);
-    let tmp = root.join(format!("{FILE_NAME}.{}.tmp", std::process::id()));
+    let tmp = root.join(format!("{FILE_NAME}.{}.tmp", horizon_platform::process::id()));
     let result = (|| {
         let mut out = BufWriter::new(File::create(&tmp)?);
         out.write_all(&MAGIC)?;

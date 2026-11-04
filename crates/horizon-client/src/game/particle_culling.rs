@@ -7,7 +7,6 @@ use horizon_client::{
     graphics::ParticleCullingMode,
     world::World,
 };
-use horizon_platform::thread::JoinHandle;
 use std::{
     array,
     cell::RefCell,

@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust"]
 members = [
     "crates/horizon-core",
     "crates/horizon-platform",
@@ -92,6 +92,10 @@ naga = { path = "third_party/naga" }
 # game died before main on CPUs without it (Core 2, #7264; THIRD_PARTY_NOTICES.md). Drop this and
 # the folder once a libmimalloc-sys release has microsoft/mimalloc#1291's fix.
 libmimalloc-sys = { path = "third_party/libmimalloc-sys" }
+# xxhash-rust 0.8.19 whose WebAssembly SIMD paths name `target_arch = "wasm32"` instead of
+# `target_family = "wasm"`: they use `core::arch::wasm32`, so the web build on wasm64 (web/README.md)
+# didn't compile. Drop this and the folder once a release has the fix.
+xxhash-rust = { path = "third_party/xxhash-rust" }
 
 # Line tables keep file:line in backtraces; full debug info made every
 # example and test binary hundreds of megabytes and slow to link.

@@ -181,8 +181,9 @@ fn thresholds_are_configurable() {
 
 #[test]
 fn mutes_survive_a_restart_and_unmute_lifts_them() {
-    let dir = std::env::temp_dir().join(format!("chat-filter-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir =
+        horizon_platform::env::temp_dir().join(format!("chat-filter-test-{}", std::process::id()));
+    horizon_platform::fs::create_dir_all(&dir).unwrap();
     let now = now_millis();
     let (mut g, problem) = Guard::load(Config::default(), &dir);
     assert_eq!(problem, None);
@@ -211,7 +212,7 @@ fn mutes_survive_a_restart_and_unmute_lifts_them() {
         (None, Some("Op"), Some("spam"))
     );
     assert_eq!(reloaded.mutes(now + MIN).len(), 1);
-    std::fs::remove_dir_all(&dir).unwrap();
+    horizon_platform::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -313,7 +314,7 @@ fn a_message_costs_little() {
     // A long message through the whole list stays far below a tick (debug builds included).
     let f = filter();
     let text = "the quick brown fox jumps over the lazy dog ".repeat(6);
-    let start = std::time::Instant::now();
+    let start = horizon_platform::time::Instant::now();
     for _ in 0..1000 {
         assert!(!f.matches(&text));
     }

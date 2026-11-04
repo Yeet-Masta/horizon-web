@@ -8,6 +8,8 @@ description = "OptiFine-format resource pack files: .properties, the name, range
 
 [dependencies]
 horizon-core = { path = "../horizon-core" }
+# The clock: std's natively, the page's on the web build.
+horizon-platform = { path = "../horizon-platform" }
 log = "0.4"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 

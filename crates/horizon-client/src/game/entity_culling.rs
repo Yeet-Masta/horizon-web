@@ -7,7 +7,6 @@ use horizon_client::{
     mobs::Species,
     world::World,
 };
-use horizon_platform::thread::JoinHandle;
 use std::{
     cell::RefCell,
     sync::{

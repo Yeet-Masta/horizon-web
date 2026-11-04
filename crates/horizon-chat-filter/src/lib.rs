@@ -285,7 +285,9 @@ const MINUTE: i64 = 60_000;
 impl Guard {
     pub fn new(config: Config, filter: Filter, file: Option<PathBuf>) -> Self {
         let mut mutes = HashMap::new();
-        if let Some(text) = file.as_ref().and_then(|f| std::fs::read_to_string(f).ok())
+        if let Some(text) = file
+            .as_ref()
+            .and_then(|f| horizon_platform::fs::read_to_string(f).ok())
             && let Ok(saved) = serde_json::from_str::<MutesFile>(&text)
         {
             for m in saved.mutes {
@@ -310,7 +312,7 @@ impl Guard {
         let filter = if config.words_file.is_empty() {
             Filter::default_list()
         } else {
-            match std::fs::read_to_string(dir.join(&config.words_file)) {
+            match horizon_platform::fs::read_to_string(dir.join(&config.words_file)) {
                 Ok(text) => Filter::new(&text),
                 Err(e) => {
                     problem = Some(format!(
@@ -432,8 +434,8 @@ impl Guard {
         mutes.sort_by(|a, b| a.name.cmp(&b.name));
         if let Ok(text) = serde_json::to_string_pretty(&MutesFile { mutes }) {
             let tmp = file.with_extension("json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, file);
+            if horizon_platform::fs::write(&tmp, text).is_ok() {
+                let _ = horizon_platform::fs::rename(&tmp, file);
             }
         }
     }
@@ -465,9 +467,9 @@ pub fn log_line(
 pub fn append_log(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        horizon_platform::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new()
+    let mut f = horizon_platform::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)?;

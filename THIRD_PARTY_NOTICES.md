@@ -19,6 +19,12 @@ variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
 
+## xxhash-rust
+
+`third_party/xxhash-rust` is [xxhash-rust](https://github.com/DoumanAsh/xxhash-rust) 0.8.19 by Douman,
+under the Boost Software License 1.0 (`third_party/xxhash-rust/LICENSE`). Its WebAssembly SIMD paths are
+limited to wasm32, whose `core::arch` module they use, so the web build compiles for wasm64.
+
 ## libmimalloc-sys and mimalloc
 
 `third_party/libmimalloc-sys` is [libmimalloc-sys](https://github.com/purpleprotocol/mimalloc_rust)

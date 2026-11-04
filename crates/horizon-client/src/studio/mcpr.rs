@@ -113,7 +113,7 @@ fn sibling(dest: &Path, suffix: &str) -> PathBuf {
         .duration_since(horizon_platform::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}-{nanos}.{suffix}", std::process::id()));
+    name.push(format!(".{}-{nanos}.{suffix}", horizon_platform::process::id()));
     dest.with_file_name(name)
 }
 
