@@ -343,7 +343,7 @@ impl Post {
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             let target = self.build_target(device, size, history_size);
-            let error = pollster::block_on(memory.pop()).or(pollster::block_on(validation.pop()));
+            let error = horizon_platform::block_on_or(memory.pop(), None).or(horizon_platform::block_on_or(validation.pop(), None));
             if error.is_none() {
                 // New textures: no history yet.
                 self.taa_this_frame.jitter[2] = 1.0;

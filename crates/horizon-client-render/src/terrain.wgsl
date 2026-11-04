@@ -231,7 +231,7 @@ fn faded(code: u32, local: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>) -> bool {
     let progress = f32(select(step, step - 64u, out)) / 64.0;
     let size = exp2(f32(max((code - 1u) / 129u, 4u)));
     let cell = bitcast<vec2<u32>>(vec2<i32>(floor(local.xz / size)));
-    var h = cell.x * 73856093u ^ cell.y * 19349663u;
+    var h = (cell.x * 73856093u) ^ (cell.y * 19349663u);
     h = (h ^ (h >> 13u)) * 0x5bd1e995u;
     let start = f32((h ^ (h >> 15u)) & 1023u) / 2048.0;
     let ramp = clamp((progress - start) * 2.0, 0.0, 1.0);

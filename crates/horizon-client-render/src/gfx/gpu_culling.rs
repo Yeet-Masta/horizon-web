@@ -724,8 +724,8 @@ impl GpuCulling {
                 cache: None,
             })
         });
-        let internal = pollster::block_on(internal.pop());
-        if let Some(e) = internal.or(pollster::block_on(validation.pop())) {
+        let internal = horizon_platform::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
             log::warn!("Horizon renderer: GPU culling unavailable ({e})");
             return None;
         }

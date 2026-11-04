@@ -389,12 +389,14 @@ fn hdr_mark(tier: u32, y: f32) -> f32 {
 fn celestial_color(in: Out) -> vec4<f32> {
     // RenderPipelines.DRAGON_RAYS / rendertype_lightning.fsh: untextured
     // vertex colour, with fog fading both RGB and alpha before additive blending.
+    // Sampled before the branch: WebGPU samples only in uniform control flow.
+    let texel = textureSample(atlas, atlas_sampler, in.uv);
     if in.overlay == 37u {
         let fog = max(linear_fog(in.fog_distance.x, globals.fog.x, globals.fog.y),
                       linear_fog(in.fog_distance.y, globals.fog.z, globals.fog.w));
         return in.color * (1.0 - fog);
     }
-    return textureSample(atlas, atlas_sampler, in.uv) * in.color * in.light_color;
+    return texel * in.color * in.light_color;
 }
 @fragment fn fs_celestial(in: Out) -> @location(0) vec4<f32> {
     return celestial_color(in);

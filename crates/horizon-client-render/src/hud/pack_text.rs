@@ -209,7 +209,7 @@ impl PackText {
             multiview_mask: None,
             cache: None,
         });
-        if let Some(e) = pollster::block_on(scope.pop()) {
+        if let Some(e) = horizon_platform::block_on_or(scope.pop(), None) {
             log::warn!("the resource pack's text shader is not used: {e}");
             return None;
         }
