@@ -100,9 +100,10 @@ impl Far {
         let asked = Arc::new(Mutex::new(asked));
         for n in 0..READERS {
             let (asked, read, read_one) = (asked.clone(), read.clone(), read_one.clone());
-            let _ = horizon_platform::thread::Builder::new()
-                .name(format!("Far chunk reader #{n}"))
-                .spawn(move || {
+            // A Web Worker on the web build, where a Builder's spawn runs in place.
+            let _ = horizon_platform::thread::spawn_worker(
+                &format!("Far chunk reader #{n}"),
+                move || {
                     loop {
                         // The far ring is gone once its sender is.
                         let Ok(((level, x, z), source)) = asked.lock().unwrap().recv() else {
@@ -113,7 +114,8 @@ impl Far {
                             return;
                         }
                     }
-                });
+                },
+            );
         }
         Self {
             max,

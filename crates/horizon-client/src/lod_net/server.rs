@@ -171,7 +171,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 struct Worker {
     shared: Arc<WorkerShared>,
-    thread: Option<thread::JoinHandle<()>>,
+    thread: Option<thread::ThreadHandle<()>>,
 }
 struct WorkerShared {
     queue: Mutex<Queue>,
@@ -193,42 +193,40 @@ impl Worker {
             done: Mutex::default(),
         });
         let worker = shared.clone();
-        let thread = thread::Builder::new()
-            .name("Far terrain server".into())
-            .spawn(move || {
-                // The ticks come first (horizon_threads).
-                horizon_threads::behind_server();
-                // A sampler per level, kept while its level's source is the same.
-                let mut samplers: HashMap<String, (Arc<dyn LodSource>, Box<dyn LodSampler>)> =
-                    HashMap::new();
-                while let Some(job) = worker.next() {
-                    let r = job.request;
-                    // A sampler that panics is dropped, and the tile refused:
-                    // every job gets a reply, which frees its slot.
-                    let reply = catch_unwind(AssertUnwindSafe(|| {
-                        let same = samplers
-                            .get(&job.level)
-                            .is_some_and(|(source, _)| same_source(source, &job.source));
-                        if !same {
-                            let main = job.source.clone().sampler();
-                            // A fork leaves out the client's chunk decoration threads.
-                            let sampler = main.fork().unwrap_or(main);
-                            samplers.insert(job.level.clone(), (job.source.clone(), sampler));
-                        }
-                        let (_, sampler) = samplers.get_mut(&job.level).expect("inserted above");
-                        sampler.set_approximate(r.approximate);
-                        let columns = sampler.grid(r.x, r.z, r.stride, SIDE);
-                        encode_reply(r.id, Some(&columns), &biome_names)
-                    }))
-                    .unwrap_or_else(|_| {
-                        log::warn!("Far terrain: sampling {} failed; tile refused", job.level);
-                        samplers.remove(&job.level);
-                        refusal(r.id)
-                    });
-                    lock(&worker.done).push((job.conn, reply));
-                }
-            })
-            .expect("far terrain server thread");
+        let thread = thread::spawn_thread("Far terrain server", move || {
+            // The ticks come first (horizon_threads).
+            horizon_threads::behind_server();
+            // A sampler per level, kept while its level's source is the same.
+            let mut samplers: HashMap<String, (Arc<dyn LodSource>, Box<dyn LodSampler>)> =
+                HashMap::new();
+            while let Some(job) = worker.next() {
+                let r = job.request;
+                // A sampler that panics is dropped, and the tile refused:
+                // every job gets a reply, which frees its slot.
+                let reply = catch_unwind(AssertUnwindSafe(|| {
+                    let same = samplers
+                        .get(&job.level)
+                        .is_some_and(|(source, _)| same_source(source, &job.source));
+                    if !same {
+                        let main = job.source.clone().sampler();
+                        // A fork leaves out the client's chunk decoration threads.
+                        let sampler = main.fork().unwrap_or(main);
+                        samplers.insert(job.level.clone(), (job.source.clone(), sampler));
+                    }
+                    let (_, sampler) = samplers.get_mut(&job.level).expect("inserted above");
+                    sampler.set_approximate(r.approximate);
+                    let columns = sampler.grid(r.x, r.z, r.stride, SIDE);
+                    encode_reply(r.id, Some(&columns), &biome_names)
+                }))
+                .unwrap_or_else(|_| {
+                    log::warn!("Far terrain: sampling {} failed; tile refused", job.level);
+                    samplers.remove(&job.level);
+                    refusal(r.id)
+                });
+                lock(&worker.done).push((job.conn, reply));
+            }
+        })
+        .expect("far terrain server thread");
         Self {
             shared,
             thread: Some(thread),

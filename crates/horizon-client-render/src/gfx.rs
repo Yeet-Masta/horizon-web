@@ -6159,8 +6159,8 @@ impl Renderer {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         surface.configure(device, config);
-        let memory = pollster::block_on(memory.pop());
-        if let Some(e) = memory.or(pollster::block_on(validation.pop())) {
+        let memory = horizon_platform::block_on_or(memory.pop(), None);
+        if let Some(e) = memory.or(horizon_platform::block_on_or(validation.pop(), None)) {
             return Err(e.to_string());
         }
         if device_lost.load(std::sync::atomic::Ordering::Relaxed) {
@@ -10902,8 +10902,8 @@ impl GpuChecks {
         Self { memory, validation }
     }
     fn pop(self) -> Option<wgpu::Error> {
-        let validation = pollster::block_on(self.validation.pop());
-        let memory = pollster::block_on(self.memory.pop());
+        let validation = horizon_platform::block_on_or(self.validation.pop(), None);
+        let memory = horizon_platform::block_on_or(self.memory.pop(), None);
         memory.or(validation)
     }
 }

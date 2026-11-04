@@ -130,7 +130,7 @@ struct CullJob {
 pub(super) struct AsyncCuller {
     jobs: SyncSender<CullJob>,
     results_rx: Receiver<CullResults>,
-    _thread: JoinHandle<()>,
+    _thread: horizon_platform::thread::ThreadHandle<()>,
     snapshot: Option<(SnapshotKey, ChunkBounds, Arc<OcclusionSnapshot>)>,
     opaque_states: Option<Arc<[bool]>>,
     results: Option<CullResults>,
@@ -144,15 +144,13 @@ impl AsyncCuller {
     pub(super) fn new() -> std::io::Result<Self> {
         let (job_tx, job_rx) = mpsc::sync_channel::<CullJob>(1);
         let (result_tx, result_rx) = mpsc::channel::<CullResults>();
-        let thread = horizon_platform::thread::Builder::new()
-            .name("entity-culling".into())
-            .spawn(move || {
-                while let Ok(job) = job_rx.recv() {
-                    if result_tx.send(cull_job(job)).is_err() {
-                        break;
-                    }
+        let thread = horizon_platform::thread::spawn_thread("entity-culling", move || {
+            while let Ok(job) = job_rx.recv() {
+                if result_tx.send(cull_job(job)).is_err() {
+                    break;
                 }
-            })?;
+            }
+        })?;
         Ok(Self {
             jobs: job_tx,
             results_rx: result_rx,

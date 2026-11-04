@@ -20581,6 +20581,10 @@ fn load_resources(
 /// This start has just read the folder's files (they are in the disk cache);
 /// the next starts read them from one file (#1961).
 fn write_prepared_files(root: PathBuf) {
+    // The web build's resources are a zip read in place: nothing to write beside them.
+    if horizon_platform::WEB {
+        return;
+    }
     use horizon_core::prepared_files;
     if prepared_files::open(&root).is_some() || !root.join("horizon-resources.json").is_file() {
         return;

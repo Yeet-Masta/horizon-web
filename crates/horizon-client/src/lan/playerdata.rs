@@ -258,7 +258,7 @@ fn write_snapshot(snapshot: Snapshot) -> Result<SavedPlayer, String> {
 struct PlayerWriter {
     send: std::sync::mpsc::Sender<Snapshot>,
     done: std::sync::mpsc::Receiver<Result<SavedPlayer, String>>,
-    thread: horizon_platform::thread::JoinHandle<()>,
+    thread: horizon_platform::thread::ThreadHandle<()>,
 }
 
 /// One FIFO writer for a server's player autosaves. Synchronous logout writes
@@ -282,13 +282,11 @@ impl Autosaves {
         if self.writer.is_none() {
             let (send, receive) = std::sync::mpsc::channel::<Snapshot>();
             let (complete, done) = std::sync::mpsc::channel();
-            match horizon_platform::thread::Builder::new()
-                .name("horizon-player-writer".into())
-                .spawn(move || {
-                    for snapshot in receive {
-                        let _ = complete.send(write_snapshot(snapshot));
-                    }
-                }) {
+            match horizon_platform::thread::spawn_thread("horizon-player-writer", move || {
+                for snapshot in receive {
+                    let _ = complete.send(write_snapshot(snapshot));
+                }
+            }) {
                 Ok(thread) => self.writer = Some(PlayerWriter { send, done, thread }),
                 Err(error) => {
                     log::warn!("Horizon: cannot start player writer, saving inline: {error}")
