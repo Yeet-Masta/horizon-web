@@ -263,7 +263,10 @@ The web build is the native game with the operating system swapped out
   every two seconds and as the page is hidden. Options → *Game data while
   playing* chooses where the resources zip and the game folder's files of
   64 KiB or more (region files, mostly) are while the game runs: *in memory*
-  (the default), read as the game starts, or on the threaded build *in
+  (the default), read as the game starts (on the threaded build all of the
+  resources zip but its sounds, which are read as they first play:
+  `web/pack-resources.sh` puts them last, so that is one read of the zip's
+  first 30 MB and not 400), or on the threaded build *in
   browser storage*, read as the game opens them, which takes less memory and
   starts slower (thousands of small reads): workers read them with
   `FileReaderSync`, and the page's thread asks a worker that does

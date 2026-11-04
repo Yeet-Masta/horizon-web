@@ -27,10 +27,11 @@ if [ ! -f "$src/horizon-resources.json" ]; then
 fi
 mkdir -p "$(dirname "$out")"
 rm -f "$out"
-# Sounds are Ogg Vorbis already: stored, not compressed again.
+(cd "$src" && zip -qr -1 -n .png "$out" . -x 'assets/*/sounds/*.ogg')
+# The sounds last, so the page can keep the rest in memory and read each sound from the zip
+# when it first plays (vfs.rs, mount_zip_blob_eager). Ogg Vorbis already: stored, not compressed
+# again.
 if [ "$sounds" = 1 ]; then
-  (cd "$src" && zip -qr -1 -n .ogg:.png "$out" .)
-else
-  (cd "$src" && zip -qr -1 -n .png "$out" . -x 'assets/*/sounds/*.ogg')
+  (cd "$src" && find assets -path 'assets/*/sounds/*.ogg' -print | zip -q -0 "$out" -@)
 fi
 echo "$out: $(du -h "$out" | cut -f1)"

@@ -614,10 +614,12 @@ globalThis.horizonBoot = async () => {
   if (chosen.files) {
     boot.resourceFiles = await Promise.all(
       chosen.files.map(async ([path, blob]) => [path, new Uint8Array(await blob.arrayBuffer())]));
-  } else if (inStorage) {
-    // Read in place: the game reads the entries it opens.
+  } else if (build.threads) {
+    // Read in place: in storage the game reads the entries it opens; in memory it keeps all
+    // but the sounds, which it reads as they are first played (vfs.rs, mount_zip_blob_eager).
     boot.resourcesBlob = blobId(chosen.blob);
     boot.resourcesSize = chosen.blob.size;
+    boot.resourcesEager = !inStorage;
   } else {
     boot.resources = new Uint8Array(await chosen.blob.arrayBuffer());
   }
