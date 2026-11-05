@@ -304,6 +304,8 @@ def main():
                     help="also record a Chrome trace of the recording here (.json: DevTools' "
                     "Performance panel opens it) and sum up what the GPU process did; keep "
                     "--seconds short, the trace grows by megabytes a second")
+    ap.add_argument("--console", type=pathlib.Path,
+                    help="also write every line the page logged here (the browser console)")
     ap.add_argument("--cpuprofile", type=pathlib.Path,
                     help="also write the page thread's CPU profile here (.cpuprofile: Chrome "
                     "DevTools' Performance panel and speedscope.app open it)")
@@ -446,6 +448,8 @@ def main():
     finally:
         server.terminate()
     print_report(report)
+    if args.console:
+        args.console.write_text("\n".join(log) + "\n", encoding="utf-8")
     if args.out:
         args.out.write_text(json.dumps(report, indent=1))
         print(f"\nweb_profile: the whole report is in {args.out}")
