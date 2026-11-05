@@ -2063,13 +2063,58 @@ mod web_output {
         },
     }
 
-    pub struct Output {
+    /// The page's WebAudio output: here, or for a game whose loop runs in a worker, on the
+    /// page (a worker has no AudioContext), kept there by number until this is dropped.
+    pub enum Output {
+        // Held for its Drop.
+        Here(#[allow(dead_code)] PageOutput),
+        #[cfg(target_feature = "atomics")]
+        OnPage(usize),
+    }
+    #[cfg(target_feature = "atomics")]
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(target_feature = "atomics")]
+    thread_local! {
+        /// The outputs the page opened for a worker, by number.
+        static ON_PAGE: RefCell<std::collections::HashMap<usize, PageOutput>> = RefCell::default();
+    }
+    impl Output {
+        pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
+            #[cfg(target_feature = "atomics")]
+            if !horizon_platform::web::on_page_thread() {
+                let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                horizon_platform::web::run_on_page(Box::new(move || {
+                    match PageOutput::open(mixer) {
+                        Ok(output) => ON_PAGE.with_borrow_mut(|m| m.insert(id, output)),
+                        Err(e) => {
+                            log::warn!("Horizon: no sound ({e})");
+                            None
+                        }
+                    };
+                }));
+                return Ok(Self::OnPage(id));
+            }
+            PageOutput::open(mixer).map(Self::Here)
+        }
+    }
+    #[cfg(target_feature = "atomics")]
+    impl Drop for Output {
+        fn drop(&mut self) {
+            if let Self::OnPage(id) = *self {
+                horizon_platform::web::run_on_page(Box::new(move || {
+                    ON_PAGE.with_borrow_mut(|m| m.remove(&id));
+                }));
+            }
+        }
+    }
+
+    pub struct PageOutput {
         context: web_sys::AudioContext,
         /// Empty until the worklet's module has loaded.
         node: Rc<RefCell<Option<Node>>>,
         _resume: Closure<dyn FnMut()>,
     }
-    impl Output {
+    impl PageOutput {
         pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
             let context = web_sys::AudioContext::new().map_err(js)?;
             let rate = context.sample_rate() as u32;
@@ -2105,7 +2150,7 @@ mod web_output {
             })
         }
     }
-    impl Drop for Output {
+    impl Drop for PageOutput {
         fn drop(&mut self) {
             match self.node.borrow_mut().take() {
                 #[cfg(target_feature = "atomics")]

@@ -253,7 +253,7 @@ if (build.threads && !globalThis.crossOriginIsolated && globalThis.isSecureConte
 // over its shared memory, each running the work the game hands it. A thread a worker starts is
 // started here too (worker.js forwards it): a worker's own workers would end with it.
 let threadModule, threadMemory;
-globalThis.horizonSpawnThread = (name, module, memory, work) => {
+globalThis.horizonSpawnThread = (name, module, memory, work, transfer) => {
   threadModule = module;
   threadMemory = memory;
   const worker = new Worker(new URL("worker.js", import.meta.url), { type: "module", name });
@@ -263,7 +263,9 @@ globalThis.horizonSpawnThread = (name, module, memory, work) => {
     if (data?.status) globalThis.horizonStatus(...data.status);
     if (data?.page !== undefined) globalThis.horizonGlue?.horizon_page_task(data.page);
   };
-  worker.postMessage([module, memory, work, globalThis.horizonBlobs]);
+  // `transfer`: the canvas the game draws on from its worker (an OffscreenCanvas).
+  if (transfer) worker.postMessage([module, memory, work, globalThis.horizonBlobs, transfer], [transfer]);
+  else worker.postMessage([module, memory, work, globalThis.horizonBlobs]);
 };
 
 async function checkBrowser() {
@@ -653,7 +655,11 @@ if (requestPointerLock && urlEnv().HORIZON_WEB_RAW_MOUSE !== "0") {
     } catch {
       return plain();
     }
-    return asked?.catch?.((e) => (e?.name === "NotSupportedError" ? plain() : Promise.reject(e))) ?? asked;
+    const result = asked?.catch?.((e) => (e?.name === "NotSupportedError" ? plain() : Promise.reject(e))) ?? asked;
+    // winit drops the promise: a refused lock (no recent click) is the game's to notice
+    // (pointer_lock::state), not an uncaught error.
+    result?.catch?.(() => {});
+    return result;
   };
 }
 

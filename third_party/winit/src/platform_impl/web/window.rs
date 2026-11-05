@@ -35,10 +35,10 @@ impl Window {
     ) -> Result<Self, RootOE> {
         let id = target.generate_id();
 
-        let window = target.runner.window();
-        let document = target.runner.document();
+        let window = target.page().runner.window();
+        let document = target.page().runner.document();
         let canvas = backend::Canvas::create(
-            target.runner.main_thread(),
+            target.page().runner.main_thread(),
             id,
             window.clone(),
             document.clone(),
@@ -48,7 +48,7 @@ impl Window {
 
         target.register(&canvas, id);
 
-        let runner = target.runner.clone();
+        let runner = target.page().runner.clone();
         let destroy_fn = Box::new(move || runner.notify_destroy_window(RootWI(id)));
 
         let inner = Inner { id, window: window.clone(), canvas, destroy_fn: Some(destroy_fn) };
@@ -60,10 +60,16 @@ impl Window {
         inner.set_cursor(attr.cursor);
 
         let canvas = Rc::downgrade(&inner.canvas);
-        let (dispatcher, runner) = Dispatcher::new(target.runner.main_thread(), inner).unwrap();
-        target.runner.add_canvas(RootWI(id), canvas, runner);
+        let (dispatcher, runner) = Dispatcher::new(target.page().runner.main_thread(), inner).unwrap();
+        target.page().runner.add_canvas(RootWI(id), canvas, runner);
 
         Ok(Window { inner: dispatcher })
+    }
+
+    /// Another handle to this window, for another thread (Horizon's addition): the window
+    /// closes when the last handle is dropped.
+    pub(crate) fn share(&self) -> Self {
+        Window { inner: self.inner.clone() }
     }
 
     pub(crate) fn maybe_queue_on_main(&self, f: impl FnOnce(&Inner) + Send + 'static) {

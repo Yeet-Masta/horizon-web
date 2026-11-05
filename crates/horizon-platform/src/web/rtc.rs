@@ -175,8 +175,20 @@ fn parse(text: &str) -> Result<JsValue, String> {
     JSON::parse(text).map_err(|_| "The other page sent something unreadable".to_owned())
 }
 
+/// WebRTC lives on the page: a worker (the game's, when its loop runs in one) has no
+/// `RTCPeerConnection`.
+fn reachable() -> Result<(), String> {
+    if super::get(&js_sys::global(), "RTCPeerConnection").is_undefined() {
+        return Err("Play with Friends needs the game's loop on the page \
+             (leave out HORIZON_WEB_WORKER_LOOP)"
+            .to_owned());
+    }
+    Ok(())
+}
+
 /// Join the world shared with `code` through the relay at `relay`.
 pub async fn join(relay: &str, code: &str, ice: &[String]) -> Result<Socket, String> {
+    reachable()?;
     let code: String = code.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
     let signal = Socket::connect(&with_query(relay, &format!("join={code}")), CONNECT).await?;
     let pc = RTCPeerConnection::new(&configuration(ice)).map_err(js_error)?;
@@ -275,6 +287,7 @@ async fn host(
     events: &Arc<Mutex<VecDeque<HostEvent>>>,
     shared_signal: &Arc<Mutex<(Option<Socket>, bool)>>,
 ) -> Result<(), String> {
+    reachable()?;
     let signal = Socket::connect(&with_query(relay, "host"), CONNECT).await?;
     {
         let mut shared = shared_signal.lock().unwrap();

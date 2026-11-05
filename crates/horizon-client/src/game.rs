@@ -21348,9 +21348,9 @@ fn leave_fullscreen_after(
 
 #[cfg(target_family = "wasm")]
 fn run_event_loop(game: Game<'static>) -> Result<()> {
-    // The page's event loop runs the game after this returns.
-    winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, game);
-    Ok(())
+    // The page's event loop (or the game's worker's, `web::spawn_app`) runs the game after
+    // this returns.
+    web::spawn_app(game)
 }
 #[cfg(not(target_family = "wasm"))]
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
@@ -21873,12 +21873,10 @@ fn run_loading(
         error: None,
     };
     let app = App::Loading(Box::new(loading));
-    // The page's event loop runs the game after this returns.
+    // The page's event loop (or the game's worker's, `web::spawn_app`) runs the game after
+    // this returns.
     #[cfg(target_family = "wasm")]
-    {
-        winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, app);
-        Ok(())
-    }
+    return web::spawn_app(app);
     #[cfg(not(target_family = "wasm"))]
     run_app_native(app)
 }

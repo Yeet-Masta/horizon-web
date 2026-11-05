@@ -5,6 +5,13 @@ use std::sync::{Arc, Condvar, Mutex};
 
 pub struct Dispatcher<T: 'static>(Wrapper<T, Sender<Closure<T>>, Closure<T>>);
 
+/// Another handle to the same value (Horizon's addition: a window shared with a Web Worker).
+impl<T> Clone for Dispatcher<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 struct Closure<T>(Box<dyn FnOnce(&T) + Send>);
 
 impl<T> Dispatcher<T> {

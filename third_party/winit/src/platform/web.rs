@@ -85,12 +85,45 @@ pub trait WindowExtWebSys {
     /// Some events are impossible to prevent. E.g. Firefox allows to access the native browser
     /// context menu with Shift+Rightclick.
     fn set_prevent_default(&self, prevent_default: bool);
+
+    /// Another handle to this window, which may go to another thread, such as a Web Worker
+    /// running the application's handlers ([`RemoteEventLoop`]): its calls run on the page, as
+    /// any handle's do off the page's thread. The window closes when the last handle is dropped.
+    /// (Horizon's addition.)
+    fn share(&self) -> Window;
+}
+
+/// An event loop that runs somewhere other than the page's thread (Horizon's addition): a Web
+/// Worker that runs the application's handlers, whose events the page's loop forwards to it,
+/// gets an [`ActiveEventLoop`] from [`remote_event_loop`] to hand them. What it asks of the loop
+/// goes to this: a window is made on the page (and shared with [`WindowExtWebSys::share`]),
+/// the control flow and exit are the worker's own. What only the page's loop has (monitors,
+/// themes, custom cursors, device event filters) answers as if there were none.
+pub trait RemoteEventLoop {
+    fn create_window(&self, attributes: WindowAttributes) -> Result<Window, crate::error::OsError>;
+    fn set_control_flow(&self, control_flow: crate::event_loop::ControlFlow);
+    fn control_flow(&self) -> crate::event_loop::ControlFlow;
+    fn exit(&self);
+    fn exiting(&self) -> bool;
+}
+
+/// The [`ActiveEventLoop`] a Web Worker hands the application's handlers (see
+/// [`RemoteEventLoop`]).
+pub fn remote_event_loop(remote: std::rc::Rc<dyn RemoteEventLoop>) -> ActiveEventLoop {
+    ActiveEventLoop {
+        p: crate::platform_impl::ActiveEventLoop::remote(remote),
+        _marker: std::marker::PhantomData,
+    }
 }
 
 impl WindowExtWebSys for Window {
     #[inline]
     fn canvas(&self) -> Option<HtmlCanvasElement> {
         self.window.canvas()
+    }
+
+    fn share(&self) -> Window {
+        Window { window: self.window.share() }
     }
 
     fn prevent_default(&self) -> bool {

@@ -8,6 +8,14 @@ developers, with upstream fixes applied
 [gfx-rs/wgpu#10714](https://github.com/gfx-rs/wgpu/pull/10714)). It is licensed under MIT or
 Apache-2.0; both licenses are in that folder (`LICENSE.MIT`, `LICENSE.APACHE`).
 
+## wgpu, wgpu-core and wgpu-types
+
+`third_party/wgpu`, `third_party/wgpu-core` and `third_party/wgpu-types` are
+[wgpu](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs developers, under MIT or Apache-2.0
+(`LICENSE.MIT`, `LICENSE.APACHE` in each folder), changed for the web build: wasm64, Chromium's
+multi-draw indirect, `Device::create_render_pipeline_async`, and render bundles for repeated
+indirect draws in the WebGPU backend (web/README.md).
+
 ## naga
 
 `third_party/naga` is [naga](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs developers, with
@@ -24,7 +32,8 @@ not out of a loaded copy of the whole struct, so a member an atomic function use
 `third_party/winit` is [winit](https://github.com/rust-windowing/winit) 0.30.13 by the winit
 contributors, under the Apache License 2.0 (`third_party/winit/LICENSE`). Its web callbacks are
 made with wasm-bindgen's `own_assert_unwind_safe` / `once_assert_unwind_safe`, so the web build
-compiles with panics that unwind (web/unwind.toml).
+compiles with panics that unwind (web/unwind.toml), and its web backend has a remote event loop
+(`platform::web::RemoteEventLoop`) for the game's loop in a Web Worker (web/README.md).
 
 ## xxhash-rust
 

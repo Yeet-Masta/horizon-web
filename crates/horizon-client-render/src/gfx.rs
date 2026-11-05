@@ -2012,6 +2012,9 @@ type WebDevice = (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue);
 #[cfg(target_family = "wasm")]
 thread_local! {
     static WEB_DEVICE: std::cell::RefCell<Option<WebDevice>> = const { std::cell::RefCell::new(None) };
+    /// The page's canvas, handed to the game's worker when its loop runs there
+    /// (`horizon_platform::web::worker_canvas`): its surfaces draw on it.
+    static WEB_CANVAS: std::cell::RefCell<Option<web_sys::OffscreenCanvas>> = const { std::cell::RefCell::new(None) };
 }
 /// The web device's `max_texture_array_layers`, for threads other than the
 /// page's (0 until it is open).
@@ -2020,6 +2023,11 @@ static WEB_LAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 /// Opens the browser's WebGPU device, with what `open_device` asks natively.
 #[cfg(target_family = "wasm")]
 pub async fn open_web_device() -> Result<()> {
+    #[cfg(target_feature = "atomics")]
+    if let Some(canvas) = horizon_platform::web::worker_canvas() {
+        use wasm_bindgen::JsCast;
+        WEB_CANVAS.set(Some(canvas.unchecked_into()));
+    }
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
     let instance = wgpu::Instance::new(descriptor);
@@ -2091,6 +2099,10 @@ async fn open_device(
     });
     let surface = if offscreen {
         None
+    } else if let Some(canvas) = WEB_CANVAS.with_borrow(Clone::clone) {
+        // A worker draws on the page's canvas through an OffscreenCanvas: the window's canvas
+        // element stays on the page.
+        Some(instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))?)
     } else {
         Some(instance.create_surface(window.clone())?)
     };
