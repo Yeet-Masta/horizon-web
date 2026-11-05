@@ -178,12 +178,20 @@ python3 tools/web_profile.py --resources R.zip --channel chrome --out report.jso
   profile holds, frame rates and GPU times don't.
 - Build with `web/build.sh --profiling` (`web\build.bat --profiling`) first:
   wasm-opt otherwise strips the module's function names and the profile lists
-  addresses. The names cost about a megabyte of download.
+  addresses. The names add about half a megabyte to the download.
 - A call out to the browser (WebGPU, a canvas, a message) counts in the
   module's JavaScript glue for it (`__wbg_...`).
 - `--cpuprofile` keeps the raw profile: Chrome DevTools (Performance, load
   profile) or speedscope.app open it as a flame chart. The workers' time is not
   in it; DevTools' own Performance recording shows every thread.
+- `--trace trace.json` records a Chrome trace of the same seconds and sums up
+  what the GPU process, the page and the compositor were busy with (shader
+  compiles, the driver's work); DevTools' Performance panel opens the file.
+  Keep `--seconds` short: it grows by megabytes a second.
+- The first `--settle` seconds in the world get a section of their own:
+  joining, where terrain and first-use work pile up. `--profile-dir DIR` keeps
+  the browser's profile (its shader cache) between runs: a second run that
+  joins smoothly compiled shaders in the first.
 - Firefox: the Firefox Profiler (profiler.firefox.com) records every thread
   with the wasm names, `?env=HORIZON_SPIKES=25` beside it.
 
