@@ -11,9 +11,10 @@ rem   web\build.bat --abort        panics abort the thread they happen on instea
 rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
 rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
 rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
-rem   web\build.bat --sccache      compiles through sccache (RUSTC_WRAPPER), which keeps compiled
-rem                                crates between builds and checkouts: not the game's own crate nor
-rem                                its link, nor `fast`'s incremental crates
+rem   web\build.bat --sccache      build.sh's sccache, which can't build this on Windows: it starts
+rem                                rustc again with web-sys's whole command line (cargo's list of its
+rem                                ~1500 features), past Windows' 32K characters (sccache issue 1082),
+rem                                so the build goes on without it
 rem   web\build.bat --cranelift    compiles build scripts and proc macros with the Cranelift backend
 rem                                (nightly; rustup adds it). Cranelift can't make WebAssembly: the
 rem                                game itself is still LLVM's
@@ -65,7 +66,7 @@ echo               [--sccache] [--cranelift]
 echo   default: wasm32 with threads on nightly Rust, release profile, panics that unwind;
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
 echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
-echo   --profiling keeps function names for a profiler; --sccache compiles through sccache;
+echo   --profiling keeps function names for a profiler; --sccache is Linux and macOS only;
 echo   --cranelift compiles build scripts and proc macros with Cranelift (not the game: no wasm)
 exit /b 0
 :args_done
@@ -89,12 +90,7 @@ if not "%have%"=="%pinned%" (
 )
 
 if "%sccache%"=="1" (
-  where sccache >nul 2>nul
-  if errorlevel 1 (
-    echo --sccache: sccache isn't on the PATH ^(cargo install sccache --locked^) 1>&2
-    exit /b 1
-  )
-  set "RUSTC_WRAPPER=sccache"
+  echo --sccache: sccache can't build web-sys on Windows ^(its command line is longer than Windows allows; sccache issue 1082^): building without it 1>&2
 )
 rem Cranelift for what runs on this machine during the build: build scripts, proc macros and what
 rem they use (the profile's build-override); cargo's codegen-backend option is nightly's.
@@ -138,7 +134,6 @@ if "%nightly%"=="1" (
   rustup target add wasm32-unknown-unknown >nul || exit /b 1
   cargo build --target %target% --profile %profile% %crate% || exit /b 1
 )
-if "%sccache%"=="1" sccache --show-stats | findstr /b /c:"Compile requests" /c:"Cache hits" /c:"Cache misses" /c:"Non-cacheable calls"
 
 set "dist=%here%\dist"
 if exist "%dist%" rmdir /s /q "%dist%"
