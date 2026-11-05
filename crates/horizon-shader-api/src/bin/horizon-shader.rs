@@ -184,7 +184,7 @@ fn check_one(path: &Path) -> CheckJson {
     };
     out.id = Some(pack.manifest.id.clone());
     out.version = Some(pack.manifest.version.clone());
-    out.api = Some(pack.manifest.api.clone());
+    out.api = Some(pack.manifest.api.to_string());
     out.sha256 = if path.fs_is_dir() {
         pack.sha256().ok()
     } else {

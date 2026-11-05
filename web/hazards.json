@@ -154,7 +154,7 @@
   "std::path::Path::is_dir": 1
  },
  "crates/horizon-client/build.rs": {
-  "std::env::var": 3,
+  "std::env::var": 4,
   "std::env::var_os": 2
  },
  "crates/horizon-client/src/entry.rs": {
@@ -198,6 +198,9 @@
  "crates/horizon-client/src/game/particle_culling.rs": {
   "std::sync::mpsc::Receiver::recv": 1
  },
+ "crates/horizon-client/src/game/pvp.rs": {
+  "chrono::Local::now": 1
+ },
  "crates/horizon-client/src/game/repro.rs": {
   "chrono::Local::now": 2,
   "std::path::Path::exists": 2,
@@ -210,6 +213,9 @@
  },
  "crates/horizon-client/src/game/world_loading.rs": {
   "std::path::Path::exists": 1
+ },
+ "crates/horizon-cosmetics/src/feed.rs": {
+  "std::sync::Condvar::wait_while": 1
  },
  "crates/horizon-cosmetics/src/fetch.rs": {
   "std::sync::Condvar::wait_timeout": 1,
