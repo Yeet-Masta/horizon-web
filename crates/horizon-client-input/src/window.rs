@@ -335,7 +335,9 @@ pub fn end_frame_on_grid(
     framerate_limit: i32,
     clock: &mut impl LimiterClock,
 ) {
-    if framerate_limit < 260 {
+    // The web build's too (`skip_frame`): its page thread can't sleep, so this spun on the
+    // clock until the slot, 40% of the page's time at 120 FPS.
+    if framerate_limit < 260 && !horizon_platform::WEB {
         limiter.limit_on_grid(framerate_limit, clock);
     }
 }
