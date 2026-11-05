@@ -87,7 +87,7 @@ impl MenuBlur {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.create_render_pipeline_async(&wgpu::RenderPipelineDescriptor {
             label: Some("Menu blur pass"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {

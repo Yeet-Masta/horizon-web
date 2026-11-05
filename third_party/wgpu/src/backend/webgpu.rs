@@ -1431,7 +1431,9 @@ pub struct WebPipelineLayout {
 
 #[derive(Debug, Clone)]
 pub struct WebRenderPipeline {
-    pub(crate) inner: webgpu_sys::GpuRenderPipeline,
+    /// The pipeline: set at once, or for one made with `createRenderPipelineAsync`
+    /// (`Device::create_render_pipeline_async`) once the browser has compiled it.
+    pub(crate) inner: Rc<core::cell::OnceCell<webgpu_sys::GpuRenderPipeline>>,
     /// Unique identifier for this RenderPipeline.
     ident: crate::cmp::Identifier,
 }
@@ -1468,6 +1470,9 @@ pub struct WebRenderPassEncoder {
     pub(crate) inner: webgpu_sys::GpuRenderPassEncoder,
     /// Unique identifier for this RenderPassEncoder.
     ident: crate::cmp::Identifier,
+    /// The pipeline set last isn't compiled yet (`create_render_pipeline_async`): its draws
+    /// are skipped.
+    skipping: bool,
 }
 
 #[derive(Debug)]
@@ -1482,6 +1487,8 @@ pub struct WebRenderBundleEncoder {
     pub(crate) inner: webgpu_sys::GpuRenderBundleEncoder,
     /// Unique identifier for this RenderBundleEncoder.
     ident: crate::cmp::Identifier,
+    /// As [`WebRenderPassEncoder::skipping`].
+    skipping: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1896,6 +1903,141 @@ impl Drop for WebAdapter {
 }
 
 impl WebDevice {
+    fn render_pipeline_descriptor(
+        &self,
+        desc: &crate::RenderPipelineDescriptor<'_>,
+    ) -> webgpu_sys::GpuRenderPipelineDescriptor {
+        let module = desc.vertex.module.inner.as_webgpu();
+        let mapped_vertex_state = webgpu_sys::GpuVertexState::new(&module.module);
+        insert_constants_map(
+            &mapped_vertex_state,
+            desc.vertex.compilation_options.constants,
+        );
+        if let Some(ep) = desc.vertex.entry_point {
+            mapped_vertex_state.set_entry_point(ep);
+        }
+
+        let buffers = desc
+            .vertex
+            .buffers
+            .iter()
+            .map(|vbuf| match vbuf {
+                Some(vbuf) => {
+                    let mapped_attributes = vbuf
+                        .attributes
+                        .iter()
+                        .map(|attr| {
+                            webgpu_sys::GpuVertexAttribute::new_with_f64(
+                                map_vertex_format(attr.format),
+                                attr.offset as f64,
+                                attr.shader_location,
+                            )
+                        })
+                        .collect::<Vec<webgpu_sys::GpuVertexAttribute>>();
+
+                    let mapped_vbuf = webgpu_sys::GpuVertexBufferLayout::new_with_f64(
+                        vbuf.array_stride as f64,
+                        &mapped_attributes,
+                    );
+                    mapped_vbuf.set_step_mode(map_vertex_step_mode(vbuf.step_mode));
+                    js_sys::JsNullable::wrap(mapped_vbuf)
+                }
+                None => js_sys::JsNullable::new(),
+            })
+            .collect::<Vec<js_sys::JsNullable<webgpu_sys::GpuVertexBufferLayout>>>();
+
+        mapped_vertex_state.set_buffers(&buffers);
+
+        let mapped_desc = match desc.layout {
+            Some(layout) => webgpu_sys::GpuRenderPipelineDescriptor::new(
+                &layout.inner.as_webgpu().inner,
+                &mapped_vertex_state,
+            ),
+            None => webgpu_sys::GpuRenderPipelineDescriptor::new_with_gpu_auto_layout_mode(
+                webgpu_sys::GpuAutoLayoutMode::Auto,
+                &mapped_vertex_state,
+            ),
+        };
+
+        if let Some(label) = desc.label {
+            mapped_desc.set_label(label);
+        }
+
+        if let Some(ref depth_stencil) = desc.depth_stencil {
+            mapped_desc.set_depth_stencil(&map_depth_stencil_state(depth_stencil));
+        }
+
+        if let Some(ref frag) = desc.fragment {
+            let targets = frag
+                .targets
+                .iter()
+                .map(|target| match target {
+                    Some(target) => {
+                        let mapped_format = map_texture_format(target.format);
+                        let mapped_color_state =
+                            webgpu_sys::GpuColorTargetState::new(mapped_format);
+                        if let Some(ref bs) = target.blend {
+                            let alpha = map_blend_component(&bs.alpha);
+                            let color = map_blend_component(&bs.color);
+                            let mapped_blend_state = webgpu_sys::GpuBlendState::new(&alpha, &color);
+                            mapped_color_state.set_blend(&mapped_blend_state);
+                        }
+                        mapped_color_state.set_write_mask(target.write_mask.bits());
+                        js_sys::JsNullable::wrap(mapped_color_state)
+                    }
+                    None => js_sys::JsNullable::new(),
+                })
+                .collect::<Vec<js_sys::JsNullable<webgpu_sys::GpuColorTargetState>>>();
+            let module = frag.module.inner.as_webgpu();
+            let mapped_fragment_desc = webgpu_sys::GpuFragmentState::new(&module.module, &targets);
+            insert_constants_map(&mapped_fragment_desc, frag.compilation_options.constants);
+            if let Some(ep) = frag.entry_point {
+                mapped_fragment_desc.set_entry_point(ep);
+            }
+            mapped_desc.set_fragment(&mapped_fragment_desc);
+        }
+
+        let mapped_multisample = webgpu_sys::GpuMultisampleState::new();
+        mapped_multisample.set_count(desc.multisample.count);
+        mapped_multisample.set_mask(desc.multisample.mask as u32);
+        mapped_multisample
+            .set_alpha_to_coverage_enabled(desc.multisample.alpha_to_coverage_enabled);
+        mapped_desc.set_multisample(&mapped_multisample);
+
+        let mapped_primitive = map_primitive_state(&desc.primitive);
+        mapped_desc.set_primitive(&mapped_primitive);
+
+        mapped_desc
+    }
+
+    /// `createRenderPipelineAsync`: the browser compiles the pipeline away from the page's
+    /// thread, and a pass or a bundle that sets it before it is ready skips its draws until the
+    /// next pipeline it sets (see `WebRenderPassEncoder::skipping`). A pipeline that failed to
+    /// build is never ready: the browser's error goes to the console.
+    pub(crate) fn create_render_pipeline_async(
+        &self,
+        desc: &crate::RenderPipelineDescriptor<'_>,
+    ) -> dispatch::DispatchRenderPipeline {
+        let mapped_desc = self.render_pipeline_descriptor(desc);
+        let slot = Rc::new(core::cell::OnceCell::new());
+        let promise = self.inner.create_render_pipeline_async(&mapped_desc);
+        let filled = slot.clone();
+        let label = alloc::string::String::from(desc.label.unwrap_or(""));
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(pipeline) => {
+                    let _ = filled.set(pipeline.unchecked_into());
+                }
+                Err(e) => log::error!("wgpu: render pipeline {label:?} failed to build: {e:?}"),
+            }
+        });
+        WebRenderPipeline {
+            inner: slot,
+            ident: crate::cmp::Identifier::create(),
+        }
+        .into()
+    }
+
     /// Wrap a foreign `webgpu_sys::GpuTexture` (e.g. from a canvas `getCurrentTexture()`) as a
     /// dispatch-level `WebTexture` without calling `device.createTexture(...)`.
     ///
@@ -2332,110 +2474,11 @@ impl dispatch::DeviceInterface for WebDevice {
         &self,
         desc: &crate::RenderPipelineDescriptor<'_>,
     ) -> dispatch::DispatchRenderPipeline {
-        let module = desc.vertex.module.inner.as_webgpu();
-        let mapped_vertex_state = webgpu_sys::GpuVertexState::new(&module.module);
-        insert_constants_map(
-            &mapped_vertex_state,
-            desc.vertex.compilation_options.constants,
-        );
-        if let Some(ep) = desc.vertex.entry_point {
-            mapped_vertex_state.set_entry_point(ep);
-        }
-
-        let buffers = desc
-            .vertex
-            .buffers
-            .iter()
-            .map(|vbuf| match vbuf {
-                Some(vbuf) => {
-                    let mapped_attributes = vbuf
-                        .attributes
-                        .iter()
-                        .map(|attr| {
-                            webgpu_sys::GpuVertexAttribute::new_with_f64(
-                                map_vertex_format(attr.format),
-                                attr.offset as f64,
-                                attr.shader_location,
-                            )
-                        })
-                        .collect::<Vec<webgpu_sys::GpuVertexAttribute>>();
-
-                    let mapped_vbuf = webgpu_sys::GpuVertexBufferLayout::new_with_f64(
-                        vbuf.array_stride as f64,
-                        &mapped_attributes,
-                    );
-                    mapped_vbuf.set_step_mode(map_vertex_step_mode(vbuf.step_mode));
-                    js_sys::JsNullable::wrap(mapped_vbuf)
-                }
-                None => js_sys::JsNullable::new(),
-            })
-            .collect::<Vec<js_sys::JsNullable<webgpu_sys::GpuVertexBufferLayout>>>();
-
-        mapped_vertex_state.set_buffers(&buffers);
-
-        let mapped_desc = match desc.layout {
-            Some(layout) => webgpu_sys::GpuRenderPipelineDescriptor::new(
-                &layout.inner.as_webgpu().inner,
-                &mapped_vertex_state,
-            ),
-            None => webgpu_sys::GpuRenderPipelineDescriptor::new_with_gpu_auto_layout_mode(
-                webgpu_sys::GpuAutoLayoutMode::Auto,
-                &mapped_vertex_state,
-            ),
-        };
-
-        if let Some(label) = desc.label {
-            mapped_desc.set_label(label);
-        }
-
-        if let Some(ref depth_stencil) = desc.depth_stencil {
-            mapped_desc.set_depth_stencil(&map_depth_stencil_state(depth_stencil));
-        }
-
-        if let Some(ref frag) = desc.fragment {
-            let targets = frag
-                .targets
-                .iter()
-                .map(|target| match target {
-                    Some(target) => {
-                        let mapped_format = map_texture_format(target.format);
-                        let mapped_color_state =
-                            webgpu_sys::GpuColorTargetState::new(mapped_format);
-                        if let Some(ref bs) = target.blend {
-                            let alpha = map_blend_component(&bs.alpha);
-                            let color = map_blend_component(&bs.color);
-                            let mapped_blend_state = webgpu_sys::GpuBlendState::new(&alpha, &color);
-                            mapped_color_state.set_blend(&mapped_blend_state);
-                        }
-                        mapped_color_state.set_write_mask(target.write_mask.bits());
-                        js_sys::JsNullable::wrap(mapped_color_state)
-                    }
-                    None => js_sys::JsNullable::new(),
-                })
-                .collect::<Vec<js_sys::JsNullable<webgpu_sys::GpuColorTargetState>>>();
-            let module = frag.module.inner.as_webgpu();
-            let mapped_fragment_desc = webgpu_sys::GpuFragmentState::new(&module.module, &targets);
-            insert_constants_map(&mapped_fragment_desc, frag.compilation_options.constants);
-            if let Some(ep) = frag.entry_point {
-                mapped_fragment_desc.set_entry_point(ep);
-            }
-            mapped_desc.set_fragment(&mapped_fragment_desc);
-        }
-
-        let mapped_multisample = webgpu_sys::GpuMultisampleState::new();
-        mapped_multisample.set_count(desc.multisample.count);
-        mapped_multisample.set_mask(desc.multisample.mask as u32);
-        mapped_multisample
-            .set_alpha_to_coverage_enabled(desc.multisample.alpha_to_coverage_enabled);
-        mapped_desc.set_multisample(&mapped_multisample);
-
-        let mapped_primitive = map_primitive_state(&desc.primitive);
-        mapped_desc.set_primitive(&mapped_primitive);
-
+        let mapped_desc = self.render_pipeline_descriptor(desc);
         let render_pipeline = self.inner.create_render_pipeline(&mapped_desc).unwrap();
 
         WebRenderPipeline {
-            inner: render_pipeline,
+            inner: Rc::new(core::cell::OnceCell::from(render_pipeline)),
             ident: crate::cmp::Identifier::create(),
         }
         .into()
@@ -2656,6 +2699,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebRenderBundleEncoder {
             inner: render_bundle_encoder,
             ident: crate::cmp::Identifier::create(),
+            skipping: false,
         }
         .into()
     }
@@ -3122,7 +3166,11 @@ impl Drop for WebPipelineLayout {
 
 impl dispatch::RenderPipelineInterface for WebRenderPipeline {
     fn get_bind_group_layout(&self, index: u32) -> dispatch::DispatchBindGroupLayout {
-        let bind_group_layout = self.inner.get_bind_group_layout(index);
+        let bind_group_layout = self
+            .inner
+            .get()
+            .expect("a pipeline made with create_render_pipeline_async has no bind group layout until it is ready: give it an explicit layout")
+            .get_bind_group_layout(index);
 
         WebBindGroupLayout {
             inner: bind_group_layout,
@@ -3377,6 +3425,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         WebRenderPassEncoder {
             inner: render_pass,
             ident: crate::cmp::Identifier::create(),
+            skipping: false,
         }
         .into()
     }
@@ -3606,9 +3655,13 @@ impl Drop for WebComputePassEncoder {
 
 impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
-        let pipeline = &pipeline.as_webgpu().inner;
-
-        self.inner.set_pipeline(pipeline);
+        match pipeline.as_webgpu().inner.get() {
+            Some(pipeline) => {
+                self.inner.set_pipeline(pipeline);
+                self.skipping = false;
+            }
+            None => self.skipping = true,
+        }
     }
 
     fn set_bind_group(
@@ -3711,6 +3764,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if self.skipping {
+            return;
+        }
         self.inner
             .draw_with_instance_count_and_first_vertex_and_first_instance(
                 vertices.end - vertices.start,
@@ -3721,6 +3777,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        if self.skipping {
+            return;
+        }
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
                 indices.end - indices.start,
@@ -3740,6 +3799,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -3750,6 +3812,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indexed_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -3769,6 +3834,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_offset: crate::BufferAddress,
         count: u32,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         if count > 1
             && multi_draw(&self.inner, "multiDrawIndirect", &buffer.inner, indirect_offset, count)
@@ -3789,6 +3857,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_offset: crate::BufferAddress,
         count: u32,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         if count > 1
             && multi_draw(
@@ -3826,6 +3897,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
+        if self.skipping {
+            return;
+        }
         panic!(
             "MULTI_DRAW_INDIRECT_COUNT feature must be enabled to call multi_draw_indirect_count"
         )
@@ -3839,6 +3913,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
+        if self.skipping {
+            return;
+        }
         panic!("MULTI_DRAW_INDIRECT_COUNT feature must be enabled to call multi_draw_indexed_indirect_count")
     }
 
@@ -3914,8 +3991,13 @@ impl Drop for WebCommandBuffer {
 
 impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
-        let pipeline = &pipeline.as_webgpu().inner;
-        self.inner.set_pipeline(pipeline);
+        match pipeline.as_webgpu().inner.get() {
+            Some(pipeline) => {
+                self.inner.set_pipeline(pipeline);
+                self.skipping = false;
+            }
+            None => self.skipping = true,
+        }
     }
 
     fn set_bind_group(
@@ -3991,6 +4073,9 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        if self.skipping {
+            return;
+        }
         self.inner
             .draw_with_instance_count_and_first_vertex_and_first_instance(
                 vertices.end - vertices.start,
@@ -4001,6 +4086,9 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        if self.skipping {
+            return;
+        }
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
                 indices.end - indices.start,
@@ -4016,6 +4104,9 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indirect_with_f64(&buffer.inner, indirect_offset as f64);
@@ -4026,6 +4117,9 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
+        if self.skipping {
+            return;
+        }
         let buffer = indirect_buffer.as_webgpu();
         self.inner
             .draw_indexed_indirect_with_f64(&buffer.inner, indirect_offset as f64);

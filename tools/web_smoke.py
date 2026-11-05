@@ -130,6 +130,15 @@ def main():
                     print(f"web_smoke: {frames} frames in {args.play:.0f} s of play", flush=True)
                     if frames < args.play:
                         failures.append(f"only {frames} frames in {args.play:.0f} s: the page stalls")
+                    # The pause menu: its blur is a pipeline made on first use (in the
+                    # background on the web: wgpu's create_render_pipeline_async).
+                    page.keyboard.press("Escape")
+                    before = page.evaluate("globalThis.__frames")
+                    page.wait_for_timeout(5000)
+                    frames = page.evaluate("globalThis.__frames") - before
+                    print(f"web_smoke: {frames} frames in 5 s of the pause menu", flush=True)
+                    if frames < 5:
+                        failures.append(f"only {frames} frames in 5 s of the pause menu: it stalls")
             if args.screenshot:
                 page.screenshot(path=str(args.screenshot))
             browser.close()

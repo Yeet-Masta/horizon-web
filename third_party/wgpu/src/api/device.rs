@@ -258,6 +258,22 @@ impl Device {
         RenderPipeline { inner: pipeline }
     }
 
+    /// Creates a [`RenderPipeline`] the browser compiles in the background (WebGPU's
+    /// `createRenderPipelineAsync`), for a pipeline made while frames are drawn: until it is
+    /// ready, a render pass or bundle that sets it skips its draws (until the next pipeline it
+    /// sets), so the frame doesn't wait for the compiler. It needs an explicit layout. Other
+    /// backends make it as [`Self::create_render_pipeline`] does. (Horizon's addition.)
+    #[must_use]
+    pub fn create_render_pipeline_async(&self, desc: &RenderPipelineDescriptor<'_>) -> RenderPipeline {
+        #[cfg(webgpu)]
+        if let Some(web) = self.inner.as_webgpu_opt() {
+            return RenderPipeline {
+                inner: web.create_render_pipeline_async(desc),
+            };
+        }
+        self.create_render_pipeline(desc)
+    }
+
     /// Creates a mesh shader based [`RenderPipeline`].
     #[must_use]
     pub fn create_mesh_pipeline(&self, desc: &MeshPipelineDescriptor<'_>) -> RenderPipeline {

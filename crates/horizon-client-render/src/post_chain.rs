@@ -409,7 +409,7 @@ impl Translated {
             bind_group_layouts: &[Some(&self.layout)],
             ..Default::default()
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = device.create_render_pipeline_async(&wgpu::RenderPipelineDescriptor {
             label: Some("Post effect pass"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
@@ -765,7 +765,7 @@ impl PostEffects {
                         bind_group_layouts: &[Some(layout)],
                         ..Default::default()
                     });
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                device.create_render_pipeline_async(&wgpu::RenderPipelineDescriptor {
                     label: Some("Post effect pass"),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {

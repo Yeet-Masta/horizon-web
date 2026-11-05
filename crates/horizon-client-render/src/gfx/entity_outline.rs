@@ -48,7 +48,7 @@ impl EntityOutline {
     ) -> Self {
         let (entity_shader, entity_layout, entity_vertex) = entity;
         // RenderPipelines.OUTLINE_NO_CULL: no depth test, the colour replaced.
-        let silhouette = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let silhouette = device.create_render_pipeline_async(&wgpu::RenderPipelineDescriptor {
             label: Some("Entity outline silhouettes"),
             layout: Some(entity_layout),
             vertex: wgpu::VertexState {
@@ -100,7 +100,7 @@ impl EntityOutline {
             ..Default::default()
         });
         let pass = |entry: &str, target: wgpu::ColorTargetState| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.create_render_pipeline_async(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
