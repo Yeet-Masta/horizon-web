@@ -11,12 +11,6 @@
 #                                (web/unwind.toml; the one-thread wasm32 build always aborts)
 #   web/build.sh --profiling     keeps the module's function names, which wasm-opt drops, for a
 #                                profiler (web/README.md, "Profiling"): 8 MB more, 2 MB downloaded
-#   web/build.sh --sccache       compiles through sccache (RUSTC_WRAPPER), which keeps compiled
-#                                crates between builds and checkouts: not the game's own crate nor
-#                                its link, nor `fast`'s incremental crates
-#   web/build.sh --cranelift     compiles build scripts and proc macros with the Cranelift backend
-#                                (nightly; rustup adds it). Cranelift can't make WebAssembly: the
-#                                game itself is still LLVM's
 #
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
 # WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
@@ -33,8 +27,6 @@ profile=release
 threads=1
 unwind=1
 names=0
-sccache=0
-cranelift=0
 extra=()
 for arg in "$@"; do
   case "$arg" in
@@ -47,9 +39,7 @@ for arg in "$@"; do
     --config=*) extra+=(--config "${arg#--config=}") ;;
     --abort) unwind=0 ;;
     --profiling) names=1 ;;
-    --sccache) sccache=1 ;;
-    --cranelift) cranelift=1 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -68,22 +58,6 @@ if [ "$have" != "$pinned" ]; then
   exit 1
 fi
 
-if [ "$sccache" = 1 ]; then
-  if ! command -v sccache >/dev/null; then
-    echo "--sccache: sccache isn't on the PATH (cargo install sccache --locked)" >&2
-    exit 1
-  fi
-  export RUSTC_WRAPPER=sccache
-fi
-# Cranelift for what runs on this machine during the build: build scripts, proc macros and what
-# they use (the profile's build-override); cargo's codegen-backend option is nightly's.
-backend=()
-if [ "$cranelift" = 1 ]; then
-  rustup component add rustc-codegen-cranelift-preview --toolchain nightly >/dev/null
-  backend=(-Zcodegen-backend)
-  export "CARGO_PROFILE_$(echo "$profile" | tr '[:lower:]-' '[:upper:]_')_BUILD_OVERRIDE_CODEGEN_BACKEND=cranelift"
-fi
-
 # No sound, controllers or mod runtime in a browser (web/README.md).
 args=(-p horizon-client --bin horizon-client --no-default-features --target "$target" --profile "$profile"
   --config web/simd.toml "${extra[@]}")
@@ -100,17 +74,10 @@ if [ "$threads" = 1 ] || [ "$target" = wasm64-unknown-unknown ]; then
   # Panics unwind (web/unwind.toml) unless --abort: std is built with what that needs.
   panic_std=panic_unwind
   if [ "$unwinds" = 1 ]; then args+=(--config web/unwind.toml); else panic_std=panic_abort; fi
-  cargo +nightly build -Zbuild-std=std,$panic_std "${backend[@]}" "${args[@]}"
-elif [ "$cranelift" = 1 ]; then
-  # On nightly for its codegen-backend option, with the prebuilt std as stable's.
-  rustup target add wasm32-unknown-unknown --toolchain nightly >/dev/null
-  cargo +nightly build "${backend[@]}" "${args[@]}"
+  cargo +nightly build -Zbuild-std=std,$panic_std "${args[@]}"
 else
   rustup target add wasm32-unknown-unknown >/dev/null
   cargo build "${args[@]}"
-fi
-if [ "$sccache" = 1 ]; then
-  sccache --show-stats | grep -E '^(Compile requests|Cache hits|Cache misses|Non-cacheable calls) ' || true
 fi
 
 dist="$here/dist"

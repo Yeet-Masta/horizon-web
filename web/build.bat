@@ -11,13 +11,6 @@ rem   web\build.bat --abort        panics abort the thread they happen on instea
 rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
 rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
 rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
-rem   web\build.bat --sccache      build.sh's sccache, which can't build this on Windows: it starts
-rem                                rustc again with web-sys's whole command line (cargo's list of its
-rem                                ~1500 features), past Windows' 32K characters (sccache issue 1082),
-rem                                so the build goes on without it
-rem   web\build.bat --cranelift    compiles build scripts and proc macros with the Cranelift backend
-rem                                (nightly; rustup adds it). Cranelift can't make WebAssembly: the
-rem                                game itself is still LLVM's
 rem
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
 rem WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs
@@ -34,8 +27,6 @@ set "profile=release"
 set "threads=1"
 set "unwind=1"
 set "names=0"
-set "sccache=0"
-set "cranelift=0"
 set "extra="
 
 :args
@@ -48,8 +39,6 @@ if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
 if /i "%~1"=="--abort" (set "unwind=0" & shift & goto args)
 if /i "%~1"=="--profiling" (set "names=1" & shift & goto args)
-if /i "%~1"=="--sccache" (set "sccache=1" & shift & goto args)
-if /i "%~1"=="--cranelift" (set "cranelift=1" & shift & goto args)
 rem cmd splits --config=FILE at the `=`: both spellings arrive as --config then FILE.
 if /i "%~1"=="--config" (
   if "%~2"=="" (echo --config needs a file 1>&2 & exit /b 2)
@@ -62,12 +51,10 @@ echo unknown option: %~1 1>&2
 exit /b 2
 :usage
 echo web\build.bat [--wasm64] [--no-threads] [--fast] [--config FILE] [--abort] [--profiling]
-echo               [--sccache] [--cranelift]
 echo   default: wasm32 with threads on nightly Rust, release profile, panics that unwind;
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
 echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
-echo   --profiling keeps function names for a profiler; --sccache is Linux and macOS only;
-echo   --cranelift compiles build scripts and proc macros with Cranelift (not the game: no wasm)
+echo   --profiling keeps function names for a profiler
 exit /b 0
 :args_done
 
@@ -87,22 +74,6 @@ if not "%have%"=="%pinned%" (
   echo wasm-bindgen %pinned% %rev% is needed ^(found: %have%^): 1>&2
   echo   %install% 1>&2
   exit /b 1
-)
-
-if "%sccache%"=="1" (
-  echo --sccache: sccache can't build web-sys on Windows ^(its command line is longer than Windows allows; sccache issue 1082^): building without it 1>&2
-)
-rem Cranelift for what runs on this machine during the build: build scripts, proc macros and what
-rem they use (the profile's build-override); cargo's codegen-backend option is nightly's.
-set "backend="
-if "%cranelift%"=="1" (
-  rustup component add rustc-codegen-cranelift-preview --toolchain nightly >nul || exit /b 1
-  set "backend=-Zcodegen-backend"
-  if "%profile%"=="fast" (
-    set "CARGO_PROFILE_FAST_BUILD_OVERRIDE_CODEGEN_BACKEND=cranelift"
-  ) else (
-    set "CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_CODEGEN_BACKEND=cranelift"
-  )
 )
 
 rem No sound device, controllers or mod runtime in a browser (web\README.md).
@@ -125,11 +96,7 @@ if "%unwinds%"=="1" (
 if "%nightly%"=="1" (
   rustup component add rust-src --toolchain nightly >nul || exit /b 1
   rustup target add %target% --toolchain nightly >nul 2>nul
-  cargo +nightly build -Zbuild-std=std,%panic_std% %backend% %config% --target %target% --profile %profile% %crate% || exit /b 1
-) else if "%cranelift%"=="1" (
-  rem On nightly for its codegen-backend option, with the prebuilt std as stable's.
-  rustup target add wasm32-unknown-unknown --toolchain nightly >nul || exit /b 1
-  cargo +nightly build %backend% --target %target% --profile %profile% %crate% || exit /b 1
+  cargo +nightly build -Zbuild-std=std,%panic_std% %config% --target %target% --profile %profile% %crate% || exit /b 1
 ) else (
   rustup target add wasm32-unknown-unknown >nul || exit /b 1
   cargo build --target %target% --profile %profile% %crate% || exit /b 1
