@@ -912,6 +912,7 @@ impl Game<'_> {
             if landed {
                 self.post_landing_event(self.armor_stands[i].position, true);
             }
+            self.armor_stands[i].apply_honey_slide(&self.world, self.res.facts());
             let a = &self.armor_stands[i];
             if !a.marker && !a.no_gravity {
                 self.entity_powder_snow_particles(
@@ -1041,7 +1042,6 @@ impl Game<'_> {
         // The stands' models posed on the GPU path (`mobs::skin`), when it runs this frame.
         let skinning = self.skinning();
         for a in &self.armor_stands {
-            let entity_start = out.len();
             // ArmorStand.shouldRenderAtSqrDistance: 256 times the box's mean
             // edge (4 for a marker's empty box), whatever the entity distance.
             // LivingEntityRenderer grows the culling box by 0.5 for a dragon head.
@@ -1071,6 +1071,11 @@ impl Game<'_> {
             ) {
                 continue;
             }
+            let culling = self.entity_cull_decision(a, alpha);
+            if culling.hides_entity() {
+                continue;
+            }
+            let entity_start = out.len();
             // EntityRenderer: drawn between last tick's position and this one's.
             let at = a.render_position(alpha);
             let p = super::entity_culling::at(at) - camera;
@@ -1104,7 +1109,9 @@ impl Game<'_> {
                 self.armor_stand_vertices(a, base, packed, None, out);
                 None
             };
-            self.cull_skinned(out, entity_start, skinned);
+            if !self.entity_glowing(a.id) {
+                self.cull_skinned(out, entity_start, skinned);
+            }
         }
     }
     /// `ArmorStandRenderer.submit` for stand `a` under `base` (its
@@ -1474,6 +1481,10 @@ impl Game<'_> {
                 || c.same_item_same_components(stack)
         }) {
             return true;
+        }
+        // Counted on the server only, before the swap.
+        if self.remote.is_none() {
+            self.award_stat("used", &stack.item, 1);
         }
         let swap = swap_with_equipment_slot(stack, current, self.creative);
         self.armor[index] = Some(swap.worn.clone());

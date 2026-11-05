@@ -6,7 +6,7 @@
 //!   `[timestamp_ms: u32 big-endian][packet_length: u32 big-endian][packet_data: VarInt(packet_id) + payload]`
 //! - Optional `markers.json`: timeline markers/chapters.
 
-use horizon_platform::fs::{self, File, OpenOptions};
+use horizon_platform::fs::{self, File, OpenOptions, PathExt as _};
 use horizon_protocol::buf::{Reader, write_varint};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -382,7 +382,7 @@ impl Drop for McprWriter {
     fn drop(&mut self) {
         // An empty stream holds nothing worth keeping; one with packets stays
         // for a later recovery (see the type's doc).
-        if self.packet_count == 0 && self.temp_tmcpr_path.exists() {
+        if self.packet_count == 0 && self.temp_tmcpr_path.fs_exists() {
             self.writer = None;
             let _ = fs::remove_file(&self.temp_tmcpr_path);
             let _ = fs::remove_file(&self.temp_meta_path);
@@ -645,7 +645,7 @@ pub fn recover_crashed_recordings(dir: &Path) -> io::Result<RecoveryReport> {
 /// Err on the side of yes: packaging a live recording would take the stream from
 /// under its writer.
 fn writer_may_be_alive(stream: &Path, pid: u32) -> bool {
-    if pid == std::process::id() {
+    if pid == horizon_platform::process::id() {
         return true;
     }
     #[cfg(target_os = "linux")]
@@ -734,7 +734,7 @@ fn recover_stream(
 
 /// `dest`, or a `.recovered` name beside it when something already fills it.
 fn free_name(dest: &Path) -> PathBuf {
-    if !dest.exists() {
+    if !dest.fs_exists() {
         return dest.to_owned();
     }
     let name = dest
@@ -750,7 +750,7 @@ fn free_name(dest: &Path) -> PathBuf {
         } else {
             format!("{stem}.recovered-{n}.mcpr")
         });
-        if !candidate.exists() {
+        if !candidate.fs_exists() {
             return candidate;
         }
         n += 1;

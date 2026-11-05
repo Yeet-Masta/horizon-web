@@ -367,6 +367,7 @@ impl NativeFrame {
             distance: None,
             unculled: None,
             every_face: false,
+            view_casters: false,
         })
     }
 
@@ -510,15 +511,24 @@ impl NativeFrame {
 
     /// Writes this frame's inputs, for a world of `size`.
     pub fn write(&mut self, queue: &wgpu::Queue, frame: &Frame, size: [u32; 2]) {
-        let seconds = self.start.elapsed().as_secs_f32() % 3600.0;
+        // Under `HORIZON_STILL` the world's ticks are the clock (`PackInputs::still_ticks`), and
+        // eased values sit at their targets.
+        let still = frame.pack.still_ticks;
+        let seconds = still.map_or_else(
+            || self.start.elapsed().as_secs_f32() % 3600.0,
+            |ticks| (ticks as f32 / 20.0) % 3600.0,
+        );
         let now = horizon_platform::time::Instant::now();
-        let since = self.wetness.1.map_or(0.0, |t| (now - t).as_secs_f32());
+        let since = match still {
+            Some(_) => f32::INFINITY,
+            None => self.wetness.1.map_or(0.0, |t| (now - t).as_secs_f32()),
+        };
         self.wetness = (wetness(self.wetness.0, frame.pack.rain, since), Some(now));
         let mut inputs = frame_inputs(
             frame,
             size,
             seconds,
-            self.frames,
+            still.map_or(self.frames, |ticks| ticks as u32),
             self.shadow_camera.as_ref(),
         );
         inputs.wetness = self.wetness.0;
@@ -551,7 +561,13 @@ impl NativeFrame {
             (f32::from(u8::from(inputs.eye_in == 1)), 0.25),
             (f32::from(u8::from(inputs.eye_in == 2)), 0.25),
         ];
-        let dt = inputs.delta_time;
+        let dt = match still {
+            Some(_) => {
+                inputs.delta_time = 0.05;
+                f32::INFINITY
+            }
+            None => inputs.delta_time,
+        };
         for (value, (target, half_life)) in self.eye.iter_mut().zip(targets) {
             *value = eased(*value, target, half_life, dt);
         }
@@ -1598,7 +1614,7 @@ file = \"b.wgsl\"
             mapped_at_creation: false,
         });
         // What the material stage stores, as the bits of floats: the normal +x (octahedral
-        // (1, 0), two snorm16), smoothness 0.5, data 0.25 and the fragment's depth 0.5.
+        // (1, 0), two snorm16), smoothness 0.75, data 0.25 and the fragment's depth 0.5.
         let writer = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(
@@ -1607,7 +1623,7 @@ file = \"b.wgsl\"
                 }
                 @fragment fn fs() -> @location(0) vec4<u32> {
                     return bitcast<vec4<u32>>(vec4<f32>(
-                        bitcast<f32>(pack2x16snorm(vec2<f32>(1.0, 0.0))), 0.5, 0.25, 0.5));
+                        bitcast<f32>(pack2x16snorm(vec2<f32>(1.0, 0.0))), 0.75, 0.25, 0.5));
                 }"
                 .into(),
             ),
@@ -1707,8 +1723,9 @@ file = \"b.wgsl\"
             buffer.unmap();
             pixel
         };
-        // Present where the world's depth is the stored one: +x, 0.5, 0.25 as 8-bit.
-        assert_eq!(read(0.5), [255, 128, 64, 255]);
+        // Present where the world's depth is the stored one: +x, 0.75, 0.25 as 8-bit. No value
+        // here sits halfway between two 8-bit levels, where drivers round either way.
+        assert_eq!(read(0.5), [255, 191, 64, 255]);
         // Hidden by something nearer drawn since: the stored values no longer show.
         assert_eq!(read(0.25), [0, 0, 0, 0]);
     }

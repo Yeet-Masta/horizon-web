@@ -1787,7 +1787,7 @@ mod tests {
             announce: false,
             listen: false,
             accepts_transfers: false,
-            ..crate::lan::NetConfig::lan(0, "Transfers".into(), 8)
+            ..crate::lan::NetConfig::loopback(0, "Transfers".into(), 8)
         };
         let lan =
             crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)
@@ -1872,7 +1872,7 @@ mod tests {
                 let _ = never.recv();
                 Vec::new()
             }))),
-            ..crate::lan::NetConfig::lan(0, "Owner - World".into(), 8)
+            ..crate::lan::NetConfig::loopback(0, "Owner - World".into(), 8)
         };
         let lan =
             crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config)

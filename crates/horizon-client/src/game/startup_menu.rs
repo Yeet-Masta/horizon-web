@@ -629,6 +629,11 @@ impl Loading {
                 | Event::ListMusicTracks
                 | Event::PlayMusicTrack(..)
                 | Event::Volume(..) => {}
+                Event::OpenStudioFolder => {
+                    let dir = std::path::PathBuf::from("recordings");
+                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    packs::open_folder(&dir);
+                }
             }
         }
     }

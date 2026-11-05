@@ -39,8 +39,8 @@ except ImportError:
 SEED = 1
 
 
-def install_datapack_fixtures(world, predicates, functions, jar, advancements=None, loot_tables=None):
-    if not predicates and not functions and not advancements and not loot_tables:
+def install_datapack_fixtures(world, predicates, functions, jar, advancements=None, loot_tables=None, recipes=None):
+    if not predicates and not functions and not advancements and not loot_tables and not recipes:
         return
     with zipfile.ZipFile(jar) as archive:
         version = json.loads(archive.read('version.json'))['pack_version']
@@ -73,6 +73,13 @@ def install_datapack_fixtures(world, predicates, functions, jar, advancements=No
         target.write_text(json.dumps(table), encoding='utf-8')
 
 
+    for identifier, recipe in (recipes or {}).items():
+        namespace, path = identifier.split(':', 1)
+        target = pack / 'data' / namespace / 'recipe' / (path + '.json')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(recipe), encoding='utf-8')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prepare', action='store_true')
@@ -84,6 +91,8 @@ def main():
                         help='use string sherd input in the pot data group (known separate codec gap)')
     parser.add_argument('--limit', type=int, default=40, help='print at most this many mismatches')
     parser.add_argument('--allow-gaps', action='store_true', help='report mismatches without failing')
+    parser.add_argument('--wolf-anger-clock-diagnostic', action='store_true',
+                        help='retain the separate loaded-NoAI absolute anger clock diagnostic')
     parser.add_argument('--only', help='run only corpus groups whose name contains this')
     parser.add_argument('--array-storage-diagnostic', action='store_true',
                         help='run all numeric-array edit cases, including the known wildcard/string storage side effects')
@@ -111,10 +120,22 @@ def main():
     parser.add_argument("--boat-item-hit-fixture", action="store_true")
     parser.add_argument("--reference-only", action="store_true")
     parser.add_argument("--boat-motion-diagnostic", action="store_true")
+    parser.add_argument('--reinforcement-original-diagnostic', action='store_true', help='replay the original unisolated174/108 fixture, retaining its terrain prerequisite failure')
+    parser.add_argument('--reinforcement-target-diagnostic', action='store_true', help='retain the separate creative-callee target relation record (full209)')
+    parser.add_argument('--reinforcement-raw-diagnostic', action='store_true', help='add unnormalized full callee snapshots; not the typed gate')
     parser.add_argument("--pufferfish-contact-fixture", action="store_true")
     parser.add_argument("--pufferfish-body-diagnostic", action="store_true")
     parser.add_argument('--moving-piston-history-diagnostic', action='store_true',
                         help='retain the full piston presentation/default-origin controls, including H191 insertion-history gaps')
+    parser.add_argument("--armor-stand-honey-fixture", action="store_true")
+    parser.add_argument("--pufferfish-mob-fixture", action="store_true")
+    parser.add_argument("--pufferfish-mob-duration-diagnostic", action="store_true")
+    parser.add_argument("--pufferfish-mob-overlap-control", action="store_true")
+    parser.add_argument('--piglin-anger-memory-fixture', action='store_true')
+    parser.add_argument('--piglin-anger-raw-diagnostic', action='store_true')
+    parser.add_argument('--piglin-anger-memory-diagnostic', action='store_true')
+    parser.add_argument('--map-decoration-patch-fixture', action='store_true')
+    parser.add_argument('--map-decoration-removal-diagnostic', action='store_true')
     args = parser.parse_args()
     build = args.work_dir.resolve() if args.work_dir else lab.LOCAL / 'command-exec-parity'
     build.mkdir(parents=True, exist_ok=True)
@@ -140,12 +161,38 @@ def main():
             sys.exit(f'{name} failed ({result.returncode}):\n{tail}')
 
     groups = corpus_module.groups()
+    if not args.only and not args.wolf_anger_clock_diagnostic:
+        groups = [(name, ops) for name, ops in groups if name not in corpus_module.ISOLATED_WOLF_ANGER]
+    if args.wolf_anger_clock_diagnostic:
+        try:
+            from .wolf_anger_corpus import groups as anger_groups
+        except ImportError:
+            from wolf_anger_corpus import groups as anger_groups
+        groups = [('setup', corpus_module.group_setup()),
+                  *anger_groups(corpus_module.cmd, corpus_module.setup, clock_diagnostic=True)]
+    isolated_reinforcements = corpus_module.ISOLATED_REINFORCEMENTS
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in isolated_reinforcements]
+    if args.reinforcement_raw_diagnostic or args.reinforcement_original_diagnostic:
+        groups = [(name, corpus_module.command_zombie_reinforcements(
+            once=name == 'command reinforcement once', raw=args.reinforcement_raw_diagnostic, legacy=args.reinforcement_original_diagnostic) if name in isolated_reinforcements else ops)
+            for name, ops in groups]
+    if not args.reinforcement_target_diagnostic and not args.reinforcement_raw_diagnostic and not args.reinforcement_original_diagnostic:
+        # H300's declared208 gate excludes exactly this separate target-policy lead.
+        # --reinforcement-target-diagnostic retains full209/all30 original records.
+        groups = [(name, [op for op in ops if op.get('label') != 'h300 original/hard/callee target']
+                   if name == 'command zombie reinforcements' else ops) for name, ops in groups]
     if args.advancement_loot_named_diagnostic and args.advancement_loot_inline_parser_diagnostic:
         parser.error('choose only one advancement-loot diagnostic')
     if args.advancement_loot_named_diagnostic or args.advancement_loot_inline_parser_diagnostic:
         groups = [(name, corpus_module.advancement_world_loot_rewards(
             named_table=args.advancement_loot_named_diagnostic, include_missing_ack=True)
                    if name == 'advancement world loot rewards' else ops) for name, ops in groups]
+    # These overlays replace built-in recipes: run each in its own world, never
+    # beside the generic corpus's fixed vanilla recipe-count controls.
+    isolated_recipes = corpus_module.ISOLATED_RECIPES
+    if not args.only:
+        groups = [(name, ops) for name, ops in groups if name not in isolated_recipes]
     if args.loaded_fixture:
         groups = [('setup', corpus_module.group_setup()),
                   ('loaded ticket removal', corpus_module.loaded_ticket_removal(args.loaded_block_diagnostic))]
@@ -162,6 +209,12 @@ def main():
     if args.sulfur_power_load_diagnostic:
         groups = [('setup', corpus_module.group_setup()),
                   ('sulfur powered-load diagnostic', corpus_module.sulfur_cube_fuse_ticks(True))]
+    if args.armor_stand_honey_fixture:
+        try:
+            from .armor_stand_honey_corpus import armor_stand_honey
+        except ImportError:
+            from armor_stand_honey_corpus import armor_stand_honey
+        groups = [("setup", corpus_module.group_setup()), ("armor stand honey slide", armor_stand_honey())]
     if args.mob_quad_fixture:
         try:
             from .mob_quad_leash_corpus import mob_quad_leash
@@ -204,6 +257,10 @@ def main():
     if args.boat_item_hit_fixture:
         from boat_item_hit_corpus import boat_item_hits
         groups = [('boat item hit', boat_item_hits(args.boat_motion_diagnostic))]
+    if args.pufferfish_mob_fixture:
+        from pufferfish_mob_contact_corpus import mob_contacts, overlapping_cod_control
+        groups = [("pufferfish mob contact", overlapping_cod_control() if args.pufferfish_mob_overlap_control
+                   else mob_contacts(args.pufferfish_mob_duration_diagnostic))]
     if args.pufferfish_contact_fixture:
         from pufferfish_contact_corpus import contact_fixture
         groups = [("pufferfish player contact", contact_fixture(args.pufferfish_body_diagnostic))]
@@ -212,6 +269,16 @@ def main():
     if args.slot_codec_diagnostic:
         groups.append(('slot source codec diagnostic', [corpus_module.cmd(
             '/item fill block 4 200 4 {type:"minecraft:slot_range",slots:"container.99"} with diamond')]))
+    if any(name in isolated_reinforcements for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
+        parser.error('reinforcement fixtures require --only with one exact group')
+    if any(name in isolated_recipes for name, _ in groups) and sum(name != 'setup' for name, _ in groups) != 1:
+        parser.error('crafting recipe fixtures require --only with one exact group')
+    if args.piglin_anger_memory_fixture:
+        from piglin_anger_memory_corpus import piglin_anger_memory
+        groups = [('setup', corpus_module.group_setup()), ('piglin live anger memory', piglin_anger_memory(args.piglin_anger_raw_diagnostic, args.piglin_anger_memory_diagnostic))]
+    if args.map_decoration_patch_fixture:
+        from map_decoration_patch_corpus import map_decoration_patches
+        groups = [('setup', corpus_module.group_setup()), ('map decoration saved patch', map_decoration_patches(args.map_decoration_removal_diagnostic))]
     script = []
     for _, lines in groups:
         script.extend(lines)
@@ -220,6 +287,7 @@ def main():
                                             ensure_ascii=False) + '\n' for op in script), encoding='utf-8')
     predicates = corpus_module.predicate_selector_fixtures([name for name, _ in groups])
     functions = corpus_module.function_return_fixtures([name for name, _ in groups])
+    recipes = corpus_module.crafting_priority_recipes([name for name, _ in groups])
     advancements = corpus_module.advancement_reward_fixtures([name for name, _ in groups])
     loot_advancements, loot_tables = corpus_module.advancement_loot_fixtures([name for name, _ in groups])
     advancements.update(loot_advancements)
@@ -232,7 +300,7 @@ def main():
     vanilla_dir = build / 'vanilla'
     shutil.rmtree(vanilla_dir, ignore_errors=True)
     vanilla_dir.mkdir()
-    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements, loot_tables)
+    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
     java_options = []
     if args.orb_water_fixture:
         (build / 'orb-water-reference.json').unlink(missing_ok=True)
@@ -250,14 +318,19 @@ def main():
             sys.exit('Java direct underwater reference prerequisite failed')
     if args.reference_only:
         reference = [json.loads(line) for line in (build / 'vanilla.jsonl').read_text().splitlines()]
-        recorded = [op for op in script if op['op'] in ('player_state', 'player_loop') or (op['op'] == 'cmd' and op.get('record', True))]
+        recorded = [op for op in script if op['op'] in ('player_state', 'player_loop', 'mob_anger', 'menu_state') or
+                    (op['op'] == 'cmd' and op.get('record', True)) or
+                    (op['op'] == 'tick' and op.get('record'))]
         if len(recorded) != len(reference):
             sys.exit('reference-only record count differs')
         for op, row in zip(recorded, reference):
+            require_anger_reference(op, row)
             if "expect_observation" in op and row.get("state") != op["expect_observation"]:
                 sys.exit(f"Java observation prerequisite failed: {op}: {row}")
             if 'expect_result' in op and row.get('results') != [[True, op['expect_result']]]:
                 sys.exit(f'Java fixture guard failed: {op}: {row.get("results")}')
+            if 'expect_callback' in op and row.get('results') != [op['expect_callback']]:
+                sys.exit(f'Java callback guard failed: {op}: {row.get("results")}')
         print(f'Java reference: {len(reference)} records, fixture guards passed')
         return
 
@@ -270,7 +343,12 @@ def main():
     rust_dir = build / 'rust'
     shutil.rmtree(rust_dir, ignore_errors=True)
     rust_dir.mkdir()
-    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements, loot_tables)
+    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    if any(op['op'] == 'crafter_max_map_fixture' for op in script):
+        source = vanilla_dir / 'universe/harness/data/minecraft/maps/31.dat'
+        target = rust_dir / 'saves/harness/data/minecraft/maps/31.dat'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     # The oracle's Services resolve no profile (/fetchprofile fails on the next tick): the game gets no services
     # either, a discovery address that refuses at once, rather than Mojang's over the network.
     env = lab.game_env(HORIZON_PLAYER_NAME="Player", HORIZON_COMMAND_SCRIPT=script_path,
@@ -300,12 +378,13 @@ def main():
     rust = [json.loads(l) for l in (build / 'rust.jsonl').open(encoding='utf-8')]
     if len(vanilla) != len(rust):
         sys.exit(f'record count differs: vanilla {len(vanilla)} rust {len(rust)}')
-    recorded_ops = [op for op in script if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'player_state', 'player_loop') or
+    recorded_ops = [op for op in script if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'map_state', 'light', 'player_state', 'player_loop', 'mob_anger', 'menu_state') or
                     (op['op'] == 'cmd' and op.get('record', True)) or
                     (op['op'] == 'tick' and op.get('record'))]
     if len(recorded_ops) != len(vanilla):
         sys.exit(f'script record count differs: expected {len(recorded_ops)}, got {len(vanilla)}')
     for op, reference in zip(recorded_ops, vanilla):
+        require_anger_reference(op, reference)
         if "expect_observation" in op and reference.get("state") != op["expect_observation"]:
             sys.exit(f"Java observation prerequisite failed: {op}: {reference}")
         if 'expect_result' in op and reference.get('results') != [[True, op['expect_result']]]:
@@ -316,12 +395,16 @@ def main():
             sys.exit(f'Java loaded contract failed: {op}: {reference}')
         if 'expect_callback' in op and reference.get('results') != [op['expect_callback']]:
             sys.exit(f'Java callback guard failed: {op}: {reference.get("results")}')
+        if 'expect_map' in op and reference.get('messages') != [[[op['expect_map'], [None, False, False, False, False, False]]]]:
+            sys.exit(f'Java map fixture control failed: {op}: {reference}')
         if 'expect_state' in op and reference.get('results') != [[True, v] for v in op['expect_state']]:
             sys.exit(f'Java weather guard failed: {op["label"]}: {reference.get("results")}')
+        if 'expect_light' in op and reference.get('results') != [[True, n] for n in op['expect_light']]:
+            sys.exit(f'Java light prerequisite failed: {op}: {reference}')
     commands_by_group = []
     index = 0
     for name, lines in groups:
-        n = sum(1 for op in lines if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'player_state', 'player_loop') or (op['op'] == 'cmd' and op.get('record', True)) or (op['op'] == 'tick' and op.get('record')))
+        n = sum(1 for op in lines if op['op'] in ('falling', 'destroy_progress', 'weather_state', 'chunk_ready', 'server_distances', 'map_state', 'light', 'player_state', 'player_loop', 'mob_anger', 'menu_state') or (op['op'] == 'cmd' and op.get('record', True)) or (op['op'] == 'tick' and op.get('record')))
         commands_by_group.append((name, index, index + n))
         index += n
     mismatches = []
@@ -360,6 +443,22 @@ def main():
     if mismatches and not args.allow_gaps:
         sys.exit(f'{len(mismatches)} command execution mismatches; see {build}')
     print(f'Command execution parity report: {report_path}')
+
+
+def require_anger_reference(op, record):
+    """Validate independent live-clock expectations, retaining raw absolute ends."""
+    expected = op.get('expect_anger')
+    if expected is None:
+        return
+    state = record.get('state', {})
+    fields = ('uuid', 'kind', 'index')
+    if (any(state.get(key) != expected[key] for key in fields) or
+            state.get('serializer') != 2 or type(state.get('value')) is not int or
+            type(state.get('game_time')) is not int):
+        sys.exit(f'Java anger identity/type guard failed: {op}: {record}')
+    value = -1 if expected['delta'] is None else state['game_time'] + expected['delta']
+    if state['value'] != value:
+        sys.exit(f'Java anger live-clock guard failed: {op}: {record}')
 
 
 MASKS = [

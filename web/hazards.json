@@ -13,7 +13,6 @@
  },
  "crates/horizon-client-lib/../horizon-client/src/control.rs": {
   "std::path::Path::exists": 1,
-  "std::process::id": 1,
   "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/crafting.rs": {
@@ -67,8 +66,9 @@
   "std::path::Path::exists": 5,
   "std::sync::Condvar::wait": 1
  },
- "crates/horizon-client-lib/../horizon-client/src/studio/mcpr.rs": {
-  "std::path::Path::exists": 1
+ "crates/horizon-client-lib/../horizon-client/src/studio/recorder.rs": {
+  "chrono::Local::now": 1,
+  "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/title.rs": {
   "chrono::Utc::now": 2
@@ -81,6 +81,9 @@
  },
  "crates/horizon-client-render/src/bluemap.rs": {
   "std::sync::Condvar::wait_timeout": 1
+ },
+ "crates/horizon-client-render/src/chat.rs": {
+  "chrono::Local::now": 1
  },
  "crates/horizon-client-render/src/cit.rs": {
   "std::path::Path::is_file": 1
@@ -178,9 +181,6 @@
   "chrono::Utc::now": 1,
   "std::process::id": 3
  },
- "crates/horizon-client/src/game/entity_culling.rs": {
-  "std::sync::mpsc::Receiver::recv": 1
- },
  "crates/horizon-client/src/game/functions.rs": {
   "std::path::Path::exists": 2
  },
@@ -191,6 +191,9 @@
  "crates/horizon-client/src/game/native_configs.rs": {
   "std::path::Path::exists": 1,
   "std::path::Path::is_file": 1
+ },
+ "crates/horizon-client/src/game/occlusion_culling.rs": {
+  "std::sync::mpsc::Receiver::recv": 2
  },
  "crates/horizon-client/src/game/particle_culling.rs": {
   "std::sync::mpsc::Receiver::recv": 1
@@ -225,8 +228,8 @@
  },
  "crates/horizon-friends/src/host.rs": {
   "std::thread::Builder::spawn": 5,
-  "std::thread::sleep": 3,
-  "std::time::Instant::now": 4
+  "std::thread::sleep": 4,
+  "std::time::Instant::now": 6
  },
  "crates/horizon-friends/src/lib.rs": {
   "std::env::var": 2,
@@ -320,6 +323,9 @@
   "std::sync::mpsc::Receiver::recv": 1,
   "std::sync::mpsc::Receiver::recv_timeout": 1
  },
+ "crates/horizon-server-files/src/private_file.rs": {
+  "std::process::id": 1
+ },
  "crates/horizon-telemetry/src/consent.rs": {
   "std::fs::read": 1
  },
@@ -350,6 +356,14 @@
   "std::sync::Condvar::wait": 1,
   "std::sync::Condvar::wait_timeout": 1,
   "std::sync::Condvar::wait_while": 1
+ },
+ "crates/horizon-world/build.rs": {
+  "std::env::var": 1,
+  "std::env::var_os": 1,
+  "std::fs::read": 1,
+  "std::fs::read_dir": 1,
+  "std::path::Path::is_dir": 1,
+  "std::path::Path::is_file": 1
  },
  "crates/horizon-world/src/datafix/world_upgrader.rs": {
   "std::path::Path::exists": 1

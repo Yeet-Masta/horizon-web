@@ -60,9 +60,11 @@ impl Uploads {
             .expect("non-zero alignment");
         let slice = self.allocate(size, alignment);
         {
-            let mut view = slice
-                .get_mapped_range_mut()
-                .expect("staging belt slices are mapped");
+            // A lost device maps nothing (the browser refuses): nothing it draws is seen, and
+            // the renderer is rebuilt on another (`Renderer::device_lost`).
+            let Ok(mut view) = slice.get_mapped_range_mut() else {
+                return;
+            };
             // copy_from_slice_at: on WebGPU straight into the browser's
             // mapping, rather than through a copy of it in wasm memory.
             if row == padded {
@@ -111,12 +113,12 @@ impl Uploads {
         );
         let alignment = NonZeroU64::new(wgpu::COPY_BUFFER_ALIGNMENT).expect("non-zero alignment");
         let slice = self.allocate(size, alignment).slice(..size.get());
+        // A lost device maps nothing: see `texture`.
+        let Ok(mut view) = slice.get_mapped_range_mut() else {
+            return;
+        };
         encoder.copy_buffer_to_buffer(slice.buffer(), slice.offset(), target, offset, size.get());
-        slice
-            .get_mapped_range_mut()
-            .expect("staging belt slices are mapped")
-            .slice(..)
-            .copy_from_slice(bytes);
+        view.slice(..).copy_from_slice(bytes);
     }
     /// Close this frame's staging buffers: they come back for reuse once the
     /// encoder's submission finishes on the GPU.

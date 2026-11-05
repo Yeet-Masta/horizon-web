@@ -12,6 +12,12 @@ in vanilla's Anvil format.
 in the README scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
+On Windows, the launcher uses a stable executable path for each game home across
+release and native-mod updates. Its private runtime copy lives under the launcher's
+data folder in `run/<home key>/game/`; installed versions remain intact. Opening a
+world to other machines can still require an initial Windows Firewall permission.
+The launcher does not create firewall rules or change network-profile settings.
+
 ## musl Linux: manual installation
 
 On x86-64 musl distributions, download `horizon-linux-musl-x86_64.tar.gz` from the
@@ -114,6 +120,10 @@ cargo run --release -p horizon-client -- --render-distance 12
 ```
 
 Development builds that link quickly: `cargo build --profile fast -p horizon-client`.
+
+`HORIZON_OCCLUSION_PROFILE=1` enables detailed entity-occlusion phase and bounds-scan timings
+in `horizon-ctl stats` and `bench`. The normal benchmark keeps these CPU-clock reads disabled;
+query, cache-hit and cull counters remain available without profiling.
 
 Optional Windows allocator build features are documented in
 [Windows allocator experiments](windows-allocators.md).
@@ -282,7 +292,10 @@ the inventory screen and places one, through the CLI and through MCP.
 constant speed and replies with the same summary as `bench` (avg/1%-low FPS and
 p50/p95/p99/max frame times), plus CPU and GPU time per frame; [the graphics
 benchmark](graphics.md#benchmark) is built on it. Frame times include waits for
-presentation, so `bench` reports what is on screen.
+presentation, so `bench` reports what is on screen. With asynchronous entity
+culling active, the summary also includes `async_occlusion_culling`: cache hits
+and misses, worker time, queued and skipped queries, budget limits, and entity
+vertices culled.
 
 ### Discord Rich Presence
 
