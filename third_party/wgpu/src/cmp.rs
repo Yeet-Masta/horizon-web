@@ -25,6 +25,12 @@ impl Identifier {
         let inner = unsafe { NonZeroU64::new_unchecked(id) };
         Self { inner }
     }
+
+    /// The number itself (the web backend's bundle cache keys batches by it).
+    #[cfg_attr(not(webgpu), allow(dead_code))]
+    pub fn raw(&self) -> u64 {
+        self.inner.get()
+    }
 }
 
 /// Implements `PartialEq`, `Eq`, `PartialOrd`, `Ord`, and `Hash` for a type by proxying the operations to a single field.

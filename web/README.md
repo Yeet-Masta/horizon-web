@@ -199,6 +199,18 @@ https page, a cookie), the relay's TCP tunnel with TLS spoken in the module, so 
 carries ciphertext. Those requests run on the page's thread, whose event loop has `fetch` and
 the sockets; a Web Worker hands its request there and waits for the answer.
 
+## Render bundles
+
+Every WebGPU call is a call out of the module into the browser and a command its GPU process
+decodes, and browsers have no multi-draw yet (Chromium's is behind a developer flag), so the
+terrain's multi-draws became one `drawIndexedIndirect` per section. The vendored wgpu
+(`third_party/wgpu/src/backend/webgpu/bundles.rs`) records each 16-entry stretch of a
+multi-draw's indirect buffer, drawn with the same pipeline and bindings in an earlier
+submission, into a render bundle once and replays it: a bundle reads the draws' parameters when
+it runs, so it stays right whatever the stretch holds that frame. A frame of a newly loaded
+world went from about 290 render-pass calls to 125 (`drawIndexedIndirect` 220 to 46).
+`?env=HORIZON_WEB_BUNDLES=0` issues every draw, to compare or to rule bundles out.
+
 ## Merging upstream
 
 Upstream merges hundreds of pull requests a day. What they bring compiles for the web, but

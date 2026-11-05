@@ -2054,6 +2054,12 @@ pub async fn open_web_device() -> Result<()> {
         })
         .await
         .map_err(|e| format!("{NO_GPU_DRIVER} (device: {e})"))?;
+    // A browser without multi-draw replays a repeated batch of indirect section draws from a
+    // render bundle (wgpu's `set_render_bundles`); HORIZON_WEB_BUNDLES=0 issues every draw.
+    if horizon_platform::env::var("HORIZON_WEB_BUNDLES").is_ok_and(|v| v.trim() == "0") {
+        device.set_render_bundles(false);
+        startup_step(format_args!("render bundles off (HORIZON_WEB_BUNDLES=0)"));
+    }
     WEB_LAYERS.store(
         device.limits().max_texture_array_layers.max(1),
         std::sync::atomic::Ordering::Relaxed,

@@ -274,6 +274,18 @@ impl Device {
         self.create_render_pipeline(desc)
     }
 
+    /// Whether the WebGPU backend's render passes replay the stretches of an indexed indirect
+    /// multi-draw drawn in an earlier submission (same pipeline, bindings and stretch of the
+    /// indirect buffer) from render bundles recorded once, where the browser has no
+    /// multi-draw: on by default. Other backends ignore it. (Horizon's addition.)
+    pub fn set_render_bundles(&self, enabled: bool) {
+        #[cfg(webgpu)]
+        if let Some(web) = self.inner.as_webgpu_opt() {
+            web.bundles.set_enabled(enabled);
+        }
+        let _ = enabled;
+    }
+
     /// Creates a mesh shader based [`RenderPipeline`].
     #[must_use]
     pub fn create_mesh_pipeline(&self, desc: &MeshPipelineDescriptor<'_>) -> RenderPipeline {

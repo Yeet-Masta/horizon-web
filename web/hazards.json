@@ -80,7 +80,7 @@
   "std::env::var_os": 2
  },
  "crates/horizon-client-render/src/bluemap.rs": {
-  "std::path::Path::exists": 1
+  "std::sync::Condvar::wait_timeout": 1
  },
  "crates/horizon-client-render/src/cit.rs": {
   "std::path::Path::is_file": 1
@@ -209,22 +209,8 @@
   "std::path::Path::exists": 1
  },
  "crates/horizon-cosmetics/src/fetch.rs": {
-  "std::fs::create_dir_all": 2,
-  "std::fs::read": 4,
-  "std::fs::read_dir": 1,
-  "std::fs::rename": 2,
-  "std::fs::write": 2,
-  "std::sync::Condvar::wait_while": 1,
-  "std::thread::Builder::spawn": 1,
-  "std::time::Instant::now": 1
- },
- "crates/horizon-cosmetics/src/lib.rs": {
-  "std::env::var": 2
- },
- "crates/horizon-cosmetics/src/prefs.rs": {
-  "std::fs::create_dir_all": 2,
-  "std::fs::read_to_string": 4,
-  "std::fs::write": 2
+  "std::sync::Condvar::wait_timeout": 1,
+  "std::sync::Condvar::wait_while": 1
  },
  "crates/horizon-friends/src/direct.rs": {
   "std::thread::Builder::spawn": 2,

@@ -1,5 +1,6 @@
 #![allow(clippy::type_complexity)]
 
+mod bundles;
 mod defined_non_null_js_value;
 mod ext_bindings;
 #[allow(clippy::allow_attributes)]
@@ -1043,16 +1044,19 @@ fn future_request_device(
             // `Surface::get_capabilities` can report `Rgba16Float` truthfully.
             rgba16float_probe::probe_rgba16float_canvas_support(&device);
 
+            let bundles = bundles::Cache::new(device.clone());
             (
                 WebDevice {
                     inner: device,
                     ident: crate::cmp::Identifier::create(),
                     error_scope_count: Rc::new(Cell::new(0)),
+                    bundles: bundles.clone(),
                 }
                 .into(),
                 WebQueue {
                     inner: queue,
                     ident: crate::cmp::Identifier::create(),
+                    bundles,
                 }
                 .into(),
             )
@@ -1274,6 +1278,8 @@ pub struct WebDevice {
     ident: crate::cmp::Identifier,
     /// Current number of error scopes that have been pushed on the device.
     error_scope_count: Rc<Cell<u32>>,
+    /// Its render passes' bundles for repeated indirect draws (`bundles`).
+    pub(crate) bundles: Rc<bundles::Cache>,
 }
 
 #[derive(Debug, Clone)]
@@ -1281,6 +1287,8 @@ pub struct WebQueue {
     pub(crate) inner: webgpu_sys::GpuQueue,
     /// Unique identifier for this Queue.
     ident: crate::cmp::Identifier,
+    /// The device's bundles, which count the submissions.
+    bundles: Rc<bundles::Cache>,
 }
 
 #[derive(Debug, Clone)]
@@ -1436,6 +1444,8 @@ pub struct WebRenderPipeline {
     pub(crate) inner: Rc<core::cell::OnceCell<webgpu_sys::GpuRenderPipeline>>,
     /// Unique identifier for this RenderPipeline.
     ident: crate::cmp::Identifier,
+    /// What it draws into, for a bundle that sets it (`bundles`).
+    layout: Rc<bundles::Layout>,
 }
 
 #[derive(Debug, Clone)]
@@ -1456,6 +1466,8 @@ pub struct WebCommandEncoder {
     pub(crate) inner: webgpu_sys::GpuCommandEncoder,
     /// Unique identifier for this CommandEncoder.
     ident: crate::cmp::Identifier,
+    /// The device's bundles, for its render passes.
+    bundles: Rc<bundles::Cache>,
 }
 
 #[derive(Debug)]
@@ -1473,6 +1485,8 @@ pub struct WebRenderPassEncoder {
     /// The pipeline set last isn't compiled yet (`create_render_pipeline_async`): its draws
     /// are skipped.
     skipping: bool,
+    /// Its pipeline and bindings, and the bundles for its repeated indirect draws.
+    bundles: bundles::Pass,
 }
 
 #[derive(Debug)]
@@ -2034,6 +2048,7 @@ impl WebDevice {
         WebRenderPipeline {
             inner: slot,
             ident: crate::cmp::Identifier::create(),
+            layout: bundles::Layout::of(desc),
         }
         .into()
     }
@@ -2480,6 +2495,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebRenderPipeline {
             inner: Rc::new(core::cell::OnceCell::from(render_pipeline)),
             ident: crate::cmp::Identifier::create(),
+            layout: bundles::Layout::of(desc),
         }
         .into()
     }
@@ -2660,6 +2676,7 @@ impl dispatch::DeviceInterface for WebDevice {
         WebCommandEncoder {
             inner: command_encoder,
             ident: crate::cmp::Identifier::create(),
+            bundles: self.bundles.clone(),
         }
         .into()
     }
@@ -2932,6 +2949,7 @@ impl dispatch::QueueInterface for WebQueue {
             .collect::<Vec<webgpu_sys::GpuCommandBuffer>>();
 
         self.inner.submit(&array);
+        self.bundles.submitted();
 
         0
     }
@@ -3421,11 +3439,18 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         }
 
         let render_pass = self.inner.begin_render_pass(&mapped_desc).unwrap();
+        let read_only = desc
+            .depth_stencil_attachment
+            .as_ref()
+            .map_or((false, false), |dsa| {
+                (dsa.depth_ops.is_none(), dsa.stencil_ops.is_none())
+            });
 
         WebRenderPassEncoder {
             inner: render_pass,
             ident: crate::cmp::Identifier::create(),
             skipping: false,
+            bundles: self.bundles.pass(read_only.0, read_only.1),
         }
         .into()
     }
@@ -3653,14 +3678,32 @@ impl Drop for WebComputePassEncoder {
     }
 }
 
+impl WebRenderPassEncoder {
+    /// Before a draw: false while the pipeline compiles (`skipping`); else the pipeline and
+    /// bindings a cached bundle cleared are set again.
+    fn ready(&mut self) -> bool {
+        if self.skipping {
+            return false;
+        }
+        self.bundles.restore(&self.inner);
+        true
+    }
+}
+
 impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
-        match pipeline.as_webgpu().inner.get() {
+        let web = pipeline.as_webgpu();
+        match web.inner.get() {
             Some(pipeline) => {
                 self.inner.set_pipeline(pipeline);
                 self.skipping = false;
+                self.bundles
+                    .set_pipeline(Some((web.ident.raw(), pipeline, &web.layout)));
             }
-            None => self.skipping = true,
+            None => {
+                self.skipping = true;
+                self.bundles.set_pipeline(None);
+            }
         }
     }
 
@@ -3670,7 +3713,13 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         bind_group: Option<&dispatch::DispatchBindGroup>,
         offsets: &[crate::DynamicOffset],
     ) {
-        let bind_group = bind_group.map(|bind_group| &bind_group.as_webgpu().inner);
+        let bind_group = bind_group.map(|bind_group| bind_group.as_webgpu());
+        self.bundles.set_bind_group(
+            index,
+            bind_group.map(|group| (group.ident.raw(), &group.inner)),
+            offsets,
+        );
+        let bind_group = bind_group.map(|bind_group| &bind_group.inner);
 
         if offsets.is_empty() {
             self.inner.set_bind_group(index, bind_group);
@@ -3696,6 +3745,13 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     ) {
         let buffer = buffer.as_webgpu();
         let index_format = map_index_format(index_format);
+        self.bundles.set_index_buffer(
+            buffer.ident.raw(),
+            &buffer.inner,
+            index_format,
+            offset as f64,
+            size.map(|size| size.get() as f64),
+        );
 
         if let Some(size) = size {
             self.inner.set_index_buffer_with_f64_and_f64(
@@ -3717,7 +3773,14 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         offset: crate::BufferAddress,
         size: Option<crate::BufferSize>,
     ) {
-        let buffer = buffer.map(|buffer| &buffer.as_webgpu().inner);
+        let buffer = buffer.map(|buffer| buffer.as_webgpu());
+        self.bundles.set_vertex_buffer(
+            slot,
+            buffer.map(|buffer| (buffer.ident.raw(), &buffer.inner)),
+            offset as f64,
+            size.map(|size| size.get() as f64),
+        );
+        let buffer = buffer.map(|buffer| &buffer.inner);
 
         if let Some(size) = size {
             self.inner.set_vertex_buffer_with_f64_and_f64(
@@ -3764,7 +3827,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         self.inner
@@ -3777,7 +3840,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         self.inner
@@ -3799,7 +3862,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         let buffer = indirect_buffer.as_webgpu();
@@ -3812,7 +3875,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_buffer: &dispatch::DispatchBuffer,
         indirect_offset: crate::BufferAddress,
     ) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         let buffer = indirect_buffer.as_webgpu();
@@ -3834,7 +3897,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         indirect_offset: crate::BufferAddress,
         count: u32,
     ) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         let buffer = indirect_buffer.as_webgpu();
@@ -3861,6 +3924,18 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
             return;
         }
         let buffer = indirect_buffer.as_webgpu();
+        // Stretches drawn in an earlier submission: their bundles (`bundles`), unless the
+        // browser draws them all in one call anyway.
+        if !MULTI_DRAW.load(core::sync::atomic::Ordering::Relaxed)
+            && self.bundles.draw_indexed_indirect(
+            &self.inner,
+            (buffer.ident.raw(), &buffer.inner),
+            indirect_offset,
+            count,
+        ) {
+            return;
+        }
+        self.bundles.restore(&self.inner);
         if count > 1
             && multi_draw(
                 &self.inner,
@@ -3897,7 +3972,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         panic!(
@@ -3913,7 +3988,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         _count_buffer_offset: crate::BufferAddress,
         _max_count: u32,
     ) {
-        if self.skipping {
+        if !self.ready() {
             return;
         }
         panic!("MULTI_DRAW_INDIRECT_COUNT feature must be enabled to call multi_draw_indexed_indirect_count")
@@ -3974,6 +4049,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
             .map(|bundle| bundle.as_webgpu().inner.clone())
             .collect::<Vec<webgpu_sys::GpuRenderBundle>>();
         self.inner.execute_bundles(&mapped);
+        self.bundles.bundles_executed();
     }
 }
 impl Drop for WebRenderPassEncoder {

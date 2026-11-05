@@ -20,6 +20,7 @@ use crate::{
     fast_hash::{FxHashMap, FxHashSet},
     lod::{Column, Span},
 };
+use horizon_platform::fs::PathExt as _;
 use horizon_platform::sync::Mutex;
 use horizon_platform::time::{Duration, Instant, SystemTime};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
@@ -1157,7 +1158,7 @@ fn read_cached(file: &Path, lowres: &Lowres) -> Option<(Option<Tile>, bool)> {
         return decode_tile(&bytes, lowres).map(|tile| (Some(tile), fresh(&png)));
     }
     let none = file.with_extension("none");
-    none.exists().then(|| (None, fresh(&none)))
+    none.fs_exists().then(|| (None, fresh(&none)))
 }
 
 /// The download worker's own state.
@@ -1312,7 +1313,7 @@ impl Worker {
             self.settings = true;
             self.answered();
             // Not gone (a file held open): no map this visit, not the wrong one.
-            if stale && horizon_platform::fs::remove_dir_all(&tiles).is_err() && tiles.exists() {
+            if stale && horizon_platform::fs::remove_dir_all(&tiles).is_err() && tiles.fs_exists() {
                 return self.found_nothing(inner);
             }
             for (name, body) in files {
@@ -1406,7 +1407,7 @@ impl Worker {
                 )
             }
             // Not a tile (an error page): a cached one is kept.
-            (None, Some(_)) if png.exists() => (true, None),
+            (None, Some(_)) if png.fs_exists() => (true, None),
             _ => {
                 let _ = horizon_platform::fs::remove_file(&png);
                 (false, write_whole(&none, &[]).ok().map(|()| 0))
