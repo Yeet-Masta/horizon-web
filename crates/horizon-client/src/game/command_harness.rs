@@ -245,6 +245,18 @@ impl Game<'_> {
             horizon_platform::thread::sleep(Duration::from_millis(2));
         }
         self.harness_owner(|g| g.harness_settle(deadline, None))?;
+        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_TICK_REFERENCE") {
+            let rows = self.harness_owner(|g| Ok(g.fishing_tick_reference()))?;
+            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+        }
+        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_BOBBING_REFERENCE") {
+            let rows = self.harness_owner(|g| Ok(g.fishing_bobbing_reference()))?;
+            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+        }
+        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_FALLBACK_REFERENCE") {
+            let rows = self.harness_owner(|g| Ok(g.fishing_fallback_reference()))?;
+            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+        }
         let mut out = String::new();
         for line in horizon_platform::fs::read_to_string(script)?.lines() {
             if line.trim().is_empty() {
