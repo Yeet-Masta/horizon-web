@@ -6720,6 +6720,11 @@ mod tests {
         );
         assert!(s.extras.sort);
         assert_eq!(
+            click(&mut ui, &mut s, Act::Extra(crate::extras::Item::Pregen)),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        assert!(s.extras.pregen);
+        assert_eq!(
             click(&mut ui, &mut s, Act::Extra(crate::extras::Item::SortKey)),
             vec![Event::ButtonClick]
         );

@@ -10,6 +10,9 @@ use horizon_client::gamepad::{self, Button, GlyphStyle, PadState, Rumble, Trigge
 use horizon_platform::time::{Duration, Instant};
 use serde_json::{Value, json};
 
+mod face_buttons;
+mod triggers;
+
 /// The controllers gilrs sees and the DualSense's output.
 #[derive(Default)]
 pub(super) struct Devices {
@@ -192,9 +195,11 @@ fn device_of(pad: &gilrs::Gamepad) -> Device {
 /// A pad's buttons, sticks and triggers now.
 fn state_of(pad: &gilrs::Gamepad) -> PadState {
     let mut state = PadState::default();
+    let crossed = face_buttons::crossed(pad);
     for button in Button::ALL {
         if !matches!(button, Button::LeftTrigger | Button::RightTrigger) {
-            state.set(button, pad.is_pressed(gilrs_button(button)));
+            let named = face_buttons::named(gilrs_button(button), crossed);
+            state.set(button, pad.is_pressed(named));
         }
     }
     let axis = |a| pad.value(a);
@@ -210,20 +215,7 @@ fn state_of(pad: &gilrs::Gamepad) -> PadState {
     );
     state.left = left;
     state.right = right;
-    // Triggers arrive as analog buttons on most mappings, as plain
-    // buttons on some.
-    let trigger = |b: gilrs::Button| {
-        let value = pad.button_data(b).map_or(0.0, |d| d.value());
-        if pad.is_pressed(b) {
-            value.max(1.0)
-        } else {
-            value
-        }
-    };
-    state.triggers = [
-        trigger(gilrs::Button::LeftTrigger2),
-        trigger(gilrs::Button::RightTrigger2),
-    ];
+    state.triggers = triggers::triggers(pad);
     state
 }
 
@@ -277,9 +269,10 @@ impl PadRouter {
         while let Some(gilrs::Event { id, event, .. }) = gilrs.next_event() {
             match event {
                 gilrs::EventType::ButtonPressed(pressed, _) => {
+                    let crossed = face_buttons::crossed(&gilrs.gamepad(id));
                     if let Some(button) = Button::ALL
                         .into_iter()
-                        .find(|&b| gilrs_button(b) == pressed)
+                        .find(|&b| face_buttons::named(gilrs_button(b), crossed) == pressed)
                     {
                         events.push(PadEvent::Press(id, button));
                     }
