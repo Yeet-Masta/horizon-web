@@ -94,3 +94,37 @@ pub fn skip_frame(limit: i32) -> bool {
         false
     })
 }
+
+/// What the page asked of the frame statistics ([`horizon_frame_stats_ask`]): to read them, and
+/// whether to start them over after.
+static FRAME_STATS_ASK: horizon_platform::sync::Mutex<Option<bool>> =
+    horizon_platform::sync::Mutex::new(None);
+/// The frame statistics last asked for, as `horizon-ctl frame-stats` prints them.
+static FRAME_STATS: horizon_platform::sync::Mutex<Option<String>> =
+    horizon_platform::sync::Mutex::new(None);
+
+/// The page asks for the game's frame statistics (`FrameStats::summary`): frame, CPU and GPU
+/// times and where the slowest frames went. The game answers at its next frame
+/// ([`horizon_frame_stats`]); with `reset` it starts counting again after (tools/web_profile.py).
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn horizon_frame_stats_ask(reset: bool) {
+    *FRAME_STATS.lock().unwrap() = None;
+    *FRAME_STATS_ASK.lock().unwrap() = Some(reset);
+}
+
+/// The answer to [`horizon_frame_stats_ask`], as JSON, once the game gave it.
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn horizon_frame_stats() -> Option<String> {
+    FRAME_STATS.lock().unwrap().clone()
+}
+
+/// Each frame: answers the page's ask, if there is one.
+pub fn answer_frame_stats(stats: &mut horizon_client::control::FrameStats) {
+    let Some(reset) = FRAME_STATS_ASK.lock().unwrap().take() else {
+        return;
+    };
+    *FRAME_STATS.lock().unwrap() = Some(stats.summary().to_string());
+    if reset {
+        stats.reset();
+    }
+}

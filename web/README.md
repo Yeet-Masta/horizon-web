@@ -158,6 +158,35 @@ in), `streaming_unload_generate`, `streaming_schedule` (new jobs), `upload`
 `renderer`, `tick` and the rest. Several can go together:
 `?env=HORIZON_SPIKES=25,HORIZON_WEB_WORKERS=2`.
 
+### Profiling
+
+`tools/web_profile.py` plays a built page and reports where its frames went:
+it serves `web/dist` (or `--dist`), starts a new creative world, flies forward
+for `--seconds` so terrain keeps loading (`--still` stays put), and records
+the page's frame times, the game's own `FrameStats` (CPU and GPU time per
+frame, its phases; `horizon_frame_stats()` from the page's console), the slow
+frames' steps (`HORIZON_SPIKES`), and a CPU profile of the page's thread with
+the functions it spent its time in.
+
+```sh
+pip install playwright
+python3 tools/web_profile.py --resources R.zip --channel chrome --out report.json --cpuprofile page.cpuprofile
+```
+
+- `--channel chrome` (or `msedge`) runs the browser installed on the machine,
+  with its GPU. Without it Playwright's Chromium draws on SwiftShader: the CPU
+  profile holds, frame rates and GPU times don't.
+- Build with `web/build.sh --profiling` (`web\build.bat --profiling`) first:
+  wasm-opt otherwise strips the module's function names and the profile lists
+  addresses. The names cost about a megabyte of download.
+- A call out to the browser (WebGPU, a canvas, a message) counts in the
+  module's JavaScript glue for it (`__wbg_...`).
+- `--cpuprofile` keeps the raw profile: Chrome DevTools (Performance, load
+  profile) or speedscope.app open it as a flame chart. The workers' time is not
+  in it; DevTools' own Performance recording shows every thread.
+- Firefox: the Firefox Profiler (profiler.firefox.com) records every thread
+  with the wasm names, `?env=HORIZON_SPIKES=25` beside it.
+
 ## Checks
 
 Upstream code calls std's file system, clocks, environment and threads, which fail, panic

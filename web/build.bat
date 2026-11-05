@@ -9,6 +9,8 @@ rem   web\build.bat --fast         the quicker-to-build `fast` profile (no LTO) 
 rem   web\build.bat --config FILE  adds a cargo config (rustflags, say), as web\simd.toml does
 rem   web\build.bat --abort        panics abort the thread they happen on instead of unwinding
 rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
+rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
+rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
 rem
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
 rem WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs
@@ -24,6 +26,7 @@ set "target=wasm32-unknown-unknown"
 set "profile=release"
 set "threads=1"
 set "unwind=1"
+set "names=0"
 set "extra="
 
 :args
@@ -35,6 +38,7 @@ if /i "%~1"=="--fast" (set "profile=fast" & shift & goto args)
 if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
 if /i "%~1"=="--abort" (set "unwind=0" & shift & goto args)
+if /i "%~1"=="--profiling" (set "names=1" & shift & goto args)
 rem cmd splits --config=FILE at the `=`: both spellings arrive as --config then FILE.
 if /i "%~1"=="--config" (
   if "%~2"=="" (echo --config needs a file 1>&2 & exit /b 2)
@@ -46,10 +50,11 @@ if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm64] [--no-threads] [--fast] [--config FILE] [--abort]
+echo web\build.bat [--wasm64] [--no-threads] [--fast] [--config FILE] [--abort] [--profiling]
 echo   default: wasm32 with threads on nightly Rust, release profile, panics that unwind;
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
-echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort
+echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
+echo   --profiling keeps function names for a profiler
 exit /b 0
 :args_done
 
@@ -119,6 +124,8 @@ if errorlevel 1 (
   if "%threads%"=="1" set "atomics=--enable-threads"
   set "exceptions="
   if "%unwinds%"=="1" set "exceptions=--enable-exception-handling"
+  set "debuginfo="
+  if "%names%"=="1" set "debuginfo=-g"
   call :optimize || exit /b 1
 )
 
@@ -166,5 +173,5 @@ echo Serve it with: python web\serve.py   (then open http://localhost:8080/)
 exit /b 0
 
 :optimize
-wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const %memory64% %atomics% %exceptions% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
+wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const %memory64% %atomics% %exceptions% %debuginfo% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
 exit /b %errorlevel%

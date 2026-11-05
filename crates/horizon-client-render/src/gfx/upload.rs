@@ -118,7 +118,10 @@ impl Uploads {
             return;
         };
         encoder.copy_buffer_to_buffer(slice.buffer(), slice.offset(), target, offset, size.get());
-        view.slice(..).copy_from_slice(bytes);
+        // On WebGPU straight into the browser's mapping (`copy_from_slice_at`): through
+        // `slice(..)` the whole mapping was copied into wasm memory and back, three copies of
+        // every mesh on the page's thread.
+        view.copy_from_slice(bytes);
     }
     /// Close this frame's staging buffers: they come back for reuse once the
     /// encoder's submission finishes on the GPU.

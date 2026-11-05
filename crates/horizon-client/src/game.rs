@@ -19098,6 +19098,9 @@ impl Game<'_> {
                         self.frame_stats.record_gpu(&r.gpu_times);
                         r.gpu_times.clear();
                     }
+                    // The page's profiler reads them (tools/web_profile.py).
+                    #[cfg(target_family = "wasm")]
+                    web::answer_frame_stats(&mut self.frame_stats);
                     self.limit_frame();
                     self.pause = self.pauses_game();
                     if let Some(server) = &self.integrated {

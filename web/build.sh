@@ -9,6 +9,8 @@
 #   web/build.sh --config=FILE   adds a cargo config (rustflags, say), as web/simd.toml does
 #   web/build.sh --abort         panics abort the thread they happen on instead of unwinding
 #                                (web/unwind.toml; the one-thread wasm32 build always aborts)
+#   web/build.sh --profiling     keeps the module's function names, which wasm-opt drops, for a
+#                                profiler (web/README.md, "Profiling"): 8 MB more, 2 MB downloaded
 #
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
 # WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
@@ -24,6 +26,7 @@ target=wasm32-unknown-unknown
 profile=release
 threads=1
 unwind=1
+names=0
 extra=()
 for arg in "$@"; do
   case "$arg" in
@@ -35,7 +38,8 @@ for arg in "$@"; do
     --fast) profile=fast ;;
     --config=*) extra+=(--config "${arg#--config=}") ;;
     --abort) unwind=0 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --profiling) names=1 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -90,6 +94,7 @@ if command -v wasm-opt >/dev/null; then
   [ "$target" = wasm64-unknown-unknown ] && flags+=(--enable-memory64)
   [ "$threads" = 1 ] && flags+=(--enable-threads)
   [ "$unwinds" = 1 ] && flags+=(--enable-exception-handling)
+  [ "$names" = 1 ] && flags+=(-g)
   wasm-opt "${flags[@]}" "$dist/pkg/horizon-client_bg.wasm" -o "$dist/pkg/horizon-client_bg.wasm"
 else
   echo "wasm-opt not found: the module is not optimized further (install binaryen to shrink it)" >&2
