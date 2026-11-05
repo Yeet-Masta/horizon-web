@@ -10,6 +10,7 @@ stays put), then reports:
 - the game's own figures (`FrameStats`, as `horizon-ctl frame-stats` prints them natively): CPU
   and GPU time per frame, and the frame's phases on average and in its slowest 1%;
 - the slow frames' named steps (`HORIZON_SPIKES`): which steps the dips spent their time in;
+  the same for single player's server thread, whose slow ticks hold back what the world does;
 - the page's thread from a CPU profile: the functions it spent its time in (own time, and time
   inside them with what they call), the wasm module's by name. A call out to the browser (a
   WebGPU call, a canvas, a message) counts in the module's JavaScript glue for it
@@ -48,6 +49,8 @@ const tick = (t) => { if (recording) globalThis.__rafs.push(t); requestAnimation
 requestAnimationFrame(tick);
 """
 SLOW = re.compile(r"slow frame ([\d.]+) ms[^(]*\([^)]*\): (.*)$")
+# The server thread's (single player's integrated server): `slow tick 85.2 ms (140 mobs): ...`.
+SLOW_TICK = re.compile(r"slow tick ([\d.]+) ms[^(]*\([^)]*\): (.*)$")
 SPAN = re.compile(r"^(.+?) ([\d.]+)(?:/([\d.]+))?$")
 HASH = re.compile(r"\[[0-9a-f]{16}\]")
 
@@ -89,15 +92,15 @@ def frame_report(stamps):
     }
 
 
-def spike_report(lines):
-    """The slow-frame lines' steps: in how many slow frames each came, and its time there."""
+def spike_report(lines, pattern=SLOW, what="slow frame"):
+    """The slow-frame lines' steps (or the slow ticks'): in how many each came, and its time there."""
     steps = collections.defaultdict(lambda: {"frames": 0, "ms": 0.0, "cpu_ms": 0.0, "max_ms": 0.0})
     frames = []
     for line in lines:
-        m = SLOW.search(line)
+        m = pattern.search(line)
         if not m:
             continue
-        frames.append((float(m.group(1)), line[line.index("slow frame"):]))
+        frames.append((float(m.group(1)), line[line.index(what):]))
         for part in m.group(2).split(", "):
             sm = SPAN.match(part.strip())
             if not sm:
@@ -272,6 +275,7 @@ def main():
                 "frames": frame_report(stamps),
                 "game": json.loads(stats) if stats else None,
                 "slow_frames": spike_report(log[mark:]),
+                "slow_ticks": spike_report(log[mark:], SLOW_TICK, "slow tick"),
                 "page_thread": cpu_report(profile, args.top),
                 "errors": errors,
             }
@@ -311,6 +315,14 @@ def print_report(r):
               f"(cpu {row['cpu_ms']:.1f}), worst {row['max_ms']:.1f}")
     for line in s["slowest"][:5]:
         print("  >", line[:240])
+    t = r.get("slow_ticks")
+    if t and t["slow_frames"]:
+        print(f"\n## The server thread's slow ticks ({t['slow_frames']} ticks over the threshold)")
+        for row in t["steps"][:12]:
+            print(f"  {row['step']:<40} in {row['frames']:>4} ticks, {row['ms']:>8.1f} ms, "
+                  f"worst {row['max_ms']:.1f}")
+        for line in t["slowest"][:3]:
+            print("  >", line[:240])
     p = r["page_thread"]
     print(f"\n## The page's thread ({p['sampled_s']} s sampled, busy {p['busy_pct']}%, "
           f"browser internals {p['program_pct']}%, GC {p['gc_pct']}%)")

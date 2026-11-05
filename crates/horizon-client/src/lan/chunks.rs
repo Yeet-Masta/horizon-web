@@ -485,12 +485,23 @@ impl WarmPool {
     }
 }
 
+/// How many warm-up threads work beside the encoding one: natively one per
+/// core but its own; on the threaded web build as many as the chunk workers
+/// (the browser's cores bound them), where the server thread encoded every
+/// chunk alone, 30 to 80 ms of a tick as a player flew; none without threads.
+fn warm_threads() -> usize {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    return horizon_platform::thread::worker_count();
+    #[allow(unreachable_code)]
+    horizon_threads::worker_count().saturating_sub(1)
+}
+
 /// The warm-up threads, started the first time; none on a single core or
 /// when no thread could start.
 fn warm_pool() -> Option<&'static WarmPool> {
     static POOL: OnceLock<Option<Arc<WarmPool>>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let threads = horizon_threads::worker_count() - 1;
+        let threads = warm_threads();
         let pool = Arc::new(WarmPool {
             job: Default::default(),
             ready: Default::default(),
@@ -498,9 +509,10 @@ fn warm_pool() -> Option<&'static WarmPool> {
         let started = (0..threads)
             .filter(|i| {
                 let pool = pool.clone();
-                horizon_platform::thread::Builder::new()
-                    .name(format!("horizon-chunk-encode-{i}"))
-                    .spawn(move || {
+                // A worker on the web build: `Builder` runs its closure there and then.
+                horizon_platform::thread::spawn_worker(
+                    &format!("horizon-chunk-encode-{i}"),
+                    move || {
                         let mut done = 0;
                         loop {
                             let job = {
@@ -515,8 +527,9 @@ fn warm_pool() -> Option<&'static WarmPool> {
                                 job.run();
                             }
                         }
-                    })
-                    .is_ok()
+                    },
+                )
+                .is_ok()
             })
             .count();
         (started > 0).then_some(pool)
