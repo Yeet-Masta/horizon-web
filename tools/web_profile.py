@@ -277,6 +277,11 @@ def cpu_report(profile, top):
 
 
 def main():
+    # Windows writes a redirected report in its ANSI code page: a game log line or function name
+    # outside it would end the run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--resources", type=pathlib.Path, required=True, help="prepared resources zip")
     ap.add_argument("--dist", type=pathlib.Path, default=ROOT / "web" / "dist")
@@ -418,7 +423,7 @@ def main():
                 page.keyboard.up("w")
                 page.keyboard.up("Control")
             report = {
-                "build": json.loads((dist / "build.json").read_text()),
+                "build": json.loads((dist / "build.json").read_text(encoding="utf-8")),
                 "browser": args.channel or "chromium (SwiftShader)",
                 "machine": machine,
                 "profile_dir": bool(args.profile_dir),
