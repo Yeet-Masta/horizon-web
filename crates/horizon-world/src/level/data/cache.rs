@@ -5,12 +5,14 @@
 //! versions, corrupt payloads and write failures always use the normal loader.
 //! Snapshots live in the game's own cache folder ([`set_dir`]), never in the
 //! resource folder: that one is shared by worktrees and copied between installed
-//! versions by the launcher. Its key includes the running executable, so a build
-//! that resolves the tables differently never reads another build's snapshot.
+//! versions by the launcher. Its key includes a hash of the code that resolves
+//! the tables (this crate, `horizon-core`, their dependencies; see `build.rs`),
+//! so a build that resolves them differently never reads another build's
+//! snapshot, while a rebuild that only touched other crates keeps them.
 use super::*;
 use crate::registry::snapshot as registry_snapshot;
 use horizon_platform::sync::Mutex;
-use horizon_platform::time::{SystemTime, UNIX_EPOCH};
+use horizon_platform::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -142,26 +144,18 @@ struct Item {
     game_master: bool,
 }
 
-/// The running executable's stamp: the version constant alone misses loader
-/// changes that keep a snapshot's layout.
-fn hash_executable(hasher: &mut Sha256) -> io::Result<()> {
-    let exe = horizon_platform::env::current_exe()?;
-    let built = fs::metadata(&exe)?;
-    hash_str(hasher, &exe.to_string_lossy());
-    hasher.update(built.len().to_le_bytes());
-    let modified = built
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| invalid(e.to_string()))?;
-    hasher.update(modified.as_nanos().to_le_bytes());
-    Ok(())
+/// The build that resolves the tables: a hash of this crate's and
+/// `horizon-core`'s sources, `Cargo.lock` and the profile (`build.rs`). The
+/// version constant alone misses loader changes that keep a snapshot's layout.
+fn hash_build(hasher: &mut Sha256) {
+    hash_str(hasher, env!("HORIZON_WORLD_SOURCES"));
 }
 
 fn fingerprint(registry: &BlockRegistry, root: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(b"horizon resolved behaviours 2");
     // The build that resolved the tables.
-    hash_executable(&mut hasher)?;
+    hash_build(&mut hasher);
     hasher.update(sources_digest(root)?);
     // The registry argument may be modified independently of facts.json.
     hasher.update((registry.len() as u64).to_le_bytes());
@@ -866,7 +860,7 @@ fn write(
 fn registry_fingerprint(root: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     hasher.update(b"horizon block registry 1");
-    hash_executable(&mut hasher)?;
+    hash_build(&mut hasher);
     hasher.update(paths_digest(root, &[root.join("facts.json")])?);
     Ok(hasher.finalize().into())
 }

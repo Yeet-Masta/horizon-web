@@ -128,6 +128,7 @@ pub fn knockback_canceled(pushed: Hurting<'_>, knock: &mut Knock) -> bool {
     }
     canceled
 }
+#[derive(Clone)]
 pub struct HealthResources {
     pub damage: Catalog,
     pub ids: PlayerFloatIds,
@@ -143,7 +144,7 @@ impl HealthResources {
                 ids[name].as_u64().ok_or("missing player float ID")?,
             )?)
         };
-        let damage = Catalog::from_json(&read("damage-catalog.json")?, &read("damage-tags.json")?)?;
+        let damage = Catalog::load(root, &horizon_world::loot::PackOverlay::NONE)?;
         for name in ["minecraft:fall", "minecraft:stalagmite", "minecraft:starve"] {
             if damage.id(name).is_none() {
                 return Err(format!("missing damage type {name}").into());
@@ -155,6 +156,23 @@ impl HealthResources {
                 health: id("health")?,
                 absorption: id("absorption")?,
             },
+        })
+    }
+    /// A world's frozen damage registry at open, or reloaded tags against
+    /// that same registry. Player metadata IDs stay the prepared version's.
+    pub fn with_packs(
+        &self,
+        root: &Path,
+        overlay: &horizon_world::loot::PackOverlay<'_>,
+        reload: bool,
+    ) -> Result<Self> {
+        Ok(Self {
+            damage: if reload {
+                self.damage.reload_tags(root, overlay)?
+            } else {
+                Catalog::load(root, overlay)?
+            },
+            ids: self.ids,
         })
     }
     pub fn landing_source(&self, source: LandingDamage) -> DamageTypeId {
@@ -1003,6 +1021,9 @@ impl ServerPlayerHurtWorld for Environment<'_> {
         Ok(true)
     }
 }
+
+#[cfg(test)]
+mod datapack_tests;
 
 #[cfg(test)]
 mod tests {

@@ -238,6 +238,7 @@ impl Game<'_> {
             return;
         };
         let mut announce = false;
+        let mut stopped = None;
         for event in sharing.host.poll() {
             match event {
                 HostEvent::Code(code) => {
@@ -261,6 +262,14 @@ impl Game<'_> {
                 HostEvent::Connected { direct: true, .. } => sharing.paths.0 += 1,
                 HostEvent::Connected { direct: false, .. } => sharing.paths.1 += 1,
                 HostEvent::Disconnected { .. } => {}
+                HostEvent::RelayStopped => {
+                    let text = lang::get_or(
+                        "horizon.friends.relay_stopped",
+                        "Too many wrong short codes, so the relay is off until you share again. Friends can still join with the full code.",
+                    );
+                    sharing.notice = Some(text.clone());
+                    stopped = Some(text);
+                }
             }
         }
         // Friends' browsers whose data channels opened join as LAN guests.
@@ -271,6 +280,9 @@ impl Game<'_> {
                 (None, Some(lan)) => lan.hub.lan.accept_web(socket),
                 (None, None) => {}
             }
+        }
+        if let Some(text) = stopped {
+            self.system_message(Text::literal(text));
         }
         if announce {
             self.system_message(Text::literal(lang::get_or(

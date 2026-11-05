@@ -1,7 +1,8 @@
 struct Hud {
     size: vec4<f32>,
     // Blend::EndPortal: atlas rects (u0, v0, width, height) of end_sky.png and
-    // end_portal.png, then vanilla's GameTime in x.
+    // end_portal.png, then vanilla's GameTime in x and PvP & HUD's glint colour in yzw
+    // (y below 0: vanilla's).
     end_portal: array<vec4<f32>, 3>,
 }
 @group(0) @binding(0) var<uniform> hud: Hud;
@@ -38,7 +39,11 @@ struct Out {
     let g = textureSample(glint_tex, glint_sampler, in.glint_uv);
     if glinted {
         if t.a < 0.1 { discard; }
-        let glint = hud.size.w * g;
+        var glint = hud.size.w * g;
+        let tint = hud.end_portal[2].yzw;
+        if tint.x >= 0.0 {
+            glint = vec4(max(glint.r, max(glint.g, glint.b)) * tint, glint.a);
+        }
         return vec4(glint.rgb * glint.rgb, t.a);
     }
     let c = t * in.color;
