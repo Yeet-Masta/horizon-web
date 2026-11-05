@@ -25,6 +25,7 @@ joins smoothly the second time compiled shaders the first.
 
     python3 tools/web_profile.py --resources .local/horizon-web-resources.zip
     python3 tools/web_profile.py --resources R --channel chrome     # the installed Chrome, its GPU
+    python3 tools/web_profile.py --resources R --browser PATH/chrome.exe   # another Chromium
     python3 tools/web_profile.py --resources R --dist D --out profile.json
     python3 tools/web_profile.py --resources R --channel chrome --seconds 15 --trace trace.json
 
@@ -291,6 +292,9 @@ def main():
     ap.add_argument("--still", action="store_true", help="stand still instead of flying forward")
     ap.add_argument("--channel", help="a browser of this machine: chrome, msedge (default: "
                     "Playwright's Chromium on SwiftShader)")
+    ap.add_argument("--browser", type=pathlib.Path,
+                    help="a Chromium-based browser's executable to run (Chromium, Brave...), with "
+                    "its GPU, as --channel does for an installed Chrome or Edge")
     ap.add_argument("--seed", default="777")
     ap.add_argument("--size", default="1280x720", help="the page's size (smaller: less GPU work)")
     ap.add_argument("--render-distance", type=int, help="chunks (the game's --render-distance)")
@@ -329,9 +333,12 @@ def main():
             except OSError:
                 time.sleep(0.2)
         with sync_playwright() as pw:
-            launch = {"headless": False, "args": (GPU if args.channel else SWIFTSHADER) + COMMON}
+            real_gpu = bool(args.channel or args.browser)
+            launch = {"headless": False, "args": (GPU if real_gpu else SWIFTSHADER) + COMMON}
             if args.channel:
                 launch["channel"] = args.channel
+            if args.browser:
+                launch["executable_path"] = str(args.browser)
             width, height = (int(v) for v in args.size.split("x"))
             viewport = {"width": width, "height": height}
             if args.profile_dir:
@@ -426,7 +433,8 @@ def main():
                 page.keyboard.up("Control")
             report = {
                 "build": json.loads((dist / "build.json").read_text(encoding="utf-8")),
-                "browser": args.channel or "chromium (SwiftShader)",
+                "browser": args.channel or (args.browser and args.browser.stem)
+                or "chromium (SwiftShader)",
                 "machine": machine,
                 "profile_dir": bool(args.profile_dir),
                 "moving": not args.still,
