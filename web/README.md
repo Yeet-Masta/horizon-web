@@ -168,6 +168,7 @@ or block in a browser, and that shows only when it runs. Two checks catch it
 python3 tools/web_hazards.py              # the wasm32 build linted for those calls (web/clippy-web)
 python3 tools/web_hazards.py --update     # accept the ones that run only natively (web/hazards.json)
 python3 tools/web_smoke.py --resources .local/horizon-web-resources.zip   # web/dist in Chromium
+python3 tools/web_smoke.py --dist DIR --resources ...    # another build: an unpacked zip, say
 ```
 
 The smoke test (Playwright for Python: `pip install playwright`) serves `web/dist`, checks

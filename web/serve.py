@@ -84,10 +84,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--resources", type=pathlib.Path, default=ROOT / ".local" / "horizon-web-resources.zip")
+    parser.add_argument("--dist", type=pathlib.Path, default=HERE / "dist",
+                        help="the built page to serve (default web/dist): an unpacked CI zip, say")
     args = parser.parse_args()
-    dist = HERE / "dist"
+    dist = args.dist
     if not (dist / "index.html").is_file():
-        raise SystemExit("web/dist is empty: run web/build.sh first")
+        raise SystemExit(f"{dist} is empty: run web/build.sh first")
     handler = functools.partial(Handler, directory=str(dist), resources=args.resources)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     found = "found" if args.resources.is_file() else "none yet: web/pack-resources.sh"

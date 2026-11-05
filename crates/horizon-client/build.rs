@@ -19,6 +19,12 @@ fn main() {
         };
         println!("cargo:rustc-link-arg-bin=horizon-client={arg}");
     }
+    // The web build's page thread too: wasm-ld gives 1 MB, below the module's data, and a
+    // release build's handoff to the game (`Loading::finish`, `start_game`, `Game::new`, their
+    // inlined structs) took more, the overflow reading past the end of memory.
+    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
+        println!("cargo:rustc-link-arg-bin=horizon-client=-zstack-size=8388608");
+    }
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut resource = winresource::WindowsResource::new();

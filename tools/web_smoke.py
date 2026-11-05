@@ -57,6 +57,8 @@ def changes(page, wait_ms=4000):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--resources", type=pathlib.Path, help="prepared resources zip: also play")
+    ap.add_argument("--dist", type=pathlib.Path, default=ROOT / "web" / "dist",
+                    help="the built page to test (default web/dist): an unpacked CI zip, say")
     ap.add_argument("--join-timeout", type=float, default=240, help="seconds to join the world")
     ap.add_argument("--play", type=float, default=20, help="seconds the page must keep drawing")
     ap.add_argument("--screenshot", type=pathlib.Path, help="save the last frame here")
@@ -64,12 +66,13 @@ def main():
                     help="crash the browser's GPU process while playing (as chrome://gpucrash): "
                     "the game must get a new device and draw on")
     args = ap.parse_args()
-    if not (ROOT / "web" / "dist" / "pkg").is_dir():
-        sys.exit("web_smoke: no web/dist: build it first (web/build.sh)")
+    dist = args.dist.resolve()
+    if not (dist / "pkg").is_dir():
+        sys.exit(f"web_smoke: no {dist}/pkg: build it first (web/build.sh)")
     from playwright.sync_api import sync_playwright
 
     port = free_port()
-    serve = [sys.executable, str(ROOT / "web" / "serve.py"), "--port", str(port)]
+    serve = [sys.executable, str(ROOT / "web" / "serve.py"), "--port", str(port), "--dist", str(dist)]
     if args.resources:
         serve += ["--resources", str(args.resources.resolve())]
     server = subprocess.Popen(serve, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -105,7 +108,7 @@ def main():
             page.wait_for_selector("#sign-in:not([disabled])", timeout=120_000)
             print(f"web_smoke: the module loaded in {time.time() - started:.1f} s", flush=True)
             # A build whose panics unwind (web/unwind.toml) catches one: std's catch_unwind works.
-            build = json.loads((ROOT / "web" / "dist" / "build.json").read_text())
+            build = json.loads((dist / "build.json").read_text())
             if build.get("unwind"):
                 if page.evaluate("globalThis.horizonGlue.horizon_panics_unwind()"):
                     print("web_smoke: a panic unwound and was caught", flush=True)
