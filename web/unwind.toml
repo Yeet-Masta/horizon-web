@@ -1,7 +1,7 @@
 # The web build's panics unwind (web/README.md): std's catch_unwind works as it does natively, so
 # a panic in a chunk job or a server tick is caught where the game catches it (the job pool, the
 # crash report) instead of trapping the thread it ran on. WebAssembly exception handling (every
-# browser with WebGPU has it); std is built with panic_unwind (web/build.sh). The one-thread
+# browser with WebGPU has it); std is built with panic_unwind (web/build.sh). The one-thread wasm32
 # build, on stable's prebuilt std, still aborts.
 [target.wasm64-unknown-unknown]
 rustflags = ["-Cpanic=unwind", "-Ctarget-feature=+exception-handling"]

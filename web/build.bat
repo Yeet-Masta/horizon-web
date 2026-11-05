@@ -2,17 +2,20 @@
 rem Builds the web version of the game into web\dist on Windows (web\README.md); web/build.sh
 rem is the same for Linux and macOS.
 rem
-rem   web\build.bat              wasm32 with threads, the default
-rem   web\build.bat --wasm64     wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
-rem   web\build.bat --no-threads one thread: no shared memory, so no COOP/COEP headers needed
-rem   web\build.bat --fast       the quicker-to-build `fast` profile (no LTO) instead of release
+rem   web\build.bat                wasm32 with threads, the default
+rem   web\build.bat --wasm64       wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
+rem   web\build.bat --no-threads   one thread: no shared memory, so no COOP/COEP headers needed
+rem   web\build.bat --fast         the quicker-to-build `fast` profile (no LTO) instead of release
+rem   web\build.bat --config FILE  adds a cargo config (rustflags, say), as web\simd.toml does
+rem   web\build.bat --abort        panics abort the thread they happen on instead of unwinding
+rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
 rem
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
-rem WebGPU has.
-rem Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
-rem wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
-rem (binaryen) is used when it is on the PATH. Serve the result with: python web\serve.py
-setlocal EnableExtensions
+rem WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs
+rem the wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
+rem (binaryen) and brotli are used when they are on the PATH. Serve the result with:
+rem python web\serve.py
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "here=%~dp0"
 set "here=%here:~0,-1%"
@@ -20,6 +23,8 @@ for %%r in ("%here%\..") do set "root=%%~fr"
 set "target=wasm32-unknown-unknown"
 set "profile=release"
 set "threads=1"
+set "unwind=1"
+set "extra="
 
 :args
 if "%~1"=="" goto args_done
@@ -29,14 +34,22 @@ if /i "%~1"=="--release" (set "profile=release" & shift & goto args)
 if /i "%~1"=="--fast" (set "profile=fast" & shift & goto args)
 if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
+if /i "%~1"=="--abort" (set "unwind=0" & shift & goto args)
+rem cmd splits --config=FILE at the `=`: both spellings arrive as --config then FILE.
+if /i "%~1"=="--config" (
+  if "%~2"=="" (echo --config needs a file 1>&2 & exit /b 2)
+  set "extra=!extra! --config %~2"
+  shift & shift & goto args
+)
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm64] [--no-threads] [--fast]
-echo   default: wasm32 with threads on nightly Rust, release profile; --wasm64 for up to 8 GiB;
-echo   --no-threads for servers without COOP/COEP headers; --fast to build quicker, without LTO
+echo web\build.bat [--wasm64] [--no-threads] [--fast] [--config FILE] [--abort]
+echo   default: wasm32 with threads on nightly Rust, release profile, panics that unwind;
+echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
+echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort
 exit /b 0
 :args_done
 
@@ -59,16 +72,26 @@ if not "%have%"=="%pinned%" (
 )
 
 rem No sound device, controllers or mod runtime in a browser (web\README.md).
-set "crate=-p horizon-client --bin horizon-client --no-default-features --config web/simd.toml"
+set "crate=-p horizon-client --bin horizon-client --no-default-features --config web/simd.toml%extra%"
 rem wasm64 is a tier 3 target, and threads need std built with atomics: std is built here, with
-rem the nightly toolchain. web\threads.toml adds shared memory and atomics.
+rem the nightly toolchain. web\threads.toml adds shared memory and atomics. Builds that make std
+rem can unwind (web\unwind.toml, unless --abort); the one-thread wasm32 build, on stable's prebuilt
+rem std, aborts.
 set "nightly=%threads%"
 if "%target%"=="wasm64-unknown-unknown" set "nightly=1"
+set "unwinds=0"
+if "%nightly%"=="1" if "%unwind%"=="1" set "unwinds=1"
 set "config="
 if "%threads%"=="1" set "config=--config web/threads.toml"
+set "panic_std=panic_abort"
+if "%unwinds%"=="1" (
+  set "config=%config% --config web/unwind.toml"
+  set "panic_std=panic_unwind"
+)
 if "%nightly%"=="1" (
   rustup component add rust-src --toolchain nightly >nul || exit /b 1
-  cargo +nightly build -Zbuild-std=std,panic_abort %config% --target %target% --profile %profile% %crate% || exit /b 1
+  rustup target add %target% --toolchain nightly >nul 2>nul
+  cargo +nightly build -Zbuild-std=std,%panic_std% %config% --target %target% --profile %profile% %crate% || exit /b 1
 ) else (
   rustup target add wasm32-unknown-unknown >nul || exit /b 1
   cargo build --target %target% --profile %profile% %crate% || exit /b 1
@@ -94,6 +117,8 @@ if errorlevel 1 (
   if "%target%"=="wasm64-unknown-unknown" set "memory64=--enable-memory64"
   set "atomics="
   if "%threads%"=="1" set "atomics=--enable-threads"
+  set "exceptions="
+  if "%unwinds%"=="1" set "exceptions=--enable-exception-handling"
   call :optimize || exit /b 1
 )
 
@@ -103,19 +128,43 @@ copy /y "%here%\worker.js" "%dist%\" >nul || exit /b 1
 copy /y "%here%\coi.js" "%dist%\" >nul || exit /b 1
 copy /y "%here%\apache.htaccess" "%dist%\.htaccess" >nul || exit /b 1
 copy /y "docs\media\brand\web\favicon.svg" "%dist%\" >nul || exit /b 1
-for %%f in (Geist-Regular.ttf PixelifySans-SemiBold.ttf OFL-Geist.txt OFL-PixelifySans.txt) do (
+for %%f in (Geist-Regular.ttf PixelifySans-SemiBold.ttf) do (
   copy /y "crates\horizon-theme\fonts\%%f" "%dist%\fonts\" >nul || exit /b 1
+)
+for %%f in ("crates\horizon-theme\fonts\OFL-*.txt") do (
+  copy /y "%%~f" "%dist%\fonts\" >nul || exit /b 1
 )
 set "commit=unknown"
 for /f %%c in ('git rev-parse --short HEAD 2^>nul') do set "commit=%%c"
 set "threads_json=false"
 if "%threads%"=="1" set "threads_json=true"
->"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"simd":true,"tailCall":true,"commit":"%commit%"}
+set "unwind_json=false"
+if "%unwinds%"=="1" set "unwind_json=true"
+>"%dist%\build.json" echo {"target":"%target%","profile":"%profile%","threads":%threads_json%,"simd":true,"tailCall":true,"unwind":%unwind_json%,"commit":"%commit%"}
+
+rem Brotli beside each text and module file (`.br`): web\serve.py and the .htaccess serve it to
+rem browsers that accept it (all current ones), with `Content-Encoding: br`, so the module
+rem downloads at about a fifth of its size and still compiles as it streams. Quality 11 for a
+rem release, 9 (seconds, not minutes) for --fast; BROTLI_QUALITY sets it. Without the `brotli`
+rem tool on the PATH the files are served as they are.
+where brotli >nul 2>nul
+if errorlevel 1 (
+  echo brotli not found: the module is served uncompressed ^(install brotli to compress it^) 1>&2
+) else (
+  set "quality=9"
+  if "%profile%"=="release" set "quality=11"
+  if defined BROTLI_QUALITY set "quality=%BROTLI_QUALITY%"
+  for /r "%dist%" %%f in (*.wasm *.js *.html *.json *.svg) do (
+    brotli -f -k -q !quality! --lgwin=24 "%%f" || exit /b 1
+  )
+  echo web\dist: Brotli at quality !quality!
+)
+
 for %%s in ("%dist%\pkg\horizon-client_bg.wasm") do set /a "mb=%%~zs / 1048576"
-echo web\dist: %mb% MB module (%target%, %profile%, threads %threads_json%)
+echo web\dist: %mb% MB module (%target%, %profile%, threads %threads_json%, unwind %unwind_json%)
 echo Serve it with: python web\serve.py   (then open http://localhost:8080/)
 exit /b 0
 
 :optimize
-wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const %memory64% %atomics% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
+wasm-opt -O2 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue --enable-simd --enable-tail-call --enable-extended-const %memory64% %atomics% %exceptions% "%dist%\pkg\horizon-client_bg.wasm" -o "%dist%\pkg\horizon-client_bg.wasm"
 exit /b %errorlevel%
