@@ -2012,9 +2012,6 @@ type WebDevice = (wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue);
 #[cfg(target_family = "wasm")]
 thread_local! {
     static WEB_DEVICE: std::cell::RefCell<Option<WebDevice>> = const { std::cell::RefCell::new(None) };
-    /// The page's canvas, handed to the game's worker when its loop runs there
-    /// (`horizon_platform::web::worker_canvas`): its surfaces draw on it.
-    static WEB_CANVAS: std::cell::RefCell<Option<web_sys::OffscreenCanvas>> = const { std::cell::RefCell::new(None) };
 }
 /// The web device's `max_texture_array_layers`, for threads other than the
 /// page's (0 until it is open).
@@ -2023,11 +2020,6 @@ static WEB_LAYERS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::
 /// Opens the browser's WebGPU device, with what `open_device` asks natively.
 #[cfg(target_family = "wasm")]
 pub async fn open_web_device() -> Result<()> {
-    #[cfg(target_feature = "atomics")]
-    if let Some(canvas) = horizon_platform::web::worker_canvas() {
-        use wasm_bindgen::JsCast;
-        WEB_CANVAS.set(Some(canvas.unchecked_into()));
-    }
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::BROWSER_WEBGPU;
     let instance = wgpu::Instance::new(descriptor);
@@ -2075,6 +2067,33 @@ pub async fn open_web_device() -> Result<()> {
     WEB_DEVICE.set(Some((instance, adapter, device, queue)));
     Ok(())
 }
+#[cfg(target_family = "wasm")]
+thread_local! {
+    /// A new device is being asked for ([`reopen_web_device`]).
+    static WEB_REOPENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The device was lost: a lost device stays lost, so the browser is asked for another (which
+/// answers later: [`web_device_ready`]) for the renderer the game rebuilds.
+#[cfg(target_family = "wasm")]
+fn reopen_web_device() {
+    if WEB_REOPENING.replace(true) {
+        return;
+    }
+    WEB_DEVICE.set(None);
+    wasm_bindgen_futures::spawn_local(async {
+        match open_web_device().await {
+            Ok(()) => log::info!("Horizon renderer: a new graphics device is open"),
+            Err(e) => log::error!("Horizon renderer: no new graphics device: {e}"),
+        }
+        WEB_REOPENING.set(false);
+    });
+}
+/// Whether a device is open to build a renderer on (none while a lost one is replaced).
+#[cfg(target_family = "wasm")]
+pub fn web_device_ready() -> bool {
+    WEB_DEVICE.with_borrow(Option::is_some)
+}
+
 /// The device [`open_web_device`] opened, and a surface on the window's canvas.
 #[cfg(target_family = "wasm")]
 async fn open_device(
@@ -2096,13 +2115,10 @@ async fn open_device(
         }
         log::warn!("Horizon renderer: the graphics device was lost ({reason:?}: {message})");
         lost.store(true, std::sync::atomic::Ordering::Relaxed);
+        reopen_web_device();
     });
     let surface = if offscreen {
         None
-    } else if let Some(canvas) = WEB_CANVAS.with_borrow(Clone::clone) {
-        // A worker draws on the page's canvas through an OffscreenCanvas: the window's canvas
-        // element stays on the page.
-        Some(instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))?)
     } else {
         Some(instance.create_surface(window.clone())?)
     };

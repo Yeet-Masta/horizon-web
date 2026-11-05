@@ -32,8 +32,7 @@ not out of a loaded copy of the whole struct, so a member an atomic function use
 `third_party/winit` is [winit](https://github.com/rust-windowing/winit) 0.30.13 by the winit
 contributors, under the Apache License 2.0 (`third_party/winit/LICENSE`). Its web callbacks are
 made with wasm-bindgen's `own_assert_unwind_safe` / `once_assert_unwind_safe`, so the web build
-compiles with panics that unwind (web/unwind.toml), and its web backend has a remote event loop
-(`platform::web::RemoteEventLoop`) for the game's loop in a Web Worker (web/README.md).
+compiles with panics that unwind (web/unwind.toml).
 
 ## xxhash-rust
 

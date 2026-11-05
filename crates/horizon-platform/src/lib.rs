@@ -43,16 +43,10 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
     #[cfg(target_family = "wasm")]
     {
         use std::task::{Context, Poll, Waker};
-        // A frame of the game's worker suspends until the browser settles it (JSPI).
-        #[cfg(target_feature = "atomics")]
-        if web::jspi::in_frame() {
-            return web::jspi::block_on(future, None).expect("no limit");
-        }
         let mut future = std::pin::pin!(future);
-        // A worker may wait: it parks until the future's waker unparks it. Not one whose own
-        // event loop settles what it waits on (the game's, `web::owns_event_loop`).
+        // A worker may wait: it parks until the future's waker unparks it.
         #[cfg(target_feature = "atomics")]
-        if !web::owns_event_loop() {
+        if !web::on_page_thread() {
             struct Unpark(std::thread::Thread);
             impl std::task::Wake for Unpark {
                 fn wake(self: std::sync::Arc<Self>) {
@@ -80,9 +74,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> F::Output {
 
 /// [`block_on`], except that on the web a future still waiting after one
 /// poll gives `pending`: a WebGPU error scope answers only once the page's
-/// event loop turns, so the web build reads it as no error. A frame of the
-/// game's loop in a worker waits for it, up to two seconds, where the browser
-/// has JSPI (`web::jspi`).
+/// event loop turns, so the web build reads it as no error.
 pub fn block_on_or<F: std::future::Future>(future: F, pending: F::Output) -> F::Output {
     #[cfg(not(target_family = "wasm"))]
     {
@@ -92,12 +84,6 @@ pub fn block_on_or<F: std::future::Future>(future: F, pending: F::Output) -> F::
     #[cfg(target_family = "wasm")]
     {
         use std::task::{Context, Poll, Waker};
-        // A frame of the game's worker waits for the answer (JSPI), for up to two seconds.
-        #[cfg(target_feature = "atomics")]
-        if web::jspi::in_frame() {
-            return web::jspi::block_on(future, Some(std::time::Duration::from_secs(2)))
-                .unwrap_or(pending);
-        }
         let mut future = std::pin::pin!(future);
         match future
             .as_mut()

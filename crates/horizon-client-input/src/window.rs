@@ -49,55 +49,12 @@ pub mod pointer_lock {
     }
     /// When the game last asked, and whether the browser has given it since.
     static ASKED: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
-    /// Whether the page holds the lock, for a game whose loop runs in a worker, which has no
-    /// document to ask ([`watch_page`]).
-    static PAGE_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    /// When the player last pressed a key or a button on the page (`Date.now()`), for a game in
-    /// a worker, which has no `navigator.userActivation` ([`watch_page`]).
-    static PAGE_INPUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    /// How long after the player's input a page may ask: browsers keep it for 5 s.
-    const ACTIVATION_MS: f64 = 4000.0;
-
-    /// On the page, for a game in a worker: keeps [`state`]'s and [`may_ask`]'s view of the
-    /// page.
-    pub fn watch_page() {
-        use wasm_bindgen::{JsCast, closure::Closure};
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            return;
-        };
-        let input = Closure::<dyn FnMut()>::own_assert_unwind_safe(|| {
-            PAGE_INPUT.store(js_sys::Date::now() as u64, std::sync::atomic::Ordering::Relaxed);
-        });
-        for event in ["pointerdown", "keydown"] {
-            let _ = document.add_event_listener_with_callback_and_bool(
-                event,
-                input.as_ref().unchecked_ref(),
-                true,
-            );
-        }
-        input.forget();
-        let watched = document.clone();
-        let changed = Closure::<dyn FnMut()>::own_assert_unwind_safe(move || {
-            PAGE_HELD.store(
-                watched.pointer_lock_element().is_some(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-        });
-        let _ = document
-            .add_event_listener_with_callback("pointerlockchange", changed.as_ref().unchecked_ref());
-        changed.forget();
-    }
 
     /// Whether asking for the lock can work: browsers give it only in answer
     /// to the player's input (`navigator.userActivation`), and refuse
     /// otherwise with an error the page reports. True where the browser
     /// doesn't say.
     pub fn may_ask() -> bool {
-        // A game in a worker: the page's last input (`watch_page`).
-        if web_sys::window().is_none() {
-            let last = PAGE_INPUT.load(std::sync::atomic::Ordering::Relaxed) as f64;
-            return js_sys::Date::now() - last < ACTIVATION_MS;
-        }
         let get = |object: &wasm_bindgen::JsValue, key: &str| {
             js_sys::Reflect::get(object, &key.into()).unwrap_or(wasm_bindgen::JsValue::UNDEFINED)
         };
@@ -110,10 +67,9 @@ pub mod pointer_lock {
     }
     /// What became of the lock the game last asked for.
     pub fn state() -> Lock {
-        let held = match web_sys::window().and_then(|w| w.document()) {
-            Some(document) => document.pointer_lock_element().is_some(),
-            None => PAGE_HELD.load(std::sync::atomic::Ordering::Relaxed),
-        };
+        let held = web_sys::window()
+            .and_then(|w| w.document())
+            .is_some_and(|d| d.pointer_lock_element().is_some());
         let mut asked = ASKED.lock().unwrap();
         match (&mut *asked, held) {
             (Some((_, given)), true) => {

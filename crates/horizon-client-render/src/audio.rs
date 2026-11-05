@@ -2063,58 +2063,18 @@ mod web_output {
         },
     }
 
-    /// The page's WebAudio output: here, or for a game whose loop runs in a worker, on the
-    /// page (a worker has no AudioContext), kept there by number until this is dropped.
-    pub enum Output {
-        // Held for its Drop.
-        Here(#[allow(dead_code)] PageOutput),
-        #[cfg(target_feature = "atomics")]
-        OnPage(usize),
-    }
-    #[cfg(target_feature = "atomics")]
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    #[cfg(target_feature = "atomics")]
-    thread_local! {
-        /// The outputs the page opened for a worker, by number.
-        static ON_PAGE: RefCell<std::collections::HashMap<usize, PageOutput>> = RefCell::default();
-    }
-    impl Output {
-        pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
-            #[cfg(target_feature = "atomics")]
-            if !horizon_platform::web::on_page_thread() {
-                let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                horizon_platform::web::run_on_page(Box::new(move || {
-                    match PageOutput::open(mixer) {
-                        Ok(output) => ON_PAGE.with_borrow_mut(|m| m.insert(id, output)),
-                        Err(e) => {
-                            log::warn!("Horizon: no sound ({e})");
-                            None
-                        }
-                    };
-                }));
-                return Ok(Self::OnPage(id));
-            }
-            PageOutput::open(mixer).map(Self::Here)
-        }
-    }
-    #[cfg(target_feature = "atomics")]
-    impl Drop for Output {
-        fn drop(&mut self) {
-            if let Self::OnPage(id) = *self {
-                horizon_platform::web::run_on_page(Box::new(move || {
-                    ON_PAGE.with_borrow_mut(|m| m.remove(&id));
-                }));
-            }
-        }
-    }
-
-    pub struct PageOutput {
+    pub struct Output {
         context: web_sys::AudioContext,
         /// Empty until the worklet's module has loaded.
         node: Rc<RefCell<Option<Node>>>,
-        _resume: Closure<dyn FnMut()>,
+        /// Starts the context on the player's first input: listening on the document until
+        /// this is dropped.
+        resume: Closure<dyn FnMut()>,
+        document: Option<web_sys::Document>,
     }
-    impl PageOutput {
+    /// The player's input that lets a page make sound.
+    const RESUME_ON: [&str; 2] = ["pointerdown", "keydown"];
+    impl Output {
         pub fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Self> {
             let context = web_sys::AudioContext::new().map_err(js)?;
             let rate = context.sample_rate() as u32;
@@ -2136,8 +2096,9 @@ mod web_output {
                     }
                 })
             };
-            if let Some(document) = web_sys::window().and_then(|w| w.document()) {
-                for event in ["pointerdown", "keydown"] {
+            let document = web_sys::window().and_then(|w| w.document());
+            if let Some(document) = &document {
+                for event in RESUME_ON {
                     let _ = document
                         .add_event_listener_with_callback(event, resume.as_ref().unchecked_ref());
                 }
@@ -2146,12 +2107,22 @@ mod web_output {
             Ok(Self {
                 context,
                 node,
-                _resume: resume,
+                resume,
+                document,
             })
         }
     }
-    impl Drop for PageOutput {
+    impl Drop for Output {
         fn drop(&mut self) {
+            // A listener left on the document would call the dropped closure.
+            if let Some(document) = &self.document {
+                for event in RESUME_ON {
+                    let _ = document.remove_event_listener_with_callback(
+                        event,
+                        self.resume.as_ref().unchecked_ref(),
+                    );
+                }
+            }
             match self.node.borrow_mut().take() {
                 #[cfg(target_feature = "atomics")]
                 Some(Node::Worklet(node, ring)) => worklet::stop(&node, &ring),

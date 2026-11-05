@@ -24,7 +24,7 @@ arboard = { version = "3.6.1", default-features = false, features = ["wayland-da
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen = "0.2.129"
 js-sys = "0.3.106"
-web-sys = { version = "0.3.106", features = ["Document", "Window", "Element", "EventTarget", "HtmlCanvasElement"] }
+web-sys = { version = "0.3.106", features = ["Document", "Window", "Element", "HtmlCanvasElement"] }
 
 [features]
 controllers = ["dep:horizon-dualsense"]

@@ -73,7 +73,7 @@ impl CustomCursor {
         match source {
             CustomCursorSource::Image(image) => Self::build_spawn(
                 event_loop,
-                from_rgba(event_loop.page().runner.window(), event_loop.page().runner.document().clone(), &image),
+                from_rgba(event_loop.runner.window(), event_loop.runner.document().clone(), &image),
                 false,
             ),
             CustomCursorSource::Url { url, hotspot_x, hotspot_y } => Self::build_spawn(
@@ -84,7 +84,7 @@ impl CustomCursor {
             CustomCursorSource::Animation { duration, cursors } => Self::build_spawn(
                 event_loop,
                 from_animation(
-                    event_loop.page().runner.main_thread(),
+                    event_loop.runner.main_thread(),
                     duration,
                     cursors.into_iter().map(|cursor| cursor.inner),
                 ),
@@ -102,7 +102,7 @@ impl CustomCursor {
         let this = CustomCursor {
             animation,
             state: Arc::new(MainThreadSafe::new(
-                window_target.page().runner.main_thread(),
+                window_target.runner.main_thread(),
                 RefCell::new(ImageState::Loading {
                     notifier: Notifier::new(),
                     _handle: DropAbortHandle::new(handle.clone()),
@@ -110,7 +110,7 @@ impl CustomCursor {
             )),
         };
         let weak = Arc::downgrade(&this.state);
-        let main_thread = window_target.page().runner.main_thread();
+        let main_thread = window_target.runner.main_thread();
 
         let task = Abortable::new(handle, {
             async move {
@@ -152,7 +152,7 @@ impl CustomCursor {
         source: CustomCursorSource,
     ) -> CustomCursorFuture {
         let CustomCursor { animation, state } = Self::new(event_loop, source);
-        let binding = state.get(event_loop.page().runner.main_thread()).borrow();
+        let binding = state.get(event_loop.runner.main_thread()).borrow();
         let ImageState::Loading { notifier, .. } = binding.deref() else {
             unreachable!("found invalid state")
         };

@@ -205,9 +205,6 @@
  "crates/horizon-client/src/game/split/players.rs": {
   "std::path::Path::exists": 1
  },
- "crates/horizon-client/src/game/web/worker_loop.rs": {
-  "std::sync::mpsc::Receiver::recv": 1
- },
  "crates/horizon-client/src/game/world_loading.rs": {
   "std::path::Path::exists": 1
  },

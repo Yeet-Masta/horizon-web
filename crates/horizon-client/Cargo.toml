@@ -94,7 +94,7 @@ wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
 js-sys = "0.3.106"
 web-sys = { version = "0.3.106", features = [
-    "Document", "Window", "Element", "EventTarget", "HtmlCanvasElement", "OffscreenCanvas",
+    "Document", "Window", "Element", "EventTarget", "HtmlCanvasElement",
     # Sound: WebAudio (audio.rs `web_output`).
     "AudioBuffer", "AudioContext", "AudioContextState", "AudioDestinationNode", "AudioNode",
     "AudioProcessingEvent", "BaseAudioContext", "ScriptProcessorNode",

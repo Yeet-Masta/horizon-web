@@ -382,11 +382,6 @@ impl ActiveEventLoop {
         )
         .entered();
 
-        // A Web Worker's loop asks the page's (Horizon's addition, `RemoteEventLoop`).
-        #[cfg(web_platform)]
-        if let Some(remote) = self.p.remote_loop() {
-            return remote.create_window(window_attributes);
-        }
         let window = platform_impl::Window::new(&self.p, window_attributes)?;
         Ok(Window { window })
     }

@@ -18,7 +18,7 @@ use crate::event::{
 };
 use crate::event_loop::{ControlFlow, DeviceEvents};
 use crate::keyboard::ModifiersState;
-use crate::platform::web::{CustomCursorFuture, PollStrategy, RemoteEventLoop, WaitUntilStrategy};
+use crate::platform::web::{CustomCursorFuture, PollStrategy, WaitUntilStrategy};
 use crate::platform_impl::platform::cursor::CustomCursor;
 use crate::platform_impl::platform::r#async::Waker;
 use crate::window::{
@@ -44,53 +44,24 @@ impl Clone for ModifiersShared {
     }
 }
 
-/// The page's event loop, or (Horizon's addition) a remote one: what a Web Worker that runs the
-/// application's handlers is handed while the page's loop forwards it the events
-/// (`platform::web::RemoteEventLoop`).
 #[derive(Clone)]
 pub struct ActiveEventLoop {
-    page: Option<Page>,
-    remote: Option<Rc<dyn RemoteEventLoop>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct Page {
     pub(crate) runner: runner::Shared,
     modifiers: ModifiersShared,
 }
 
 impl ActiveEventLoop {
     pub fn new() -> Self {
-        Self {
-            page: Some(Page {
-                runner: runner::Shared::new(),
-                modifiers: ModifiersShared::default(),
-            }),
-            remote: None,
-        }
-    }
-
-    pub(crate) fn remote(remote: Rc<dyn RemoteEventLoop>) -> Self {
-        Self { page: None, remote: Some(remote) }
-    }
-
-    /// The remote loop this one stands for, if it is one.
-    pub(crate) fn remote_loop(&self) -> Option<&Rc<dyn RemoteEventLoop>> {
-        self.remote.as_ref()
-    }
-
-    /// The page's loop: what only the page can do (windows, cursors, its events).
-    pub(crate) fn page(&self) -> &Page {
-        self.page.as_ref().expect("winit: only the page's event loop can do this, not a remote one")
+        Self { runner: runner::Shared::new(), modifiers: ModifiersShared::default() }
     }
 
     pub fn run(&self, event_handler: Box<runner::EventHandler>, event_loop_recreation: bool) {
-        self.page().runner.event_loop_recreation(event_loop_recreation);
-        self.page().runner.set_listener(event_handler);
+        self.runner.event_loop_recreation(event_loop_recreation);
+        self.runner.set_listener(event_handler);
     }
 
     pub fn generate_id(&self) -> WindowId {
-        WindowId(self.page().runner.generate_id())
+        WindowId(self.runner.generate_id())
     }
 
     pub fn create_custom_cursor(&self, source: CustomCursorSource) -> RootCustomCursor {
@@ -109,9 +80,9 @@ impl ActiveEventLoop {
 
         canvas.on_touch_start();
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         let has_focus = canvas.has_focus.clone();
-        let modifiers = self.page().modifiers.clone();
+        let modifiers = self.modifiers.clone();
         canvas.on_blur(move || {
             has_focus.set(false);
 
@@ -129,7 +100,7 @@ impl ActiveEventLoop {
             })));
         });
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         let has_focus = canvas.has_focus.clone();
         canvas.on_focus(move || {
             if !has_focus.replace(true) {
@@ -153,14 +124,14 @@ impl ActiveEventLoop {
 
         if focused {
             canvas.has_focus.set(true);
-            self.page().runner.send_event(Event::WindowEvent {
+            self.runner.send_event(Event::WindowEvent {
                 window_id: RootWindowId(id),
                 event: WindowEvent::Focused(true),
             })
         }
 
-        let runner = self.page().runner.clone();
-        let modifiers = self.page().modifiers.clone();
+        let runner = self.runner.clone();
+        let modifiers = self.modifiers.clone();
         canvas.on_keyboard_press(
             move |physical_key, logical_key, text, location, repeat, active_modifiers| {
                 let modifiers_changed = (modifiers.get() != active_modifiers).then(|| {
@@ -195,8 +166,8 @@ impl ActiveEventLoop {
             },
         );
 
-        let runner = self.page().runner.clone();
-        let modifiers = self.page().modifiers.clone();
+        let runner = self.runner.clone();
+        let modifiers = self.modifiers.clone();
         canvas.on_keyboard_release(
             move |physical_key, logical_key, text, location, repeat, active_modifiers| {
                 let modifiers_changed = (modifiers.get() != active_modifiers).then(|| {
@@ -233,9 +204,9 @@ impl ActiveEventLoop {
 
         let has_focus = canvas.has_focus.clone();
         canvas.on_cursor_leave({
-            let runner = self.page().runner.clone();
+            let runner = self.runner.clone();
             let has_focus = has_focus.clone();
-            let modifiers = self.page().modifiers.clone();
+            let modifiers = self.modifiers.clone();
 
             move |active_modifiers, pointer_id| {
                 let focus = (has_focus.get() && modifiers.get() != active_modifiers).then(|| {
@@ -260,9 +231,9 @@ impl ActiveEventLoop {
         });
 
         canvas.on_cursor_enter({
-            let runner = self.page().runner.clone();
+            let runner = self.runner.clone();
             let has_focus = has_focus.clone();
-            let modifiers = self.page().modifiers.clone();
+            let modifiers = self.modifiers.clone();
 
             move |active_modifiers, pointer_id| {
                 let focus = (has_focus.get() && modifiers.get() != active_modifiers).then(|| {
@@ -288,9 +259,9 @@ impl ActiveEventLoop {
 
         canvas.on_cursor_move(
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let has_focus = has_focus.clone();
-                let modifiers = self.page().modifiers.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, pointer_id, events| {
                     let modifiers =
@@ -313,9 +284,9 @@ impl ActiveEventLoop {
                 }
             },
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let has_focus = has_focus.clone();
-                let modifiers = self.page().modifiers.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, device_id, events| {
                     let modifiers =
@@ -342,9 +313,9 @@ impl ActiveEventLoop {
                 }
             },
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let has_focus = has_focus.clone();
-                let modifiers = self.page().modifiers.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers,
                       pointer_id,
@@ -387,8 +358,8 @@ impl ActiveEventLoop {
 
         canvas.on_mouse_press(
             {
-                let runner = self.page().runner.clone();
-                let modifiers = self.page().modifiers.clone();
+                let runner = self.runner.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, pointer_id, position, button| {
                     let modifiers = (modifiers.get() != active_modifiers).then(|| {
@@ -421,8 +392,8 @@ impl ActiveEventLoop {
                 }
             },
             {
-                let runner = self.page().runner.clone();
-                let modifiers = self.page().modifiers.clone();
+                let runner = self.runner.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, device_id, location, force| {
                     let modifiers = (modifiers.get() != active_modifiers).then(|| {
@@ -451,9 +422,9 @@ impl ActiveEventLoop {
 
         canvas.on_mouse_release(
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let has_focus = has_focus.clone();
-                let modifiers = self.page().modifiers.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, pointer_id, position, button| {
                     let modifiers =
@@ -487,9 +458,9 @@ impl ActiveEventLoop {
                 }
             },
             {
-                let runner_touch = self.page().runner.clone();
+                let runner_touch = self.runner.clone();
                 let has_focus = has_focus.clone();
-                let modifiers = self.page().modifiers.clone();
+                let modifiers = self.modifiers.clone();
 
                 move |active_modifiers, device_id, location, force| {
                     let modifiers =
@@ -517,8 +488,8 @@ impl ActiveEventLoop {
             },
         );
 
-        let runner = self.page().runner.clone();
-        let modifiers = self.page().modifiers.clone();
+        let runner = self.runner.clone();
+        let modifiers = self.modifiers.clone();
         canvas.on_mouse_wheel(move |pointer_id, delta, active_modifiers| {
             let modifiers_changed =
                 (has_focus.get() && modifiers.get() != active_modifiers).then(|| {
@@ -541,7 +512,7 @@ impl ActiveEventLoop {
             )));
         });
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         canvas.on_touch_cancel(move |device_id, location, force| {
             runner.send_event(Event::WindowEvent {
                 window_id: RootWindowId(id),
@@ -555,7 +526,7 @@ impl ActiveEventLoop {
             });
         });
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         canvas.on_dark_mode(move |is_dark_mode| {
             let theme = if is_dark_mode { Theme::Dark } else { Theme::Light };
             runner.send_event(Event::WindowEvent {
@@ -566,7 +537,7 @@ impl ActiveEventLoop {
 
         canvas.on_resize_scale(
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let canvas = canvas_clone.clone();
 
                 move |size, scale| {
@@ -578,7 +549,7 @@ impl ActiveEventLoop {
                 }
             },
             {
-                let runner = self.page().runner.clone();
+                let runner = self.runner.clone();
                 let canvas = canvas_clone.clone();
 
                 move |new_size| {
@@ -596,7 +567,7 @@ impl ActiveEventLoop {
             },
         );
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         canvas.on_intersection(move |is_intersecting| {
             // only fire if visible while skipping the first event if it's intersecting
             if backend::is_visible(runner.document())
@@ -611,7 +582,7 @@ impl ActiveEventLoop {
             canvas_clone.borrow_mut().is_intersecting = Some(is_intersecting);
         });
 
-        let runner = self.page().runner.clone();
+        let runner = self.runner.clone();
         canvas.on_animation_frame(move || runner.request_redraw(RootWindowId(id)));
 
         canvas.on_context_menu();
@@ -640,17 +611,11 @@ impl ActiveEventLoop {
     }
 
     pub fn listen_device_events(&self, allowed: DeviceEvents) {
-        if self.remote.is_some() {
-            return;
-        }
-        self.page().runner.listen_device_events(allowed)
+        self.runner.listen_device_events(allowed)
     }
 
     pub fn system_theme(&self) -> Option<Theme> {
-        if self.remote.is_some() {
-            return None;
-        }
-        backend::is_dark_mode(self.page().runner.window()).map(|is_dark_mode| {
+        backend::is_dark_mode(self.runner.window()).map(|is_dark_mode| {
             if is_dark_mode {
                 Theme::Dark
             } else {
@@ -660,63 +625,39 @@ impl ActiveEventLoop {
     }
 
     pub(crate) fn set_control_flow(&self, control_flow: ControlFlow) {
-        if let Some(remote) = &self.remote {
-            return remote.set_control_flow(control_flow);
-        }
-        self.page().runner.set_control_flow(control_flow)
+        self.runner.set_control_flow(control_flow)
     }
 
     pub(crate) fn control_flow(&self) -> ControlFlow {
-        if let Some(remote) = &self.remote {
-            return remote.control_flow();
-        }
-        self.page().runner.control_flow()
+        self.runner.control_flow()
     }
 
     pub(crate) fn exit(&self) {
-        if let Some(remote) = &self.remote {
-            return remote.exit();
-        }
-        self.page().runner.exit()
+        self.runner.exit()
     }
 
     pub(crate) fn exiting(&self) -> bool {
-        if let Some(remote) = &self.remote {
-            return remote.exiting();
-        }
-        self.page().runner.exiting()
+        self.runner.exiting()
     }
 
     pub(crate) fn set_poll_strategy(&self, strategy: PollStrategy) {
-        if self.remote.is_some() {
-            return;
-        }
-        self.page().runner.set_poll_strategy(strategy)
+        self.runner.set_poll_strategy(strategy)
     }
 
     pub(crate) fn poll_strategy(&self) -> PollStrategy {
-        if self.remote.is_some() {
-            return PollStrategy::default();
-        }
-        self.page().runner.poll_strategy()
+        self.runner.poll_strategy()
     }
 
     pub(crate) fn set_wait_until_strategy(&self, strategy: WaitUntilStrategy) {
-        if self.remote.is_some() {
-            return;
-        }
-        self.page().runner.set_wait_until_strategy(strategy)
+        self.runner.set_wait_until_strategy(strategy)
     }
 
     pub(crate) fn wait_until_strategy(&self) -> WaitUntilStrategy {
-        if self.remote.is_some() {
-            return WaitUntilStrategy::default();
-        }
-        self.page().runner.wait_until_strategy()
+        self.runner.wait_until_strategy()
     }
 
     pub(crate) fn waker(&self) -> Waker<Weak<Execution>> {
-        self.page().runner.waker()
+        self.runner.waker()
     }
 
     pub(crate) fn owned_display_handle(&self) -> OwnedDisplayHandle {

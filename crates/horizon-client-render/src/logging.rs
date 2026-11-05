@@ -422,11 +422,10 @@ impl log::Log for Logger {
         }
         let message = record.args().to_string();
         let current = horizon_platform::thread::current();
-        let thread = match (THREAD_NAME.get(), current.name()) {
-            (Some(name), _) => name,
-            (None, Some("main")) => self.main_thread,
-            (None, Some(name)) => name,
-            (None, None) => "unnamed",
+        let thread = match current.name() {
+            Some("main") => self.main_thread,
+            Some(name) => name,
+            None => "unnamed",
         };
         let gate = if record.level() <= log::Level::Warn {
             let mut floods = self.floods.lock().unwrap_or_else(|e| e.into_inner());
@@ -519,16 +518,6 @@ impl Logger {
             eprintln!("{message}");
         }
     }
-}
-
-thread_local! {
-    /// What this thread is called in the log when std gave it no name ([`name_this_thread`]).
-    static THREAD_NAME: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
-}
-/// Names this thread in the log: a Web Worker has no std name, such as the game's own when its
-/// loop runs in one (web/README.md).
-pub fn name_this_thread(name: &'static str) {
-    THREAD_NAME.set(Some(name));
 }
 
 /// Starts the log in `home/logs`. The main thread shows as `main_thread` in it. Messages are

@@ -14521,6 +14521,12 @@ impl Game<'_> {
         if self.options.paced_by_split {
             return Err("the graphics device was lost during split-screen play".into());
         }
+        // The web build asks the browser for a new device, which answers later: until then the
+        // lost one draws nothing.
+        #[cfg(target_family = "wasm")]
+        if !horizon_client::gfx::web_device_ready() {
+            return Ok(());
+        }
         let now = Instant::now();
         if self
             .last_device_recovery
@@ -21348,9 +21354,9 @@ fn leave_fullscreen_after(
 
 #[cfg(target_family = "wasm")]
 fn run_event_loop(game: Game<'static>) -> Result<()> {
-    // The page's event loop (or the game's worker's, `web::spawn_app`) runs the game after
-    // this returns.
-    web::spawn_app(game)
+    // The page's event loop runs the game after this returns.
+    winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, game);
+    Ok(())
 }
 #[cfg(not(target_family = "wasm"))]
 fn run_event_loop(mut game: Game<'_>) -> Result<()> {
@@ -21873,10 +21879,12 @@ fn run_loading(
         error: None,
     };
     let app = App::Loading(Box::new(loading));
-    // The page's event loop (or the game's worker's, `web::spawn_app`) runs the game after
-    // this returns.
+    // The page's event loop runs the game after this returns.
     #[cfg(target_family = "wasm")]
-    return web::spawn_app(app);
+    {
+        winit::platform::web::EventLoopExtWebSys::spawn_app(EventLoop::new()?, app);
+        Ok(())
+    }
     #[cfg(not(target_family = "wasm"))]
     run_app_native(app)
 }

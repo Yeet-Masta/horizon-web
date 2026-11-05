@@ -1,13 +1,9 @@
 //! The web build's start (`web/README.md`): the page hands over the prepared
 //! resources and the kept game folder, the WebGPU device opens (which waits
 //! on the browser, as nothing else in the game may), then the game starts as
-//! it does natively, on the page's event loop, or in a worker of its own
-//! (`worker_loop`, opt-in).
+//! it does natively, on the page's event loop.
 use horizon_client::Result;
 use horizon_platform::time::{Duration, Instant};
-
-mod worker_loop;
-pub use worker_loop::spawn_app;
 
 /// `main` on the web: starts the game once the page is ready, and returns.
 pub fn start() {
@@ -34,21 +30,6 @@ async fn boot() -> Result<()> {
         report(info);
         horizon_platform::web::status(&format!("Horizon crashed: {info}"), true);
     }));
-    if worker_loop::wanted() {
-        // The rest goes on in the game's worker, whose event loop runs its frames.
-        return worker_loop::start(|| {
-            wasm_bindgen_futures::spawn_local(async {
-                if let Err(error) = game().await {
-                    stopped(Some(&*error));
-                }
-            });
-        });
-    }
-    game().await
-}
-
-/// The game itself, on the thread that draws: the device, then the game.
-async fn game() -> Result<()> {
     horizon_client::gfx::open_web_device().await?;
     super::run_with()
 }

@@ -211,33 +211,12 @@ it runs, so it stays right whatever the stretch holds that frame. A frame of a n
 world went from about 290 render-pass calls to 125 (`drawIndexedIndirect` 220 to 46).
 `?env=HORIZON_WEB_BUNDLES=0` issues every draw, to compare or to rule bundles out.
 
-## The game's loop in a worker
+## A lost device
 
-`?env=HORIZON_WEB_WORKER_LOOP=1` (threaded build) runs the game itself in a Web Worker, so
-the page's thread only takes input. The page keeps winit's event loop, which has the canvas and
-its events, hands the canvas to the worker (`transferControlToOffscreen`) and forwards every
-event there (`crates/horizon-client/src/game/web/worker_loop.rs`). The worker runs the same
-handlers the page would, one step each animation frame, and draws on the canvas through the
-OffscreenCanvas. What the handlers ask of the loop goes back to the page: winit's
-`RemoteEventLoop` in `third_party/winit` makes the window there and shares it, and a window's
-calls from the worker run on the page as winit's do from any other thread. What only a page
-has goes there too: sound (the AudioContext), downloads, links, the clipboard, the pointer
-lock's state.
-
-On the worker the game may wait on locks and channels, and nothing on the page's thread holds a
-frame back: layout, garbage collection, the network bridges. It is opt-in until it has been
-played on more machines: tell us what differs. Not yet in a worker: Play with Friends, whose
-WebRTC connections only a page can make (it says so).
-
-### JSPI
-
-In a browser with JavaScript Promise Integration (Chrome 137+), the worker's frames run as
-`WebAssembly.promising` calls (`web/worker.js`), and in one a wait on the browser (a WebGPU
-error scope, say) suspends the frame until the answer comes, where the page's frames read it
-as "no error" (`crates/horizon-platform/src/web/jspi.rs`). wasm-bindgen's own JSPI refuses
-shared memory, because a suspended call's stack frames stay in it: here only the game's worker
-suspends, one frame at a time, entered from JavaScript, so what runs while it waits uses the
-stack below it and is done before it resumes.
+When the browser loses the WebGPU device (a driver reset, a GPU hang, Chromium's GPU process
+restarting), the game asks it for a new one and rebuilds its renderer on it once the browser
+answers. `python3 tools/web_smoke.py --resources ... --gpu-crash` crashes Chromium's GPU
+process while playing (as `chrome://gpucrash` does) and checks that the game draws on.
 
 ## Merging upstream
 

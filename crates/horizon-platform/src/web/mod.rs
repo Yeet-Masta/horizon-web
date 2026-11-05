@@ -7,8 +7,6 @@ mod alloc;
 mod blobs;
 pub mod http;
 pub mod https;
-#[cfg(target_feature = "atomics")]
-pub mod jspi;
 pub mod rtc;
 pub mod socket;
 pub mod vfs;
@@ -72,20 +70,14 @@ pub fn status(message: &str, error: bool) {
 }
 
 /// A file for the player to keep, such as a screenshot: the browser's
-/// download, which the page makes ([`run_on_page`] from a worker).
+/// download. (The page's thread only: a worker has no page to ask.)
 pub fn save_file(name: &str, bytes: &[u8]) {
-    let (name, bytes) = (name.to_owned(), bytes.to_vec());
     // A copy: a Blob can't hold a view of shared memory.
-    run_on_page(Box::new(move || {
-        let _ = horizon_save_file(&name, Uint8Array::from(bytes.as_slice()));
-    }));
+    let _ = horizon_save_file(name, Uint8Array::from(bytes));
 }
 /// `Util.getPlatform().openUri`: a new tab on the link.
 pub fn open_url(url: &str) {
-    let url = url.to_owned();
-    run_on_page(Box::new(move || {
-        let _ = horizon_open_url(&url);
-    }));
+    let _ = horizon_open_url(url);
 }
 
 /// The system clipboard as far as the page reaches it: a page reads it only
@@ -100,10 +92,7 @@ pub fn clipboard_text() -> Option<String> {
 /// write it (after the player's input, as Ctrl+C is).
 pub fn set_clipboard_text(text: &str) {
     *CLIPBOARD.lock().unwrap() = Some(text.to_owned());
-    let text = text.to_owned();
-    run_on_page(Box::new(move || {
-        let _ = horizon_clipboard_write(&text);
-    }));
+    let _ = horizon_clipboard_write(text);
 }
 /// The text of a paste event, before the game sees the Ctrl+V that made it.
 #[wasm_bindgen]
@@ -321,55 +310,20 @@ mod threads {
     thread_local! {
         /// This thread is one of `spawn_thread`'s, not the page's.
         static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        /// This worker's event loop goes on after its work returns ([`keep_event_loop`]).
-        static KEEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        /// This worker runs the game's frames on its event loop ([`run_event_loop_here`]).
-        static EVENT_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
     /// Whether this is the page's thread, the one that may not wait.
     pub fn on_page_thread() -> bool {
         !WORKER.get()
     }
-    /// Whether this thread's own event loop settles the browser's promises it waits on: the
-    /// page's, and a worker that runs the game ([`run_event_loop_here`]). Waiting there for
-    /// such a promise would wait forever ([`crate::block_on`] doesn't).
-    pub fn owns_event_loop() -> bool {
-        !WORKER.get() || EVENT_LOOP.get()
-    }
-    /// This worker's event loop goes on once its work returns (worker.js closes it otherwise):
-    /// its tasks, timers and frames run there.
-    pub fn keep_event_loop() {
-        KEEP.set(true);
-    }
-    /// This worker runs the game, its frames called from its event loop, as the page's are
-    /// (the game's loop in a worker, web/README.md): it keeps its event loop, and a future
-    /// waiting on the browser is not waited on here ([`owns_event_loop`]).
-    pub fn run_event_loop_here() {
-        KEEP.set(true);
-        EVENT_LOOP.set(true);
-    }
 
     #[wasm_bindgen]
     extern "C" {
-        /// Starts `web/worker.js` with the module and memory, to run `work`; `transfer` (an
-        /// OffscreenCanvas, or undefined) goes to it as `globalThis.horizonCanvas`.
+        /// Starts `web/worker.js` with the module and memory, to run `work`.
         #[wasm_bindgen(js_namespace = globalThis, js_name = horizonSpawnThread)]
-        fn horizon_spawn_thread(
-            name: &str,
-            module: JsValue,
-            memory: JsValue,
-            work: u32,
-            transfer: JsValue,
-        );
+        fn horizon_spawn_thread(name: &str, module: JsValue, memory: JsValue, work: u32);
     }
 
     pub fn spawn_thread(name: &str, work: Work) {
-        spawn_thread_with(name, JsValue::UNDEFINED, work);
-    }
-
-    /// [`spawn_thread`], handing the worker `transfer` (the page's thread only): the canvas
-    /// the game draws on from a worker.
-    pub fn spawn_thread_with(name: &str, transfer: JsValue, work: Work) {
         let id = {
             let mut pending = WORK.lock().unwrap();
             match pending.iter().position(Option::is_none) {
@@ -388,14 +342,12 @@ mod threads {
             wasm_bindgen::module(),
             wasm_bindgen::memory(),
             id as u32,
-            transfer,
         );
     }
 
-    /// `web/worker.js` runs this once its module is up: the thread's work. True when the
-    /// worker's event loop goes on afterwards ([`keep_event_loop`]).
+    /// `web/worker.js` runs this once its module is up: the thread's work.
     #[wasm_bindgen]
-    pub fn horizon_thread_entry(work: u32) -> bool {
+    pub fn horizon_thread_entry(work: u32) {
         WORKER.set(true);
         super::alloc::worker_started();
         let work = WORK
@@ -406,15 +358,6 @@ mod threads {
         if let Some(work) = work {
             work();
         }
-        KEEP.get()
-    }
-
-    /// The canvas the page handed this worker (`spawn_thread_with`), once.
-    pub fn worker_canvas() -> Option<JsValue> {
-        let global = js_sys::global();
-        let canvas = super::get(&global, "horizonCanvas");
-        let _ = js_sys::Reflect::delete_property(&global, &"horizonCanvas".into());
-        (!canvas.is_undefined() && !canvas.is_null()).then_some(canvas)
     }
 
     /// `navigator.hardwareConcurrency`: the cores the browser reports.
@@ -427,10 +370,7 @@ mod threads {
     }
 }
 #[cfg(target_feature = "atomics")]
-pub use threads::{
-    hardware_concurrency, horizon_thread_entry, keep_event_loop, on_page_thread, owns_event_loop,
-    run_event_loop_here, spawn_thread, spawn_thread_with, worker_canvas,
-};
+pub use threads::{hardware_concurrency, horizon_thread_entry, on_page_thread, spawn_thread};
 /// Whether this build's panics unwind (web/unwind.toml): one is raised and caught here, quietly.
 /// The smoke test (tools/web_smoke.py) asks a build whose build.json says they do. A build whose
 /// panics abort must not call it: the panic would stop the page.
@@ -446,10 +386,6 @@ pub fn horizon_panics_unwind() -> bool {
 /// Without threads every thread is the page's.
 #[cfg(not(target_feature = "atomics"))]
 pub fn on_page_thread() -> bool {
-    true
-}
-#[cfg(not(target_feature = "atomics"))]
-pub fn owns_event_loop() -> bool {
     true
 }
 

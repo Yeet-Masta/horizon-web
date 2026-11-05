@@ -9,7 +9,7 @@ drawing afterwards: what a blocking call on the page's thread, a panic or a hang
 
     python3 tools/web_smoke.py                                   # the module loads
     python3 tools/web_smoke.py --resources .local/horizon-web-resources.zip
-    python3 tools/web_smoke.py --resources ... --worker-loop     # the game's loop in a worker
+    python3 tools/web_smoke.py --resources ... --gpu-crash      # and the device lost while playing
 
 Needs Playwright for Python (pip install playwright; python3 -m playwright install chromium).
 """
@@ -47,14 +47,22 @@ def wait_for_server(port, timeout=20):
     sys.exit("web_smoke: web/serve.py did not start")
 
 
+def changes(page, wait_ms=4000):
+    """Whether the page's picture changes within `wait_ms`."""
+    first = page.screenshot()
+    page.wait_for_timeout(wait_ms)
+    return page.screenshot() != first
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--resources", type=pathlib.Path, help="prepared resources zip: also play")
     ap.add_argument("--join-timeout", type=float, default=240, help="seconds to join the world")
     ap.add_argument("--play", type=float, default=20, help="seconds the page must keep drawing")
     ap.add_argument("--screenshot", type=pathlib.Path, help="save the last frame here")
-    ap.add_argument("--worker-loop", action="store_true",
-                    help="run the game's loop in a worker (HORIZON_WEB_WORKER_LOOP=1)")
+    ap.add_argument("--gpu-crash", action="store_true",
+                    help="crash the browser's GPU process while playing (as chrome://gpucrash): "
+                    "the game must get a new device and draw on")
     args = ap.parse_args()
     if not (ROOT / "web" / "dist" / "pkg").is_dir():
         sys.exit("web_smoke: no web/dist: build it first (web/build.sh)")
@@ -92,8 +100,7 @@ def main():
                 "const tick = () => { globalThis.__frames++; requestAnimationFrame(tick); };"
                 "requestAnimationFrame(tick);"
             )
-            query = "?env=HORIZON_WEB_WORKER_LOOP=1" if args.worker_loop else ""
-            page.goto(f"http://127.0.0.1:{port}/{query}")
+            page.goto(f"http://127.0.0.1:{port}/")
             # The module loaded: its sign-in button turns on once it is instantiated.
             page.wait_for_selector("#sign-in:not([disabled])", timeout=120_000)
             print(f"web_smoke: the module loaded in {time.time() - started:.1f} s", flush=True)
@@ -127,8 +134,6 @@ def main():
                         failures.append(f"the player did not join within {args.join_timeout:.0f} s")
                 if not failures:
                     print(f"web_smoke: joined after {time.time() - started:.1f} s", flush=True)
-                    if args.worker_loop and not any("loop runs in a worker" in l for l in log):
-                        failures.append("the game's loop was asked to run in a worker, and did not")
                     # The page keeps drawing: a page that waits on something forever stops.
                     before = page.evaluate("globalThis.__frames")
                     page.wait_for_timeout(args.play * 1000)
@@ -137,13 +142,27 @@ def main():
                     if frames < args.play:
                         failures.append(f"only {frames} frames in {args.play:.0f} s: the page stalls")
                     # The game draws: the picture moves (clouds, the sun), which a game that
-                    # stopped drawing, on the page or in its worker, no longer does.
-                    first = page.screenshot()
-                    page.wait_for_timeout(4000)
-                    if page.screenshot() == first:
+                    # stopped drawing no longer does.
+                    if not changes(page):
                         failures.append("the picture did not change in 4 s: the game stopped drawing")
                     else:
                         print("web_smoke: the game keeps drawing", flush=True)
+                    # A GPU process that crashed (as a driver reset does) loses the device: the
+                    # game asks the browser for another and rebuilds its renderer on it.
+                    if args.gpu_crash:
+                        # chrome://gpucrash, through the DevTools protocol (a page can't open it).
+                        browser.new_browser_cdp_session().send("Browser.crashGpuProcess")
+                        recovered = lambda: any("graphics device recovered" in l for l in log)
+                        deadline = time.time() + 60
+                        while time.time() < deadline and not recovered():
+                            page.wait_for_timeout(1000)
+                        if not recovered():
+                            failures.append("the game did not recover from the GPU process's crash")
+                        else:
+                            print("web_smoke: recovered from the GPU process's crash", flush=True)
+                            page.wait_for_timeout(5000)
+                            if not changes(page):
+                                failures.append("the picture did not change after the GPU crash")
                     # The pause menu: its blur is a pipeline made on first use (in the
                     # background on the web: wgpu's create_render_pipeline_async).
                     page.keyboard.press("Escape")
