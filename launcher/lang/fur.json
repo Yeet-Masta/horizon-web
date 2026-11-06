@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "I covente il loader: i siei plans a rivin al zûc",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Esecuzion: {count} file jar segnalâts",
   "Clear compatibility cache": "Nete la cache di compatibilitât",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "La cache di compatibilitât par {name} e je stade netade. E vignarà controlade di gnûf cu la prossime instalazion, inzornament o ricercje.",
-  "(+{count} more)": "(+{count} altris)"
+  "(+{count} more)": "(+{count} altris)",
+  "Hybrid: native + loader": "Ibrid: natîf + caricador"
 }

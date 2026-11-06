@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "需要加载器：它的计划以游戏为目标",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "运行时：报告了 {count} 个 jar",
   "Clear compatibility cache": "清除兼容性缓存",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "已清除 {name} 的兼容性缓存。下次安装、更新或在搜索中列出时会重新检查。",
-  "(+{count} more)": "（另有 {count} 个）"
+  "(+{count} more)": "（另有 {count} 个）",
+  "Hybrid: native + loader": "混合：原生 + 加载器"
 }

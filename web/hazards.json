@@ -184,6 +184,9 @@
  "crates/horizon-client/src/game/functions.rs": {
   "std::path::Path::exists": 2
  },
+ "crates/horizon-client/src/game/java_mods.rs": {
+  "std::sync::Condvar::wait": 1
+ },
  "crates/horizon-client/src/game/mods.rs": {
   "std::path::Path::exists": 1,
   "std::path::Path::is_file": 1

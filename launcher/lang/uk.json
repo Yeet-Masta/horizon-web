@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Потрібен завантажувач: його плани націлені на гру",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Середовище: повідомлено про {count} jar-файл(ів)",
   "Clear compatibility cache": "Очистити кеш сумісності",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кеш сумісності для {name} очищено. Його буде перевірено знову під час наступного встановлення, оновлення або появи в пошуку.",
-  "(+{count} more)": "(+{count} ще)"
+  "(+{count} more)": "(+{count} ще)",
+  "Hybrid: native + loader": "Гібрид: нативний + завантажувач"
 }

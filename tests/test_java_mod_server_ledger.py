@@ -79,7 +79,7 @@ class JavaModServerLedgerTests(unittest.TestCase):
         self.assertEqual(LEDGER.summary([row, LEDGER.Row("ok.jar", verdict="ran")]), {
             "total": 2, "ran": 1, "refused": 1, "skipped": 0,
             "reason_categories": {"none": 1, "timeout": 1},
-            "recommendations": {"native": 1, "native-gap": 1},
+            "recommendations": {"native-ok": 1, "native-gap": 1},
         })
 
     def test_parse_entrypoint_refusals_are_skipped_by_subtype(self):
@@ -129,13 +129,13 @@ class JavaModServerLedgerTests(unittest.TestCase):
         )
         client = LEDGER.Row("client.jar", verdict="skipped", subtype="client-only", engine="refused")
         refused = LEDGER.Row("broken.jar", verdict="refused", engine="refused", reason="Metadata(bad)")
-        self.assertEqual(ran.recommend, "loader")
-        self.assertEqual(LEDGER.recommendation(client), "native")
+        self.assertEqual(ran.recommend, "needs-loader")
+        self.assertEqual(LEDGER.recommendation(client), "native-ok")
         self.assertEqual(LEDGER.recommendation(refused), "native-gap")
 
     def test_recommendation_prefers_loader_engine(self):
         row = LEDGER.Row("knot.jar", verdict="refused", engine="knot")
-        self.assertEqual(LEDGER.recommendation(row), "loader")
+        self.assertEqual(LEDGER.recommendation(row), "needs-loader")
 
     def test_clipped_client_only_jar_is_skipped_from_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:

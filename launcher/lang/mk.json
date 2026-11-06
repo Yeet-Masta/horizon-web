@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Потребен е вчитувачот: неговите планови целат на играта",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Извршување: пријавени {count} jar датотеки",
   "Clear compatibility cache": "Исчисти го кешот за компатибилност",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кешот за компатибилност за {name} е исчистен. Ќе биде повторно проверен при следното инсталирање, ажурирање или пребарување.",
-  "(+{count} more)": "(+{count} повеќе)"
+  "(+{count} more)": "(+{count} повеќе)",
+  "Hybrid: native + loader": "Хибрид: нативно + вчитувач"
 }

@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Jeħtieġ il-loader: il-pjanijiet tiegħu jimmiraw lejn il-logħba",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Eżekuzzjoni: ġew irrappurtati {count} fajls jar",
   "Clear compatibility cache": "Ħassar il-cache tal-kompatibilità",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Il-cache tal-kompatibilità għal {name} tħassar. Se jerġa’ jiġi ċċekkjat fl-installazzjoni, aġġornament jew tfittxija li jmiss.",
-  "(+{count} more)": "(+{count} aktar)"
+  "(+{count} more)": "(+{count} aktar)",
+  "Hybrid: native + loader": "Ibridu: nattiv + tagħbija"
 }

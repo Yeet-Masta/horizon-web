@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Жүктөгүч керек: анын пландары оюнду көздөйт",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Аткаруу: {count} jar файлы тууралуу билдирилди",
   "Clear compatibility cache": "Шайкештик кэшин тазалоо",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} үчүн шайкештик кэши тазаланды. Кийинки орнотуу, жаңыртуу же издөөдө кайра текшерилет.",
-  "(+{count} more)": "(+{count} дагы)"
+  "(+{count} more)": "(+{count} дагы)",
+  "Hybrid: native + loader": "Гибрид: жергиликтүү + жүктөөчү"
 }

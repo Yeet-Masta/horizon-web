@@ -1,0 +1,732 @@
+# Horizon corpus tier coverage
+# native-ok: the dedicated server runs it; needs-loader: a real Fabric loader run lists
+# it and reaches Done; native-gap: neither tier carries it, with the cause;
+# out-of-scope: built for another game version, so no 26.3 tier can carry it.
+# Sources: LAST_SERVER_LEDGER_223.txt, LAST_SERVER_LEDGER_500.txt, LAST_LOADER_PROOF_223.txt, LAST_LOADER_PROOF_500.txt
+
+corpus=corpus-xl	jars=223	native-ok=164	needs-loader=59	native-gap=0	out-of-scope=0	proven=59	partial=0	unproven=0
+corpus=mega	jars=500	native-ok=382	needs-loader=115	native-gap=0	out-of-scope=3	proven=110	partial=5	unproven=0
+union	digests=599	native-ok=446	needs-loader=150	native-gap=0	out-of-scope=3
+corpus-xl/1005914-8891048.jar	mod=fzzy_config	native=native-ok	tier=native-ok
+corpus-xl/1312687-7927503.jar	mod=1312687-7927503	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/1399257-8910835.jar	mod=mossylib	native=native-ok	tier=native-ok
+corpus-xl/232131-8893535.jar	mod=defaultoptions	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/241160-8893517.jar	mod=netherportalfix	native=native-ok	tier=native-ok
+corpus-xl/241895-8893531.jar	mod=kleeslabs	native=native-ok	tier=native-ok
+corpus-xl/250398-8925557.jar	mod=controlling	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/254284-8894331.jar	mod=ambientsounds	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/258587-8894337.jar	mod=itemphysic	native=native-ok	tier=native-ok
+corpus-xl/306612-8913512.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/308769-8829788.jar	mod=fabric-language-kotlin	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/320163-8900484.jar	mod=ambientenvironment	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/334259-8890634.jar	mod=presencefootsteps	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/348521-8884063.jar	mod=cloth-config	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/361579-8918571.jar	mod=spark	native=native-ok	tier=native-ok
+corpus-xl/385587-8884656.jar	mod=385587-8884656	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/394468-8888037.jar	mod=sodium	native=native-ok	tier=native-ok	no native entrypoint (available: client, preLaunch)
+corpus-xl/407206-8893778.jar	mod=chat_heads	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/411813-8925261.jar	mod=stackrefill	native=native-ok	tier=native-ok
+corpus-xl/417510-8890526.jar	mod=fallingleaves	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/433760-8929069.jar	mod=notenoughanimations	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/448233-8929291.jar	mod=entityculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/452834-8914313.jar	mod=rightclickharvest	native=native-ok	tier=native-ok
+corpus-xl/453763-7854681.jar	mod=453763-7854681	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/455508-8888283.jar	mod=iris	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, sodium:config_api_user)
+corpus-xl/459857-7806040.jar	mod=ferritecore	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/461745-6133209.jar	mod=461745-6133209	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/470193-8893473.jar	mod=connectivity	native=native-ok	tier=native-ok
+corpus-xl/511319-8891934.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: sodium:config_api_user)
+corpus-xl/521126-8930194.jar	mod=visuality	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/521480-8906462.jar	mod=skinlayers3d	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/531351-8892594.jar	mod=continuity	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+corpus-xl/531730-8048795.jar	mod=531730-8048795	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/535489-8909383.jar	mod=sound_physics_remastered	native=native-ok	tier=native-ok
+corpus-xl/547434-8889946.jar	mod=forgeconfigapiport	native=native-ok	tier=native-ok
+corpus-xl/568563-8908952.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/582327-7898857.jar	mod=smoothchunk	native=native-ok	tier=native-ok
+corpus-xl/60089-8887995.jar	mod=mousetweaks	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/618339-8908152.jar	mod=618339-8908152	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/619986-8912084.jar	mod=optigui	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/627557-8884654.jar	mod=627557-8884654	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/635427-8919819.jar	mod=yeetusexperimentus	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/686911-8905047.jar	mod=immediatelyfast	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/689467-8889627.jar	mod=packetfixer	native=native-ok	tier=native-ok
+corpus-xl/714059-8925906.jar	mod=resourcefulconfig	native=native-ok	tier=native-ok
+corpus-xl/809311-8919465.jar	mod=beautify	native=native-ok	tier=native-ok
+corpus-xl/832070-7829608.jar	mod=footprintparticle	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/844662-8908907.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+corpus-xl/858542-8900504.jar	mod=searchables	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/892086-8902974.jar	mod=chatanimation	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/904356-8905293.jar	mod=fastipping	native=native-ok	tier=native-ok
+corpus-xl/938643-8912168.jar	mod=melody	native=native-ok	tier=native-ok
+corpus-xl/949555-8891658.jar	mod=badoptimizations	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu)
+corpus-xl/BedrockEntityModels-26.3-1.1.2-fabric.jar	mod=bedrockentitymodels	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/BetterAdvancements-Fabric-26.3-0.6.0.78.jar	mod=betteradvancements	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/BetterF3-20.0.0-Fabric-26.3.jar	mod=betterf3	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/BorderlessFullscreen-v2.5.1-mc26.3.jar	mod=fullscreenfix	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu)
+corpus-xl/ConfigManager-fabric-26.1_26.2-1.1.3.jar	mod=config_manager	native=native-ok	tier=native-ok
+corpus-xl/Controlling-fabric-26.3-26.3.4.jar	mod=controlling	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/CustomSkinLoader_Universal-15.1.jar	mod=customskinloader-bootstrap	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/DayCount-1.6.0-Fabric-mc26.3.jar	mod=daycount	native=native-ok	tier=native-ok
+corpus-xl/DetailArmorBarReconstructed-5.3.2-26.3-fabric.jar	mod=detailabreconst	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/DualBar-1.2.jar	mod=dualbar	native=native-ok	tier=native-ok
+corpus-xl/EuphoriaPatcher-1.10.5-r5.9.3-fabric.jar	mod=euphoria_patcher	native=native-ok	tier=native-ok
+corpus-xl/FastServerPings-1.1.5+26.3.jar	mod=fastserverpings	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/FastTrading-0.2.5+26.3.jar	mod=fasttrading	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/Gamma-Utils-Fabric-3.2.0+mc26.3.jar	mod=gammautils	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+corpus-xl/HoverItems-26.1-26.3.jar	mod=hover_items_bundle	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/IMBlocker-7.3.2-fabric-26.1+.jar	mod=imblocker	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/InventoryInteractions-2.2.0+26.3+fabric.jar	mod=inventory_interactions	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/InventoryParticles-3.2.0+26.3+fabric.jar	mod=inventory_particles	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/InventoryProfilesNext-fabric-26.3-2.3.8.jar	mod=inventoryprofilesnext	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/Ixeris-4.6.8+26.3-fabric.jar	mod=ixeris	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/Ixeris-4.6.9+26.3-fabric.jar	mod=ixeris	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/MagicLib-mc26.3-fabric-0.8.882-stable.jar	mod=magiclib	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/MossyLib-1.6.0+26.3+fabric.jar	mod=mossylib	native=native-ok	tier=native-ok
+corpus-xl/NoPackCompatCheck-0.1.1-fabric-mc26.1+.jar	mod=nopackcompatcheck	native=native-ok	tier=native-ok
+corpus-xl/ResourcefulConfig-6.0.2.jar	mod=resourcefulconfig	native=native-ok	tier=native-ok
+corpus-xl/Ripple-1.2.5-26.3.jar	mod=ripple	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/Searchables-fabric-26.3-1.0.3.jar	mod=searchables	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/StringDupersReturn-1.0.0-Fabric-26.3.jar	mod=stringdupersreturn	native=native-ok	tier=native-ok
+corpus-xl/SubtleEffects-fabric-26.3-1.15.0.jar	mod=subtle_effects	native=native-ok	tier=native-ok
+corpus-xl/ViaFabricPlus-5.1.1.jar	mod=viafabricplus	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, viafabricplus)
+corpus-xl/Windy-1.1.1+26.1.jar	mod=windy	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/XaeroPlus-2.37.0+fabric-26.3-WM1.47.0-MM26.6.0.jar	mod=xaeroplus	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+corpus-xl/animatica-0.6.3+26.3.jar	mod=animatica	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/asynclogger-2.2.2+26.1.2-fabric.jar	mod=asynclogger	native=native-ok	tier=native-ok
+corpus-xl/atmospherics-2.6.6-mc-26.3.jar	mod=atmospherics	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/betterf1-fabric-26.3-1.3.jar	mod=betterf1	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/bobby-5.2.16+mc26.3.jar	mod=bobby	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+corpus-xl/bookshelfinspector-fabric-2.4+26.3.jar	mod=bookshelfinspector	native=native-ok	tier=native-ok
+corpus-xl/c2me-fabric-mc26.3-0.4.2-alpha.0.106.jar	mod=c2me	native=native-ok	tier=native-ok
+corpus-xl/camerautils-fabric-1.1.2+26.3.jar	mod=camerautils	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/capes-1.5.10+26.3.jar	mod=capes	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/carpet-tis-addition-v1.82.4-mc26.3.jar	mod=carpet-tis-addition	native=native-ok	tier=native-ok
+corpus-xl/cherishedworlds-fabric-18.0.0+26.3.jar	mod=cherishedworlds	native=native-ok	tier=native-ok	no native entrypoint (available: client, spectrelib-config)
+corpus-xl/controlify-3.5.3+mc26.3-universal.jar	mod=controlify	native=native-ok	tier=native-ok
+corpus-xl/cull-fewer-leaves-1.1.2+26.1-fabric.jar	mod=cull-fewer-leaves	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+corpus-xl/custom-glow-enchantment-outline-fabric-26.3-1.2.3.jar	mod=custom_glow_enchantment_outline	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/cutthrough-v26.3.0-mc26.3.x+fabric.jar	mod=cutthrough	native=native-ok	tier=native-ok
+corpus-xl/deleteworldstotrash-v26.3.0-mc26.3.x+fabric.jar	mod=deleteworldstotrash	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/dungeons-and-taverns-6.0.2.jar	mod=mr_dungeons_andtaverns	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/durabilityviewer-fabric-26.3-1.13.1.jar	mod=durabilityviewer	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/dynamiccrosshair-9.15+26.3-fabric.jar	mod=dynamiccrosshair	native=native-ok	tier=native-ok	no native entrypoint (available: autohud, client, modmenu)
+corpus-xl/elytratrims-fabric-4.9.1+26.3.jar	mod=elytratrims	native=native-ok	tier=native-ok
+corpus-xl/entity_model_features-3.3.12-26.3-fabric.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+corpus-xl/entity_texture_features-7.2.6-26.3-fabric.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/entityculling-fabric-1.11.2-mc26.3.jar	mod=entityculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/fabric-api-0.163.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/fabric-api-0.165.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/forcecloseloadingscreen-2.3.7.jar	mod=forcecloseworldloadingscreen	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/globalpacks-fabric-26.3-26.3.1.jar	mod=globalpacks	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/glowing-torchflower-fabric-mc26.2-1.4.1.jar	mod=glowing-torchflower	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/glowing_trims-1.0.26.3.x.jar	mod=glowing_trims	native=native-ok	tier=native-ok
+corpus-xl/gugle-carpet-addition-v2.12.9+build.104.jar	mod=gca_wrapper	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/immersive-hotbar-1.2.2-26.3.jar	mod=immersive-hotbar	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/ji-afk-cinematic-26.3-2.3.2.jar	mod=ji-afk-cinematic	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/krypton-0.3.2.jar	mod=krypton	native=native-ok	tier=native-ok
+corpus-xl/lambdabettergrass-2.9.0+26.3.jar	mod=lambdabettergrass	native=native-ok	tier=native-ok	no native entrypoint (available: fabric-datagen, modmenu, sodium:config_api_user, yumi:client_init)
+corpus-xl/libIPN-fabric-26.3-6.9.0.jar	mod=libipn	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/libjf-26.3.1.jar	mod=libjf	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/light-overlay-2.13.0+26.3.jar	mod=light-overlay	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/lighty-fabric-4.0.1+26.3.jar	mod=lighty	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/litematica-printer-26.3-3.2.3.jar	mod=litematica_printer	native=native-ok	tier=native-ok
+corpus-xl/livetextureeditor-3.jar	mod=textureeditor	native=native-ok	tier=native-ok
+corpus-xl/main-menu-credits-1.4.0+26.2-universal.jar	mod=main_menu_credits	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/mezz_config-26.3-fabric-0.6.8.jar	mod=mezz_config	native=native-ok	tier=native-ok
+corpus-xl/mezz_config_gui-26.3-fabric-mc26.3-0.5.11.jar	mod=mezz_config_gui	native=native-ok	tier=native-ok
+corpus-xl/mixintrace-1.1.1+1.17.jar	mod=mixintrace	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/morechathistory-2.0.0.jar	mod=morechathistory	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/one-click-crafting-2.3.1+26.3.jar	mod=one-click-crafting	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/overlaylib-0.12.1+26.3.jar	mod=overlaylib	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/packed_packs-fabric-2.3.1+26.3.jar	mod=packed_packs	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, packed_packs)
+corpus-xl/particlerain-4.0.1+26.3-fabric.jar	mod=particlerain	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/pickupnotifier-v26.3.0-mc26.3.x+fabric.jar	mod=pickupnotifier	native=native-ok	tier=native-ok
+corpus-xl/picturemode-fabric-1.1.7+26.3.jar	mod=picturemode	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/pingview-fabric-1.7.jar	mod=pingview	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/pneumonocore-1.3.1+26.3+A.jar	mod=pneumonocore	native=native-ok	tier=native-ok
+corpus-xl/preferred-gamerules-2.0.1+26.2.jar	mod=preferred-gamerules	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu)
+corpus-xl/reachbehind-v26.3.0-mc26.3.x+fabric.jar	mod=reachbehind	native=native-ok	tier=native-ok
+corpus-xl/reeses-sodium-options-fabric-2.2.5+mc26.3.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: controlify, sodium:config_api_user)
+corpus-xl/reeses-sodium-options-fabric-2.2.6-beta.1+mc26.3.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: controlify, sodium:config_api_user)
+corpus-xl/renderscale-1.4.0-alpha.6-fabric+26.3.jar	mod=renderscale	native=native-ok	tier=native-ok	no native entrypoint (available: client, fabric-client-gametest, fabric-datagen, modmenu, sodium:config_api_user)
+corpus-xl/respackopts-26.3.0.jar	mod=respackopts	native=native-ok	tier=native-ok
+corpus-xl/rrls-5.2.8+mc.26.3.jar	mod=rrls	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/screenshotgallery-fabric-2.1.jar	mod=screenshotgallery	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/scribble-2.1.0-beta1+mc26.3.jar	mod=scribble	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/serverpingerfixer+26.1-1.1.1.jar	mod=serverpingerfixer	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/simple_music_control-fabric-1.5.5+26.3.jar	mod=simple_music_control	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+corpus-xl/smoothscroll-3.0.0.jar	mod=smoothscroll	native=native-ok	tier=native-ok
+corpus-xl/smoothscroll-3.0.2.jar	mod=smoothscroll	native=native-ok	tier=native-ok
+corpus-xl/smoothswapping-0.9.11-26.3-fabric.jar	mod=smoothswapping	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/sodium-fabric-0.9.3-beta.1+mc26.3.jar	mod=sodium	native=native-ok	tier=native-ok	no native entrypoint (available: client, preLaunch)
+corpus-xl/stackrefill-26.3.0-5.1.jar	mod=stackrefill	native=native-ok	tier=native-ok
+corpus-xl/structure_layout_optimizer-1.1.4+26.3-fabric.jar	mod=structure_layout_optimizer	native=native-ok	tier=native-ok
+corpus-xl/texture-builder - 26.3 - 1.0.0.jar	mod=texturebuilder	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/tightfire-26.3-1.0-SNAPSHOT.jar	mod=tightfire	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/titlechanger-1.4.8+mc26.3.jar	mod=titlechanger	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+corpus-xl/vehicleupgrade-v26.3.0-mc26.3.x+fabric.jar	mod=vehicleupgrade	native=native-ok	tier=native-ok
+corpus-xl/vmp-fabric-mc26.3-0.2.0+beta.7.238-all.jar	mod=vmp	native=native-ok	tier=native-ok
+corpus-xl/wakes-26.3-Fabric-1.4.1.jar	mod=wakes	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+corpus-xl/worldplaytimereborn-1.2.6+26.3-fabric.jar	mod=worldplaytimereborn	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/xplus-autofish-2.0.0-fabric-mc26.3.jar	mod=autofish	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+corpus-xl/zmatcomp-1.1.2+26.3.jar	mod=zmatcomp	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+corpus-xl/1283899-8898481.jar	mod=player_animation_library	native=needs-loader	tier=needs-loader	proof=proven	loader_id=player_animation_library	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/248787-8907912.jar	mod=appleskin	native=needs-loader	tier=needs-loader	proof=proven	loader_id=appleskin	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/257814-8894326.jar	mod=creativecore	native=native-gap	tier=needs-loader	proof=proven	loader_id=creativecore	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/326652-8890593.jar	mod=cupboard	native=needs-loader	tier=needs-loader	proof=proven	loader_id=cupboard	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/342584-8921261.jar	mod=collective	native=native-gap	tier=needs-loader	proof=proven	loader_id=collective	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/348831-8926733.jar	mod=doubledoors	native=needs-loader	tier=needs-loader	proof=proven	loader_id=doubledoors	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/367706-8917645.jar	mod=fancymenu	native=needs-loader	tier=needs-loader	proof=proven	loader_id=fancymenu	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/368825-8901843.jar	mod=inventoryessentials	native=needs-loader	tier=needs-loader	proof=proven	loader_id=inventoryessentials	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/410295-8911219.jar	mod=konkrete	native=needs-loader	tier=needs-loader	proof=proven	loader_id=konkrete	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/419699-8915075.jar	mod=architectury	native=needs-loader	tier=needs-loader	proof=proven	loader_id=architectury	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/456640-8026052.jar	mod=limitedchunks	native=needs-loader	tier=needs-loader	proof=proven	loader_id=limitedchunks	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/511733-8929530.jar	mod=clickadv	native=needs-loader	tier=needs-loader	proof=proven	loader_id=clickadv	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/526901-8925000.jar	mod=memorysettings	native=needs-loader	tier=needs-loader	proof=proven	loader_id=memorysettings	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/531761-8889669.jar	mod=balm	native=native-gap	tier=needs-loader	proof=proven	loader_id=balm	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/608235-8905060.jar	mod=weaponmaster_ydm	native=needs-loader	tier=needs-loader	proof=proven	loader_id=weaponmaster_ydm	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/623764-8914234.jar	mod=jamlib	native=native-gap	tier=needs-loader	proof=proven	loader_id=jamlib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/639842-8906536.jar	mod=bettercombat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=bettercombat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/734339-8931641.jar	mod=pingwheel	native=needs-loader	tier=needs-loader	proof=proven	loader_id=pingwheel	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/832882-8896904.jar	mod=structureessentials	native=needs-loader	tier=needs-loader	proof=proven	loader_id=structureessentials	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/882495-8910991.jar	mod=gpumemleakfix	native=needs-loader	tier=needs-loader	proof=proven	loader_id=gpumemleakfix	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/888790-8002356.jar	mod=clientcrafting	native=needs-loader	tier=needs-loader	proof=proven	loader_id=clientcrafting	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/BedrockSkins-26.3-2.1.1.jar	mod=bedrockskins	native=needs-loader	tier=needs-loader	proof=proven	loader_id=bedrockskins	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/CustomPlayerModels-Fabric-26.3-0.6.27e.jar	mod=cpm	native=needs-loader	tier=needs-loader	proof=proven	loader_id=cpm	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/Jade-mc26.3-Fabric-26.3.5.jar	mod=jade	native=needs-loader	tier=needs-loader	proof=proven	loader_id=jade	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/Legacy4J-26.3-1.9.1-fabric.jar	mod=legacy	native=native-gap	tier=needs-loader	proof=proven	loader_id=legacy	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/PatPat-1.3.2+26.3+fabric.jar	mod=patpat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=patpat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/advancementscreenshot-26.3.0-5.3.jar	mod=advancementscreenshot	native=needs-loader	tier=needs-loader	proof=proven	loader_id=advancementscreenshot	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/architectury-fabric-22.0.4.jar	mod=architectury	native=needs-loader	tier=needs-loader	proof=proven	loader_id=architectury	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/armor-stand-poses-fabric-26.3-1.4.0.jar	mod=poses	native=needs-loader	tier=needs-loader	proof=proven	loader_id=poses	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/baguettelib-26.3-Fabric-2.0.7.jar	mod=baguettelib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=baguettelib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/bannerpoint-fabric-1.1.2+26.3.jar	mod=bannerpoint	native=needs-loader	tier=needs-loader	proof=proven	loader_id=bannerpoint	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/betterstats-5.6.0-beta.2+fn-26.3.jar	mod=betterstats	native=native-gap	tier=needs-loader	proof=proven	loader_id=betterstats	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/betterstats-5.7.0+fn-26.3.jar	mod=betterstats	native=native-gap	tier=needs-loader	proof=proven	loader_id=betterstats	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/clientsort-fabric-3.104.1+26.3.jar	mod=clientsort	native=native-gap	tier=needs-loader	proof=proven	loader_id=clientsort	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/collective-26.3.0-8.42.jar	mod=collective	native=native-gap	tier=needs-loader	proof=proven	loader_id=collective	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/collective-26.3.0-8.46.jar	mod=collective	native=native-gap	tier=needs-loader	proof=proven	loader_id=collective	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/cropsloverain-3.2.1.jar	mod=cropsloverain	native=needs-loader	tier=needs-loader	proof=proven	loader_id=cropsloverain	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/fix-keyboard-on-linux-1.0.2.jar	mod=fix-keyboard-on-linux	native=needs-loader	tier=needs-loader	proof=proven	loader_id=fix-keyboard-on-linux	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/jei-26.3-fabric-31.16.0.83.jar	mod=jei	native=needs-loader	tier=needs-loader	proof=proven	loader_id=jei	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/kreno_fpatcher-26.2.0+26.1.jar	mod=kreno-fpatcher	native=native-gap	tier=needs-loader	proof=proven	loader_id=kreno-fpatcher	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/mcwifipnp-2.1.4-26.3-fabric.jar	mod=mcwifipnp	native=needs-loader	tier=needs-loader	proof=proven	loader_id=mcwifipnp	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/moderner-beta-fabric-5.0.0-alpha.4+26.3.jar	mod=moderner_beta	native=native-gap	tier=needs-loader	proof=proven	loader_id=moderner_beta	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/modernregsyncfix-2.0.0.jar	mod=modernregsyncfix	native=needs-loader	tier=needs-loader	proof=proven	loader_id=modernregsyncfix	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/naturally_trimmed-3.6.1+26.3-fabric.jar	mod=naturally_trimmed	native=needs-loader	tier=needs-loader	proof=proven	loader_id=naturally_trimmed	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/peek-fabric-1.6.0+26.3.jar	mod=peek	native=needs-loader	tier=needs-loader	proof=proven	loader_id=peek	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/pickupnotifications-fabric-3.0.1+26.3.jar	mod=pickupnotifications	native=native-gap	tier=needs-loader	proof=proven	loader_id=pickupnotifications	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/puzzleslib-v26.3.12-mc26.3.x+fabric.jar	mod=puzzleslib	native=native-gap	tier=needs-loader	proof=proven	loader_id=puzzleslib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/puzzleslib-v26.3.13-mc26.3.x+fabric.jar	mod=puzzleslib	native=native-gap	tier=needs-loader	proof=proven	loader_id=puzzleslib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/puzzleslib-v26.3.14-mc26.3.x+fabric.jar	mod=puzzleslib	native=native-gap	tier=needs-loader	proof=proven	loader_id=puzzleslib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/servercore-fabric-1.5.20+26.3.jar	mod=servercore	native=native-gap	tier=needs-loader	proof=proven	loader_id=servercore	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/simplemenu-26.3.0-2.3.jar	mod=simplemenu	native=needs-loader	tier=needs-loader	proof=proven	loader_id=simplemenu	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/smooth_f5-fabric-1.3.2.jar	mod=smooth_f5	native=needs-loader	tier=needs-loader	proof=proven	loader_id=smooth_f5	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/swinginglanterns-fabric-26.3-2.0.3.jar	mod=swinginglanterns	native=native-gap	tier=needs-loader	proof=proven	loader_id=swinginglanterns	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/takeitout-1.1.28-26.3.jar	mod=takeitout	native=needs-loader	tier=needs-loader	proof=proven	loader_id=takeitout	cause=no server ledger row	the real Fabric loader lists it and reached Done
+corpus-xl/tcdcommons-5.6.0-beta.2+fn-26.3.jar	mod=tcdcommons	native=native-gap	tier=needs-loader	proof=proven	loader_id=tcdcommons	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/tcdcommons-5.7.0+fn-26.3.jar	mod=tcdcommons	native=native-gap	tier=needs-loader	proof=proven	loader_id=tcdcommons	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/whiteout-0.21.0.jar	mod=whiteout	native=native-gap	tier=needs-loader	proof=proven	loader_id=whiteout	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+corpus-xl/xaeroworldmap-fabric-26.3-1.47.0.jar	mod=xaeroworldmap	native=native-gap	tier=needs-loader	proof=proven	loader_id=xaeroworldmap	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+corpus-xl/zoomify-2.17.0+mc26.3-universal.jar	mod=zoomify	native=native-gap	tier=needs-loader	proof=proven	loader_id=zoomify	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/002c03b348-removewardeneffect-0.0.2-26.2FB.jar	mod=removewardeneffect	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/019cb78748-tweakermore-v3.33.3-beta.1-mc26.3.jar	mod=tweakermore	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, preLaunch)
+mega/025bd582d1-mcw-stairs-1.0.2-mc26.3fabric.jar	mod=mcwstairs	native=native-ok	tier=native-ok
+mega/027bffb136-noxesium-fabric-3.3.0.jar	mod=noxesium	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, noxesium)
+mega/029c647038-fallingleaves-2.0.8+26.3.jar	mod=fallingleaves	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/031a69a494-inventoryhud.fabric.26.3-3.4.36.jar	mod=inventoryhud	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/036c4e7460-Catharsis-1.0.0-beta.22-26.3.jar	mod=catharsis	native=native-ok	tier=native-ok	no native entrypoint (available: client, jade, packed_packs, skyblock-item-list)
+mega/038a5c9b96-chatsigninghider-fabric-1.0.5+26.3.jar	mod=chatsigninghider	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/03cd41bb2a-glowing_trims-1.0.26.3.x.jar	mod=glowing_trims	native=native-ok	tier=native-ok
+mega/0437d38ed4-lumen-tooltips-fabric-26.3-b8.jar	mod=lumen_tooltips	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/0493f21c5b-wWaypoints_0.8.1_Fabric_26.3.jar	mod=wwaypoints	native=native-ok	tier=native-ok
+mega/0577f3fbef-eg_particle_interactions-0.10.4+26.3-fabric.jar	mod=eg_particle_interactions	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/0589060a1c-chunksmith-4.6.0+26.3.jar	mod=chunksmith	native=native-ok	tier=native-ok
+mega/064ad66ea6-geckolib-fabric-26.3-5.5.7.jar	mod=geckolib	native=native-ok	tier=native-ok
+mega/069848f8bd-nowplaying-fabric-2.104.1+26.3.jar	mod=nowplaying	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/0718517489-blur-fabric-6.3.1+26.3.jar	mod=blur	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/07680af3f0-DnT-ocean-monument-overhaul-2.3__Fabric_.jar	mod=mr_dungeons_andtavernsoceanmonumentoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/07f9724c04-coolrain-1.4.0-26.3.jar	mod=coolrain	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/0940b4089a-spark-1.10.187-fabric.jar	mod=spark	native=native-ok	tier=native-ok
+mega/0977eb0a35-fastquit-3.1.5+mc26.2.jar	mod=fastquit	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/09ee9afdd2-entity-view-distance-1.9.0+26.2.jar	mod=entity-view-distance	native=native-ok	tier=native-ok
+mega/0a0ac0fa89-simpleshulkerpreview-2.6.0-mc26.3.jar	mod=simpleshulkerpreview	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/0b20fe6666-DnT-desert-temple-overhaul-2.2__Fabric_.jar	mod=mr_dungeons_andtavernsdeserttempleoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/0b603a240e-cull-fewer-leaves-1.1.2+26.1-fabric.jar	mod=cull-fewer-leaves	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/0bee69eb0c-mcw-lights-1.1.5-mc26.3fabric.jar	mod=mcwlights	native=native-ok	tier=native-ok
+mega/0d4e86a123-mezz_config-26.3-fabric-0.6.10.jar	mod=mezz_config	native=native-ok	tier=native-ok
+mega/0db62973d2-stack-to-nearby-chests-mc26.3-0.5.20.jar	mod=stack-to-nearby-chests	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, rei_client)
+mega/0f4243dcc8-bobby-5.2.16+mc26.3.jar	mod=bobby	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/14e35002fa-authme-fabric-9.3.0+26.3.jar	mod=authme	native=native-ok	tier=native-ok
+mega/151330c3ea-bbe-fabric-1.3.9+mc26.3-mod.jar	mod=betterblockentities	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/168f32a666-IMBlocker-7.3.2-fabric-26.1+.jar	mod=imblocker	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/172ba3915c-dungeons-and-taverns-6.0.2.jar	mod=mr_dungeons_andtaverns	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/172c7d95b8-Ixeris-4.6.7+26.3-fabric.jar	mod=ixeris	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/177c5acce9-vanillahud-3.5.10+26.3.jar	mod=vanillahud	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/18214af634-explosive-enhancement-1.4.2-26.2.jar	mod=explosiveenhancement	native=native-ok	tier=native-ok
+mega/18c8ab40f0-lambdynamiclights-4.13.0+26.3.jar	mod=lambdynlights	native=native-ok	tier=native-ok
+mega/190d00465d-held-item-info-1.9.3.jar	mod=held-item-info	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/19cc0e4fb9-reeses-sodium-options-mc26.3-2.2.4+fabric.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: sodium:config_api_user)
+mega/1a1fb1dba4-EclipseUI-fabric-1.0.5-fabric-26.3.jar	mod=eclipseui	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/1a57eccde0-freelook-2.3.3+mc26.3.jar	mod=freelook	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/1aa0ea7893-c2me-fabric-mc26.3-0.4.2-alpha.0.89.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/1b0a4ed5f7-structure_pool_api-fabric-1.3.0+26.3.jar	mod=structure_pool_api	native=native-ok	tier=native-ok
+mega/1b7ea6160c-MoogsMissingVillages-universal-1.21-2.2.0.jar	mod=mmv	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/1bf4b5db91-indium-1.0.35+mc1.21.jar	mod=indium	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/1d3c4b4614-AsyncParticles-26.3.2.1+26.3.jar	mod=asyncparticles	native=native-ok	tier=native-ok
+mega/1e04e1a40e-particle_core-0.3.3+fix1+26.2.jar	mod=particle_core	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/1e0725c00c-tectonic-3.0.31-fabric-26.3.jar	mod=tectonic	native=native-ok	tier=native-ok
+mega/1e6aec741b-sodium-fabric-0.9.3-beta.1+mc26.3.jar	mod=sodium	native=native-ok	tier=native-ok	no native entrypoint (available: client, preLaunch)
+mega/1eef5b7a4b-skinlayers3d-fabric-1.11.4-mc26.3.jar	mod=skinlayers3d	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/1f23efb23a-cratedelight-26.09.15-26.3-fabric.jar	mod=cratedelight	native=native-ok	tier=native-ok
+mega/201cf2bf98-CrashPatch-2.2.3+26.3.jar	mod=crashpatch	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/21b21cb88e-krypton-0.3.2.jar	mod=krypton	native=native-ok	tier=native-ok
+mega/224e9c47d9-renice-shot-1.2.1+mc26.3.jar	mod=renice-shot	native=native-ok	tier=native-ok
+mega/230bac67e9-boatiview-fabric-0.0.11-26.3.jar	mod=boatiview	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/232a2b50b3-Controlling-fabric-26.3-26.3.3.jar	mod=controlling	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/2363766a77-tweakeroo-fabric-26.3-0.30.1.jar	mod=tweakeroo	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/2448fd1e45-Ripple-1.2.5-26.3.jar	mod=ripple	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/246a8b955f-mountopacity-1.2.5+26.3-fabric.jar	mod=mountopacity	native=native-ok	tier=native-ok
+mega/24f4b12ff6-emf_compat_core_fabric_26.3_2.3.0.jar	mod=emf_compat_core	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2653bb482e-DnT-ancient-city-overhaul-3.5.1__Fabric_.jar	mod=mr_dungeons_andtavernsancientcityoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/2712ba020d-Searchables-fabric-26.3-1.0.3.jar	mod=searchables	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/273cd2dcbd-fabric-api-0.162.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/2747a6c39d-PresenceFootsteps-1.14.0+26.3.jar	mod=presencefootsteps	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2790a249c6-fzzy_config-0.7.7+26.3.jar	mod=fzzy_config	native=native-ok	tier=native-ok
+mega/28654544c7-FastServerPings-1.1.5+26.3.jar	mod=fastserverpings	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/29f48f42d7-entity_texture_features-7.2.7-26.3-fabric.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2a0833c877-BridgingMod-2.7.0+26.3.fabric-release.jar	mod=bridgingmod	native=native-ok	tier=native-ok	no native entrypoint (available: client, dynamiccrosshair, modmenu)
+mega/2af112d25d-zmatcomp-1.1.4+26.3.jar	mod=zmatcomp	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/2afbb66860-vehicleupgrade-v26.3.0-mc26.3.x+fabric.jar	mod=vehicleupgrade	native=native-ok	tier=native-ok
+mega/2b5cb93d60-IAS-9.0.8+26.3-fabric.jar	mod=ias	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2b86b92f9c-rrls-5.2.8+mc.26.3.jar	mod=rrls	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/2bc181e1cc-Resourcify__26.3-fabric_-1.8.7.jar	mod=resourcify	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2c0e37ef45-litematica-fabric-26.3-0.29.1.jar	mod=litematica	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/2c58662fe1-smoothswapping-0.9.11-26.3-fabric.jar	mod=smoothswapping	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2c768b910e-moreculling-fabric-26.3-1.9.1.jar	mod=moreculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/2caea3f75e-fadeless-2.0.9-26.3.jar	mod=fadeless	native=native-ok	tier=native-ok
+mega/2d076285c7-entity_model_features-3.3.12-26.3-fabric.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+mega/2d3afe9d43-lithium-fabric-0.26.3+mc26.3.jar	mod=lithium	native=native-ok	tier=native-ok
+mega/2de5886fcc-soundculling-2.0.1.jar	mod=soundculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2e0c90e7a1-InventoryProfilesNext-fabric-26.3-2.3.8.jar	mod=inventoryprofilesnext	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/2e364989e3-fabric-api-0.165.2+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/2e59faa6d6-hatlist-1.5.jar	mod=hatlist	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/2efc137fcb-polycrosshair-2.0.7+26.3.jar	mod=polycrosshair	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/2fdb969c89-reachbehind-v26.3.0-mc26.3.x+fabric.jar	mod=reachbehind	native=native-ok	tier=native-ok
+mega/30321451a7-PrickleMC-fabric-MC26.3-26.3.0.2.jar	mod=prickle	native=native-ok	tier=native-ok
+mega/305aa81317-reeses-sodium-options-fabric-2.2.5+mc26.3.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: controlify, sodium:config_api_user)
+mega/3079d66d03-animatica-0.7.0+beta.3+26.3-fabric.jar	mod=animatica	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/310c036306-DistantHorizons-3.3.4-26.3-fabric-neoforge.jar	mod=distanthorizons	native=native-ok	tier=native-ok	clientSideOnly mod cannot run for server execution (available: client, modmenu, server)
+mega/31b69af23c-better-clouds-1.15.0-beta.4+26.3-fabric.jar	mod=betterclouds	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, preLaunch)
+mega/31ee367d59-3dskinlayers-1.11.3.jar	mod=skinlayers3d	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/3231a2c774-cape-provider-5.6.2.jar	mod=cape-provider	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/323a50c8f8-puzzle-fabric-2.3.1+26.3.jar	mod=puzzle	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/3329b11673-MoogsPaths-fabric-26.3-1.2.0.jar	mod=moogs_paths	native=native-ok	tier=native-ok
+mega/3341b8f43a-aitk-1.2.2-fabric+26.3.jar	mod=aitk	native=native-ok	tier=native-ok
+mega/33f9a43b83-fwa+26.3-1.3.0.jar	mod=fwa	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/360c432a7f-eg_particle_interactions-0.10.5+26.3-fabric.jar	mod=eg_particle_interactions	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/373b6365bb-fzzy_config-0.7.7+fix3+26.3.jar	mod=fzzy_config	native=native-ok	tier=native-ok
+mega/37c992aa4c-craft_config-1.1.13+26.3-fabric.jar	mod=craft_config	native=native-ok	tier=native-ok
+mega/38caf552fa-serverpingerfixer+26.1-1.1.1.jar	mod=serverpingerfixer	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/393b42752d-delightlib-26.09.16-26.3-fabric.jar	mod=delightlib	native=native-ok	tier=native-ok
+mega/3ab870e07e-betterf1-fabric-26.3-1.3.jar	mod=betterf1	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/3b18554c01-advancements_fullscreen-2.0.1+fabric-mc26.3.jar	mod=advancements_fullscreen	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/3b270bf23f-mixintrace-1.0-26.1-universal.jar	mod=mixintrace	native=native-ok	tier=native-ok
+mega/3c4b4e119f-ParticleEffects-1.6.0+26.3+fabric.jar	mod=particle_effects	native=native-ok	tier=native-ok
+mega/3d52342f58-no-telemetry-1.10.0.jar	mod=no-telemetry	native=native-ok	tier=native-ok
+mega/3d9aa76fbf-ViaFabricPlus-5.1.2.jar	mod=viafabricplus	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, viafabricplus)
+mega/3e2d5b0247-EuphoriaPatcher-1.10.5-r5.9.3-fabric.jar	mod=euphoria_patcher	native=native-ok	tier=native-ok
+mega/3fd4cccef3-zoomify-2.16.3+26.3.jar	mod=zoomify	native=native-ok	tier=native-ok	no native entrypoint (available: client, controlify, modmenu)
+mega/40fd33455e-entity_texture_features-7.2.6-26.3-fabric.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/41596f189f-cloth-config-26.3.158.jar	mod=cloth-config	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/418b70684c-BetterF3-20.0.0-Fabric-26.3.jar	mod=betterf3	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/4223867c5a-c2me-fabric-mc26.3-0.4.2-alpha.0.106.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/4329b602a8-pneumonocore-1.3.1+26.3+A.jar	mod=pneumonocore	native=native-ok	tier=native-ok
+mega/4398bc8c1d-entity_sound_features-0.8.2-26.1-fabric.jar	mod=entity_sound_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/4460d7fde6-supermartijn642configlib-1.1.8a-fabric-mc26.3.jar	mod=supermartijn642configlib	native=native-ok	tier=native-ok
+mega/44e556090f-ok_zoomer-19.0.0-beta.1.jar	mod=ok_zoomer	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/45f47f7a06-entityculling-fabric-1.11.3-mc26.3.jar	mod=entityculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/47372e0b6c-Searchables-fabric-26.3-1.0.2.jar	mod=searchables	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/4873321d64-quick-pack-fabric-1.5.1+26.3.jar	mod=quick-pack	native=native-ok	tier=native-ok
+mega/48facdb59d-MossyLib-1.6.0+26.3+fabric.jar	mod=mossylib	native=native-ok	tier=native-ok
+mega/4ba9610c3f-advancements_search-1.3.1+fabric-mc26.3.jar	mod=advancements_search	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/4c455faa63-placeholder-api-3.2.0+26.3.jar	mod=placeholder-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/4c64afc809-obe+26.3-1.2.0.jar	mod=obe	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/4ca9bccbab-passiveshield-26.3.0-4.0.jar	mod=passiveshield	native=native-ok	tier=native-ok
+mega/4cc25ce621-BadOptimizations-2.4.1-26.3-fabric.jar	mod=badoptimizations	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu)
+mega/4d6409d93a-logical_zoom-0.0.37.jar	mod=logical_zoom	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/4d668978e1-Geophilic_v3.7.mod.jar	mod=geophilic	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/4e0aa2a34e-Perception-FABRIC-0.1.6.1+26.3.jar	mod=perception	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/507cb204ff-freecam-fabric-1.5.1+mc26.3.jar	mod=freecam	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/516c8b6726-inventoryhud.fabric.26.3-3.4.37.jar	mod=inventoryhud	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/5198543345-ViaFabricPlus-5.1.1.jar	mod=viafabricplus	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, viafabricplus)
+mega/51e6ecdd6b-LegendaryTooltips-26.3-fabric-1.6.3.jar	mod=legendarytooltips	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/526a481b15-fullbrightnesstoggle-26.3.0-4.7.jar	mod=fullbrightnesstoggle	native=native-ok	tier=native-ok
+mega/53b871bf38-c2me-fabric-mc26.3-0.4.2-alpha.0.114.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/53bae0f117-lambdabettergrass-2.9.0+26.3.jar	mod=lambdabettergrass	native=native-ok	tier=native-ok	no native entrypoint (available: fabric-datagen, modmenu, sodium:config_api_user, yumi:client_init)
+mega/53f9ee02c3-fabric-api-0.161.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/54631780b9-searchstats-fabric-1.103.0+26.2.jar	mod=searchstats	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/5506fd0a73-packed-packs-2.3.0-beta.1+26.3.jar	mod=packed_packs	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, packed_packs)
+mega/565e3f384e-pickupnotifier-v26.3.0-mc26.3.x+fabric.jar	mod=pickupnotifier	native=native-ok	tier=native-ok
+mega/5743ce2bb5-chatanimation-fabric-1.3.4+mc26.3.jar	mod=chatanimation	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/57aaafb29c-respackopts-26.3.0.jar	mod=respackopts	native=native-ok	tier=native-ok
+mega/58981c8cb9-waveycapes-fabric-1.11.2-mc26.3.jar	mod=waveycapes	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/58ea9fda32-packed_packs-fabric-2.3.1+26.3.jar	mod=packed_packs	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, packed_packs)
+mega/596d330c67-JustEnoughResources-Fabric-26.3-1.11.0.58.jar	mod=jeresources	native=native-ok	tier=native-ok	no native entrypoint (available: client, jei_mod_plugin, modmenu)
+mega/5adb976ad7-InventoryParticles-3.2.0+26.3+fabric.jar	mod=inventory_particles	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/5af7c187be-NarrusYeetus-1.3.0.jar	mod=narrus_yeetus	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/5c80b582b9-WorldEditCUI-26.3+01.jar	mod=worldeditcui	native=native-ok	tier=native-ok
+mega/5cdaf1553c-scribble-2.1.0-beta1+mc26.3.jar	mod=scribble	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/5d2ccfa70f-ping-in-tablist-1.1.0.jar	mod=pingintablist	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/5d874aa578-crashexploitfixer-fabric-2.0.0+26.3.jar	mod=crashexploitfixer	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/5d88caf6f3-sodium-fabric-0.9.3-alpha.1+mc26.3.jar	mod=sodium	native=native-ok	tier=native-ok	no native entrypoint (available: client, preLaunch)
+mega/5e4923c662-cicada-lib-0.15.3+26.3.jar	mod=cicada	native=native-ok	tier=native-ok
+mega/5e7d2a3fac-smoothgui-fabric-2.0.7+mc26.3.jar	mod=smoothgui	native=native-ok	tier=native-ok
+mega/5ecc428a87-easyanvils-v26.3.1-mc26.3.x+fabric.jar	mod=easyanvils	native=native-ok	tier=native-ok
+mega/5fbf213aa4-networkproxy-1.2.0-26.x.jar	mod=networkproxy	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/60a95072fa-rsls-1.4.0.jar	mod=rsls	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/60d0415cbb-chat-heads-1.2.9.jar	mod=chat_heads	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/6259b275cd-sound-physics-remastered-fabric-1.5.1+26.3.jar	mod=sound_physics_remastered	native=native-ok	tier=native-ok
+mega/626f74d326-BetterGrassify-1.8.8+fabric.26.3.jar	mod=bettergrass	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/627dfcf435-betternightvision-1.0.5+26.2-fabric.jar	mod=betternightvision	native=native-ok	tier=native-ok
+mega/62876ccaaa-debugify-26.3.0.0.jar	mod=debugify	native=native-ok	tier=native-ok
+mega/62ae40a31b-fabric-language-kotlin-1.14.1+kotlin.2.4.20.jar	mod=fabric-language-kotlin	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/62c6f8a9ef-entityculling-fabric-1.11.1-mc26.3.jar	mod=entityculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/63493cf8c5-iris-fabric-1.11.6+mc26.3.jar	mod=iris	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, sodium:config_api_user)
+mega/63d51781b2-continuity-3.0.1+26.3.jar	mod=continuity	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/6554509fc8-notenoughanimations-fabric-1.12.6-mc26.3.jar	mod=notenoughanimations	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/65ada8c72b-fabric-api-0.163.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/65c0f55889-MouseTweaks-fabric-mc26.3-2.31.jar	mod=mousetweaks	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/65fbee1197-animatica-0.6.2+26.3.jar	mod=animatica	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/6640621b66-chatanimation-fabric-1.3.3+mc26.3.jar	mod=chatanimation	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/66ec40f1cd-modmenu-21.0.0.jar	mod=modmenu	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/6741b037b9-nvidium-0.4.4-beta7-26.3.jar	mod=nvidium	native=native-ok	tier=native-ok	no native entrypoint (available: sodium:config_api_user)
+mega/6743f7b782-renderscale-1.4.0-alpha.6-fabric+26.3.jar	mod=renderscale	native=native-ok	tier=native-ok	no native entrypoint (available: client, fabric-client-gametest, fabric-datagen, modmenu, sodium:config_api_user)
+mega/6ce97845f9-morechathistory-2.0.0.jar	mod=morechathistory	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/6de6271329-Ksyxis-1.4.6.jar	mod=ksyxis	native=native-ok	tier=native-ok
+mega/6f83f06a39-BetterAdvancements-Fabric-26.3-0.6.0.78.jar	mod=betteradvancements	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/6f8d04aa82-punchy-3.1b-fabric-26.3.jar	mod=punchy	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/6fd4e3c9b0-InventoryParticles-3.3.0+26.3+fabric.jar	mod=inventory_particles	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/702f38da06-smoothskies-2.12.2+26.3-fabric.jar	mod=smoothskies	native=native-ok	tier=native-ok
+mega/709783b43b-scrolltweaks-1.0.7+26.1.2-fabric.jar	mod=scrolltweaks	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/713ad16504-dark-loading-screen-1.6.20.jar	mod=dark-loading-screen	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu)
+mega/714f7e22e2-DnT-nether-fortress-overhaul-3.2.1__Fabric_.jar	mod=mr_dungeons_andtavernsnetherfortressoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/7169a67d2c-smallernetherportals-26.3.0-4.1.jar	mod=smallernetherportals	native=native-ok	tier=native-ok
+mega/71c63d9af9-sodium-extra-fabric-0.9.6-beta.1+mc26.3.jar	mod=sodium-extra	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/7308b0b0b6-moreculling-fabric-26.3-1.9.0.jar	mod=moreculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/73a1ca31ad-emf_compat_core_fabric_26.3_2.3.2.jar	mod=emf_compat_core	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/749d7198b0-wakes-0.7.3+26.3.jar	mod=wakes	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/750384db0a-Bookshelf-fabric-MC26.3-26.3.0.4.jar	mod=bookshelf	native=native-ok	tier=native-ok
+mega/75bf51226a-CameraOverhaul-v2.1.2-fabric+mc_26.3-plus_.jar	mod=cameraoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/760a2863d2-chatanimation-fabric-1.3.5+mc26.3.jar	mod=chatanimation	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/76553c51e0-elytratrims-fabric-4.9.1+26.3.jar	mod=elytratrims	native=native-ok	tier=native-ok
+mega/76c3b1e2fd-SmoothPlayerAnimations_Fabric_26.3_1.1.0.jar	mod=smoothplayeranimations	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/773b786860-screenshotgallery-fabric-2.1.jar	mod=screenshotgallery	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/776d59ad1c-Windy-1.1.1+26.1.jar	mod=windy	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/779dceee6a-item_descriptions-2.8.5+26.2-fabric.jar	mod=item_descriptions	native=native-ok	tier=native-ok	no native entrypoint (available: client, jade, limelight, modmenu, rrv_client)
+mega/77a7f6a760-sounds-2.6.0+26.3-fabric.jar	mod=sounds	native=native-ok	tier=native-ok	no native entrypoint (available: client, fabric-datagen, modmenu, mru, mru_client)
+mega/78a4feb50b-e4mc-fabric-6.2.3-modern.jar	mod=e4mc	native=native-ok	tier=native-ok
+mega/78b1e05f53-fwa+26.3-1.2.40.jar	mod=fwa	native=native-ok	tier=native-ok
+mega/79dc4f5cc9-ItemPhysicLite_FABRIC_v1.6.13_mc26.3.jar	mod=itemphysiclite	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/7a1dfc4607-zoomx-26.3.jar	mod=zoomx	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/7b77b734bc-particlerain-4.0.3+26.3-fabric.jar	mod=particlerain	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/7c738d13e6-reeses-sodium-options-fabric-2.2.6-beta.1+mc26.3.jar	mod=reeses-sodium-options	native=native-ok	tier=native-ok	no native entrypoint (available: controlify, sodium:config_api_user)
+mega/7d7557a816-bookshelfinspector-fabric-2.4+26.3.jar	mod=bookshelfinspector	native=native-ok	tier=native-ok
+mega/7d79198917-secureskins-1.0.1+26.1.1-fabric.jar	mod=secureskins	native=native-ok	tier=native-ok
+mega/7d861470d6-mcw-furniture-3.4.2-mc26.3fabric.jar	mod=mcwfurnitures	native=native-ok	tier=native-ok
+mega/7db094c0a3-fast-ip-ping-v1.0.12-mc26.3.jar	mod=fastipping	native=native-ok	tier=native-ok
+mega/7e58e70918-mru-1.0.43+26.3-fabric.jar	mod=mru	native=native-ok	tier=native-ok
+mega/7e75cee129-cwb-5.0.0+26.3.jar	mod=cwb	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/7ec45ba92a-fabric-api-0.164.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/7f44bfa0a1-emf_compat_not_enough_animations_fabric_26.3_1.2.1.jar	mod=emf_compat_not_enough_animations	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/7f7f6bf5b0-obe+26.3-1.1.47-patch.2.jar	mod=obe	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/81b54955b3-minihud-0.41.1.jar	mod=minihud	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/8310140018-IKWID-1.0.0-mc26.3.jar	mod=ikwid	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/832a00c0d6-malilib-fabric-26.3-0.30.2.jar	mod=malilib	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/84a14fbb28-itemscroller-fabric-26.3-0.33.1.jar	mod=itemscroller	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/8582d854ae-ping-display-26.3.jar	mod=pingdisplay	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/86d6618f77-Clumps-fabric-26.3-26.3.2.jar	mod=clumps	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/8762bac6ce-polytone-26.3-6.8.6-fabric.jar	mod=polytone	native=native-ok	tier=native-ok	no native entrypoint (available: client, packed_packs)
+mega/87e1454362-capes-1.5.10+26.3.jar	mod=capes	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/88726ef646-HypixelModAPI-1.0.2+build.1+mc26.1.jar	mod=hypixel-mod-api	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/88d58e7b23-tightfire-26.3-1.0-SNAPSHOT.jar	mod=tightfire	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/8a2ebb77d4-treeharvester-26.3.0-10.3.jar	mod=treeharvester	native=native-ok	tier=native-ok
+mega/8a2fe6b71f-ukulib-fabric-2.2.1+26.3.jar	mod=ukulib	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/8aded6da11-camerautils-fabric-1.1.2+26.3.jar	mod=camerautils	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/8ae77404a0-freelook-1.4.4.jar	mod=freelook	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/8b648b1aa3-macos-input-fixes-1.16.jar	mod=8b648b1aa3-macos-input-fixes-1.16	native=native-gap	tier=native-ok	loader_id=8b648b1aa3-macos-input-fixes-1.16	cause=no entrypoint	no native entrypoint; the dedicated server has nothing to run
+mega/8cd7b7bf6b-BetterAddServer-26.1.2-fabric-1.2.6.jar	mod=betteraddserver	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/8da055eec2-libjf-26.3.1.jar	mod=libjf	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/8e075c2fe9-polyplus-1.4.4+26.3.jar	mod=polyplus	native=native-ok	tier=native-ok	no native entrypoint (available: client, debugify, preLaunch, voicechat)
+mega/8f067dfb67-SubtleEffects-fabric-26.3-1.15.0.jar	mod=subtle_effects	native=native-ok	tier=native-ok
+mega/8f8a23d6c9-fabric-api-0.165.0+26.3.jar	mod=fabric-api	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/8fb9d3039e-journeymap-fabric-26.3-6.0.10.jar	mod=journeymap	native=native-ok	tier=native-ok
+mega/90703eae11-anvianslib-fabric-26.1-1.5.0.jar	mod=anvianslib	native=native-ok	tier=native-ok
+mega/91852e4f48-Prism-26.3-fabric-1.1.3.jar	mod=prism	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/91dab4f255-zconfig-1.0.0+26.x.jar	mod=zconfig	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/91e91c9556-lithium-mc26.3-0.26.1-fabric.jar	mod=lithium	native=native-ok	tier=native-ok
+mega/920f4b554e-droppeditemtweaks-2.0.3+26.3-fabric.jar	mod=droppeditemtweaks	native=native-ok	tier=native-ok
+mega/924d698c9b-brightness-plus-26.3.jar	mod=brightnessplus	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/9371da945e-universalbonemeal-v26.3.1-mc26.3.x+fabric.jar	mod=universalbonemeal	native=native-ok	tier=native-ok
+mega/9420614dd8-cwb-4.1.0+26.2.jar	mod=cwb	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/94bf26960b-zfastsurface-1.0.0+26.3.jar	mod=zfastsurface	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/980234046f-rightclickharvest-fabric-4.6.2+26.3.x.jar	mod=rightclickharvest	native=native-ok	tier=native-ok
+mega/986dcd9a7b-jakes-build-tools-v5.0.8.jar	mod=mr_jakes_buildtools	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/98c1ca5bfd-Gamma-Utils-Fabric-3.2.2+mc26.3.jar	mod=gammautils	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/98dfc399f2-villager-inventory-hwyla-plugin-2.0.3.jar	mod=villager-inventory-hwyla-plugin	native=native-ok	tier=native-ok	no native entrypoint (available: jade)
+mega/99193f6ef8-immersiveoverlays-1.8.5+26.3-fabric.jar	mod=immersiveoverlays	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/99d45ce509-ItemsDisplayed_-_v1.3-26.3.jar	mod=items_displayed	native=native-ok	tier=native-ok
+mega/9a5cce0693-cloth-config-fabric-26.3.159.jar	mod=cloth-config	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/9acfe851e3-sodium-fabric-0.9.2+mc26.3.jar	mod=sodium	native=native-ok	tier=native-ok	no native entrypoint (available: client, preLaunch)
+mega/9ad8263061-easyshulkerboxes-v26.3.3-mc26.3.x+fabric.jar	mod=easyshulkerboxes	native=native-ok	tier=native-ok
+mega/9b1af574e6-make_bubbles_pop-0.3.4-fabric-mc26.2.x.jar	mod=make_bubbles_pop	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/9bdee9d3d6-confirmresetkeys-1.0.1+26.2-fabric.jar	mod=confirmresetkeys	native=native-ok	tier=native-ok
+mega/9c11805cc3-entity_model_features-3.3.11-26.3-fabric.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+mega/9c6c155411-visuality-0.7.15+26.3.jar	mod=visuality	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/9d5d153d39-sodium-shadowy-path-blocks-fabric-8.0.0.jar	mod=sspb	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/9d724e17fc-flyspeed-2.0.1.jar	mod=flyspeed	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/9df91163e9-controlify-3.5.3+mc26.3-universal.jar	mod=controlify	native=native-ok	tier=native-ok
+mega/9e7fcba815-forcecloseloadingscreen-2.3.7.jar	mod=forcecloseworldloadingscreen	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/9ef1cf7e86-ItemBorders-26.3-fabric-1.3.3.jar	mod=itemborders	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/9f12a0dffd-stackrefill-26.3.0-5.1.jar	mod=stackrefill	native=native-ok	tier=native-ok
+mega/a0d802d2cb-ForgeConfigAPIPort-v26.3.1-mc26.3.x-Fabric.jar	mod=forgeconfigapiport	native=native-ok	tier=native-ok
+mega/a1a40e9382-c2me-fabric-mc26.3-0.4.2-alpha.0.116.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/a28b0b90a9-real-arrow-tip-0.3.1+mc26.3.jar	mod=real-arrow-tip	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/a2da0b33ad-zfastnoise-1.1.0-beta.5+26.3.jar	mod=zfastnoise	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/a3179997e1-chatplus-fabric-2.9.0-dev-shadow.jar	mod=chatplus	native=native-ok	tier=native-ok
+mega/a43a41725b-malilib-0.30.1.jar	mod=malilib	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/a4860c9480-dynamic-fps-3.11.10+minecraft-26.3.0-fabric.jar	mod=dynamic_fps	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/a52448cd11-softimprints-fabric-26.3-2.8.01.jar	mod=softimprints	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/a6345c4d56-Highlighter-26.3-fabric-1.2.3.jar	mod=highlighter	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/a71fcdee67-PacketFixer-fabric-3.3.6.jar	mod=packetfixer	native=native-ok	tier=native-ok
+mega/a90ced0840-effectual-fabric-1.4.2-26.3.jar	mod=effectual	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/aae8eb2d17-accessible-step-fabric-26.3-2.4.1+26.3.jar	mod=accessible-step	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/ab3537fc66-Gamma-Utils-Fabric-3.2.0+mc26.3.jar	mod=gammautils	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu, sodium:config_api_user)
+mega/abf486eb5e-waveycapes-fabric-1.11.3-mc26.3.jar	mod=waveycapes	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/ad77ff239e-ok_zoomer-19.0.0-beta.2.jar	mod=ok_zoomer	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/ae6b7673be-SubtleEffects-fabric-26.3-1.15.1-hotfix.1.jar	mod=subtle_effects	native=native-ok	tier=native-ok
+mega/b24b18f87c-skyboxify-3.4.jar	mod=skyboxify	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/b363d41dbe-ScalableLux-fabric-0.3.0-alpha.0.4-all.jar	mod=scalablelux	native=native-ok	tier=native-ok
+mega/b3683159ff-better-selection-mc-1.9.1.jar	mod=better-selection	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/b4dedc2e99-trade-cycling-fabric-1.0.23+26.3.jar	mod=trade_cycling	native=native-ok	tier=native-ok
+mega/b6007d5f86-BorderlessVulkan-26.3.jar	mod=borderless_windowed_vulkan_bundle	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/b6692ce231-dynamiccrosshair-9.15+26.3-fabric.jar	mod=dynamiccrosshair	native=native-ok	tier=native-ok	no native entrypoint (available: autohud, client, modmenu)
+mega/b8cfd72406-too-cheap-1.4.1+mc26.3.jar	mod=too-cheap	native=native-ok	tier=native-ok
+mega/bb64120cc3-compacting-1.1.1+26.2.jar	mod=compacting	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/bb99cb0b21-chatting-3.2.5+26.3.jar	mod=chatting	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/bbc4699b5b-durabilityviewer-fabric-26.3-1.13.1.jar	mod=durabilityviewer	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/bc05706d31-freecam-fabric-1.5.0-alpha.2+mc26.3.jar	mod=freecam	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/bd6069cfae-Too_Many_Entities_26.2_Fabric_v1.2.3.jar	mod=too_many_entities	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/bde574c0fc-seedmapper-2.35.0.jar	mod=seedmapper	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/be0f4747ea-ViaVersion-5.12.2-SNAPSHOT.jar	mod=viaversion	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/be8c84a976-minihud-fabric-26.3-0.41.2.jar	mod=minihud	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/bf81c5caba-wikirenderer-2.6+26.3.jar	mod=wikirenderer	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/c000eea7b1-entity_model_features-3.3.8-26.3-fabric.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+mega/c004d35e17-screencopy-1.4.2-fabric.jar	mod=screencopy	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/c01a821dcb-glowing-torchflower-fabric-mc26.2-1.4.1.jar	mod=glowing-torchflower	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/c08b9b1ab6-Controlling-fabric-26.3-26.3.4.jar	mod=controlling	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/c0a354ebdd-InvMove-0.9.6+26.3-Fabric.jar	mod=invmove	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/c0c7de5d3f-durabilitytooltip-1.2.0a-fabric-mc26.3.jar	mod=durabilitytooltip	native=native-ok	tier=native-ok
+mega/c1b73f9579-lithostitched-2.0.6-fabric-26.3.jar	mod=lithostitched	native=native-ok	tier=native-ok
+mega/c23a191f2f-trade-cycling-fabric-1.0.22+26.3.jar	mod=trade_cycling	native=native-ok	tier=native-ok
+mega/c24b269d5c-animatica-0.6.3+26.3.jar	mod=animatica	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/c282dfd5fd-easy_npc_config_ui-fabric-26.3-7.17.1.jar	mod=easy_npc_config_ui	native=native-ok	tier=native-ok
+mega/c343a2f633-BiomesOPlenty-fabric-26.3-26.3.0.0.15.jar	mod=biomesoplenty	native=native-ok	tier=native-ok	no native entrypoint (available: glitchcore, terrablender)
+mega/c38a65adc0-Ixeris-4.6.8+26.3-fabric.jar	mod=ixeris	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/c45c38e918-Ixeris-4.6.11+26.3-fabric.jar	mod=ixeris	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/c4d8d0f47a-entity_texture_features-7.2.5-26.3-fabric.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/c559c6fb98-yet_another_config_lib_v3-3.9.6+26.3-fabric.jar	mod=yet_another_config_lib_v3	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/c57a5caf1f-libjf-26.3.0.jar	mod=libjf	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/c614642a41-Hold-That-Chunk-V2-2.0.0+26.3.jar	mod=hold_that_chunk_2	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/c66b027994-ResourcefulConfig-6.0.2.jar	mod=resourcefulconfig	native=native-ok	tier=native-ok
+mega/c6ee7eacb5-melody_fabric_1.0.17_MC_26.3.jar	mod=melody	native=native-ok	tier=native-ok
+mega/c9bfa0f1fe-cherishedworlds-fabric-18.0.0+26.3.jar	mod=cherishedworlds	native=native-ok	tier=native-ok	no native entrypoint (available: client, spectrelib-config)
+mega/ca2714e195-AccurateBlockPlacement-Reborn-1.4.7+mc-26.3.jar	mod=accurateblockplacement	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/ce2d31f3cb-ConfigManager-fabric-26.1_26.2-1.1.3.jar	mod=config_manager	native=native-ok	tier=native-ok
+mega/ce6a03a927-structure_layout_optimizer-1.1.4+26.3-fabric.jar	mod=structure_layout_optimizer	native=native-ok	tier=native-ok
+mega/cf4eec23f6-chat_heads-1.3.2-fabric-26.3.jar	mod=chat_heads	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/cfe3e213ad-AdvancementPlaques-26.3-fabric-1.7.3.jar	mod=advancementplaques	native=native-ok	tier=native-ok
+mega/d198676d8b-calcmod-1.6.0+fabric.26.3.jar	mod=calcmod	native=native-ok	tier=native-ok
+mega/d1affbf48c-asynclogger-2.2.2+26.1.2-fabric.jar	mod=asynclogger	native=native-ok	tier=native-ok
+mega/d201ff9087-better_tab-2.2.3+26.2-fabric.jar	mod=better_tab	native=native-ok	tier=native-ok
+mega/d29f6677bb-autoreplants-1.2.1.jar	mod=autoreplants	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/d51dcbe901-scalablelux-0.3.0-alpha.0.6+26.3.jar	mod=scalablelux	native=native-ok	tier=native-ok
+mega/d578e9e067-asynclogger-2.2.3+26.1.2-fabric.jar	mod=asynclogger	native=native-ok	tier=native-ok
+mega/d6237dced5-Gnetum-4.6.3+26.3-fabric.jar	mod=gnetum	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/d73b75eefb-main-menu-credits-1.4.0+26.2-universal.jar	mod=main_menu_credits	native=native-gap	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/d80296eda0-evergreenhud-3.9.14+26.3.jar	mod=evergreenhud	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/d9b80cd5ee-obe+26.3-1.2.1.jar	mod=obe	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/da82d733b6-Structory_26.3_v1.3.18+26.3.jar	mod=structory	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/dc8666e40b-c2me-fabric-mc26.3-0.4.2-alpha.0.90.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/dcf1671112-hotbarlagfixer-1.1.1.jar	mod=hotbarlagfixer	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/dd46c92a07-cuties-simple-zoom-v1.0.2-mc26.3.jar	mod=cuties-simple-zoom	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/dd56877848-EssentialClient-2.8.0+26.3.jar	mod=essential-client	native=native-ok	tier=native-ok
+mega/dd5a4ec2c6-lithium-fabric-0.26.2+mc26.3.jar	mod=lithium	native=native-ok	tier=native-ok
+mega/df05cffc9b-EnchantmentDescriptions-fabric-MC26.3-26.3.0.2.jar	mod=enchdesc	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/e3e323d713-entity_texture_features-7.2.4-26.3-fabric.jar	mod=entity_texture_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/e54d86dd4a-yet_another_config_lib_v3-3.9.7+26.3-fabric.jar	mod=yet_another_config_lib_v3	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/e5afb2f392-itemphysicliteconfig-1.1.2+26.3-fabric.jar	mod=itemphysicliteconfig	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/e5c622d565-bettertab-2.3.0+26.3.jar	mod=bettertab	native=needs-loader	tier=native-ok	cause=client-only	client-only (`environment: client`); the dedicated server loads nothing of it
+mega/e65dd21678-wakes-26.3-Fabric-1.4.1.jar	mod=wakes	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/e66cb96d33-SmoothScrollingRefurbished+26.3-1.10.0.jar	mod=smoothscrollingrefurbished	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/e6737febb5-particlerain-4.0.2+26.3-fabric.jar	mod=particlerain	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/e6fd2df83d-language-reload-1.7.8+26.3.jar	mod=languagereload	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/e75cdab186-modmenu-21.0.0-beta.1.jar	mod=modmenu	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/e788a22a46-optigui-2.3.0-beta.10+26.3.jar	mod=optigui	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/e8a325192f-zfastnoise-1.1.2+26.3.jar	mod=zfastnoise	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/eac76ff0f3-ferritecore-9.0.0-fabric.jar	mod=ferritecore	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/ebff83a144-NBTac-FABRIC-26.3-2.1.jar	mod=nbtac	native=native-ok	tier=native-ok
+mega/eca7889240-DetailArmorBarReconstructed-5.3.2-26.3-fabric.jar	mod=detailabreconst	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/ee0e2631cd-simple_music_control-fabric-1.5.6+26.3.jar	mod=simple_music_control	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/ee889207eb-chattweaks-1.2.3+26.3.jar	mod=chattweaks	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/eeccaad85c-rusticdelight-fabric-26.3-1.7.0.jar	mod=rusticdelight	native=native-ok	tier=native-ok
+mega/ef5f57f0e5-MoogsEndStructures-universal-1.21-2.1.1.jar	mod=mes	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/ef6cb9b2a7-bbe-fabric-1.4.0+mc26.3-mod.jar	mod=betterblockentities	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/ef7581bcd1-vmp-fabric-mc26.3-0.2.0+beta.7.238-all.jar	mod=vmp	native=native-ok	tier=native-ok
+mega/f0201a1b67-sodium-extra-fabric-0.9.5+mc26.3.jar	mod=sodium-extra	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/f0340e9c0b-yosbr-0.1.2.jar	mod=yosbr	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f1d4ab6ecd-fabric-language-kotlin-1.14.2+kotlin.2.4.21.jar	mod=fabric-language-kotlin	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f2196e803f-entityculling-fabric-1.11.2-mc26.3.jar	mod=entityculling	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/f29719c310-status-effect-bars-1.0.12.jar	mod=status-effect-bars	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/f440a68363-zfastnoise-1.1.1+26.3.jar	mod=zfastnoise	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f5618ebee4-HoverItems-26.1-26.3.jar	mod=hover_items_bundle	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f565bbeb20-ImmediatelyFast-Fabric-1.17.1+26.3.jar	mod=immediatelyfast	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f5e8071619-numericalenchantments-1.0.2+26.1.1-fabric.jar	mod=numericalenchantments	native=native-ok	tier=native-ok
+mega/f63bae5db5-Essential_1-5-1_fabric_26-3.jar	mod=essential-container	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f70cc0b389-c2me-fabric-0.4.2-alpha.0.88+26.3.jar	mod=c2me	native=native-ok	tier=native-ok
+mega/f79bcb4bf3-Gnetum-4.6.4+26.3-fabric.jar	mod=gnetum	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/f7dd558ed6-carpet-tis-addition-v1.82.4-mc26.3.jar	mod=carpet-tis-addition	native=native-ok	tier=native-ok
+mega/f86040d501-bettermounthud-1.3.1.jar	mod=bettermounthud	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/f87d4964f6-MyTotemDoll-2.7.0+26.3+fabric.jar	mod=my_totem_doll	native=native-ok	tier=native-ok
+mega/f8f38dd2b0-UniLib-1.2.1+26.3-fabric.jar	mod=unilib	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/f8fa51b3c9-a_good_place-26.3-1.3.9-fabric.jar	mod=a_good_place	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/f989cd24ac-libIPN-fabric-26.3-6.9.0.jar	mod=libipn	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/fa03640ba1-iris-fabric-1.11.7+mc26.3.jar	mod=iris	native=native-ok	tier=native-ok	no native entrypoint (available: modmenu, sodium:config_api_user)
+mega/fab34e74a9-effecttimerplus-fabric-3.104.1+26.3.jar	mod=effecttimerplus	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/fb1e085a62-compose-bundle-2.1.0+compose.1.13.0-alpha02.jar	mod=compose-multiplatform	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/fbbffef274-WalksyLib-2.0.1+26.3.jar	mod=walksylib	native=native-ok	tier=native-ok	no native entrypoint (available: client, modmenu)
+mega/fbd2fcb600-fovchanger-1.0.4+26.3.jar	mod=fovchanger	native=native-ok	tier=native-ok	no native entrypoint (available: client)
+mega/fc1f2f374c-Chunky-Fabric-1.5.3.jar	mod=chunky	native=native-ok	tier=native-ok
+mega/fd6935e1fe-entity_model_features-3.3.7-26.3-fabric.jar	mod=entity_model_features	native=native-ok	tier=native-ok	no native entrypoint (available: client, ebe_v1, modmenu)
+mega/fe1fff399f-ArmorPoser-fabric-26.3-16.0.1.jar	mod=armorposer	native=native-ok	tier=native-ok
+mega/ff2056f222-sodium-extra-fabric-0.9.4+mc26.3.jar	mod=sodium-extra	native=native-ok	tier=native-ok	no native entrypoint (available: client, sodium:config_api_user)
+mega/fff33c05fb-DnT-woodland-mansion-overhaul-2.2.1__Fabric_.jar	mod=mr_dungeons_andtavernswoodlandmansionoverhaul	native=native-ok	tier=native-ok	no native entrypoint (available: none)
+mega/02d17d2f1c-Axiom-6.1.5-for-MC26.3.jar	mod=axiom	native=needs-loader	tier=needs-loader	proof=partial	loader_id=axiom	cause=no server ledger row	the real Fabric loader lists it but the run did not boot
+mega/03280769d5-baguettelib-26.3-Fabric-2.0.7.jar	mod=baguettelib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=baguettelib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/0610f18c4f-fancymenu_fabric_3.9.14_MC_26.3.jar	mod=fancymenu	native=needs-loader	tier=needs-loader	proof=proven	loader_id=fancymenu	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/0c6898e27d-armor-stand-poses-fabric-26.3-1.4.0.jar	mod=poses	native=needs-loader	tier=needs-loader	proof=proven	loader_id=poses	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/0da0ce012a-betterstats-5.7.0+fn-26.3.jar	mod=betterstats	native=native-gap	tier=needs-loader	proof=proven	loader_id=betterstats	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/0efe50ab35-icys-better-horses-2.1.4-fab-26.3.jar	mod=icys-better-horses	native=native-gap	tier=needs-loader	proof=proven	loader_id=icys-better-horses	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/1079f41d14-otterlib-0.4.0.2+26.3-fabric.jar	mod=otterlib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=otterlib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/11bd97b82a-xaeros-world-map-fabric-26.3-1.46.4.jar	mod=xaeroworldmap	native=native-gap	tier=needs-loader	proof=proven	loader_id=xaeroworldmap	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/1282302b6c-xaeroworldmap-fabric-26.3-1.47.2.jar	mod=xaeroworldmap	native=native-gap	tier=needs-loader	proof=proven	loader_id=xaeroworldmap	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/1316efc419-alternate-current-mc26.3-1.9.0.jar	mod=alternate-current	native=needs-loader	tier=needs-loader	proof=proven	loader_id=alternate-current	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/17aff6842e-almanac-fabric-26.3-1.26.10.1.jar	mod=almanac	native=needs-loader	tier=needs-loader	proof=proven	loader_id=almanac	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/1af0d1f40d-collectorsalbum-fabric-2.9.0+26.3.jar	mod=collectorsalbum	native=native-gap	tier=needs-loader	proof=proven	loader_id=collectorsalbum	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/1b3681bc98-CreativeCore_FABRIC_v2.14.19_mc26.3.jar	mod=creativecore	native=native-gap	tier=needs-loader	proof=proven	loader_id=creativecore	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/1b44d97048-balm-fabric-26.3-26.3.0.3.jar	mod=balm	native=native-gap	tier=needs-loader	proof=proven	loader_id=balm	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/2280c8ca8d-shulkerboxtooltip-fabric-5.4.2+26.3.jar	mod=shulkerboxtooltip	native=native-gap	tier=needs-loader	proof=proven	loader_id=shulkerboxtooltip	cause=other	native refused (other); the real Fabric loader lists it and reached Done
+mega/22d7099612-tcdcommons-5.7.0+fn-26.3.jar	mod=tcdcommons	native=native-gap	tier=needs-loader	proof=proven	loader_id=tcdcommons	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/2344273592-voicechat-fabric-2.6.27+26.3.jar	mod=voicechat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=voicechat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/26baec9303-NoChatRestrictions-Fabric-MC26.3-v1.3.0.jar	mod=nochatrestrictions	native=needs-loader	tier=needs-loader	proof=proven	loader_id=nochatrestrictions	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/286a800d23-emotecraft-for-MC26.3-3.5.0-b.build.179.jar	mod=emotecraft	native=native-gap	tier=needs-loader	proof=proven	loader_id=emotecraft	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/287f670348-xaerominimap-fabric-26.3-26.6.0.jar	mod=xaerominimap	native=needs-loader	tier=needs-loader	proof=proven	loader_id=xaerominimap	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/28b6739189-xaeros-minimap-fabric-26.3-26.5.3.jar	mod=xaerominimap	native=needs-loader	tier=needs-loader	proof=proven	loader_id=xaerominimap	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/2ac4bb844e-simple-voice-chat-fabric-2.6.24+26.3.jar	mod=voicechat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=voicechat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/2b0f704848-inventorysorter-fabric-3.0.1+mc26.3.jar	mod=inventorysorter	native=native-gap	tier=needs-loader	proof=proven	loader_id=inventorysorter	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/2bf7964d7f-elytratrails-1.6.6-26.3.jar	mod=elytratrails	native=needs-loader	tier=needs-loader	proof=proven	loader_id=elytratrails	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/2c0e2ba8a9-midnightlib-fabric-1.9.3+26.3-rc-2.jar	mod=midnightlib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=midnightlib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/2c3f5e1a56-cropsloverain-3.2.1.jar	mod=cropsloverain	native=needs-loader	tier=needs-loader	proof=proven	loader_id=cropsloverain	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/31c30c5d21-notenoughcrashes-fabric-4.5.1+26.3.jar	mod=notenoughcrashes	native=native-gap	tier=needs-loader	proof=proven	loader_id=notenoughcrashes	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/3678d44132-letmedespawn-fabric-26.3-1.26.9.2.jar	mod=letmedespawn	native=needs-loader	tier=needs-loader	proof=proven	loader_id=letmedespawn	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/36e8de6c68-carryon-fabric-26.3-2.12.0.jar	mod=carryon	native=native-gap	tier=needs-loader	proof=proven	loader_id=carryon	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/3b90f638d6-jei-26.3-fabric-31.9.0.61.jar	mod=jei	native=needs-loader	tier=needs-loader	proof=proven	loader_id=jei	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/3c1a43daba-sway-2.4.5-fabric+26.3.jar	mod=sway	native=native-gap	tier=needs-loader	proof=partial	loader_id=sway	cause=metadata	native refused (metadata); the real Fabric loader lists it but the run did not boot
+mega/3d19e40c5f-appleskin-fabric-mc26.3-3.0.10.jar	mod=appleskin	native=needs-loader	tier=needs-loader	proof=proven	loader_id=appleskin	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/4881abae4b-archers-fabric-3.1.4+26.3.jar	mod=archers	native=native-gap	tier=needs-loader	proof=proven	loader_id=archers	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/4ed60c0212-combat-hitboxes-1.0.11.jar	mod=combat-hitboxes	native=needs-loader	tier=needs-loader	proof=partial	loader_id=combat-hitboxes	cause=no server ledger row	the real Fabric loader lists it but the run did not boot
+mega/53d859f95b-betterstats-5.6.0-beta.2+fn-26.3.jar	mod=betterstats	native=native-gap	tier=needs-loader	proof=proven	loader_id=betterstats	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/554319fbea-syncmatica-fabric-26.3-0.3.20.jar	mod=syncmatica	native=needs-loader	tier=needs-loader	proof=proven	loader_id=syncmatica	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/564c46b80e-carpet-26.3.jar	mod=carpet	native=native-gap	tier=needs-loader	proof=proven	loader_id=carpet	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/5a24c09a6b-shogi-fabric-26.3-26.3.0.3.jar	mod=shogi	native=needs-loader	tier=needs-loader	proof=proven	loader_id=shogi	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/5a2f06f60a-betterstats-5.8.0+fn-26.3.jar	mod=betterstats	native=native-gap	tier=needs-loader	proof=proven	loader_id=betterstats	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/5de88d705e-waystones-fabric-26.3-26.3.0.1.jar	mod=waystones	native=needs-loader	tier=needs-loader	proof=proven	loader_id=waystones	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/61412064ba-konkrete_fabric_1.11.1_MC_26.3.jar	mod=konkrete	native=needs-loader	tier=needs-loader	proof=proven	loader_id=konkrete	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/619dfae706-easymagic-v26.3.0-mc26.3.x+fabric.jar	mod=easymagic	native=needs-loader	tier=needs-loader	proof=proven	loader_id=easymagic	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/63e0462bf6-servux-fabric-26.3-0.12.2.jar	mod=servux	native=needs-loader	tier=needs-loader	proof=proven	loader_id=servux	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/6571ed9b65-clientcommands-2.16.2.jar	mod=clientcommands	native=needs-loader	tier=needs-loader	proof=proven	loader_id=clientcommands	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/65ac95d621-FarmersDelight-26.3-3.6.28+refabricated.jar	mod=farmersdelight	native=native-gap	tier=needs-loader	proof=proven	loader_id=farmersdelight	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/691967a54e-FarmersDelight-26.3-3.6.30+refabricated.jar	mod=farmersdelight	native=native-gap	tier=needs-loader	proof=proven	loader_id=farmersdelight	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/6c14dd4e5a-CustomPlayerModels-Fabric-26.3-0.6.27e.jar	mod=cpm	native=needs-loader	tier=needs-loader	proof=proven	loader_id=cpm	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/6e393e646f-weaponmaster_ydm-4.4.4-fabric.jar	mod=weaponmaster_ydm	native=needs-loader	tier=needs-loader	proof=proven	loader_id=weaponmaster_ydm	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/6f9aebaa6c-TerraBlender-fabric-26.3-26.3.0.0.9.jar	mod=terrablender	native=native-gap	tier=needs-loader	proof=proven	loader_id=terrablender	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/71ef18bf31-configurable-3.5.3+26.3-fabric.jar	mod=configurable	native=needs-loader	tier=needs-loader	proof=proven	loader_id=configurable	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/72a8a1c67a-puzzleslib-v26.3.14-mc26.3.x+fabric.jar	mod=puzzleslib	native=native-gap	tier=needs-loader	proof=proven	loader_id=puzzleslib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/7315ceea43-spell_engine-fabric-1.10.9+26.3.jar	mod=spell_engine	native=native-gap	tier=needs-loader	proof=proven	loader_id=spell_engine	cause=verifier	native refused (verifier); the real Fabric loader lists it and reached Done
+mega/7397370582-tcdcommons-5.6.0-beta.2+fn-26.3.jar	mod=tcdcommons	native=native-gap	tier=needs-loader	proof=proven	loader_id=tcdcommons	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/74e2f4053d-bettercombat-fabric-3.2.2+26.3.jar	mod=bettercombat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=bettercombat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/7751ee3925-locator-heads-2.5.0.jar	mod=locator-heads	native=native-gap	tier=needs-loader	proof=proven	loader_id=locator-heads	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/7b10411d20-worldedit-7.4.6-beta-02.jar	mod=worldedit	native=native-gap	tier=needs-loader	proof=proven	loader_id=worldedit	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/7b1bf05fde-runes-fabric-1.3.2+26.3.jar	mod=runes	native=native-gap	tier=needs-loader	proof=proven	loader_id=runes	cause=declaration	native refused (declaration); the real Fabric loader lists it and reached Done
+mega/7b2f7c67f2-minecart-trains-fork-2.5.0+26.3.jar	mod=minecart-trains-fork	native=needs-loader	tier=needs-loader	proof=proven	loader_id=minecart-trains-fork	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/7edf4f3c5c-biolith-fabric-3.8.0-beta.1.jar	mod=biolith	native=needs-loader	tier=needs-loader	proof=proven	loader_id=biolith	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/7f18090fea-zoomify-2.17.0+mc26.3-universal.jar	mod=zoomify	native=native-gap	tier=needs-loader	proof=proven	loader_id=zoomify	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/80a0fc2ac1-CreativeCore_FABRIC_v2.14.16_mc26.3.jar	mod=creativecore	native=native-gap	tier=needs-loader	proof=partial	loader_id=creativecore	cause=runtime	native refused (runtime); the real Fabric loader lists it but the run did not boot
+mega/812809eb6f-Axiom-6.1.3-for-MC26.3.jar	mod=axiom	native=needs-loader	tier=needs-loader	proof=partial	loader_id=axiom	cause=no server ledger row	the real Fabric loader lists it but the run did not boot
+mega/825dce0c0b-ResourcefulLib-6.0.1.jar	mod=resourcefullib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=resourcefullib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/8505adf224-kreno_fpatcher-26.2.0+26.1.jar	mod=kreno-fpatcher	native=native-gap	tier=needs-loader	proof=proven	loader_id=kreno-fpatcher	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/8b73533f63-hideexperimentalwarning-26.3.0-1.3.jar	mod=hideexperimentalwarning	native=needs-loader	tier=needs-loader	proof=proven	loader_id=hideexperimentalwarning	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/8bdd75360a-collective-26.3.0-8.42.jar	mod=collective	native=native-gap	tier=needs-loader	proof=proven	loader_id=collective	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/8c5f566e32-architectury-fabric-22.0.5.jar	mod=architectury	native=needs-loader	tier=needs-loader	proof=proven	loader_id=architectury	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/8dd649bf70-tooltipstxf-26.3-1.0.8-fabric.jar	mod=tooltipstxf	native=needs-loader	tier=needs-loader	proof=proven	loader_id=tooltipstxf	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/8e0f97d1e1-Terrain_Slabs_v3.4.2-26.3.jar	mod=terrain_slabs	native=needs-loader	tier=needs-loader	proof=proven	loader_id=terrain_slabs	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/8e4b0943b5-itemswapper-fabric-1.0.0-beta.3-mc26.3.jar	mod=itemswapper	native=native-gap	tier=needs-loader	proof=proven	loader_id=itemswapper	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/8f52bbe46b-armor-hider-fabric-0.14.4+26.3.jar	mod=armor-hider	native=native-gap	tier=needs-loader	proof=proven	loader_id=armor-hider	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/8f7962199e-worldedit-mod-7.4.6.jar	mod=worldedit	native=native-gap	tier=needs-loader	proof=proven	loader_id=worldedit	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/9124091b2c-sit--1.2.6.4+26.3.jar	mod=sit-oth3r	native=needs-loader	tier=needs-loader	proof=proven	loader_id=sit-oth3r	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/92815a8e4c-emotecraft-for-MC26.3-3.5.0-a.build.171.jar	mod=emotecraft	native=native-gap	tier=needs-loader	proof=proven	loader_id=emotecraft	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/96512caad3-scholar-fabric-26.3-1.2.12.jar	mod=scholar	native=needs-loader	tier=needs-loader	proof=proven	loader_id=scholar	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/96cbf8e292-clientsort-fabric-3.104.1+26.3.jar	mod=clientsort	native=native-gap	tier=needs-loader	proof=proven	loader_id=clientsort	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/9ace0b0646-xaeroworldmap-fabric-26.3-1.47.0.jar	mod=xaeroworldmap	native=native-gap	tier=needs-loader	proof=proven	loader_id=xaeroworldmap	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/9b44e5718f-xaerominimap-fabric-26.3-26.6.2.jar	mod=xaerominimap	native=needs-loader	tier=needs-loader	proof=proven	loader_id=xaerominimap	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/9c77a694f8-bkupsV3-fabric-mod-26.3.jar	mod=bkups	native=native-gap	tier=needs-loader	proof=proven	loader_id=bkups	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/9cc655e54a-cristellib-fabric-26.3-3.1.13.jar	mod=cristellib	native=native-gap	tier=needs-loader	proof=proven	loader_id=cristellib	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/9ce277e691-particular-26.3-Fabric-1.5.7.jar	mod=particular	native=needs-loader	tier=needs-loader	proof=proven	loader_id=particular	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/a0d33c0e9a-leavesbegone-v26.3.0-mc26.3.x+fabric.jar	mod=leavesbegone	native=needs-loader	tier=needs-loader	proof=proven	loader_id=leavesbegone	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/a0efa54716-voxy-0.2.20-beta.jar	mod=voxy	native=native-gap	tier=needs-loader	proof=proven	loader_id=voxy	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/ad6e1ef225-peek-fabric-1.6.0+26.3.jar	mod=peek	native=needs-loader	tier=needs-loader	proof=proven	loader_id=peek	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/b11edf2591-voicechat-fabric-2.6.26+26.3.jar	mod=voicechat	native=needs-loader	tier=needs-loader	proof=proven	loader_id=voicechat	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/b182027030-graves-3.13.0+26.3.jar	mod=universal-graves	native=needs-loader	tier=needs-loader	proof=proven	loader_id=universal-graves	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/b1b136006d-clientcommands-2.16.3.jar	mod=clientcommands	native=needs-loader	tier=needs-loader	proof=proven	loader_id=clientcommands	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/b63337e801-modernfix-5.27.20-build.2.jar	mod=modernfix	native=native-gap	tier=needs-loader	proof=proven	loader_id=modernfix	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/b7bfe27288-RoughlyEnoughItems-26.3.824.jar	mod=roughlyenoughitems	native=native-gap	tier=needs-loader	proof=proven	loader_id=roughlyenoughitems	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/b9fde00565-tcdcommons-5.8.0+fn-26.3.jar	mod=tcdcommons	native=native-gap	tier=needs-loader	proof=proven	loader_id=tcdcommons	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/bdc7223ca2-collective-26.3.0-8.67.jar	mod=collective	native=native-gap	tier=needs-loader	proof=proven	loader_id=collective	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/c09b30ad82-connectiblechains-2.4.4+26.3-fabric.jar	mod=connectiblechains	native=native-gap	tier=needs-loader	proof=proven	loader_id=connectiblechains	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/c661609de9-modelbrowser-1.5.1.jar	mod=modelbrowser	native=needs-loader	tier=needs-loader	proof=proven	loader_id=modelbrowser	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/cc53b1cd2b-fullbrightnesstoggle-26.3.0-4.9.jar	mod=fullbrightnesstoggle	native=needs-loader	tier=needs-loader	proof=proven	loader_id=fullbrightnesstoggle	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/cc6bad23aa-mc-armor-hud-8.1.1.6-26.3-fabric.jar	mod=mc-armor-hud	native=needs-loader	tier=needs-loader	proof=proven	loader_id=mc-armor-hud	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/cdf3c7f2f0-yo_hooks-5.3.0.jar	mod=yo_hooks	native=native-gap	tier=needs-loader	proof=proven	loader_id=yo_hooks	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/d068d42039-wizards-fabric-3.1.4+26.3.jar	mod=wizards	native=native-gap	tier=needs-loader	proof=proven	loader_id=wizards	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/d584723a3e-chunkloaders-1.2.9-fabric-mc26.3.jar	mod=chunkloaders	native=needs-loader	tier=needs-loader	proof=proven	loader_id=chunkloaders	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/d82f07c8b3-pickupnotifications-fabric-3.0.1+26.3.jar	mod=pickupnotifications	native=native-gap	tier=needs-loader	proof=proven	loader_id=pickupnotifications	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/da61413c58-Jade-mc26.3-Fabric-26.3.5.jar	mod=jade	native=needs-loader	tier=needs-loader	proof=proven	loader_id=jade	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/dea53a10e5-CrashAssistant-fabric-26.2-26.3-1.11.14.jar	mod=crash_assistant	native=needs-loader	tier=needs-loader	proof=proven	loader_id=crash_assistant	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/e2bc1f3b51-supermartijn642corelib-1.1.25-fabric-mc26.3.jar	mod=supermartijn642corelib	native=native-gap	tier=needs-loader	proof=proven	loader_id=supermartijn642corelib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/e2f129702a-jei-26.3-fabric-31.9.0.56.jar	mod=jei	native=needs-loader	tier=needs-loader	proof=proven	loader_id=jei	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/e3f7d7ca69-modernfix-5.27.20-build.1.jar	mod=modernfix	native=native-gap	tier=needs-loader	proof=proven	loader_id=modernfix	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/e46c5f86c6-puzzleslib-v26.3.15-mc26.3.x+fabric.jar	mod=puzzleslib	native=native-gap	tier=needs-loader	proof=proven	loader_id=puzzleslib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/e618db246e-jamlib-fabric-2.3.1+26.3.x.jar	mod=jamlib	native=native-gap	tier=needs-loader	proof=proven	loader_id=jamlib	cause=runtime	native refused (runtime); the real Fabric loader lists it and reached Done
+mega/e65d856fdf-Iceberg-26.3-fabric-1.4.3.1.jar	mod=iceberg	native=needs-loader	tier=needs-loader	proof=proven	loader_id=iceberg	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/e81054001c-shulkerboxtooltip-fabric-5.4.3+26.3.jar	mod=shulkerboxtooltip	native=native-gap	tier=needs-loader	proof=proven	loader_id=shulkerboxtooltip	cause=other	native refused (other); the real Fabric loader lists it and reached Done
+mega/e878fad023-PlayerAnimationLibMerged-1.2.8+mc.26.3.jar	mod=player_animation_library	native=needs-loader	tier=needs-loader	proof=proven	loader_id=player_animation_library	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/eaeb6dbc39-elytratrails-1.6.7-26.3.jar	mod=elytratrails	native=needs-loader	tier=needs-loader	proof=proven	loader_id=elytratrails	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/ec5fdf4798-servercore-fabric-1.5.20+26.3.jar	mod=servercore	native=native-gap	tier=needs-loader	proof=proven	loader_id=servercore	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/ed3ce86798-ExplorersCompass-26.3-2.5.2-fabric.jar	mod=explorerscompass	native=native-gap	tier=needs-loader	proof=proven	loader_id=explorerscompass	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/ed49e6780f-NoChatReports-FABRIC-26.3-v2.21.0.jar	mod=nochatreports	native=native-gap	tier=needs-loader	proof=proven	loader_id=nochatreports	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/f0b01c55aa-midnightlib-fabric-1.10.0+26.3.jar	mod=midnightlib	native=needs-loader	tier=needs-loader	proof=proven	loader_id=midnightlib	cause=no server ledger row	the real Fabric loader lists it and reached Done
+mega/fca854f8ee-paladins-fabric-3.1.4.1+26.3.jar	mod=paladins	native=native-gap	tier=needs-loader	proof=proven	loader_id=paladins	cause=metadata	native refused (metadata); the real Fabric loader lists it and reached Done
+mega/1bb71c0df6-coroutil-fabric-1.21.1-1.3.8.jar	mod=coroutil	native=native-gap	tier=out-of-scope	proof=not-needed	loader_id=coroutil	cause=minecraft-version	built for another game version (requires minecraft 1.21.x); it cannot run on 26.3
+mega/949fa8a29a-show-me-your-skin-2.0.3+26.2.jar	mod=showmeyourskin	native=native-gap	tier=out-of-scope	proof=not-needed	loader_id=showmeyourskin	cause=minecraft-version	built for another game version (requires minecraft >=26.2 <26.3); it cannot run on 26.3
+mega/c90f03eedd-noisium-fabric-2.8.5+mc26.2-pre-2.jar	mod=noisium	native=native-gap	tier=out-of-scope	proof=not-needed	loader_id=noisium	cause=minecraft-version	built for another game version (requires minecraft ~26.2-); it cannot run on 26.3

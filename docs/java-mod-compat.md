@@ -79,6 +79,29 @@ kept separate from those tiers because it executes Java in `horizon-jvm` and the
 Native probe success proves only the bounded native surface exercised by its fixture; it does not claim that the
 whole jar has become Rust or that optional fallback coverage is complete.
 
+## The goal: two phases to native-only
+
+Compatibility is delivered in two phases, each with a measured exit gate rather than a date:
+
+| Phase | Goal | Exit criteria |
+|---|---|---|
+| **1. Every corpus jar works on a tier** | no measured jar is left without a path: it runs natively, or through the loader tier, and its label says why | **0 `native-gap`** rows in both committed ledgers; **every `needs-loader` jar proven on the loader tier** — a real Fabric-loader run reaches `Done (`, lists the jar's mod id and names no exception against it; and a hybrid pack session completes both halves inside its work bound |
+| **2. Native-only** | the same corpus runs on `horizon-native-java` alone; the loader tier is retired and no game path starts a JVM | 0 `needs-loader` and 0 `native-gap`; every exercised mixin plan is applied by the native weaver or bound to a named host hook; `backends.jvm` stays zero because nothing has a JVM to fall back to |
+
+Phase 1 proves the loader tier can carry what native cannot; it does not move a jar to native. Phase 2 is the native
+policy at the top of this page made true for the corpus, starting from phase 1's zero-refusal baseline and adding what
+the loader was hiding: game-class mixins, event callbacks and the client surface.
+
+Progress against each gate, the current per-corpus counts, the blockers that keep a phase open and the full rerun
+recipe are maintained in
+[java-mod-compat-status.md](java-mod-compat-status.md#the-goal-two-phases-to-native-only). The two commands behind the
+numbers are:
+
+```sh
+python3 tools/java_mod_server_ledger.py --from tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt | tail -1
+python3 tools/java_mod_loader_ledger.py --mods-dir ~/horizon-corpus/corpus-xl --binary target/fast/horizon-jvm
+```
+
 ## Why an optional JVM fallback exists, and why it is not native support
 
 A jar is bytecode for the JVM. Two ways to make it run here:
@@ -457,6 +480,78 @@ which the weaver rejects, and their targets are Minecraft classes outside the ja
 `RETURN`/`TAIL`, `INVOKE`, `@Redirect`, `@ModifyArg`/`@ModifyVariable`, `FIELD`/`NEW`/`JUMP`, slices, ordinal
 selectors and every method outside that subset run only through the interpreter's own entry points or the
 standalone JVM runner. In a game run they do not run at all, and the jar reads `native-qualified`.
+
+### Game-class hook tier (experiment)
+
+`target-outside-jar` is the largest skip class, and it is not always a real limit: Horizon already calls a named
+hook at many of the positions a mod wants (`native-hooks.json`, 432 entries today), and those hook points are the
+same call sites Mixin would weave into. The hook tier turns that overlap into a second, non-bytecode execution
+path for `@Inject` plans whose target is a game class:
+
+1. **Plan.** `NativeJar::plan_load_time_weave_with_game_hooks` classifies each discovered `@Inject`. A target
+   that names a `GameHookSite` and whose shape fits that hook becomes a `GameHookPlan` in
+   `LoadTimeMixinWeave::game_hooks`; the plan's empty `method = "tick"` descriptor takes the site's concrete
+   descriptor.
+2. **Register.** `NativeJar::register_game_hooks(&weave)` re-checks each plan against the site table and the
+   jar's own callback bytes, then answers a `GameHookRegistrations`: hook name → callbacks, in Mixin apply order
+   (priority, then config order, then method order).
+3. **Run.** Where the hook point fires, the host calls
+   `NativeJar::run_game_hook(&registrations, hook, receiver, args, &mut host)`. The callbacks run with a
+   runtime-owned `CallbackInfo`; a cancellable one that calls `cancel()` stops the ones after it and sets
+   `GameHookRun::cancelled`. The target object's marker is the callback receiver, and a callback's static fields
+   are the jar's: they persist to the next firing, exactly as a woven callback's would.
+
+The site table (`GAME_HOOK_SITES`) is deliberately tiny and hand-checked, because running a mod's callback at the
+wrong moment is worse than refusing it. It holds two sites:
+
+| Hook point | Target | Position | Contract |
+|---|---|---|---|
+| `player_tick` | `ServerPlayer#tick()V` | `TAIL` (at the end of the tick) | listen, server side |
+| `item_picked_up` | `ItemEntity#playerTouch(Player)V` | `HEAD` (before the stack is taken) | cancel, server side |
+
+**Coverage rule.** A plan maps only when every one of these holds; the first failure is reported with its own
+reason:
+
+- the target names a site in `GAME_HOOK_SITES` (otherwise the plan keeps `target-outside-jar`);
+- the site's physical side is the weave side;
+- the plan's anchor is one the hook's position exposes (`HEAD` for a pre hook, `RETURN`/`TAIL` for a post one);
+- a cancellable plan needs a hook whose census contract is `cancel`, not `listen`;
+- the target returns `void`, because a hook point carries no result to override;
+- the plan has no `shift`, `slice` or `ordinal`, which a named hook cannot honour;
+- the callback mirrors the target's arguments and adds at most one trailing `CallbackInfo`, and returns `void`.
+
+Anything else is a `SkippedMixinPlan` with `MixinSkipReason::GameHookMismatch` and a bounded sentence saying which
+clause failed (the same shape a compatibility screen shows for `weaver-rejected`). A target with no site at all
+keeps `MixinSkipReason::TargetOutsideJar`, unchanged. The census test
+(`crates/horizon-native-java/tests/fixture_game_hook_tier.rs`) fails if a site's name, version, contract, side or
+cancellation drifts from `native-hooks.json`, so the table cannot quietly disagree with the hook it claims.
+
+The tier is opt-in: the game's loader still calls `plan_load_time_weave`, which refuses every game-class plan as
+before, because Horizon's game has no code yet that fires these registrations. Claiming the plans without a host
+that fires them would label a jar `native` while its callbacks never ran. A host with hook points available uses
+`plan_load_time_weave_with_game_hooks`, registers once per jar at load, and calls `run_game_hook` at each point;
+a compatibility report reads `weave.game_hooks` for what mapped and `weave.skipped` for what did not.
+
+What the tier does not fix, and does not pretend to:
+
+- Real jars' `@Inject` annotations are `CLASS`-retention, so discovery still sees no plans until the port
+  pipeline surfaces them; the tier classifies plans, it does not make them appear.
+- A hook is only usable when its **population and position** equal the target's. `entity_tick_pre`/`_post` are
+  batched per entity family and skip players, projectiles, orbs and TNT, so `Entity#tick` does not map onto them
+  even though the names look close; `level_tick_pre` carries no `BooleanSupplier`, so `ServerLevel#tick` cannot
+  be mapped either. Those stay `target-outside-jar`.
+- Post hooks cannot override a result, and pre hooks cannot supply arguments the hook payload does not carry.
+  Adding a site is a host change (add or extend the hook, then add the table row), never a parser change.
+- Instance callbacks receive the target marker the host names; the host must be able to reconstruct the target
+  object from it. The tier does not build a bridge class, because there is no woven target to bridge into.
+
+The fixture `crates/horizon-native-java/tests/fixture_game_hook_tier.rs` compiles a jar with six `@Mixin`
+classes targeting game classes: `player_tick` (TAIL, maps), `item_picked_up` (HEAD, cancellable, maps),
+`Level#getBlockState` (no site, `target-outside-jar`), `ServerPlayer#tick` at `HEAD` (wrong position,
+`game-hook-mismatch`), a cancellable `player_tick` (listen-only, `game-hook-mismatch`) and a `playerTouch`
+callback that drops the player argument (`game-hook-mismatch`). It then registers the two mapped callbacks,
+fires both points, checks the host saw the callback bodies, checks the cancellation surfaced, and checks a
+callback's static counter survived to the second firing.
 
 Reproduce:
 
@@ -1187,6 +1282,59 @@ with no façade and no game jar, against the ≤ 400 ms target above — which i
 to reach, not a claim already met. Numbers move with the JVM, the heap flag (`--heap`, default `-Xmx1g`)
 and the classpath, so compare like with like, and record the machine alongside the figure.
 
+### The bootstrap content cache
+
+Not every start needs the interpreter. What a jar declares depends on its bytes, this build's engine and
+the execution role, so a jar that started once is stored and replayed instead of parsed and executed
+again (`crates/horizon-client/src/game/java_cache.rs`). The entry holds the typed registration rows, the
+jar's own `META-INF/horizon-native.json` rows and the compatibility report; the declarations are rebuilt
+through the same converter the live path uses, so the content root of a warm start is the one the cold
+start built.
+
+- **Key.** The jar's sha256 and length, its role (`client`, `integrated-server`, `dedicated-server`) and
+  the engine's identity (the release commit, or for a local build the executable's modification time, as
+  the far-terrain cache does). The hash is verified on every load — a jar whose bytes changed looks up
+  another entry — and an entry naming another hash, length, role or engine is deleted, never used.
+- **Bound.** `java-content-cache/` under the game home, 256 MiB and 4096 entries, pruned after each batch
+  by removing the least recently used entries. No secrets: an entry is the jar's own declarations and
+  counts, nothing read from the player.
+- **What is never cached.** A jar that announced payload channels, because dispatch needs the
+  bootstrapped host rather than its rows; and any jar that did not start. Client-only jars never reach
+  the cache at all: the role check runs first, as it does on the live path.
+- **Off switch.** `HORIZON_JAVA_CACHE=0` (or `false`/`off`) skips both lookup and store;
+  `HORIZON_JAVA_CACHE_ENGINE` replaces the engine identity for an A/B run.
+- **Self-tests.** The module's tests prove that a jar with one byte more misses (its hash is another
+  key), that an entry naming another hash, length, role or engine is deleted rather than used, that a
+  corrupt entry is removed, that a replayed run rebuilds the same declarations as the live path, and
+  that pruning keeps the cache inside its entry bound.
+
+Measured 6 November 2026 (16 CPUs) on the 100-jar pool: the dedicated server over a flat world, one game
+folder, one `HORIZON_HOME` and one world reused by every run, the cache cleared before each cold run,
+eight cold and eight warm starts alternating. Jars are the first 100 of the 192 that start natively from
+the 500-jar corpus.
+
+| Start | Wall to `Done` (8 runs) | Median | Peak RSS (median) | Reused |
+|---|---|---:|---:|---:|
+| cold (empty cache) | 2.24–2.87 s | 2.48 s | 725 MiB | 0 of 100 |
+| warm (filled cache) | 2.08–2.60 s | 2.41 s | 671 MiB | 88 of 100 |
+
+A warm start is 0.16 s faster per cold/warm pair (mean and median of the eight pairs; range −0.02 to
++0.37 s), about 6% of time to `Done`, and its peak RSS is ~54 MiB lower because 88 jars are no longer
+parsed at once. Its `java-runtime.json` is byte-identical to the cold run's: same engine labels,
+woven/skipped counts and registration counts per jar. The twelve jars not reused are the ones that
+declare payload channels; the other 58 jars of the corpus never reach the cache because the role check
+skips them first. The cache held 88 entries in 448 KiB (~5 KiB each), so the byte bound is not what
+limits it here.
+
+The saving is smaller than the cold start's jar batch because the warm path still reads and hashes the
+jars — 150 MB here — and because the machine's load moved more than the difference did between some
+pairs. On the 500-jar corpus the batch is 5.14 s of a 10.46 s start, so the same ratio has more room
+there.
+
+Caveats: this is a parser measurement, not a claim that these 100 mods work (their mixins still target
+game classes, so `woven` is 0); a rebuild changes the engine identity and starts cold again; and the
+cache is keyed on the file's bytes, so re-signed or re-compressed jars are new jars.
+
 ## Trust
 
 A bridged jar is third-party code the registry never reviewed, running with the player's rights. That is
@@ -1221,6 +1369,105 @@ worse than a native mod, which at least passed a human.
   objects, and arbitrary mod packet handling are still later work. A client without the server's typed
   declarations is refused during the normal content/registry compatibility check, as with other content.
 - Mods that change packets outside their own channel: reported, not emulated.
+
+## Hybrid sessions: a native half and a loader half
+
+The tier is chosen per jar, so a pack does not have to pick one engine. The server ledger already labels
+every jar; `tools/hybrid_pack.py` turns those labels into two launch commands and a static compatibility
+check, and `--measure` runs both ways.
+
+| Ledger label | Where it runs | Why |
+|---|---|---|
+| `native-ok` | native half | the dedicated server ran it and its skipped plans stayed inside the jar (or it has no server-role entrypoint) |
+| `needs-loader` | loader half | it ran, but the plans it skipped target game classes, which only a real loader applies |
+| `native-gap` | neither by default; the loader with `--gap-to-loader` | native execution refuses it, so the loader is the other path that can carry it |
+
+The halves are separate processes. The native half is one `horizon-client --java-mod` run (the window, the
+integrated server or `--dedicated`); the loader half is `horizon-jvm --real-loader --launch-game` booting
+the pinned 26.3 server with Fabric Loader. They share a world folder, not a class loader or a registry —
+which is why the partition has to respect declared dependencies.
+
+### The partition and the two commands
+
+The input is the same text ledger as [java-mod-compat-status.md](java-mod-compat-status.md) (`--ledger`,
+repeatable). A pack folder keeps the pack's filenames while the corpus ledger may hold the identical bytes
+under another pack's name after deduplication, so `--match-by-hash` falls back to SHA-256 when the name
+does not match.
+
+Each half is closed over the pack's declared `depends`. A jar whose required dependency sits in the other
+half is added to this half too; the dependency is not moved out of the half that already had it, so a
+library both sides need (typically `fabric-api`) is passed to both and reported as `shared`. This is the
+first thing a naive partition gets wrong: a loader-only jar that depends on a native-only library fails at
+class-load time, even though each half is individually healthy.
+
+```sh
+python3 tools/hybrid_pack.py ~/horizon-corpus/corpus-helix \
+  --ledger tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt \
+  --ledger ~/horizon-corpus/ledger-mega-classified.txt --match-by-hash --commands
+```
+
+The native command puts every `--java-mod` before `--dedicated` (everything after it is the server's own
+argv). The loader command carries the pinned loader, libraries and game jar on the command line and the
+same values in `HORIZON_REAL_LAUNCH`, `HORIZON_LAUNCH_STOP_AT_DONE`, `HORIZON_MINECRAFT_JAR`,
+`FABRIC_LOADER_JAR` and `FABRIC_LIBS_DIR`; it also passes `--mixin-audit`, so Mixin's own record of what it
+applied comes back with the result.
+
+### The declared-content check
+
+Before either command runs, the tool checks the pack's own declarations rather than the runtime's:
+
+- duplicate mod ids across the pack (conflict);
+- the same `registry:id` declared by two jars in `META-INF/horizon-native.json` (conflict);
+- a required id the half that runs the jar does not contain (conflict — the failure the closure prevents);
+- `breaks`/`conflicts` against a pack member (warning: Fabric's field is a version range, and the checker
+  does not evaluate semver);
+- `native-gap` and unlabelled jars left out of both halves (warning, with their ledger reason).
+
+### Results: Helix (112 jars)
+
+The pack is the Helix client pack used by the loader ledger (112 jars). Labels come from the two corpus
+ledger runs by content match: 89 `native-ok`, 1 `needs-loader` (`baguettelib`), 15 `native-gap`, and 7
+jars with no ledger row. The ledger's own split puts 2 jars in the loader half: `baguettelib` and the
+`fabric-api` its closure requires (which also stays in the native half as `shared`). The full variant,
+`--gap-to-loader`, has 26 loader jars: the 16 non-native jars plus ten libraries they require, 10 of them
+shared with the native half.
+
+| Run | Jars | Mods that executed | Mixin plans applied | Wall |
+|---|---:|---:|---:|---:|
+| native-only (native half) | 89 | 33 | 0 (1,836 skipped) | 2.4 s |
+| hybrid — native half | 89 | 33 | 0 (1,836 skipped) | 2.4 s |
+| hybrid — loader half | 2 | 1 (`baguettelib`) | 257 (34 configs, 170 targets) | 11.1 s |
+| **hybrid total** | | **34** | **257** | |
+
+What the table says, and what it does not:
+
+- The native half is unchanged between the two runs: 2.4 s to `Done`, 33 entrypoints, and 1,836 mixin
+  plans still skipped because they target Minecraft classes. Those plans are the ledger's `needs-loader`
+  signal, and they are 0 applied.
+- The loader half carries the one jar the ledger said needs it. Fabric loads 43 mods (baguettelib,
+  Fabric API and its modules), applies 257 mixins from 34 configs over 170 targets with 0 failures, and
+  reaches `Done` in the same bounded fashion. The count is larger than baguettelib's own 19 skipped plans
+  because Fabric API's own mixins now apply too.
+- The hybrid therefore moves 33 mods to 34, and — the part the count hides — takes the pack from 0 applied
+  mixins to 257. The mod count barely moves because this pack is client-heavy: the native half already
+  runs most of it and the ledger finds one jar whose mixins need the loader.
+- The 15 `native-gap` jars stay out of the measured hybrid. `--gap-to-loader` puts them in the loader half,
+  and that full variant (26 jars) loaded 78 mods but did not reach `Done`: 13 of its jars appear in the
+  listing, the audit records 0 applied and 4 failed mixins, and `fabric-data-attachment-api-v1`'s
+  `AttachmentSync` entrypoint throws `NoSuchMethodError: getMaxPayloadSize…` before server start. That is
+  a Fabric API/26.3 mismatch in this tree, not a partition bug, and it is why the status page keeps
+  `native-gap` separate from `needs-loader`: the second is a routing decision, the first is still a gap.
+- The static check reports 9 conflicts, all `cross-partition-dependency`, and 42 warnings (mostly
+  `declared-break`). The conflicts are real: `itemscroller`, `litematica`, `litematica-printer`,
+  `tweakeroo` and `minihud` need `malilib`, `subtle_effects` needs `fzzy_config`, `particular` and `wakes`
+  need `baguettelib`, and `pickupnotifier` needs `puzzleslib`. Every one is a native jar whose dependency
+  the native process cannot load (the dependency is `native-gap` or sits in the loader half), so moving
+  the dependent jar to the loader would hide the gap, not close it.
+
+The experiment's own limit is the work bound: each half is one process with a 240 s ceiling, the native
+run stops at `Done (` and the loader run stops at the same line through
+`HORIZON_LAUNCH_STOP_AT_DONE=1`. Neither number is a claim about a pack where the native half is the
+client window; the server role is the one both ledgers measure.
 
 ## How it is tested
 

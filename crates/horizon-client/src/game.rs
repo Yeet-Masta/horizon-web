@@ -22638,6 +22638,11 @@ pub fn run_with() -> Result<()> {
     // before the content root and the resources are built; a client's run at
     // the content-root build below, in the client role.
     if options.execution_role == execution_role::ExecutionRole::DedicatedServer {
+        // The Java batch is the worker pool's first user and runs before
+        // `load_resources`: size the pool from the server's options now, or it
+        // would keep the default count for the whole process.
+        let settings = Settings::load(&Game::options_path());
+        horizon_threads::jobs::configure(settings.horizon.worker_threads());
         dedicated::load_java_mods(&options)?;
     }
     // Someone is playing: the anonymous ping behind the launcher's "N playing now", and the
@@ -22696,6 +22701,10 @@ pub fn run_with() -> Result<()> {
             pack_error = Some(e.to_string());
             vanilla_root.clone()
         });
+    // The Java batch below is the worker pool's first user, and it runs before
+    // `load_resources` sizes the pool: size it from the player's setting now,
+    // or the batch would freeze the default count for the whole session.
+    horizon_threads::jobs::configure(early_settings.horizon.worker_threads());
     options.resources = mods::content_root_with_java(
         &options.resources,
         &early_settings.mods.enabled,

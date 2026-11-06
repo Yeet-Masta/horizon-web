@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Nepieciešams ielādētājs: tā plāni mērķē uz spēli",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Izpildlaiks: ziņots par {count} jar failiem",
   "Clear compatibility cache": "Notīrīt saderības kešatmiņu",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} saderības kešatmiņa tika notīrīta. Tā tiks pārbaudīta vēlreiz nākamajā instalēšanā, atjaunināšanā vai meklēšanā.",
-  "(+{count} more)": "(+{count} vairāk)"
+  "(+{count} more)": "(+{count} vairāk)",
+  "Hybrid: native + loader": "Hibrīds: vietējais + ielādētājs"
 }

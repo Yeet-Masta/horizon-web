@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Indiget onerarium: consilia eius ludum petunt",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Tempus currendi: {count} fasciculi jar nuntiati",
   "Clear compatibility cache": "Purgare cache congruentiae",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache congruentiae pro {name} purgata est. Iterum inspicietur in proxima institutione, renovatione aut investigatione.",
-  "(+{count} more)": "(+{count} plures)"
+  "(+{count} more)": "(+{count} plures)",
+  "Hybrid: native + loader": "Hybridum: nativum + onerator"
 }

@@ -8,6 +8,7 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    sync::Arc,
 };
 
 pub mod weaver;
@@ -17,8 +18,8 @@ use weaver::{
 };
 
 pub use weaver::{
-    ReturnMode, WovenClasses, callback_info_class, callback_info_returnable_class, weave_class,
-    weave_class_with_extras, weave_classes, weave_classes_with_extras, weave_head,
+    ReturnMode, ShiftBy, WovenClasses, callback_info_class, callback_info_returnable_class,
+    weave_class, weave_class_with_extras, weave_classes, weave_classes_with_extras, weave_head,
     weave_head_cancellable, weave_invoke, weave_invoke_plan, weave_plans, weave_return,
 };
 
@@ -236,10 +237,10 @@ impl MixinInjectionPlan {
 /// This sits beside [`MixinInjectionPlan`] rather than extending it: the
 /// injection plan is the executable HEAD/RETURN/TAIL/INVOKE contract other
 /// callers already build, while an anchor plan additionally carries the raw
-/// `@At` site, ordinal and slice bounds a call-site hook needs.  Discovery
-/// keeps a plan out of [`NativeJar::mixin_anchor_plans`] when its selector or
-/// callback shape is outside the bounded forms; the reason is reported by
-/// [`NativeJar::unresolved_anchor_plans`].
+/// `@At` site, ordinal, slice bounds and resolved shift a call-site hook
+/// needs.  Discovery keeps a plan out of [`NativeJar::mixin_anchor_plans`]
+/// when its selector or callback shape is outside the bounded forms; the
+/// reason is reported by [`NativeJar::unresolved_anchor_plans`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixinAnchorPlan {
     pub target: MethodRef,
@@ -259,6 +260,15 @@ pub struct MixinAnchorPlan {
     pub slice_from: Option<String>,
     /// `@Slice.to`'s anchor label, kept as written.
     pub slice_to: Option<String>,
+    /// `@At(shift = ..., by = ...)`, resolved to the signed instruction
+    /// distance the bounded weaver moves the insert.
+    ///
+    /// Mixin's `BEFORE by n` is `n` instruction boundaries before the site and
+    /// `AFTER by n` is `n + 1` after it, the distances an [`InvokeShift`]
+    /// names; `BY` keeps its signed amount.  A shift on a `@Redirect` is
+    /// impossible in this runtime and stays report-only: the replacement bytes
+    /// have to stay on the instruction they replace.
+    pub shift: Option<ShiftBy>,
     /// True when the plan came from `@Redirect` rather than `@Inject`.
     pub redirect: bool,
 }
@@ -297,6 +307,9 @@ pub struct MixinModifyArgPlan {
     pub index: usize,
     /// `@At.ordinal`: only the ordinal-th matching call site is modified.
     pub ordinal: Option<usize>,
+    /// `@Slice(from = ..., to = ...)`, the half-open instruction range the
+    /// matching call sites and [`Self::ordinal`] count inside.
+    pub slice: Option<SliceBounds>,
 }
 
 /// One bounded native translation for an `@ModifyVariable` callback.
@@ -401,6 +414,11 @@ pub enum MixinSkipReason {
     ConfigPlugin,
     /// The target class is not in this jar, the case for every Minecraft target.
     TargetOutsideJar,
+    /// The target is a game class whose call site a host hook point exposes,
+    /// but this plan's shape (its side, anchor, cancellation, selector or
+    /// callback) does not fit that hook's contract, so it stays refused rather
+    /// than approximated.
+    GameHookMismatch(String),
     /// The target class declares no method matching the selector.
     TargetMissing,
     /// The selector matches several overloads, or two selectors name one method.
@@ -428,11 +446,20 @@ impl MixinSkipReason {
             Self::OtherSide => "other-side",
             Self::ConfigPlugin => "config-plugin",
             Self::TargetOutsideJar => "target-outside-jar",
+            Self::GameHookMismatch(_) => "game-hook-mismatch",
             Self::TargetMissing => "target-missing",
             Self::AmbiguousTarget => "ambiguous-target",
             Self::ConstructorTarget => "constructor-target",
             Self::Weaver(_) => "weaver-rejected",
             Self::ListedWithoutPlan => "listed-without-plan",
+        }
+    }
+
+    /// The bounded sentence a reason carries, for the two variants that do.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Weaver(detail) | Self::GameHookMismatch(detail) => Some(detail),
+            _ => None,
         }
     }
 }
@@ -466,11 +493,318 @@ impl std::fmt::Display for SkippedMixinPlan {
             self.callback.name,
             self.callback.descriptor,
         )?;
-        if let MixinSkipReason::Weaver(detail) = &self.reason {
+        if let MixinSkipReason::Weaver(detail) | MixinSkipReason::GameHookMismatch(detail) =
+            &self.reason
+        {
             write!(f, ": {detail}")?;
         }
         Ok(())
     }
+}
+
+/// What a game hook point's contract lets a host do with the callbacks bound to
+/// it.
+///
+/// The words mirror `native-hooks.json`'s `mod_api.contract`, so the census
+/// test can compare them by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameHookContract {
+    /// The host only tells the callback the point was reached.
+    Listen,
+    /// The host hands the callback the census's out-parameter (`out`) and
+    /// reads it back, so `CallbackInfo.cancel()` has something to write where
+    /// the vanilla code checks.
+    Cancel {
+        /// The out-parameter's name in the census (`canceled`, `claimed`...).
+        out: &'static str,
+    },
+}
+
+impl GameHookContract {
+    /// The census contract word (`listen` or `cancel`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Listen => "listen",
+            Self::Cancel { .. } => "cancel",
+        }
+    }
+}
+
+/// What a game hook point hands the interpreter as the callback's `this`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameHookReceiver {
+    /// A static target, so the callback has no receiver.
+    None,
+    /// The hook names the target object itself. The host passes its marker
+    /// (for example `player/<id>`), and an instance callback receives it.
+    Named(&'static str),
+}
+
+/// One game class method whose call site a host hook point exposes.
+///
+/// A site is the mapping a `@Inject` plan on a Minecraft class needs: the plan
+/// cannot be woven (the class is outside the jar), but the host already calls a
+/// named hook at that position, so the callback can run there natively. The
+/// table is deliberately small and hand-checked against the hook's own
+/// documentation: a wrong entry would run mod code at the wrong moment, which
+/// is worse than the honest `target-outside-jar` refusal.
+///
+/// Adding a site is a host change, not a parser change: the hook must already
+/// be in `native-hooks.json` with the same contract word, side and cancellation,
+/// and it must be able to hand the interpreter the target's receiver and every
+/// target argument. Today only the receiver-carrying, argument-free and
+/// single-argument hooks qualify (see `game_hook_sites`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameHookSite {
+    /// The census hook name (`native-hooks.json`'s `name`).
+    pub hook: &'static str,
+    /// The census contract version the call site implements.
+    pub version: u32,
+    /// The vanilla class the hooked call site belongs to.
+    pub target_owner: &'static str,
+    /// The vanilla method name.
+    pub target_name: &'static str,
+    /// The vanilla method descriptor. Empty plan descriptors resolve to it.
+    pub target_descriptor: &'static str,
+    /// The `@At` anchors the hook's position answers (`HEAD`, `RETURN`, `TAIL`).
+    pub anchors: &'static [&'static str],
+    /// What the hook lets the callback do.
+    pub contract: GameHookContract,
+    /// The physical side the hook fires on; `None` for both.
+    pub side: Option<MixinSide>,
+    /// The object the host passes as the callback's receiver.
+    pub receiver: GameHookReceiver,
+    /// One sentence on what the hook actually covers, for a compatibility
+    /// screen: the population and position are part of the contract.
+    pub note: &'static str,
+}
+
+/// The game hook points this runtime maps a Minecraft `@Inject` target onto.
+///
+/// Coverage rule, in order: the plan's target is one of these sites; the hook's
+/// side is the weave side; the plan's anchor is one the hook's position
+/// exposes; a cancellable plan needs a `Cancel` contract; the target stays
+/// `void` for a post hook (the hook carries no result to override); the plan
+/// carries no `shift`, `slice` or `ordinal`; and the callback's descriptor
+/// mirrors the target's arguments with at most one trailing `CallbackInfo` and
+/// returns `void`. Anything else is skipped with
+/// [`MixinSkipReason::GameHookMismatch`], and a target with no site at all
+/// keeps [`MixinSkipReason::TargetOutsideJar`].
+///
+/// Only two sites qualify today because the rule is strict on purpose: the hook
+/// must fire at the same position and for the same population as the vanilla
+/// method. `entity_tick_pre`/`_post` are batched per family and exclude
+/// players and projectiles, so `Entity#tick` does not map onto them.
+pub const GAME_HOOK_SITES: &[GameHookSite] = &[
+    GameHookSite {
+        hook: "player_tick",
+        version: 1,
+        target_owner: "net/minecraft/server/level/ServerPlayer",
+        target_name: "tick",
+        target_descriptor: "()V",
+        anchors: &["TAIL"],
+        contract: GameHookContract::Listen,
+        side: Some(MixinSide::Server),
+        receiver: GameHookReceiver::Named("player"),
+        note: "at the end of ServerPlayer.tick, for a living player, on the authoritative server",
+    },
+    GameHookSite {
+        hook: "item_picked_up",
+        version: 1,
+        target_owner: "net/minecraft/world/entity/item/ItemEntity",
+        target_name: "playerTouch",
+        target_descriptor: "(Lnet/minecraft/world/entity/player/Player;)V",
+        anchors: &["HEAD"],
+        contract: GameHookContract::Cancel { out: "canceled" },
+        side: Some(MixinSide::Server),
+        receiver: GameHookReceiver::Named("item"),
+        note: "at ItemEntity.playerTouch, before the stack is taken, on the authoritative server",
+    },
+];
+
+/// The sites a report or a launcher can list, in table order.
+pub fn game_hook_sites() -> &'static [GameHookSite] {
+    GAME_HOOK_SITES
+}
+
+/// The site whose call site a plan target names, if any.
+///
+/// A plan descriptor that is empty (real Mixin's `method = "tick"`) matches the
+/// site's descriptor; a non-empty one must match it exactly.
+pub fn game_hook_site_for(target: &MethodRef) -> Option<&'static GameHookSite> {
+    GAME_HOOK_SITES.iter().find(|site| {
+        site.target_owner == target.owner
+            && site.target_name == target.name
+            && (target.descriptor.is_empty() || target.descriptor == site.target_descriptor)
+    })
+}
+
+/// Why one shape cannot use a site, or `Ok(())` when it can.
+///
+/// This is the coverage rule without the jar: the caller still has to resolve
+/// and validate the callback's descriptor against [`GameHookSite::target_descriptor`].
+pub fn game_hook_site_fits(
+    site: &GameHookSite,
+    anchor: &str,
+    cancellable: bool,
+    side: MixinSide,
+) -> Result<(), MixinSkipReason> {
+    let anchor = if anchor.is_empty() { "HEAD" } else { anchor };
+    if site.side.is_some_and(|only| only != side) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} fires on the {} side only; this weave is {}",
+                site.hook,
+                match site.side {
+                    Some(MixinSide::Client) => "client",
+                    Some(MixinSide::Server) => "server",
+                    None => "either",
+                },
+                match side {
+                    MixinSide::Client => "client",
+                    MixinSide::Server => "server",
+                }
+            ),
+        )));
+    }
+    if !site.anchors.contains(&anchor) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} fires {} on {}#{}; @Inject at {anchor} has no call site there",
+                site.hook,
+                site.anchors.join("/"),
+                site.target_owner,
+                site.target_name
+            ),
+        )));
+    }
+    if cancellable && !matches!(site.contract, GameHookContract::Cancel { .. }) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} only listens; a cancellable @Inject needs a hook whose contract cancels",
+                site.hook
+            ),
+        )));
+    }
+    if return_desc(site.target_descriptor) != "V" {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} names {}#{}{}, which returns a value; a host hook carries no result to override",
+                site.hook, site.target_owner, site.target_name, site.target_descriptor
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// One `@Inject` plan a game hook point runs instead of a bytecode weave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameHookPlan {
+    /// The census hook name the callback is registered under.
+    pub hook: &'static str,
+    /// The hook contract version this registration was validated against.
+    pub version: u32,
+    /// The plan's anchor, with an empty `@At` read as `HEAD`.
+    pub anchor: String,
+    /// The plan with its concrete target descriptor.
+    pub plan: MixinInjectionPlan,
+}
+
+/// One callback bound to one host hook point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredGameHook {
+    /// The census hook name.
+    pub hook: String,
+    /// The hook contract version.
+    pub version: u32,
+    /// The resolved vanilla target, with its concrete descriptor.
+    pub target: MethodRef,
+    /// The jar callback the host runs at the point.
+    pub callback: MethodRef,
+    /// The plan's anchor, with an empty `@At` read as `HEAD`.
+    pub anchor: String,
+    /// Whether `CallbackInfo.cancel()` is honoured at this point.
+    pub cancellable: bool,
+}
+
+/// The callbacks one jar registered at host hook points, grouped by hook and
+/// kept in Mixin apply order inside each group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GameHookRegistrations {
+    by_hook: BTreeMap<String, Vec<RegisteredGameHook>>,
+}
+
+impl GameHookRegistrations {
+    /// Every hook name with at least one callback, in name order.
+    pub fn hooks(&self) -> impl Iterator<Item = &str> {
+        self.by_hook.keys().map(String::as_str)
+    }
+
+    /// The callbacks bound to `hook`, in Mixin apply order. An unknown hook
+    /// answers an empty slice, so a host can ask unconditionally.
+    pub fn entries(&self, hook: &str) -> &[RegisteredGameHook] {
+        self.by_hook.get(hook).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The number of callbacks over every hook.
+    pub fn len(&self) -> usize {
+        self.by_hook.values().map(Vec::len).sum()
+    }
+
+    /// Whether the jar registered no hook callback at all.
+    pub fn is_empty(&self) -> bool {
+        self.by_hook.values().all(Vec::is_empty)
+    }
+
+    fn insert(&mut self, hook: RegisteredGameHook) {
+        self.by_hook
+            .entry(hook.hook.clone())
+            .or_default()
+            .push(hook);
+    }
+}
+
+/// What one firing of a host hook point did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameHookRun {
+    /// The hook name that fired.
+    pub hook: String,
+    /// How many callbacks ran (a cancellation stops the ones after it).
+    pub ran: usize,
+    /// Whether one of them cancelled the vanilla work.
+    pub cancelled: bool,
+    /// Every callback result, in run order.
+    pub results: Vec<Value>,
+}
+
+/// Which generated member a Mixin class declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixinAccessorKind {
+    /// `@Accessor` with no arguments: read the target field.
+    Getter,
+    /// `@Accessor` with one argument and a `void` return: write the target field.
+    Setter,
+    /// `@Invoker`: call the target method.
+    Invoker,
+}
+
+/// One `@Accessor`/`@Invoker` member a Mixin class declares.
+///
+/// Unlike an injection plan these members have no woven body: real Mixin
+/// generates a getter, setter or forwarding call. The native interpreter runs
+/// the same contract when the member is invoked on an object, reading or
+/// writing the bounded field table or dispatching the named target. A target
+/// class outside the jar (every Minecraft class) still works because the host
+/// answers the field read or the call through its own modelled surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixinAccessorPlan {
+    /// The field or method the generated member reads, writes or calls.
+    pub target: MethodRef,
+    /// The `@Accessor`/`@Invoker` member as the jar declares it.
+    pub accessor: MethodRef,
+    pub kind: MixinAccessorKind,
+    /// Whether the target member is static (and therefore has no receiver).
+    pub static_target: bool,
 }
 
 /// What [`NativeJar::plan_load_time_weave`] decided for one jar.
@@ -487,6 +821,12 @@ pub struct LoadTimeMixinWeave {
     pub woven_modify_args: Vec<MixinModifyArgPlan>,
     /// The resolved @ModifyVariable plans the bytes carry.
     pub woven_modify_variables: Vec<MixinModifyVariablePlan>,
+    /// The `@Inject` plans a host hook point runs instead of the bytecode
+    /// weave. Only [`NativeJar::plan_load_time_weave_with_game_hooks`] fills
+    /// this; the default weave refuses those plans as `target-outside-jar`.
+    pub game_hooks: Vec<GameHookPlan>,
+    /// The `@Accessor`/`@Invoker` members the interpreter runs natively.
+    pub accessors: Vec<MixinAccessorPlan>,
     /// Everything else the jar's Mixin classes declare.
     pub skipped: Vec<SkippedMixinPlan>,
 }
@@ -1417,6 +1757,26 @@ pub trait Host {
         Vec::new()
     }
 
+    /// The text a bounded input-stream marker exposes, when the host holds it.
+    ///
+    /// The interpreter models `java.io` readers itself; a stream the host
+    /// opened (a jar resource, through `ClassLoader.getResourceAsStream`) is
+    /// read through this query, which drains the bytes a `read` call would
+    /// consume. A host that keeps no stream table keeps the default.
+    fn resource_stream_text(&mut self, _marker: &str) -> Option<String> {
+        None
+    }
+
+    /// Sibling-jar classes this host lets the executing jar link against.
+    ///
+    /// `None` keeps single-jar behavior exactly as before: a symbol the
+    /// running jar does not declare stays on the host path. A host that holds
+    /// parsed library jars answers `Some`, and the interpreter resolves the
+    /// symbol against those jars before falling back to the host.
+    fn linked_class_table(&self) -> Option<&Arc<LinkedClassTable>> {
+        None
+    }
+
     /// Message a host recorded for one bounded Throwable marker.
     ///
     /// The interpreter keeps objects as markers, so a host that answers
@@ -1546,6 +1906,10 @@ pub struct StdHost {
     /// Values are class markers, and no host classpath or filesystem lookup is
     /// ever attempted.
     classes: BTreeMap<String, String>,
+    /// Sibling jars this host lets the executing jar link against. Shared by
+    /// `Arc` so a pack can build one table and every mod's host uses it
+    /// without copying the class bytes again.
+    linked_classes: Arc<LinkedClassTable>,
     /// Explicitly seeded Java service providers. Native execution never scans
     /// the host classpath; callers must supply the service and provider class
     /// names they want visible to `ServiceLoader`.
@@ -1655,6 +2019,7 @@ impl StdHost {
             resource_streams: BTreeMap::new(),
             resource_marks: BTreeMap::new(),
             classes: BTreeMap::new(),
+            linked_classes: Arc::default(),
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
             mods: BTreeMap::new(),
@@ -1725,14 +2090,26 @@ impl StdHost {
         }
         if self.strict_unknown_host_calls {
             Err(NativeError::UnknownHostCall(r.clone()))
-        } else if let Some(kind) = empty_collection_kind(result_descriptor(&r.descriptor)) {
-            // A caller that gets null where Java returns a collection fails on
-            // the very next `Map.entrySet`/`Collection.iterator`; an empty
-            // modelled collection keeps the call chain on the bounded path.
-            Ok(self.empty_collection(kind))
         } else {
-            Ok(Value::default_for(&r.descriptor))
+            Ok(self.neutral_unmodelled_result(&r.descriptor))
         }
+    }
+
+    /// The neutral answer an unmodelled call gives for its declared result.
+    ///
+    /// Java never returns null from a method declared to return a collection or
+    /// an array, and the caller's very next `iterator()`/`arraylength` fails on
+    /// a null. Both answer an empty modelled value instead, so the call chain
+    /// stays on the bounded path; every other type keeps the neutral default
+    /// (null, 0, false) a handler can observe.
+    fn neutral_unmodelled_result(&mut self, descriptor: &str) -> Value {
+        if let Some(kind) = empty_collection_kind(result_descriptor(descriptor)) {
+            return self.empty_collection(kind);
+        }
+        if result_descriptor(descriptor).starts_with('[') {
+            return Value::Ref(Some("array/empty".into()));
+        }
+        Value::default_for(descriptor)
     }
 
     /// A distinct empty collection marker for one unmodelled call.
@@ -1885,6 +2262,43 @@ impl StdHost {
             .map(String::as_str)
     }
 
+    /// Link the classes of another jar so this jar's symbols resolve against
+    /// them.
+    ///
+    /// This is the native path's class path: the caller parses the library jar
+    /// it already holds, and the interpreter may then run that jar's bytecode
+    /// for a static field, a static call or a `Class.forName`. Nothing here
+    /// reads the process class path or the filesystem.
+    pub fn link_jar(
+        &mut self,
+        id: impl Into<String>,
+        jar: &NativeJar,
+    ) -> Result<usize, NativeError> {
+        Arc::make_mut(&mut self.linked_classes).link_jar(id, jar)
+    }
+
+    /// [`Self::link_jar`] for a caller that already parsed the library's
+    /// classes.
+    pub fn link_classes(
+        &mut self,
+        id: impl Into<String>,
+        classes: impl IntoIterator<Item = ClassFile>,
+    ) -> Result<usize, NativeError> {
+        Arc::make_mut(&mut self.linked_classes).link_classes(id, classes)
+    }
+
+    /// Share one linked table across many hosts (`Self::link_jar` clones it
+    /// per host otherwise, which doubles the class bytes of a whole pack).
+    pub fn with_linked_class_table(mut self, table: Arc<LinkedClassTable>) -> Self {
+        self.linked_classes = table;
+        self
+    }
+
+    /// The sibling jars this host links against.
+    pub fn linked_classes(&self) -> &LinkedClassTable {
+        &self.linked_classes
+    }
+
     /// Seed one deterministic provider for a Java service. Provider discovery
     /// remains explicit and invocation-local; no JDK or host classpath lookup
     /// is performed.
@@ -1904,6 +2318,26 @@ impl StdHost {
     /// Return the explicitly seeded providers for a service, if any.
     pub fn service_providers(&self, service: &str) -> Option<&[String]> {
         self.service_providers.get(service).map(Vec::as_slice)
+    }
+
+    /// The providers of one service across this host's own seeds and the
+    /// linked jars' `META-INF/services` files.
+    ///
+    /// A linked jar is part of the caller-supplied class path, so code the
+    /// interpreter runs from that link sees the providers it declares. The
+    /// host still never scans a process class path.
+    fn merged_service_providers(&self, service: &str) -> Vec<String> {
+        let mut providers = self
+            .service_providers
+            .get(service)
+            .cloned()
+            .unwrap_or_default();
+        for provider in self.linked_classes.service_providers(service) {
+            if !providers.contains(provider) {
+                providers.push(provider.clone());
+            }
+        }
+        providers
     }
 
     /// Set the deterministic value returned by `System.currentTimeMillis`.
@@ -1940,6 +2374,138 @@ impl StdHost {
         self.mutable_collections
             .get(marker)
             .map(|values| values.iter().map(value_marker).collect::<Vec<_>>())
+    }
+
+    /// Answer `java.util.Properties` members from the map a collection keeps.
+    ///
+    /// A loader bootstrap reads a jar's own `.properties` file through
+    /// `Class.getResourceAsStream` followed by `Properties.load`, then asks for
+    /// `mod.name`/`mod.version`. The stream is a host resource stream, so the
+    /// parse happens here; `getProperty` answers from the same table `get`
+    /// uses. The format's escapes and continuations are read as plain
+    /// assignments, which is what a metadata file declares.
+    fn properties_member(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("load", "(Ljava/io/InputStream;)V") | ("load", "(Ljava/io/Reader;)V") => {
+                let Some(stream) = expect_ref(Self::argument(r, args, 0)?) else {
+                    return Ok(Some(Value::Void));
+                };
+                let Some((bytes, index)) = self.resource_streams.get_mut(stream) else {
+                    return Ok(Some(Value::Void));
+                };
+                let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
+                *index = bytes.len();
+                let additions = properties_entries(&text);
+                let values = self
+                    .mutable_collections
+                    .entry(marker.to_owned())
+                    .or_default();
+                for (key, value) in additions {
+                    let key = Value::Ref(Some(key));
+                    let value = Value::Ref(Some(value));
+                    match values.chunks_exact_mut(2).find(|pair| pair[0] == key) {
+                        Some(pair) => pair[1] = value,
+                        None => values.extend([key, value]),
+                    }
+                }
+                Ok(Some(Value::Void))
+            }
+            ("getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let found = self
+                    .mutable_collections
+                    .get(marker)
+                    .and_then(|values| {
+                        values
+                            .chunks_exact(2)
+                            .find(|pair| pair[0] == key)
+                            .map(|pair| pair[1].clone())
+                    })
+                    .unwrap_or(Value::Ref(None));
+                Ok(Some(found))
+            }
+            ("getProperty", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let fallback = Self::argument(r, args, 1)?.clone();
+                let found = self
+                    .mutable_collections
+                    .get(marker)
+                    .and_then(|values| {
+                        values
+                            .chunks_exact(2)
+                            .find(|pair| pair[0] == key)
+                            .map(|pair| pair[1].clone())
+                    })
+                    .unwrap_or(fallback);
+                Ok(Some(found))
+            }
+            ("setProperty", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let value = Self::argument(r, args, 1)?.clone();
+                let values = self
+                    .mutable_collections
+                    .entry(marker.to_owned())
+                    .or_default();
+                for pair in values.chunks_exact_mut(2) {
+                    if pair[0] == key {
+                        return Ok(Some(std::mem::replace(&mut pair[1], value)));
+                    }
+                }
+                values.extend([key, value]);
+                Ok(Some(Value::Ref(None)))
+            }
+            ("stringPropertyNames", "()Ljava/util/Set;") => {
+                let keys = self
+                    .mutable_collections
+                    .get(marker)
+                    .map(|values| {
+                        values
+                            .chunks_exact(2)
+                            .map(|pair| pair[0].clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let marker = self.empty_collection("set");
+                if let Some(marker) = expect_ref(&marker) {
+                    self.mutable_collections.insert(marker.to_owned(), keys);
+                }
+                Ok(Some(marker))
+            }
+            ("store", _) | ("storeToXML", _) | ("list", _) | ("save", _) => Ok(Some(Value::Void)),
+            _ => Ok(None),
+        }
+    }
+
+    /// One `custom` entry of the jar's own `fabric.mod.json`.
+    ///
+    /// Fabric exposes build metadata (a commit hash, a CI URL) through
+    /// `ModMetadata.getCustomValue`, and a bootstrap formats it into a version
+    /// string. The jar's metadata document is a resource the host already
+    /// holds, so the answer is read from it; a key the document does not
+    /// declare stays `null`, which is what Fabric answers.
+    fn fabric_custom_value(&self, key: &str) -> Value {
+        let Some(bytes) = self.resource_bytes.get("fabric.mod.json") else {
+            return Value::Ref(None);
+        };
+        let Ok(document) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return Value::Ref(None);
+        };
+        let Some(value) = document.get("custom").and_then(|custom| custom.get(key)) else {
+            return Value::Ref(None);
+        };
+        match value {
+            serde_json::Value::String(text) => Value::Ref(Some(format!("custom-value/{text}"))),
+            serde_json::Value::Bool(flag) => Value::Ref(Some(format!("custom-boolean/{flag}"))),
+            serde_json::Value::Number(number) => {
+                Value::Ref(Some(format!("custom-number/{number}")))
+            }
+            other => Value::Ref(Some(format!("custom-value/{other}"))),
+        }
     }
 
     fn ensure_mutable_collection(&mut self, receiver: &Value) {
@@ -2621,10 +3187,18 @@ impl Host for StdHost {
     }
 
     fn service_providers(&self, service: &str) -> Vec<String> {
-        self.service_providers
-            .get(service)
-            .cloned()
-            .unwrap_or_default()
+        self.merged_service_providers(service)
+    }
+
+    fn resource_stream_text(&mut self, marker: &str) -> Option<String> {
+        let (bytes, index) = self.resource_streams.get_mut(marker)?;
+        let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
+        *index = bytes.len();
+        Some(text)
+    }
+
+    fn linked_class_table(&self) -> Option<&Arc<LinkedClassTable>> {
+        Some(&self.linked_classes)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
@@ -2654,12 +3228,30 @@ impl Host for StdHost {
                 | "DAYS",
                 "Ljava/util/concurrent/TimeUnit;",
             ) => Ok(Value::Ref(Some(format!("time-unit/{}", r.name)))),
-            ("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;") => {
-                Ok(Value::Ref(Some("true".into())))
-            }
-            ("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;") => {
-                Ok(Value::Ref(Some("false".into())))
-            }
+            ("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;") => Ok(boolean_value(true)),
+            ("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;") => Ok(boolean_value(false)),
+            // The wrapper's integer bounds and sizes. `Long`, `Float` and
+            // `Double` already answer theirs; without these a mod that compares
+            // against `Integer.MAX_VALUE` or allocates `Integer.SIZE` bits reads
+            // the neutral `0` the unmodelled-static fallback returns, which
+            // silently truncates every comparison.
+            ("java/lang/Integer", "MAX_VALUE", "I") => Ok(Value::Int(i32::MAX)),
+            ("java/lang/Integer", "MIN_VALUE", "I") => Ok(Value::Int(i32::MIN)),
+            ("java/lang/Integer", "SIZE", "I") => Ok(Value::Int(32)),
+            ("java/lang/Integer", "BYTES", "I") => Ok(Value::Int(4)),
+            ("java/lang/Short", "MAX_VALUE", "S") => Ok(Value::Int(i32::from(i16::MAX))),
+            ("java/lang/Short", "MIN_VALUE", "S") => Ok(Value::Int(i32::from(i16::MIN))),
+            ("java/lang/Short", "SIZE", "I") => Ok(Value::Int(16)),
+            ("java/lang/Short", "BYTES", "I") => Ok(Value::Int(2)),
+            ("java/lang/Byte", "MAX_VALUE", "B") => Ok(Value::Int(i32::from(i8::MAX))),
+            ("java/lang/Byte", "MIN_VALUE", "B") => Ok(Value::Int(i32::from(i8::MIN))),
+            ("java/lang/Byte", "SIZE", "I") => Ok(Value::Int(8)),
+            ("java/lang/Byte", "BYTES", "I") => Ok(Value::Int(1)),
+            // `char` is unsigned: `MIN_VALUE` is 0, not `i16::MIN`.
+            ("java/lang/Character", "MAX_VALUE", "C") => Ok(Value::Int(0xffff)),
+            ("java/lang/Character", "MIN_VALUE", "C") => Ok(Value::Int(0)),
+            ("java/lang/Character", "SIZE", "I") => Ok(Value::Int(16)),
+            ("java/lang/Character", "BYTES", "I") => Ok(Value::Int(2)),
             // `int.class` and its siblings compile to a `TYPE` read on the
             // wrapper, so the primitive's `Class` marker is the primitive name.
             // Without it a `getMethod(name, new Class[]{int.class})` call sees
@@ -2778,7 +3370,7 @@ impl Host for StdHost {
                 if descriptor.starts_with("(Ljava/lang/Class;") =>
             {
                 let service = expect_string(Self::argument(r, args, 0)?).replace('.', "/");
-                if self.service_providers.contains_key(&service) {
+                if !self.merged_service_providers(&service).is_empty() {
                     Ok(Value::Ref(Some(format!("service-loader/{service}"))))
                 } else {
                     Err(NativeError::Metadata(format!(
@@ -3214,9 +3806,17 @@ impl Host for StdHost {
             ("java/util/stream/Collectors", "toList", "()Ljava/util/stream/Collector;") => {
                 Ok(Value::Ref(Some("collector/list".into())))
             }
-            ("java/util/stream/Collectors", "toSet", "()Ljava/util/stream/Collector;") => {
-                Ok(Value::Ref(Some("collector/set".into())))
-            }
+            ("java/util/stream/Collectors", "toSet", "()Ljava/util/stream/Collector;")
+            | (
+                "java/util/stream/Collectors",
+                "toUnmodifiableSet",
+                "()Ljava/util/stream/Collector;",
+            ) => Ok(Value::Ref(Some("collector/set".into()))),
+            (
+                "java/util/stream/Collectors",
+                "toUnmodifiableList",
+                "()Ljava/util/stream/Collector;",
+            ) => Ok(Value::Ref(Some("collector/list".into()))),
             // Guava's immutable collectors are the same list/set shapes.
             (
                 "com/google/common/collect/ImmutableList",
@@ -4087,66 +4687,10 @@ impl Host for StdHost {
             };
         }
         let receiver_marker = expect_ref(receiver).cloned();
-        if let Some(marker) = receiver_marker.as_deref() {
-            let callback_result = match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-                (
-                    "java/util/function/Predicate",
-                    "and",
-                    "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:predicate.and:{marker}|{}",
-                        expect_ref(other).map_or("@fn:predicate.false", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Predicate",
-                    "or",
-                    "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:predicate.or:{marker}|{}",
-                        expect_ref(other).map_or("@fn:predicate.false", String::as_str)
-                    )))
-                }),
-                ("java/util/function/Predicate", "negate", "()Ljava/util/function/Predicate;") => {
-                    Some(Value::Ref(Some(format!("@fn:predicate.not:{marker}"))))
-                }
-                (
-                    "java/util/function/Consumer",
-                    "andThen",
-                    "(Ljava/util/function/Consumer;)Ljava/util/function/Consumer;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:consumer.then:{marker}|{}",
-                        expect_ref(other).map_or("@fn:consumer.empty", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Function",
-                    "compose",
-                    "(Ljava/util/function/Function;)Ljava/util/function/Function;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:function.compose:{marker}|{}",
-                        expect_ref(other).map_or("@fn:function.empty", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Function",
-                    "andThen",
-                    "(Ljava/util/function/Function;)Ljava/util/function/Function;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:function.then:{marker}|{}",
-                        expect_ref(other).map_or("@fn:function.empty", String::as_str)
-                    )))
-                }),
-                _ => None,
-            };
-            if let Some(value) = callback_result {
-                return Ok(value);
-            }
+        if let Some(marker) = receiver_marker.as_deref()
+            && let Some(value) = functional_composition_marker(r, marker, args)
+        {
+            return Ok(value);
         }
         if r.owner == "java/lang/reflect/Field"
             && matches!(
@@ -4461,10 +5005,153 @@ impl Host for StdHost {
                 }
                 return Ok(Value::Void);
             }
+            if r.owner == "java/util/Properties" {
+                if let Some(value) = self.properties_member(r, marker, args)? {
+                    return Ok(value);
+                }
+            }
             match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+                (owner, "<init>", "(Ljava/util/Map;)V") if is_map_owner(owner) => {
+                    // `new HashMap<>(other)` copies the entries, and a config
+                    // validator that builds a modified copy relies on it.
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
+                        .into_iter()
+                        .map(|value| parse_collection_value(&value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.mutable_collections.insert(marker.to_owned(), source);
+                    return Ok(Value::Void);
+                }
+                (owner, "<init>", "(Ljava/util/Collection;)V")
+                    if is_collection_owner(owner) && !is_map_owner(owner) =>
+                {
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
+                        .into_iter()
+                        .map(|value| parse_collection_value(&value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.mutable_collections.insert(marker.to_owned(), source);
+                    return Ok(Value::Void);
+                }
                 (_, "<init>", _) => {
                     self.ensure_mutable_collection(receiver);
                     return Ok(Value::Void);
+                }
+                (owner, "offer" | "offerLast" | "addLast", "(Ljava/lang/Object;)Z")
+                    if is_queue_owner(owner) =>
+                {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .push(value);
+                    return Ok(Value::Int(1));
+                }
+                (owner, "push" | "addFirst" | "offerFirst", "(Ljava/lang/Object;)V")
+                    if is_queue_owner(owner) =>
+                {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .insert(0, value);
+                    return Ok(Value::Void);
+                }
+                (owner, "push", "(Ljava/lang/Object;)Z") if is_queue_owner(owner) => {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .insert(0, value);
+                    return Ok(Value::Int(1));
+                }
+                (owner, "poll" | "pollFirst" | "pop" | "removeFirst", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if matches!(r.name.as_str(), "pop" | "removeFirst") {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values.remove(0));
+                }
+                (owner, "pollLast" | "removeLast", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "removeLast" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values.pop().unwrap_or(Value::Ref(None)));
+                }
+                (owner, "peek" | "peekFirst" | "getFirst", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "getFirst" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values[0].clone());
+                }
+                (owner, "peekLast" | "getLast", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "getLast" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values[values.len() - 1].clone());
+                }
+                (owner, "element", "()Ljava/lang/Object;") if is_queue_owner(owner) => {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/util/NoSuchElementException".into(),
+                            message: Some("queue is empty".into()),
+                            frame: None,
+                        });
+                    }
+                    return Ok(values[0].clone());
                 }
                 (owner, "add", "(Ljava/lang/Object;)Z") if is_list_like_owner(owner) => {
                     let value = Self::argument(r, args, 0)?.clone();
@@ -5017,16 +5704,14 @@ impl Host for StdHost {
                 NativeError::Metadata("unsupported java/util/ServiceLoader marker".into())
             })?;
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
-                let values = self
-                    .service_providers
-                    .get(service)
-                    .ok_or_else(|| {
-                        NativeError::Metadata(format!(
-                            "unknown seeded ServiceLoader service {service}"
-                        ))
-                    })?
-                    .iter()
-                    .cloned()
+                let providers = self.merged_service_providers(service);
+                if providers.is_empty() {
+                    return Err(NativeError::Metadata(format!(
+                        "unknown seeded ServiceLoader service {service}"
+                    )));
+                }
+                let values = providers
+                    .into_iter()
                     .map(|provider| Value::Ref(Some(provider)))
                     .collect::<Vec<_>>();
                 let iterator = format!("iterator/{}", self.next_iterator);
@@ -5036,10 +5721,7 @@ impl Host for StdHost {
             }
             if r.name == "findFirst"
                 && r.descriptor == "()Ljava/util/Optional;"
-                && let Some(provider) = self
-                    .service_providers
-                    .get(service)
-                    .and_then(|providers| providers.first())
+                && let Some(provider) = self.merged_service_providers(service).first()
             {
                 return Ok(Value::Ref(Some(format!("optional/{provider}"))));
             }
@@ -5744,6 +6426,43 @@ impl Host for StdHost {
                     start,
                 )))
             }
+            // The `char` overloads take a code unit, so a scanner walking
+            // `indexOf('.', from)` must see the character, not a default.
+            ("java/lang/String", "indexOf", "(I)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                Ok(Value::Int(utf16_index_of(
+                    expect_string(receiver),
+                    &needle,
+                    0,
+                )))
+            }
+            ("java/lang/String", "indexOf", "(II)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                let start = expect_int(r, Self::argument(r, args, 1)?)?;
+                Ok(Value::Int(utf16_index_of(
+                    expect_string(receiver),
+                    &needle,
+                    start,
+                )))
+            }
+            ("java/lang/String", "lastIndexOf", "(I)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                Ok(Value::Int(utf16_last_index_of(
+                    expect_string(receiver),
+                    &needle,
+                )))
+            }
+            ("java/lang/String", "lastIndexOf", "(II)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                let from = expect_int(r, Self::argument(r, args, 1)?)?;
+                let value = expect_string(receiver);
+                let units = value.encode_utf16().collect::<Vec<_>>();
+                let end = usize::try_from(from)
+                    .map(|from| (from + needle.encode_utf16().count()).min(units.len()))
+                    .unwrap_or(0);
+                let prefix = String::from_utf16_lossy(&units[..end]);
+                Ok(Value::Int(utf16_last_index_of(&prefix, &needle)))
+            }
             ("java/lang/String", "lastIndexOf", "(Ljava/lang/String;)I") => {
                 Ok(Value::Int(utf16_last_index_of(
                     expect_string(receiver),
@@ -6386,7 +7105,12 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
-                Ok(Value::Int(self.mods.contains_key(id) as i32))
+                // The loader itself and the game are always loaded; a jar's
+                // platform probe asks for them before it asks for anything the
+                // metadata could name.
+                Ok(Value::Int(
+                    (self.mods.contains_key(id) || is_always_loaded_mod(id)) as i32,
+                ))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
@@ -6435,11 +7159,13 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(
-                    self.mods
-                        .get(id)
-                        .map(|version| format!("mod-container/{id}/{version}")),
-                ))
+                Ok(Value::Ref(match self.mods.get(id) {
+                    Some(version) => Some(format!("mod-container/{id}/{version}")),
+                    // The loader and the game are present in every runtime
+                    // even though no jar declares them as a dependency.
+                    None if is_always_loaded_mod(id) => Some(format!("mod-container/{id}/unknown")),
+                    None => None,
+                }))
             }
             (
                 "net/fabricmc/loader/api/ModContainer",
@@ -6601,6 +7327,40 @@ impl Host for StdHost {
                 "getDescription",
                 "()Ljava/lang/String;",
             ) => Ok(Value::Ref(Some(String::new()))),
+            (
+                "net/fabricmc/loader/api/metadata/ModMetadata",
+                "getCustomValue",
+                "(Ljava/lang/String;)Lnet/fabricmc/loader/api/metadata/CustomValue;",
+            ) => {
+                let key = expect_string(Self::argument(r, args, 0)?);
+                Ok(self.fabric_custom_value(key))
+            }
+            (
+                "net/fabricmc/loader/api/metadata/CustomValue",
+                "getAsString",
+                "()Ljava/lang/String;",
+            ) => Ok(Value::Ref(Some(
+                expect_string(receiver)
+                    .strip_prefix("custom-value/")
+                    .unwrap_or_else(|| expect_string(receiver))
+                    .to_owned(),
+            ))),
+            (
+                "net/fabricmc/loader/api/metadata/CustomValue",
+                "getAsNumber",
+                "()Ljava/lang/Number;",
+            ) => Ok(Value::Ref(Some(
+                expect_string(receiver)
+                    .strip_prefix("custom-number/")
+                    .unwrap_or_else(|| expect_string(receiver))
+                    .to_owned(),
+            ))),
+            ("net/fabricmc/loader/api/metadata/CustomValue", "getAsBoolean", "()Z") => {
+                Ok(Value::Int(i32::from(
+                    expect_string(receiver).starts_with("custom-boolean/true")
+                        || expect_string(receiver).ends_with(":true"),
+                )))
+            }
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getProvides",
@@ -6952,13 +7712,10 @@ impl Host for StdHost {
                 if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
                     return Ok(Value::Ref(Some(value_text(receiver))));
                 }
-                // An unmodelled accessor that declares a collection answers an
-                // empty modelled collection: null would fail on the caller's
-                // very next `iterator()`/`entrySet()`.
-                match empty_collection_kind(result_descriptor(&r.descriptor)) {
-                    Some(kind) => Ok(self.empty_collection(kind)),
-                    None => Ok(Value::default_for(&r.descriptor)),
-                }
+                // An unmodelled accessor that declares a collection or an array
+                // answers an empty modelled value: a null would fail on the
+                // caller's very next `iterator()`/`arraylength`.
+                Ok(self.neutral_unmodelled_result(&r.descriptor))
             }
         }
     }
@@ -7343,6 +8100,18 @@ fn stable_hash(value: &str) -> i32 {
     value.encode_utf16().fold(0_i32, |hash, unit| {
         hash.wrapping_mul(31).wrapping_add(i32::from(unit))
     })
+}
+
+/// The UTF-16 slice `Writer#write(String, int, int)` appends. Java counts code
+/// units, so a surrogate pair contributes two.
+fn slice_utf16(text: &str, start: i32, length: i32) -> String {
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    let start = start.max(0) as usize;
+    if start >= units.len() || length <= 0 {
+        return String::new();
+    }
+    let end = (start + length as usize).min(units.len());
+    String::from_utf16_lossy(&units[start..end])
 }
 
 /// How a record's generated `toString` prints one component value.
@@ -7970,6 +8739,8 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
             "COUNTERCLOCKWISE_90",
         ],
         "net/minecraft/world/level/block/Mirror" => &["NONE", "LEFT_RIGHT", "FRONT_BACK"],
+        // Mods iterate `PackType.values()` to register a pack for each side.
+        "net/minecraft/server/packs/PackType" => &["CLIENT_RESOURCES", "SERVER_DATA"],
         _ => return None,
     })
 }
@@ -8020,6 +8791,9 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/lang/IllegalAccessException"
         | "java/lang/InstantiationException"
         | "java/lang/reflect/InvocationTargetException" => "java/lang/ReflectiveOperationException",
+        "java/io/FileNotFoundException"
+        | "java/nio/file/NoSuchFileException"
+        | "java/nio/file/FileSystemException" => "java/io/IOException",
         "java/lang/ReflectiveOperationException"
         | "java/io/IOException"
         | "java/lang/InterruptedException"
@@ -8043,8 +8817,14 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
 }
 
 /// Whether a thrown class is caught by one exception-table entry, walking the
-/// jar's own superclasses first and the bounded JDK table after them.
-fn exception_is_subtype(classes: &BTreeMap<String, ClassFile>, thrown: &str, catch: &str) -> bool {
+/// jar's own superclasses first, then the sibling jars the host linked, then
+/// the bounded JDK table.
+fn exception_is_subtype(
+    classes: &BTreeMap<String, ClassFile>,
+    linked: &LinkedClassTable,
+    thrown: &str,
+    catch: &str,
+) -> bool {
     if catch == "java/lang/Object" {
         return true;
     }
@@ -8055,6 +8835,7 @@ fn exception_is_subtype(classes: &BTreeMap<String, ClassFile>, thrown: &str, cat
         }
         let next = classes
             .get(&current)
+            .or_else(|| linked.get(&current))
             .map(|file| file.super_name.clone())
             .or_else(|| jdk_exception_superclass(&current).map(str::to_owned));
         match next {
@@ -8490,11 +9271,25 @@ fn expect_long(r: &MethodRef, value: &Value) -> Result<i64, NativeError> {
 fn boxed_boolean(value: &Value) -> Option<bool> {
     match value {
         Value::Int(value) => Some(*value != 0),
-        Value::Ref(Some(value)) => value
-            .strip_prefix("boolean:")
-            .and_then(|value| value.parse::<bool>().ok()),
+        // `boolean:true` is the canonical boxed marker. The bare `true`/`false`
+        // markers are still read: they are what the host answered for
+        // `Boolean.TRUE`/`FALSE` before the two forms converged, and a marker
+        // already inside a running jar keeps its meaning.
+        Value::Ref(Some(value)) => value.strip_prefix("boolean:").map_or_else(
+            || match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            |value| value.parse::<bool>().ok(),
+        ),
         _ => None,
     }
+}
+
+/// The canonical boxed-`Boolean` marker.
+fn boolean_value(value: bool) -> Value {
+    Value::Ref(Some(format!("boolean:{value}")))
 }
 
 fn parse_java_float(value: &Value) -> Result<f64, NativeError> {
@@ -8775,6 +9570,7 @@ fn is_collection_owner(owner: &str) -> bool {
     is_list_owner(owner)
         || is_set_owner(owner)
         || is_map_owner(owner)
+        || is_queue_owner(owner)
         || matches!(
             owner,
             "java/lang/Iterable"
@@ -8813,6 +9609,7 @@ fn is_list_owner(owner: &str) -> bool {
 /// mutable table arm.
 fn is_list_like_owner(owner: &str) -> bool {
     is_list_owner(owner)
+        || is_queue_owner(owner)
         || matches!(
             owner,
             "java/util/Collection"
@@ -8823,6 +9620,35 @@ fn is_list_like_owner(owner: &str) -> bool {
                 | "java/util/AbstractCollection"
                 | "java/lang/Iterable"
         )
+}
+
+/// Every queue a jar constructs directly.
+///
+/// A queue keeps its elements in the same mutable table a list uses, so
+/// `add`/`size`/`isEmpty`/`iterator` answer through the list arms. `poll`,
+/// `peek` and `push` are the queue-only members modelled above them; the
+/// table is FIFO, which is what a `PriorityQueue`'s own iteration order is not,
+/// but is a bounded order the interpreter can reproduce deterministically.
+fn is_queue_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/Queue"
+            | "java/util/Deque"
+            | "java/util/BlockingQueue"
+            | "java/util/BlockingDeque"
+            | "java/util/concurrent/BlockingQueue"
+            | "java/util/concurrent/BlockingDeque"
+            | "java/util/PriorityQueue"
+            | "java/util/ArrayDeque"
+            | "java/util/concurrent/ConcurrentLinkedQueue"
+            | "java/util/concurrent/ConcurrentLinkedDeque"
+            | "java/util/concurrent/LinkedBlockingQueue"
+            | "java/util/concurrent/LinkedBlockingDeque"
+            | "java/util/concurrent/ArrayBlockingQueue"
+            | "java/util/concurrent/PriorityBlockingQueue"
+            | "java/util/concurrent/DelayQueue"
+            | "java/util/concurrent/SynchronousQueue"
+    )
 }
 
 /// Every concrete set a jar constructs directly.
@@ -8865,6 +9691,78 @@ fn is_map_owner(owner: &str) -> bool {
             | "com/google/common/collect/ImmutableMap"
             | "com/google/common/collect/ImmutableBiMap"
     )
+}
+
+/// The `key=value` assignments one `.properties` document declares.
+///
+/// The parser keeps the format's three separators (`=`, `:`, whitespace),
+/// skips `#`/`!` comments and blank lines, and unescapes `\n`/`\t`/`\\`. A
+/// continuation line and a unicode escape are read literally: a metadata file
+/// built by the loader does not use them, and a bounded read must not turn a
+/// crafted file into host state.
+/// Mod ids every Fabric/NeoForge runtime already has loaded.
+///
+/// A platform probe asks `isModLoaded("fabricloader")` (or `minecraft`) to
+/// decide which loader it is running on; neither is a declared dependency a
+/// jar's metadata names.
+fn is_always_loaded_mod(id: &str) -> bool {
+    matches!(
+        id,
+        "fabricloader" | "fabric" | "minecraft" | "java" | "neoforge" | "forge"
+    )
+}
+
+/// The one-character string a `String` char index names.
+fn string_from_char_code(code: i32) -> String {
+    char::from_u32(code as u32).map_or_else(String::new, String::from)
+}
+
+fn properties_entries(text: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => match line.split_once(':') {
+                Some((key, value)) => (key, value),
+                None => match line.split_once(char::is_whitespace) {
+                    Some((key, value)) => (key, value),
+                    None => (line, ""),
+                },
+            },
+        };
+        entries.push((
+            property_unescape(key.trim()),
+            property_unescape(value.trim()),
+        ));
+    }
+    entries
+}
+
+/// Undo the escapes a `.properties` value may carry.
+fn property_unescape(text: &str) -> String {
+    let mut value = String::with_capacity(text.len());
+    let mut escaped = false;
+    for character in text.chars() {
+        if escaped {
+            value.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'f' => '\u{0c}',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            value.push(character);
+        }
+    }
+    value
 }
 
 fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
@@ -9466,8 +10364,12 @@ fn generic_type_instance_of(marker: &str, class: &str) -> bool {
 /// without a runtime tag. A jar's own classes are in `classes`; a JDK or game
 /// class is a slash-qualified name; and the interpreter's other marker
 /// namespaces (`@fn`, `list/`, `type/`, ...) are not classes.
-fn class_marker_like(marker: &str, classes: &BTreeMap<String, ClassFile>) -> bool {
-    if classes.contains_key(marker) {
+fn class_marker_like(
+    marker: &str,
+    classes: &BTreeMap<String, ClassFile>,
+    linked: &LinkedClassTable,
+) -> bool {
+    if classes.contains_key(marker) || linked.contains_key(marker) {
         return true;
     }
     if matches!(
@@ -9681,6 +10583,22 @@ fn array_index(value: i32) -> Result<usize, NativeError> {
     usize::try_from(value).map_err(|_| NativeError::Metadata("array index is negative".into()))
 }
 
+/// The throwable a Java array access raises for an index outside the array.
+///
+/// `ArrayIndexOutOfBoundsException` is a catchable `RuntimeException`, and
+/// javac's synthetic `$SwitchMap` initialisers (and any generated switch over
+/// an enum from another jar) rely on that: a bounds error inside a `try` block
+/// must reach the frame's handler instead of failing the whole invocation. The
+/// message matches the JDK's so a mod that prints or parses it sees the same
+/// text.
+fn array_index_out_of_bounds(index: i32, length: usize) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/ArrayIndexOutOfBoundsException".into(),
+        message: Some(format!("Index {index} out of bounds for length {length}")),
+        frame: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Method {
     pub name: String,
@@ -9812,6 +10730,37 @@ impl ClassFile {
         self.methods
             .iter()
             .find(|m| m.name == name && m.descriptor == desc)
+    }
+
+    /// The internal names of the interfaces this class declares, in
+    /// class-file order.
+    ///
+    /// `Class#getInterfaces` answers from this model, so a mod that reflects on
+    /// a linked library's class sees the same list a JVM would. The parser
+    /// skips the table for every other use, so it is read back from the class
+    /// bytes instead of widening every `ClassFile`; unreadable bytes answer an
+    /// empty list, which cannot happen for a class this crate parsed.
+    pub fn interface_names(&self) -> Vec<String> {
+        self.read_interface_names().unwrap_or_default()
+    }
+
+    fn read_interface_names(&self) -> Result<Vec<String>, NativeError> {
+        let mut r = Reader::new(&self.raw);
+        if r.u4()? != 0xCAFE_BABE {
+            return Err(NativeError::InvalidClass("bad magic"));
+        }
+        r.skip(4)?;
+        let pool = read_pool(&mut r)?;
+        r.u2()?; // access flags
+        r.u2()?; // this class
+        r.u2()?; // super class
+        let count = r.u2()? as usize;
+        let mut interfaces = Vec::new();
+        for _ in 0..count {
+            let index = r.u2()?;
+            interfaces.push(class_name(&pool, index)?);
+        }
+        Ok(interfaces)
     }
 
     /// The exception-table rows of one method's `Code` attribute.
@@ -10183,6 +11132,32 @@ pub enum NativeError {
         /// raised it; a host call has no frame and leaves this `None`.
         frame: Option<String>,
     },
+    /// A jar nested more jar frames than [`MAX_JAR_CALL_DEPTH`] allows.
+    ///
+    /// The interpreter's frames are Rust frames, so an unbounded jar recursion
+    /// is a process abort, not an error a loader could isolate. This bound
+    /// turns that abort into one failed jar; the caller's tolerant policy keeps
+    /// the rest of the batch running.
+    CallDepthExceeded {
+        /// The frame that would have exceeded the bound.
+        class: String,
+        method: String,
+        /// The bound, in nested jar frames.
+        limit: usize,
+    },
+    /// A jar ran past the wall-clock budget its caller allowed.
+    ///
+    /// Checked as frames are entered and periodically inside a frame, so a jar
+    /// that loops without calling anything still stops. The caller decides the
+    /// budget; an unbounded one ([`ExecutionBudget::UNBOUNDED`]) never raises
+    /// this.
+    ExecutionBudgetExceeded {
+        /// The frame the check ran in.
+        class: String,
+        method: String,
+        /// How long the budget allowed.
+        budget: std::time::Duration,
+    },
     /// The fail-closed host mode rejected a call with no bounded model.
     UnknownHostCall(MethodRef),
     Zip(String),
@@ -10210,11 +11185,249 @@ impl std::fmt::Display for NativeError {
                 }
                 Ok(())
             }
+            Self::CallDepthExceeded {
+                class,
+                method,
+                limit,
+            } => write!(
+                f,
+                "native interpreter recursion exceeded {limit} nested jar frames at {class}#{method}"
+            ),
+            Self::ExecutionBudgetExceeded {
+                class,
+                method,
+                budget,
+            } => write!(
+                f,
+                "native interpreter exceeded its {:.1}s execution budget at {class}#{method}",
+                budget.as_secs_f64()
+            ),
             _ => write!(f, "{self:?}"),
         }
     }
 }
 impl std::error::Error for NativeError {}
+
+impl NativeError {
+    /// The loader-side verdict for a failed native entrypoint, when the failure
+    /// itself says which loader could run it.
+    ///
+    /// `None` means the failure is the jar's own behaviour (a mod throwing, an
+    /// unsupported opcode) and not a property of the loader: the caller keeps
+    /// its own reason for that row.
+    pub fn entrypoint_skip(&self) -> Option<EntrypointSkip> {
+        match self {
+            // `execute` names a class it could not find in the jar this way, so
+            // the metadata and the packaged classes disagree.
+            Self::MissingMethod(member) if member.starts_with("class ") => {
+                Some(EntrypointSkip::MissingClass)
+            }
+            // The jar's own bytecode called into the Kotlin standard library.
+            // It is not packaged with the mod: fabric-language-kotlin loads it
+            // as a separate mod, which the native path cannot link.
+            Self::MissingMethod(member)
+            | Self::UnknownHostCall(MethodRef { owner: member, .. })
+                if member_is_kotlin_runtime(member) =>
+            {
+                Some(EntrypointSkip::KotlinRuntime)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether a member or owner names the Kotlin runtime rather than the jar.
+fn member_is_kotlin_runtime(member: &str) -> bool {
+    member
+        .split_once('#')
+        .map_or(member, |(owner, _)| owner)
+        .starts_with("kotlin/")
+}
+
+/// The sibling-jar class sources one execution may link against.
+///
+/// A Fabric or Forge pack puts a mod's library on the same class path as a
+/// second jar (`xaerolib` beside the Xaero maps, a config library beside the
+/// mod that declares it), so bytecode in one jar names classes the other jar
+/// declares. The native runtime never reads the process class path or the
+/// filesystem: the caller that already holds both jars registers the library
+/// here, and the interpreter resolves a symbol against the running jar's own
+/// classes first, then these tables in jar-id order.
+///
+/// Bounds: [`Self::MAX_JARS`] registered jars and [`Self::MAX_CLASSES`] class
+/// names across them. A name another jar already supplied keeps that jar's
+/// class, which is the class-path precedence a JVM applies.
+#[derive(Debug, Clone, Default)]
+pub struct LinkedClassTable {
+    /// Every linked class in class-path order: the first jar that declares a
+    /// name keeps it, which is the precedence a JVM class path applies.
+    classes: BTreeMap<String, ClassFile>,
+    /// The class names each jar declared, kept so a jar stays a named row
+    /// even when every class it holds is shadowed by an earlier jar.
+    jars: BTreeMap<String, BTreeSet<String>>,
+    /// Service providers the linked jars' own `META-INF/services` files
+    /// declare, keyed by service. A real class path exposes them to
+    /// `ServiceLoader`; the bounded host still never scans the process class
+    /// path, it only answers what a supplied jar declared.
+    services: BTreeMap<String, Vec<String>>,
+    providers: usize,
+}
+
+impl LinkedClassTable {
+    /// Sibling jars one table may hold. A pack links the libraries its mods
+    /// declare, not every jar, and one table can be shared by all of them.
+    pub const MAX_JARS: usize = 256;
+    /// Class names across every linked jar. A 500-jar client pack carries
+    /// roughly 40k classes; this caps a crafted input while leaving a whole
+    /// pack representable.
+    pub const MAX_CLASSES: usize = 131_072;
+    /// Providers across every linked jar's `META-INF/services` files, matching
+    /// the bound a single jar's seeding already applies.
+    pub const MAX_PROVIDERS: usize = 4_096;
+
+    /// Register every class `jar` declares under `id`, answering how many
+    /// class names the table took.
+    ///
+    /// The jar's `META-INF/services` files come with it: code the interpreter
+    /// runs from the link asks `ServiceLoader` for the providers its class
+    /// path declares, and the host still answers only explicitly supplied
+    /// names.
+    pub fn link_jar(
+        &mut self,
+        id: impl Into<String>,
+        jar: &NativeJar,
+    ) -> Result<usize, NativeError> {
+        let added = self.link_classes(id, jar.classes.values().cloned())?;
+        self.link_services(jar);
+        Ok(added)
+    }
+
+    /// Seed the providers one jar's `META-INF/services` files declare.
+    ///
+    /// Past [`Self::MAX_PROVIDERS`] the table stops seeding instead of
+    /// failing the link: a service list is metadata, and one oversized file
+    /// must not cost the whole jar its classes.
+    fn link_services(&mut self, jar: &NativeJar) {
+        for name in jar.resources.keys() {
+            let Some(service) = name.strip_prefix("META-INF/services/") else {
+                continue;
+            };
+            if service.is_empty() || service.contains('/') {
+                continue;
+            }
+            let Some(bytes) = jar.resource_bytes.get(name) else {
+                continue;
+            };
+            let service = service.replace('.', "/");
+            for line in String::from_utf8_lossy(bytes).lines() {
+                if self.providers >= Self::MAX_PROVIDERS {
+                    return;
+                }
+                let provider = line.split_once('#').map_or(line, |(line, _)| line).trim();
+                if provider.is_empty() {
+                    continue;
+                }
+                let providers = self.services.entry(service.clone()).or_default();
+                let provider = provider.replace('.', "/");
+                if !providers.contains(&provider) {
+                    providers.push(provider);
+                    self.providers += 1;
+                }
+            }
+        }
+    }
+
+    /// Register already-parsed classes under `id`, answering how many class
+    /// names the table took.
+    ///
+    /// A caller that parsed classes without their jar has no
+    /// `META-INF/services` to offer, so [`Self::link_jar`] is the entry point
+    /// for a real library jar.
+    pub fn link_classes(
+        &mut self,
+        id: impl Into<String>,
+        classes: impl IntoIterator<Item = ClassFile>,
+    ) -> Result<usize, NativeError> {
+        let id = id.into();
+        if self.jars.contains_key(&id) {
+            return Err(NativeError::Metadata(format!(
+                "linked jar {id} is already registered; register each jar once"
+            )));
+        }
+        let table = classes
+            .into_iter()
+            .map(|class| (class.name.clone(), class))
+            .collect::<BTreeMap<_, _>>();
+        let added = table
+            .keys()
+            .filter(|name| !self.classes.contains_key(*name))
+            .count();
+        if self.jars.len() + 1 > Self::MAX_JARS {
+            return Err(NativeError::Metadata(format!(
+                "linked class table cannot hold more than {} jars",
+                Self::MAX_JARS
+            )));
+        }
+        if self.classes.len() + added > Self::MAX_CLASSES {
+            return Err(NativeError::Metadata(format!(
+                "linked class table cannot hold more than {} classes",
+                Self::MAX_CLASSES
+            )));
+        }
+        self.jars
+            .insert(id, table.keys().cloned().collect::<BTreeSet<_>>());
+        for (name, class) in table {
+            // An earlier jar's class keeps the name; later jars only add what
+            // the class path has not resolved yet.
+            self.classes.entry(name).or_insert(class);
+        }
+        Ok(added)
+    }
+
+    /// Resolve one class by its internal name, or `None` when no linked jar
+    /// declares it.
+    pub fn get(&self, name: &str) -> Option<&ClassFile> {
+        self.classes.get(name)
+    }
+
+    /// Whether any linked jar declares `name`.
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.classes.contains_key(name)
+    }
+
+    /// The jar identities this table holds, in registration order.
+    pub fn jar_ids(&self) -> impl Iterator<Item = &str> {
+        self.jars.keys().map(String::as_str)
+    }
+
+    /// How many jars are registered.
+    pub fn jar_count(&self) -> usize {
+        self.jars.len()
+    }
+
+    /// How many distinct class names the table holds.
+    pub fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
+    /// Whether no jar is registered.
+    pub fn is_empty(&self) -> bool {
+        self.jars.is_empty()
+    }
+
+    /// The provider classes the linked jars declare for one service.
+    pub fn service_providers(&self, service: &str) -> &[String] {
+        self.services
+            .get(service)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How many providers the linked jars declare.
+    pub fn provider_count(&self) -> usize {
+        self.providers
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct NativeJar {
@@ -10277,9 +11490,99 @@ const MAX_MIXIN_CONFIG_WARNINGS: usize = 64;
 pub struct Entrypoint {
     pub class: String,
     pub method: Option<String>,
-    /// Fabric entrypoint adapters change the invocation contract. They are
-    /// retained for diagnostics until a native adapter implementation exists.
+    /// The adapter the metadata declared, after [`NativeJar::discover_entrypoints`]
+    /// resolved the ones the host runs itself.
+    ///
+    /// A Fabric adapter changes the invocation contract: `{"value": ...,
+    /// "adapter": ...}` makes the loader build the object to call instead of
+    /// constructing the class. The host implements the adapters whose target
+    /// is plain JVM bytecode ([`EntrypointAdapter::Kotlin`]), so discovery
+    /// clears the field for those and sets the resolved invocation instead
+    /// (`Class::method`, or the kind's `onInitialize*`). Every other adapter
+    /// stays here for the caller to refuse and for loader diagnostics.
     pub adapter: Option<String>,
+}
+
+/// The language adapter one Fabric entrypoint declares.
+///
+/// `fabric.mod.json` accepts `{"value": ..., "adapter": ...}` where the adapter
+/// decides how the value becomes the object to call. Kotlin compiles to JVM
+/// bytecode, so the adapters whose target is a plain class, object or
+/// top-level function need no language runtime: the bounded host enters them
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrypointAdapter {
+    /// No adapter, or Fabric's own `default` adapter: construct the class and
+    /// call its `onInitialize*`, or the named `Class::method`.
+    Default,
+    /// `kotlin`, the fabric-language-kotlin adapter. The value is a Kotlin
+    /// `object` singleton, a class with a no-argument constructor, or a
+    /// top-level function written `Class::function`.
+    Kotlin,
+    /// An adapter only a real loader (or another language runtime) implements.
+    Unsupported,
+}
+
+impl EntrypointAdapter {
+    /// Classify one metadata entry by the adapter it declares.
+    pub fn of(entry: &Entrypoint) -> Self {
+        match entry.adapter.as_deref() {
+            None | Some("default") => Self::Default,
+            Some("kotlin") => Self::Kotlin,
+            Some(_) => Self::Unsupported,
+        }
+    }
+
+    /// Whether the native host runs this adapter's target itself.
+    pub fn is_native(&self) -> bool {
+        matches!(self, Self::Default | Self::Kotlin)
+    }
+}
+
+/// The loader-side verdict for an entrypoint the native path cannot run.
+///
+/// A refusal on its own does not say whether another loader setting could run
+/// the jar; the label does, in the vocabulary the ledger
+/// (`tools/java_mod_server_ledger.py`) and the launcher already print:
+/// `needs-loader` when a real loader applies the jar, `native-gap` when
+/// nothing native can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrypointSkip {
+    /// The entrypoint names a class the jar does not contain. Metadata and
+    /// classes disagree, so no loader can run it either.
+    MissingClass,
+    /// A Kotlin entrypoint reached the Kotlin runtime (`kotlin/*`), which ships
+    /// as its own mod jar (`fabric-language-kotlin`). The native path links one
+    /// jar's classes at a time, so only a loader that loads that jar applies
+    /// the entrypoint.
+    KotlinRuntime,
+    /// An entrypoint adapter the native path does not implement.
+    UnsupportedAdapter,
+}
+
+impl EntrypointSkip {
+    /// The ledger/launcher label for this verdict.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::KotlinRuntime => "needs-loader",
+            Self::MissingClass | Self::UnsupportedAdapter => "native-gap",
+        }
+    }
+
+    /// One sentence naming what stops the jar, for ledger rows and launcher UI.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::MissingClass => {
+                "the entrypoint names a class the jar does not contain; no loader setting can run it"
+            }
+            Self::KotlinRuntime => {
+                "the Kotlin entrypoint needs the Kotlin runtime, which ships as its own mod jar (fabric-language-kotlin); only a loader that loads that jar applies it"
+            }
+            Self::UnsupportedAdapter => {
+                "the Fabric entrypoint adapter is not implemented by the native path"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10288,6 +11591,84 @@ pub struct ExecutionReport {
     pub method: String,
     pub calls: usize,
 }
+
+/// The wall-clock bound one jar's native execution may consume.
+///
+/// The bound is cooperative: [`NativeJar::execute_with_budget`] hands it to the
+/// interpreter, which checks it as each jar frame is entered and every
+/// [`BUDGET_CHECK_INSTRUCTIONS`] bytecode instructions inside a frame. A jar
+/// that runs past it fails with [`NativeError::ExecutionBudgetExceeded`] and its
+/// caller can skip that jar while the rest of the batch runs.
+///
+/// [`Self::UNBOUNDED`] is the library and probe default, so a caller that says
+/// nothing about time keeps the pre-budget behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionBudget {
+    /// The clock the budget reads (time since an origin of the caller's
+    /// choosing), when it expires on that clock, and how long it allowed, so
+    /// the diagnostic can name the bound rather than only the frame.
+    deadline: Option<(
+        fn() -> std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    )>,
+}
+
+impl ExecutionBudget {
+    /// No wall-clock bound; only [`MAX_JAR_CALL_DEPTH`] applies.
+    pub const UNBOUNDED: Self = Self { deadline: None };
+
+    /// A budget that expires `limit` from now, on std's clock. Not in the
+    /// browser build, where std has no clock: use [`Self::within_clock`].
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    pub fn within(limit: std::time::Duration) -> Self {
+        fn since_start() -> std::time::Duration {
+            static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+            START.get_or_init(std::time::Instant::now).elapsed()
+        }
+        Self::within_clock(limit, since_start)
+    }
+
+    /// A budget that expires `limit` from now on `clock`, which answers the
+    /// time since an origin of its own: the interpreter reads no clock of its
+    /// own, so the game passes the platform's.
+    pub fn within_clock(limit: std::time::Duration, clock: fn() -> std::time::Duration) -> Self {
+        Self {
+            deadline: clock().checked_add(limit).map(|at| (clock, at, limit)),
+        }
+    }
+
+    /// The bound the budget was built with; `None` for [`Self::UNBOUNDED`].
+    pub fn limit(&self) -> Option<std::time::Duration> {
+        self.deadline.map(|(_, _, limit)| limit)
+    }
+
+    /// Whether the wall-clock bound has passed. An unbounded budget never does.
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|(clock, deadline, _)| clock() >= deadline)
+    }
+}
+
+/// The most jar frames one native execution may nest on a 2 MiB thread.
+///
+/// These frames are Rust frames, so an unbounded jar recursion is a stack
+/// overflow: the process aborts instead of unwinding to the loader that could
+/// skip just that jar. The safe count is a property of the compiled frame size.
+/// An unoptimised build reserves about 100 KiB per interpreter frame (every
+/// temporary of the instruction match gets its own slot); an optimised one
+/// reserves about 3 KiB. Both bounds keep more than a third of the 2 MiB
+/// default stack the game's server, render and worker threads run with, and
+/// both are far above what a normal entrypoint nests.
+#[cfg(debug_assertions)]
+const MAX_JAR_CALL_DEPTH: usize = 12;
+#[cfg(not(debug_assertions))]
+const MAX_JAR_CALL_DEPTH: usize = 128;
+
+/// Bytecode instructions between wall-clock budget checks inside one frame, so
+/// a loop that calls nothing cannot hold execution past its budget. A power of
+/// two so the check is a mask rather than a division.
+const BUDGET_CHECK_INSTRUCTIONS: usize = 4096;
 
 /// One Mixin JSON config a native jar declares.
 ///
@@ -10320,6 +11701,108 @@ pub struct MixinConfig {
     pub plugin: Option<String>,
     /// Optional refmap resource name.
     pub refmap: Option<String>,
+}
+
+/// Descriptor of Mixin's generated-field accessor annotation.
+const MIXIN_ACCESSOR_DESCRIPTOR: &str = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
+/// Descriptor of Mixin's generated-method invoker annotation.
+const MIXIN_INVOKER_DESCRIPTOR: &str = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
+
+/// The first string an annotation element declares.
+fn annotation_element_string(annotation: &Annotation, key: &str) -> Option<String> {
+    annotation
+        .values
+        .get(key)
+        .and_then(|value| annotation_strings(value).into_iter().next())
+        .filter(|value| !value.is_empty())
+}
+
+/// The field name Mixin infers for an accessor whose annotation omits `value`.
+///
+/// `getFoo`/`setFoo`/`isFoo` name `foo`, with the first character lowercased,
+/// exactly as Mixin's own name inference does.
+fn inferred_accessor_name(method: &Method) -> Option<String> {
+    for prefix in ["get", "set", "is"] {
+        if let Some(rest) = method.name.strip_prefix(prefix)
+            && let Some(first) = rest.chars().next()
+        {
+            return Some(format!(
+                "{}{}",
+                first.to_lowercase(),
+                rest.chars().skip(1).collect::<String>()
+            ));
+        }
+    }
+    None
+}
+
+/// Resolve one declared member to the `@Accessor`/`@Invoker` contract it
+/// generates, if any.
+fn resolve_mixin_accessor(class: &ClassFile, method: &Method) -> Option<MixinAccessorPlan> {
+    let mixin = class
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)?;
+    let target_owner = mixin_target_owners(mixin).into_iter().next()?;
+    let accessor = method
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_ACCESSOR_DESCRIPTOR);
+    if let Some(annotation) = accessor {
+        let name = annotation_element_string(annotation, "value")
+            .or_else(|| inferred_accessor_name(method))?;
+        let arguments = descriptor_arguments(&method.descriptor);
+        let result = return_desc(&method.descriptor);
+        let (descriptor, kind) = match (arguments.as_slice(), result) {
+            ([], result) if result != "V" => (result.to_owned(), MixinAccessorKind::Getter),
+            ([argument], "V") => (argument.clone(), MixinAccessorKind::Setter),
+            // A property of any other shape (`(II)V`, `()V`) is not an
+            // accessor Mixin can generate; leave it unresolved rather than
+            // guessing a field descriptor.
+            _ => return None,
+        };
+        return Some(MixinAccessorPlan {
+            target: MethodRef {
+                owner: target_owner,
+                name,
+                descriptor,
+            },
+            accessor: MethodRef {
+                owner: class.name.clone(),
+                name: method.name.clone(),
+                descriptor: method.descriptor.clone(),
+            },
+            kind,
+            static_target: method.is_static(),
+        });
+    }
+    let invoker = method
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_INVOKER_DESCRIPTOR)?;
+    let name = annotation_element_string(invoker, "value").unwrap_or_else(|| method.name.clone());
+    Some(MixinAccessorPlan {
+        target: MethodRef {
+            owner: target_owner,
+            name,
+            descriptor: method.descriptor.clone(),
+        },
+        accessor: MethodRef {
+            owner: class.name.clone(),
+            name: method.name.clone(),
+            descriptor: method.descriptor.clone(),
+        },
+        kind: MixinAccessorKind::Invoker,
+        static_target: method.is_static(),
+    })
+}
+
+/// The report word for one accessor kind.
+fn mixin_accessor_label(kind: MixinAccessorKind) -> &'static str {
+    match kind {
+        MixinAccessorKind::Getter | MixinAccessorKind::Setter => "@Accessor",
+        MixinAccessorKind::Invoker => "@Invoker",
+    }
 }
 
 impl NativeJar {
@@ -10374,6 +11857,44 @@ impl NativeJar {
     /// `@Slice` lands here too.  Sorted like [`Self::mixin_injection_plans`].
     pub fn unresolved_invoke_plans(&self) -> Vec<MixinInjectionPlan> {
         self.mixin_plan_scan().1
+    }
+
+    /// Every `@Accessor`/`@Invoker` member the jar's `@Mixin` classes declare,
+    /// in deterministic (class, method) order.
+    ///
+    /// A member whose contract cannot be named (an accessor with no `value`
+    /// and no `get`/`set`/`is` prefix, or a descriptor that is neither a getter
+    /// nor a setter) stays out: there is nothing a weaver or interpreter could
+    /// run for it.
+    pub fn mixin_accessor_plans(&self) -> Vec<MixinAccessorPlan> {
+        let mut plans = Vec::new();
+        for class in self.classes.values() {
+            if !class
+                .annotations
+                .iter()
+                .any(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
+            {
+                continue;
+            }
+            for method in &class.methods {
+                if let Some(plan) = resolve_mixin_accessor(class, method) {
+                    plans.push(plan);
+                }
+            }
+        }
+        plans.sort_by(|left, right| {
+            (
+                &left.accessor.owner,
+                &left.accessor.name,
+                &left.accessor.descriptor,
+            )
+                .cmp(&(
+                    &right.accessor.owner,
+                    &right.accessor.name,
+                    &right.accessor.descriptor,
+                ))
+        });
+        plans
     }
 
     fn mixin_plan_scan(&self) -> (Vec<MixinInjectionPlan>, Vec<MixinInjectionPlan>) {
@@ -10494,9 +12015,10 @@ impl NativeJar {
     /// the classes' annotations.
     ///
     /// The plans are a translation plan, not weaving: each carries the raw
-    /// `@At` site plus the bounded selector this runtime resolved from it.
-    /// A selector, callback shape or `@At` anchor outside the accepted forms
-    /// stays out of this executable set and is reported by
+    /// `@At` site, its bounded ordinal and `@Slice` bounds, and the resolved
+    /// `shift`/`by` distance the weaver moves the insert by.  A selector,
+    /// callback shape or `@At` anchor outside the accepted forms stays out of
+    /// this executable set and is reported by
     /// [`Self::unresolved_anchor_plans`].  Sorted and deduplicated like
     /// [`Self::mixin_injection_plans`].
     pub fn mixin_anchor_plans(&self) -> Vec<MixinAnchorPlan> {
@@ -10601,21 +12123,53 @@ impl NativeJar {
                                 } else {
                                     matches!(anchor.anchor.as_str(), "FIELD" | "NEW" | "JUMP")
                                 };
+                                // A malformed shift still gets a plan so the
+                                // report names the selector; the reason below
+                                // is the one that explains it.
+                                let raw_shift = anchor_shift(anchor).ok().flatten();
                                 if !supported {
                                     // An @Inject RETURN/TAIL belongs to the
                                     // injection plan set; another unsupported
                                     // anchor is reported precisely.
                                     if redirect {
                                         unresolved.push((
-                                            anchor_plan(&class.name, method, method_spec, target_owner, anchor, redirect, cancellable),
+                                            anchor_plan(
+                                                &class.name,
+                                                method,
+                                                method_spec,
+                                                target_owner,
+                                                anchor,
+                                                redirect,
+                                                cancellable,
+                                                raw_shift,
+                                            ),
                                             format!(
-                                                "@Redirect anchor {} is not executed natively; native redirects support HEAD, INVOKE and FIELD",
+                                                "@Redirect anchor {} is not a bounded redirect selector; native redirects replace HEAD, INVOKE and FIELD sites",
                                                 anchor.anchor
                                             ),
                                         ));
                                     }
                                     continue;
                                 }
+                                let shift = match resolve_anchor_modifiers(anchor, redirect) {
+                                    Ok(shift) => shift,
+                                    Err(reason) => {
+                                        unresolved.push((
+                                            anchor_plan(
+                                                &class.name,
+                                                method,
+                                                method_spec,
+                                                target_owner,
+                                                anchor,
+                                                redirect,
+                                                cancellable,
+                                                raw_shift,
+                                            ),
+                                            reason,
+                                        ));
+                                        continue;
+                                    }
+                                };
                                 let plan = anchor_plan(
                                     &class.name,
                                     method,
@@ -10624,11 +12178,8 @@ impl NativeJar {
                                     anchor,
                                     redirect,
                                     cancellable,
+                                    shift,
                                 );
-                                if let Some(reason) = unsupported_anchor_modifiers(anchor) {
-                                    unresolved.push((plan, reason));
-                                    continue;
-                                }
                                 match resolve_anchor_site(&plan)
                                     .and_then(|site| validate_anchor_plan(self, &plan, &site))
                                 {
@@ -10769,9 +12320,10 @@ impl NativeJar {
     /// Discover the `@ModifyArg` plans this jar declares.
     ///
     /// Each plan names one `@At("INVOKE")` site and the zero-based argument it
-    /// replaces.  The callback must return the argument's own type and either
-    /// take that argument alone or mirror the invoked method's whole argument
-    /// list, which is Mixin's bounded handler shape.  Cancellation, slices,
+    /// replaces, optionally counting the site inside an `@Slice` range with
+    /// `@At.ordinal`.  The callback must return the argument's own type and
+    /// either take that argument alone or mirror the invoked method's whole
+    /// argument list, which is Mixin's bounded handler shape.  Cancellation,
     /// shifts, a missing call descriptor and an out-of-range index stay out of
     /// this set and are reported by [`Self::unresolved_modify_arg_plans`].
     pub fn mixin_modify_arg_plans(&self) -> Vec<MixinModifyArgPlan> {
@@ -10822,7 +12374,11 @@ impl NativeJar {
                         .map(annotation_anchor_selectors)
                         .unwrap_or_default();
                     let cancellable = annotation_bool(annotation, "cancellable");
-                    let slices = annotation.values.contains_key("slice");
+                    let slices = annotation
+                        .values
+                        .get("slice")
+                        .map(annotation_slice_entries)
+                        .unwrap_or_default();
                     let index = annotation_int(annotation, "index").unwrap_or(0);
                     for owner in &targets {
                         for method_spec in &method_specs {
@@ -10846,13 +12402,21 @@ impl NativeJar {
                                     },
                                     index: 0,
                                     ordinal: None,
+                                    slice: None,
+                                };
+                                let slice = match resolve_modify_arg_slice(anchor, &slices) {
+                                    Ok(slice) => slice,
+                                    Err(reason) => {
+                                        unresolved.push((plan, reason));
+                                        continue;
+                                    }
                                 };
                                 let reason = modify_arg_plan_reason(
                                     anchor,
                                     &callback,
                                     index,
                                     cancellable,
-                                    slices,
+                                    slice,
                                     &mut plan,
                                 );
                                 match reason {
@@ -11564,21 +13128,66 @@ impl NativeJar {
 
     /// Decide what can be woven into this jar at load, and weave it.
     ///
-    /// The bounded subset is an `@Inject` at `HEAD` whose target method is in
-    /// this jar and whose `@Mixin` class a readable config applies on `side`.
-    /// A `cancellable` plan is woven too when the target is `void`; a `void`
-    /// callback may cancel it, and the woven method returns without running the
-    /// body. A static callback is called directly; an instance callback is
-    /// reached through the synthetic bridge class the weaver adds. Every other
-    /// plan family and shape is a [`SkippedMixinPlan`] with its reason, never an
-    /// approximation, and so is a config-listed class discovery found no plan
-    /// for.
+    /// The bounded subset is every Mixin family discovery models for a target
+    /// method in this jar whose `@Mixin` class a readable config applies on
+    /// `side`: `@Inject` at `HEAD`/`RETURN`/`TAIL`/`INVOKE`, the
+    /// `FIELD`/`NEW`/`JUMP` anchor families, `@Redirect` at
+    /// `HEAD`/`INVOKE`/`FIELD`, `@Overwrite`, `@ModifyArg` and
+    /// `@ModifyVariable`.  A `cancellable` plan is woven where the injected
+    /// shape can answer: a `void` `HEAD` can cancel the body, and a
+    /// value-returning `RETURN`/`TAIL` can override the result. A static
+    /// callback is called directly; an instance callback is reached through the
+    /// synthetic bridge class the weaver adds. Every other plan shape is a
+    /// [`SkippedMixinPlan`] with its reason, never an approximation, and so is
+    /// a config-listed class discovery found no plan for.
     ///
     /// Callbacks run in the order of [`Self::mixin_plans_in_apply_order`]. A
     /// rejected plan costs only itself: the rest of its class still weaves. This
     /// never touches `self`; pass the result's classes to
     /// [`Self::with_woven_classes`].
+    ///
+    /// # Cross-family order
+    ///
+    /// Every target class is rewritten family by family in a fixed order, each
+    /// pass re-parsing the previous pass's bytes:
+    ///
+    /// 1. `@ModifyVariable` (its `STORE`/`LOAD` ordinals count the original
+    ///    local accesses),
+    /// 2. `@ModifyArg` (its call-site ordinals count the original calls),
+    /// 3. `FIELD`/`NEW`/`JUMP`/`@Redirect` anchors,
+    /// 4. `@Inject`-family plans (`HEAD`/`RETURN`/`TAIL`/`INVOKE`), which last
+    ///    because their selectors name instructions the earlier passes may have
+    ///    moved rather than counting them.
+    ///
+    /// This is the count-sensitive order the bytecode weaver documents at
+    /// `weave_class_extended_with_instance_callbacks`; a plan family that
+    /// rewrites an instruction the next family counts would otherwise see an
+    /// insert as a site of its own.
     pub fn plan_load_time_weave(&self, side: MixinSide) -> LoadTimeMixinWeave {
+        self.plan_load_time_weave_on(side, false)
+    }
+
+    /// [`Self::plan_load_time_weave`], with the game-class hook tier on.
+    ///
+    /// A `@Inject` plan whose target class is outside the jar is normally
+    /// refused as [`MixinSkipReason::TargetOutsideJar`]. With this entry point,
+    /// a target that names a [`GameHookSite`] and whose shape fits that hook's
+    /// contract becomes a [`GameHookPlan`] in [`LoadTimeMixinWeave::game_hooks`]
+    /// instead: the host registers the callback at its own hook point
+    /// ([`Self::register_game_hooks`]) and runs it there
+    /// ([`Self::run_game_hook`]). A site whose shape does not fit stays a
+    /// [`SkippedMixinPlan`] with [`MixinSkipReason::GameHookMismatch`], and a
+    /// target with no site keeps the `target-outside-jar` refusal.
+    ///
+    /// The game's loader uses [`Self::plan_load_time_weave`]: it does not yet
+    /// register host hook callbacks, so claiming those plans would report a jar
+    /// as native while its callbacks never run. This entry point is what a host
+    /// with hook points available uses, and what the fixture proves end to end.
+    pub fn plan_load_time_weave_with_game_hooks(&self, side: MixinSide) -> LoadTimeMixinWeave {
+        self.plan_load_time_weave_on(side, true)
+    }
+
+    fn plan_load_time_weave_on(&self, side: MixinSide, game_hooks: bool) -> LoadTimeMixinWeave {
         let (mut plans, unresolved) = self.mixin_plan_scan();
         let (anchors, unresolved_anchors) = self.mixin_anchor_scan();
         let (overwrites, unresolved_overwrites) = self.mixin_overwrite_scan();
@@ -11634,12 +13243,40 @@ impl NativeJar {
                     }),
             );
         self.unwoven_mixin_members(&mut weave.skipped);
+        // `@Accessor`/`@Invoker` members have no injected body. The
+        // interpreter runs their contract directly, so a member a readable
+        // config claims is applied rather than skipped; the gate's reason is
+        // kept for a class the config does not apply on this side.
+        for plan in self.mixin_accessor_plans() {
+            match mixin_config_gate(&configs, &config_sides, &plan.accessor.owner, side) {
+                Ok(()) => weave.accessors.push(plan),
+                Err(reason) => weave.skipped.push(SkippedMixinPlan {
+                    target: plan.target,
+                    callback: plan.accessor,
+                    at: mixin_accessor_label(plan.kind).to_owned(),
+                    reason,
+                }),
+            }
+        }
         let mut injection_by_owner: BTreeMap<String, Vec<MixinInjectionPlan>> = BTreeMap::new();
         let mut anchor_by_owner: BTreeMap<String, Vec<MixinAnchorPlan>> = BTreeMap::new();
         let mut modify_arg_by_owner: BTreeMap<String, Vec<MixinModifyArgPlan>> = BTreeMap::new();
         let mut modify_variable_by_owner: BTreeMap<String, Vec<MixinModifyVariablePlan>> =
             BTreeMap::new();
         for plan in &plans {
+            if game_hooks {
+                match self.game_hook_plan(plan, side, &configs, &config_sides) {
+                    Ok(Some(hook)) => {
+                        weave.game_hooks.push(hook);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        weave.skipped.push(skipped_plan(plan, reason));
+                        continue;
+                    }
+                }
+            }
             match self.load_time_inject_plan(plan, side, &configs, &config_sides) {
                 Ok(concrete) => {
                     let group = injection_by_owner
@@ -11890,6 +13527,44 @@ impl NativeJar {
         let mut concrete = plan.clone();
         concrete.target.descriptor = target.descriptor.clone();
         Ok(concrete)
+    }
+
+    /// Decide whether one `@Inject` plan maps onto a host hook point.
+    ///
+    /// `Ok(None)` means the target is not a game hook site, so the ordinary
+    /// weave path decides. `Err` means the target *is* a site but this plan's
+    /// shape does not fit it, and the plan must be reported, never
+    /// approximated: the callback would run at a call site the mod did not ask
+    /// for.
+    fn game_hook_plan(
+        &self,
+        plan: &MixinInjectionPlan,
+        side: MixinSide,
+        configs: &[MixinConfig],
+        config_sides: &BTreeMap<String, MixinSide>,
+    ) -> Result<Option<GameHookPlan>, MixinSkipReason> {
+        let Some(site) = game_hook_site_for(&plan.target) else {
+            return Ok(None);
+        };
+        mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
+        if plan.shift.is_some() || plan.slice.is_some() || plan.ordinal.is_some() {
+            return Err(MixinSkipReason::SelectorModifier);
+        }
+        let anchor = if plan.at.is_empty() {
+            "HEAD"
+        } else {
+            plan.at.as_str()
+        };
+        game_hook_site_fits(site, anchor, plan.cancellable, side)?;
+        game_hook_callback(&self.classes, &plan.callback, site)?;
+        let mut concrete = plan.clone();
+        concrete.target.descriptor = site.target_descriptor.to_owned();
+        Ok(Some(GameHookPlan {
+            hook: site.hook,
+            version: site.version,
+            anchor: anchor.to_owned(),
+            plan: concrete,
+        }))
     }
 
     /// Resolve the target overload and callback that every load-time family
@@ -12257,6 +13932,11 @@ impl NativeJar {
                             .annotations
                             .iter()
                             .any(|annotation| PLANNED.contains(&annotation.descriptor.as_str()))
+                        // A resolvable `@Accessor`/`@Invoker` is applied by
+                        // the interpreter, not a generic merged member. One
+                        // whose contract cannot be named stays in the report
+                        // through this row.
+                        && resolve_mixin_accessor(class, method).is_none()
                 })
                 .map(|method| (&method.name, &method.descriptor));
             // One row per class: the first member says the class is not plain.
@@ -12307,6 +13987,11 @@ impl NativeJar {
                             .annotations
                             .iter()
                             .any(|annotation| PLANNED.contains(&annotation.descriptor.as_str()))
+                        // A resolvable `@Accessor`/`@Invoker` is applied by
+                        // the interpreter, not a generic merged member. One
+                        // whose contract cannot be named stays in the report
+                        // through this row.
+                        && resolve_mixin_accessor(class, method).is_none()
                 })
                 .map(|method| (&method.name, &method.descriptor));
             if let Some((name, descriptor)) = field.or(method) {
@@ -12336,7 +14021,21 @@ impl NativeJar {
     /// dropping everything after the first declaration.
     pub fn discover_entrypoints(&self, kind: &str) -> Vec<Entrypoint> {
         if let Some(entries) = self.fabric_entrypoints.get(kind) {
-            return entries.clone();
+            return entries
+                .iter()
+                .map(|entry| {
+                    let mut entry = entry.clone();
+                    // The host runs a native adapter's target with the default
+                    // invocation contract: a Kotlin `object` and a top-level
+                    // `Class::function` are entered exactly like a class and
+                    // its `onInitialize*`. Clearing the marker is what tells
+                    // callers the invocation is resolved.
+                    if EntrypointAdapter::of(&entry).is_native() {
+                        entry.adapter = None;
+                    }
+                    entry
+                })
+                .collect();
         }
         if kind == "neoforge" {
             return self
@@ -12350,6 +14049,45 @@ impl NativeJar {
                 .collect();
         }
         Vec::new()
+    }
+
+    /// The adapter the jar's metadata declared for `class` under `kind`.
+    ///
+    /// [`Self::discover_entrypoints`] resolves the adapters the host runs
+    /// itself and clears their marker, so this reads the declaration back from
+    /// the jar's metadata for diagnostics and ledger rows.
+    pub fn declared_entrypoint_adapter(&self, kind: &str, class: &str) -> Option<&str> {
+        self.fabric_entrypoints
+            .get(kind)?
+            .iter()
+            .find(|entry| entry.class == class)?
+            .adapter
+            .as_deref()
+    }
+
+    /// The class in the jar's superclass chain that declares one entrypoint
+    /// method.
+    ///
+    /// The JVM dispatches an inherited `onInitialize*` to the class that
+    /// declares it (DistantHorizons' `FabricMain` inherits both of its
+    /// `onInitialize*` from an abstract base in the same jar). Looking only at
+    /// the entry class reports a `MissingMethod` for a method the jar really
+    /// has, so the bounded host resolves the declaring class and keeps the
+    /// entry class as `this`. A chain that leaves the jar stops here: the host
+    /// cannot execute a class it does not hold.
+    fn entrypoint_method_owner(&self, class: &str, method: &str, desc: &str) -> Option<String> {
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let file = self.classes.get(&current)?;
+            if file.method(method, desc).is_some() {
+                return Some(current);
+            }
+            if file.super_name == "java/lang/Object" {
+                return None;
+            }
+            current = file.super_name.clone();
+        }
+        None
     }
 
     /// Seed a host with the mod identity and required mod ids declared by
@@ -12434,6 +14172,29 @@ impl NativeJar {
         kind: &str,
         host: &mut H,
     ) -> Result<ExecutionReport, NativeError> {
+        self.execute_with_budget(
+            class,
+            explicit_method,
+            kind,
+            host,
+            &ExecutionBudget::UNBOUNDED,
+        )
+    }
+
+    /// [`Self::execute`] under a wall-clock budget.
+    ///
+    /// One budget covers this call's entrypoint construction and invocation.
+    /// A caller that runs several entrypoints of one jar shares one budget
+    /// across them, so the jar as a whole is bounded rather than each
+    /// entrypoint separately.
+    pub fn execute_with_budget<H: Host>(
+        &self,
+        class: &str,
+        explicit_method: Option<&str>,
+        kind: &str,
+        host: &mut H,
+        budget: &ExecutionBudget,
+    ) -> Result<ExecutionReport, NativeError> {
         let class_name = class.replace('.', "/");
         let is_neoforge = self
             .neoforge_entrypoints
@@ -12458,6 +14219,7 @@ impl NativeJar {
             host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
+            linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -12471,6 +14233,9 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -12478,17 +14243,28 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget,
         };
         if !runtime.classes.contains_key(&class_name) {
             return Err(NativeError::MissingMethod(format!("class {class}")));
         }
         let result = (|| -> Result<(), NativeError> {
             runtime.ensure_initialized(&class_name)?;
+            // An inherited entrypoint method belongs to the class that
+            // declares it; the entry class stays `this`.
+            let method_owner = self
+                .entrypoint_method_owner(&class_name, method, "()V")
+                .unwrap_or_else(|| class_name.clone());
             let file = runtime
                 .classes
                 .get(&class_name)
                 .ok_or_else(|| NativeError::MissingMethod(format!("class {class}")))?;
-            let is_static = file.method(method, "()V").is_some_and(Method::is_static);
+            let is_static = runtime
+                .classes
+                .get(&method_owner)
+                .and_then(|declaring| declaring.method(method, "()V"))
+                .is_some_and(Method::is_static);
             if !is_static {
                 let constructor = file
                     .methods
@@ -12514,7 +14290,7 @@ impl NativeJar {
                 // in an inner-class constructor (and any entrypoint reading its
                 // own instance fields) depends on.
                 runtime.invoke(
-                    &class_name,
+                    &method_owner,
                     method,
                     "()V",
                     Some(Value::Ref(Some(class_name.clone()))),
@@ -12665,6 +14441,7 @@ impl NativeJar {
         let class_name = class.replace('.', "/");
         let mut runtime = Runtime {
             classes: &self.classes,
+            linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -12678,6 +14455,9 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos,
@@ -12685,6 +14465,8 @@ impl NativeJar {
             anchor_hooks,
             modify_hooks,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         runtime.invoke(&class_name, method, descriptor, receiver, args)
     }
@@ -12879,6 +14661,225 @@ impl NativeJar {
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
         })
+    }
+
+    /// Bind the game-hook plans of `weave` to this jar's callbacks.
+    ///
+    /// Each plan is re-checked against the site table and the jar's own
+    /// callback bytes before it becomes a registration, so a weave that was
+    /// edited, or a plan built by hand, cannot register a callback the host
+    /// would fail to run. The registrations keep the plans' apply order inside
+    /// each hook.
+    pub fn register_game_hooks(
+        &self,
+        weave: &LoadTimeMixinWeave,
+    ) -> Result<GameHookRegistrations, NativeError> {
+        let mut registrations = GameHookRegistrations::default();
+        for hook in &weave.game_hooks {
+            let site = GAME_HOOK_SITES
+                .iter()
+                .find(|site| site.hook == hook.hook && site.version == hook.version)
+                .ok_or_else(|| {
+                    NativeError::Metadata(format!(
+                        "game hook plan names {} version {}, which this runtime does not know",
+                        hook.hook, hook.version
+                    ))
+                })?;
+            if hook.plan.target.owner != site.target_owner
+                || hook.plan.target.name != site.target_name
+                || hook.plan.target.descriptor != site.target_descriptor
+            {
+                return Err(NativeError::Metadata(format!(
+                    "game hook plan at {} targets {}#{}{}, but the site is {}#{}{}",
+                    site.hook,
+                    hook.plan.target.owner,
+                    hook.plan.target.name,
+                    hook.plan.target.descriptor,
+                    site.target_owner,
+                    site.target_name,
+                    site.target_descriptor
+                )));
+            }
+            game_hook_callback(&self.classes, &hook.plan.callback, site)
+                .map_err(|reason| game_hook_error(&reason))?;
+            registrations.insert(RegisteredGameHook {
+                hook: site.hook.to_owned(),
+                version: site.version,
+                target: hook.plan.target.clone(),
+                callback: hook.plan.callback.clone(),
+                anchor: hook.anchor.clone(),
+                cancellable: hook.plan.cancellable,
+            });
+        }
+        Ok(registrations)
+    }
+
+    /// Run the callbacks a jar registered at one host hook point.
+    ///
+    /// The host calls this where its hook point fires, with the target object's
+    /// marker as `receiver` and the target method's arguments in `args`. The
+    /// callbacks run in registration order (Mixin apply order) with a
+    /// runtime-owned `CallbackInfo`; a cancellable callback that calls
+    /// `cancel()` stops the ones after it and sets [`GameHookRun::cancelled`].
+    ///
+    /// A hook whose registrations are empty is an error rather than a silent
+    /// no-op: a host that fires a point no jar registered at has a bug, and the
+    /// launcher's report should say so. Arguments are counted against the
+    /// site's target descriptor before any callback runs, and every callback is
+    /// validated before the first one runs, so a bad registration cannot leave
+    /// half of a hook's callbacks executed.
+    pub fn run_game_hook<H: Host>(
+        &self,
+        registrations: &GameHookRegistrations,
+        hook: &str,
+        receiver: Option<Value>,
+        args: &[Value],
+        host: &mut H,
+    ) -> Result<GameHookRun, NativeError> {
+        let entries = registrations.entries(hook);
+        let Some(first) = entries.first() else {
+            return Err(NativeError::Metadata(format!(
+                "no native game hook callback is registered at {hook}"
+            )));
+        };
+        let expected = arg_count(&first.target.descriptor);
+        if args.len() != expected {
+            return Err(NativeError::Metadata(format!(
+                "game hook point {hook} passes {} argument(s) to {}#{}{}, got {}",
+                expected,
+                first.target.owner,
+                first.target.name,
+                first.target.descriptor,
+                args.len()
+            )));
+        }
+        let mut checked = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let site = GAME_HOOK_SITES
+                .iter()
+                .find(|site| site.hook == entry.hook && site.version == entry.version)
+                .ok_or_else(|| {
+                    NativeError::Metadata(format!(
+                        "game hook registration names {} version {}, which this runtime does not know",
+                        entry.hook, entry.version
+                    ))
+                })?;
+            game_hook_callback(&self.classes, &entry.callback, site)
+                .map_err(|reason| game_hook_error(&reason))?;
+            checked.push(self.game_hook_callback_values(entry, args)?);
+        }
+        let (persistent_static_fields, persistent_initialized_classes) =
+            host.persistent_class_state();
+        let mut callback_infos = CallbackInfos::new();
+        let mut results = Vec::with_capacity(entries.len());
+        let mut cancelled = false;
+        {
+            let mut runtime = Runtime {
+                classes: &self.classes,
+                linked: host.linked_class_table().cloned().unwrap_or_default(),
+                host,
+                calls: 0,
+                fields: BTreeMap::new(),
+                static_fields: persistent_static_fields,
+                initialized_classes: persistent_initialized_classes,
+                arrays: BTreeMap::new(),
+                next_array: 0,
+                next_object: 0,
+                streams: BTreeMap::new(),
+                next_stream: 0,
+                enum_constants: BTreeMap::new(),
+                string_builders: BTreeMap::new(),
+                string_readers: BTreeMap::new(),
+                io_writers: BTreeMap::new(),
+                io_paths: BTreeMap::new(),
+                io_files: BTreeMap::new(),
+                annotations: BTreeMap::new(),
+                next_annotation: 0,
+                callback_infos: &mut callback_infos,
+                invoke_hooks: None,
+                anchor_hooks: None,
+                modify_hooks: None,
+                pending_skipped_new: Vec::new(),
+                depth: 0,
+                budget: &ExecutionBudget::UNBOUNDED,
+            };
+            for (entry, (is_static, values)) in entries.iter().zip(checked) {
+                let marker = callback_info_marker(&entry.target);
+                // Open the object even when this callback does not declare it:
+                // every callback at one hook point shares the object Mixin
+                // would hand the injection point, so a `cancel()` in one is
+                // what the next one observes.
+                runtime.open_callback_info(&marker)?;
+                let callback_receiver = (!is_static).then(|| {
+                    receiver
+                        .clone()
+                        .unwrap_or_else(|| Value::Ref(Some(entry.callback.owner.clone())))
+                });
+                let result = runtime.invoke(
+                    &entry.callback.owner,
+                    &entry.callback.name,
+                    &entry.callback.descriptor,
+                    callback_receiver,
+                    &values,
+                )?;
+                results.push(result);
+                if entry.cancellable && runtime.callback_info_cancelled(&marker)? {
+                    cancelled = true;
+                    break;
+                }
+            }
+            runtime.persist_class_state()?;
+        }
+        Ok(GameHookRun {
+            hook: hook.to_owned(),
+            ran: results.len(),
+            cancelled,
+            results,
+        })
+    }
+
+    /// The receiver/static flag and full argument list for one registered hook
+    /// callback, mirroring `check_mixin_callback` without a target class in the
+    /// jar: the site's descriptor is the target's.
+    fn game_hook_callback_values(
+        &self,
+        entry: &RegisteredGameHook,
+        args: &[Value],
+    ) -> Result<(bool, Vec<Value>), NativeError> {
+        let callback_class = self.classes.get(&entry.callback.owner).ok_or_else(|| {
+            NativeError::MissingMethod(format!(
+                "{}#{}{}",
+                entry.callback.owner, entry.callback.name, entry.callback.descriptor
+            ))
+        })?;
+        let method = callback_class
+            .method(&entry.callback.name, &entry.callback.descriptor)
+            .ok_or_else(|| {
+                NativeError::MissingMethod(format!(
+                    "{}#{}{}",
+                    entry.callback.owner, entry.callback.name, entry.callback.descriptor
+                ))
+            })?;
+        let target_args = descriptor_arguments(&entry.target.descriptor);
+        let callback_args = descriptor_arguments(&entry.callback.descriptor);
+        let mut values = args.to_vec();
+        if callback_args.len() == target_args.len() + 1
+            && callback_args
+                .last()
+                .is_some_and(|arg| arg == CALLBACK_INFO_DESC)
+            && callback_args[..target_args.len()] == target_args[..]
+        {
+            values.push(Value::Ref(Some(callback_info_marker(&entry.target))));
+        } else if callback_args != target_args {
+            return Err(NativeError::Metadata(format!(
+                "native game hook callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo",
+                entry.callback.owner,
+                entry.callback.name,
+                entry.callback.descriptor,
+                entry.target.name
+            )));
+        }
+        Ok((!method.is_static(), values))
     }
 
     /// Execute an ordered chain of compatible void-only injectors while invoking
@@ -13843,6 +15844,12 @@ impl NativeJar {
             ..ModifyHooks::default()
         };
         for plan in arg_plans {
+            if plan.slice.is_some() {
+                return Err(NativeError::Metadata(format!(
+                    "native @ModifyArg callback {}#{}{} declares @Slice; the bounded interpreter counts every call site in the method, so instruction ranges are applied by the load-time weave",
+                    plan.callback.owner, plan.callback.name, plan.callback.descriptor
+                )));
+            }
             let callback_class = self.classes.get(&plan.callback.owner).ok_or_else(|| {
                 NativeError::MissingMethod(format!(
                     "{}#{}{}",
@@ -14172,6 +16179,17 @@ impl NativeJar {
             ..AnchorHooks::default()
         };
         for plan in plans {
+            if plan.shift.is_some() || plan.slice_from.is_some() || plan.slice_to.is_some() {
+                let modifier = if plan.shift.is_some() {
+                    "@At.shift"
+                } else {
+                    "@Slice"
+                };
+                return Err(NativeError::Metadata(format!(
+                    "native Mixin anchor {}#{} at {} declares {modifier}; the bounded interpreter selects whole-method sites, so instruction ranges and shifts are applied by the load-time weave",
+                    plan.callback.owner, plan.callback.name, plan.at
+                )));
+            }
             let site = resolve_anchor_site(plan).map_err(NativeError::Metadata)?;
             let callback_class = self.classes.get(&plan.callback.owner).ok_or_else(|| {
                 NativeError::MissingMethod(format!(
@@ -14496,6 +16514,67 @@ fn predicate_marker_value(marker: &str) -> bool {
     marker.starts_with("@indy:")
 }
 
+/// The marker a `Predicate`/`Consumer`/`Function` combinator answers.
+///
+/// Java's default combinators close over both sides instead of producing an
+/// object. The interpreter represents that closure as an `@fn:` marker, and
+/// both the host surface and a jar callback's own combinator call read it the
+/// same way: composing two callbacks must not execute the receiver as if it
+/// were the argument (which is what a callback marker otherwise means).
+fn functional_composition_marker(
+    r: &MethodRef,
+    receiver_marker: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let other = || args.first().and_then(expect_ref).map(String::as_str);
+    match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        (
+            "java/util/function/Predicate",
+            "and",
+            "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:predicate.and:{receiver_marker}|{}",
+            other().unwrap_or("@fn:predicate.false")
+        )))),
+        (
+            "java/util/function/Predicate",
+            "or",
+            "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:predicate.or:{receiver_marker}|{}",
+            other().unwrap_or("@fn:predicate.false")
+        )))),
+        ("java/util/function/Predicate", "negate", "()Ljava/util/function/Predicate;") => Some(
+            Value::Ref(Some(format!("@fn:predicate.not:{receiver_marker}"))),
+        ),
+        (
+            "java/util/function/Consumer",
+            "andThen",
+            "(Ljava/util/function/Consumer;)Ljava/util/function/Consumer;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:consumer.then:{receiver_marker}|{}",
+            other().unwrap_or("@fn:consumer.empty")
+        )))),
+        (
+            "java/util/function/Function",
+            "compose",
+            "(Ljava/util/function/Function;)Ljava/util/function/Function;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:function.compose:{receiver_marker}|{}",
+            other().unwrap_or("@fn:function.empty")
+        )))),
+        (
+            "java/util/function/Function",
+            "andThen",
+            "(Ljava/util/function/Function;)Ljava/util/function/Function;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:function.then:{receiver_marker}|{}",
+            other().unwrap_or("@fn:function.empty")
+        )))),
+        _ => None,
+    }
+}
+
 fn split_capture_markers(value: &str) -> Result<Vec<String>, NativeError> {
     let mut captures = Vec::new();
     let mut current = String::new();
@@ -14566,12 +16645,12 @@ const MAX_GSON_DEPTH: usize = 32;
 /// that nests past [`MAX_GSON_DEPTH`] or measures over
 /// [`MAX_GSON_JSON_BYTES`] is refused with a bounded reason, never replaced by
 /// an empty value.
-fn gson_from_json(text: &str, class: &str) -> Result<Value, NativeError> {
+fn gson_document(text: &str) -> Result<Option<serde_json::Value>, NativeError> {
     // Gson answers `null` for an empty document; a config file that does not
     // exist yet is read through `Files.newBufferedReader` as an empty stream,
     // and the caller's null check is the next step.
     if text.trim().is_empty() {
-        return Ok(Value::Ref(None));
+        return Ok(None);
     }
     if text.len() > MAX_GSON_JSON_BYTES {
         return Err(NativeError::Metadata(format!(
@@ -14579,16 +16658,79 @@ fn gson_from_json(text: &str, class: &str) -> Result<Value, NativeError> {
             text.len()
         )));
     }
-    let json: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-        NativeError::Metadata(format!("Gson.fromJson rejected the document: {error}"))
-    })?;
+    // Gson's lenient parser accepts the `//` and `/* */` comments a
+    // hand-maintained lang or config file carries; strip them outside string
+    // literals before the bounded JSON reader sees the bytes.
+    let json: serde_json::Value =
+        serde_json::from_str(&strip_json_comments(text)).map_err(|error| {
+            NativeError::Metadata(format!("Gson.fromJson rejected the document: {error}"))
+        })?;
     let depth = gson_json_depth(&json, 0);
     if depth > MAX_GSON_DEPTH {
         return Err(NativeError::Metadata(format!(
             "Gson.fromJson document nests {depth} levels; the bounded parser reads at most {MAX_GSON_DEPTH}"
         )));
     }
-    gson_json_value(&json, &class.replace('.', "/"))
+    Ok(Some(json))
+}
+
+/// Remove the `//` and `/* */` comments a lenient Gson read accepts.
+///
+/// The scan tracks string literals and escapes, so a `//` inside a value stays
+/// part of the value. A leading byte-order mark is dropped too: a file written
+/// by an editor that adds one is still valid to Gson.
+fn strip_json_comments(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = characters.next() {
+        if in_string {
+            out.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            out.push(character);
+            continue;
+        }
+        if character == '/' {
+            match characters.peek() {
+                Some('/') => {
+                    characters.next();
+                    for next in characters.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    characters.next();
+                    let mut previous = '\0';
+                    for next in characters.by_ref() {
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(character);
+    }
+    out
 }
 
 fn gson_json_depth(json: &serde_json::Value, depth: usize) -> usize {
@@ -14868,6 +17010,9 @@ fn gson_json_escape(text: &str) -> String {
 
 struct Runtime<'a, H> {
     classes: &'a BTreeMap<String, ClassFile>,
+    /// Sibling-jar tables this execution may link, snapshotted from the host
+    /// so a frame that keeps a class reference does not borrow the host.
+    linked: Arc<LinkedClassTable>,
     host: &'a mut H,
     calls: usize,
     fields: BTreeMap<String, Value>,
@@ -14887,9 +17032,23 @@ struct Runtime<'a, H> {
     /// so a later `toString` sees every earlier append — the JDK's contract,
     /// and what a value-chain marker would lose.
     string_builders: BTreeMap<String, String>,
-    /// Text each `java.io.StringReader` this invocation built exposes to
+    /// Text each `java.io.StringReader` (and each modelled file or stream
+    /// reader) this invocation built exposes to `Reader#read` and to
     /// `Gson.fromJson(Reader, Class)`, keyed by the reader's marker.
     string_readers: BTreeMap<String, String>,
+    /// Text each `java.io` writer this invocation built holds, keyed by its
+    /// sink: `file:<path>` for a writer over a virtual file, `mem:<marker>` for
+    /// one that only exists in memory. A wrapper (`BufferedWriter`,
+    /// `OutputStreamWriter`) opens the same sink as the writer it wraps, so the
+    /// text is committed once and a later close cannot truncate it.
+    io_writers: BTreeMap<String, String>,
+    /// The virtual file each `java.io.File`, stream, reader or writer marker
+    /// names, keyed by the marker.
+    io_paths: BTreeMap<String, String>,
+    /// Files this invocation wrote, keyed by their path text. The native path
+    /// never touches the host filesystem: a bootstrap that saves defaults and
+    /// reads them back sees these bytes and nothing else.
+    io_files: BTreeMap<String, String>,
     /// Annotation values `Class#getAnnotation`/`Method#getAnnotation` handed
     /// out, keyed by the proxy marker a member query answers from.
     annotations: BTreeMap<String, Annotation>,
@@ -14910,10 +17069,56 @@ struct Runtime<'a, H> {
     /// call.  LIFO, because a constructor argument may itself construct an
     /// object before the outer `<init>` runs.
     pending_skipped_new: Vec<String>,
+    /// Jar frames currently on this runtime's call chain. Bounded by
+    /// [`MAX_JAR_CALL_DEPTH`] in [`Runtime::invoke`] before a frame starts.
+    depth: usize,
+    /// The wall-clock budget this execution honours, checked with
+    /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
+    budget: &'a ExecutionBudget,
 }
 impl<H: Host> Runtime<'_, H> {
     fn static_field_key(field: &MethodRef) -> String {
         format!("{}#{}{}", field.owner, field.name, field.descriptor)
+    }
+
+    /// The class that declares `field`, walking the superclass chain the way
+    /// the JVM resolves an inherited field reference.
+    ///
+    /// `javac` names the class it read the field through, which for an
+    /// inherited field is the subclass. Keying static and instance fields by
+    /// the symbolic owner would then miss the value the declaring class's
+    /// initializer stored, so both a read and a write resolve first.
+    fn field_owner(&self, field: &MethodRef) -> String {
+        let mut current = field.owner.clone();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let Some(file) = self.class(&current) else {
+                break;
+            };
+            if file.fields.iter().any(|declared| {
+                declared.name == field.name && declared.descriptor == field.descriptor
+            }) {
+                return current;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                break;
+            }
+            current = file.super_name.clone();
+        }
+        field.owner.clone()
+    }
+
+    /// Resolve a class this execution may link: the running jar's own classes
+    /// first, then the host's sibling-jar tables in jar-id order.
+    ///
+    /// This is the native path's class path. A class neither source declares
+    /// stays unknown, so the caller keeps the host fallback it always had.
+    fn class(&self, name: &str) -> Option<&ClassFile> {
+        self.classes.get(name).or_else(|| self.linked.get(name))
+    }
+
+    /// Whether this execution can link `name` from its own or a sibling jar.
+    fn has_class(&self, name: &str) -> bool {
+        self.classes.contains_key(name) || self.linked.contains_key(name)
     }
 
     /// Run a jar-owned class initializer once before the first active use.
@@ -14924,12 +17129,11 @@ impl<H: Host> Runtime<'_, H> {
     /// bootstrap into a no-op, so the bounded runtime models only this JVM
     /// initialization rule while retaining its per-invocation lifetime.
     fn ensure_initialized(&mut self, class: &str) -> Result<(), NativeError> {
-        if !self.classes.contains_key(class) || !self.initialized_classes.insert(class.to_owned()) {
+        if !self.has_class(class) || !self.initialized_classes.insert(class.to_owned()) {
             return Ok(());
         }
         if self
-            .classes
-            .get(class)
+            .class(class)
             .and_then(|file| file.method("<clinit>", "()V"))
             .is_some()
         {
@@ -14946,6 +17150,16 @@ impl<H: Host> Runtime<'_, H> {
             self.static_fields.clone(),
             self.initialized_classes.clone(),
         )
+    }
+
+    /// Open one `CallbackInfo` object for a host hook callback.
+    fn open_callback_info(&mut self, marker: &str) -> Result<(), NativeError> {
+        self.callback_infos.open(marker)
+    }
+
+    /// Whether a host hook callback cancelled its call.
+    fn callback_info_cancelled(&self, marker: &str) -> Result<bool, NativeError> {
+        self.callback_infos.flag(marker)
     }
 
     /// Answer the bounded `CallbackInfo` surface for the object this execution
@@ -15347,7 +17561,7 @@ impl<H: Host> Runtime<'_, H> {
         base_args: &[Value],
         marker: &str,
     ) -> Result<(bool, Vec<Value>), NativeError> {
-        let callback_class = self.classes.get(&callback.owner).ok_or_else(|| {
+        let callback_class = self.class(&callback.owner).ok_or_else(|| {
             NativeError::MissingMethod(format!(
                 "{}#{}{}",
                 callback.owner, callback.name, callback.descriptor
@@ -15585,6 +17799,103 @@ impl<H: Host> Runtime<'_, H> {
     /// Resolve a captured invokedynamic marker when its target is in this
     /// jar. Unknown or malformed markers stay on the host path, preserving
     /// the bounded runtime's neutral fallback for unsupported lambdas.
+    /// Run one `@Accessor`/`@Invoker` member the way real Mixin's generated
+    /// body would.
+    ///
+    /// The member class is in the jar and its method has no code, so the
+    /// annotation is the whole contract. A getter reads the field named by the
+    /// annotation (or inferred from the method name), a setter writes it, and
+    /// an invoker dispatches the named target with the member's own arguments.
+    /// The field table is receiver-keyed, so a game object marker works exactly
+    /// like a jar object; a game target the host models answers the call
+    /// through the host, and an unmodelled one keeps the neutral answer it
+    /// always had.
+    fn invoke_mixin_accessor(
+        &mut self,
+        receiver: Option<&Value>,
+        class: &str,
+        method: &str,
+        desc: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let plan = {
+            let Some(file) = self.classes.get(class) else {
+                return Ok(None);
+            };
+            let Some(declared) = file.method(method, desc) else {
+                return Ok(None);
+            };
+            if declared.code.is_some() {
+                return Ok(None);
+            }
+            let Some(plan) = resolve_mixin_accessor(file, declared) else {
+                return Ok(None);
+            };
+            plan
+        };
+        if self.has_class(&plan.target.owner) {
+            self.ensure_initialized(&plan.target.owner)?;
+        }
+        let target = MethodRef {
+            owner: plan.target.owner.clone(),
+            name: plan.target.name.clone(),
+            descriptor: plan.target.descriptor.clone(),
+        };
+        match plan.kind {
+            MixinAccessorKind::Getter => {
+                let value = if plan.static_target {
+                    self.static_fields
+                        .get(&Self::static_field_key(&target))
+                        .cloned()
+                } else {
+                    receiver
+                        .and_then(|receiver| instance_field_key(receiver, &target))
+                        .and_then(|key| self.fields.get(&key).cloned())
+                };
+                Ok(Some(
+                    value.unwrap_or_else(|| Value::default_for(&target.descriptor)),
+                ))
+            }
+            MixinAccessorKind::Setter => {
+                let value = args.first().cloned().unwrap_or(Value::Void);
+                if plan.static_target {
+                    self.static_fields
+                        .insert(Self::static_field_key(&target), value);
+                } else if let Some(key) =
+                    receiver.and_then(|receiver| instance_field_key(receiver, &target))
+                {
+                    self.fields.insert(key, value);
+                }
+                Ok(Some(Value::Void))
+            }
+            MixinAccessorKind::Invoker => {
+                if plan.static_target {
+                    if self.has_class(&plan.target.owner) {
+                        return self
+                            .invoke(&target.owner, &target.name, &target.descriptor, None, args)
+                            .map(Some);
+                    }
+                    return self.host.invoke(&target, args).map(Some);
+                }
+                let Some(receiver) = receiver else {
+                    return Ok(None);
+                };
+                if self.has_class(&plan.target.owner) {
+                    return self
+                        .invoke(
+                            &target.owner,
+                            &target.name,
+                            &target.descriptor,
+                            Some(receiver.clone()),
+                            args,
+                        )
+                        .map(Some);
+                }
+                self.host.invoke_instance(&target, receiver, args).map(Some)
+            }
+        }
+    }
+
     fn invoke_callback(
         &mut self,
         marker: &Value,
@@ -15593,21 +17904,87 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(marker) else {
             return Ok(None);
         };
+        // A composition marker closes over the two callbacks it joined. Running
+        // it means running both, in the order the combinator defines — not
+        // answering the marker itself.
+        if let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            self.invoke_callback(&Value::Ref(Some(left.to_owned())), args)?;
+            self.invoke_callback(&Value::Ref(Some(right.to_owned())), args)?;
+            return Ok(Some(Value::Void));
+        }
+        if let Some(rest) = marker.strip_prefix("@fn:function.then:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            let value = self
+                .invoke_callback(&Value::Ref(Some(left.to_owned())), args)?
+                .unwrap_or(Value::Ref(None));
+            return self.invoke_callback(&Value::Ref(Some(right.to_owned())), &[value]);
+        }
+        if let Some(rest) = marker.strip_prefix("@fn:function.compose:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            // `f.compose(g)` applies `g` first, then `f`.
+            let value = self
+                .invoke_callback(&Value::Ref(Some(right.to_owned())), args)?
+                .unwrap_or(Value::Ref(None));
+            return self.invoke_callback(&Value::Ref(Some(left.to_owned())), &[value]);
+        }
         let Ok(callback) = parse_callback_marker(marker) else {
             return Ok(None);
         };
-        let Some(class) = self.classes.get(&callback.target.owner) else {
-            return Ok(None);
+        // The callback target may live in a linked library jar, so resolve it
+        // the same way a frame resolves its own class.
+        let linked = Arc::clone(&self.linked);
+        let Some(class) = self
+            .classes
+            .get(&callback.target.owner)
+            .or_else(|| linked.get(&callback.target.owner))
+        else {
+            // A method reference to a JDK method (`List::stream`) has no jar
+            // body. The host's own surface answers it; a collection's `stream`
+            // is the interpreter's, and the host's identity `Function.apply`
+            // would otherwise hand the receiver back unchanged.
+            let (receiver, rest) = if let Some((receiver, rest)) = callback.captures.split_first() {
+                (receiver.clone(), rest.to_vec())
+            } else if let Some((receiver, rest)) = args.split_first() {
+                (receiver.clone(), rest.to_vec())
+            } else {
+                return Ok(None);
+            };
+            // A constructor reference (`GameClass::new`) is a factory whose
+            // effective result is the constructed object, even though `<init>`
+            // itself returns void. The class is outside the jar, so there is no
+            // body to run: answer the object marker the host models for it.
+            if callback.target.name == "<init>" {
+                return Ok(Some(self.new_object(&callback.target.owner)));
+            }
+            if callback.target.name == "stream"
+                && callback.target.descriptor == "()Ljava/util/stream/Stream;"
+                && is_collection_owner(&callback.target.owner)
+            {
+                let values = runtime_collection_values(self.host, &receiver)?
+                    .into_iter()
+                    .map(|value| parse_collection_value(&value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Some(self.new_stream("callback", "stream", values)));
+            }
+            return self
+                .host
+                .invoke_instance(&callback.target, &receiver, &rest)
+                .map(Some);
         };
         let Some(method) = class.method(&callback.target.name, &callback.target.descriptor) else {
             return Ok(None);
         };
+        let target_is_static = method.is_static();
         // A constructor reference (`Type::new`) is a factory: the lambda has no
         // receiver to capture, so the runtime owns the object it constructs and
         // answers the lambda's own call with it.
         let mut constructed = None;
         let mut args_consumed = false;
-        let (receiver, mut target_args) = if method.is_static() {
+        let (receiver, mut target_args) = if target_is_static {
             (None, callback.captures.clone())
         } else if callback.target.name == "<init>" && callback.captures.is_empty() {
             let object = self.new_object(&callback.target.owner);
@@ -15769,25 +18146,227 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(marker))
     }
 
-    /// Resolve `Class.forName` only against classes already loaded from the
-    /// current jar. This keeps reflection useful for bootstrap code without
-    /// permitting arbitrary classpath or filesystem loading.
+    /// Resolve `Class.forName` against the running jar's classes and the
+    /// sibling jars the host linked. This keeps reflection useful for
+    /// bootstrap code without permitting arbitrary classpath or filesystem
+    /// loading: a class neither source declares still answers `null`.
     fn class_for_name(&self, args: &[Value]) -> Result<Value, NativeError> {
         let binary = expect_string(
             args.first()
                 .ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
         let internal = binary.replace('.', "/");
-        Ok(if self.classes.contains_key(&internal) {
-            Value::Ref(Some(internal))
-        } else {
-            Value::Ref(None)
+        if self.has_class(&internal) {
+            return Ok(Value::Ref(Some(internal)));
+        }
+        // The JVM throws for an absent class, and a platform probe relies on
+        // its `catch (ClassNotFoundException)` to try the next loader. A null
+        // answer would turn the probe's `getConstructor` into an NPE.
+        Err(NativeError::UncaughtException {
+            class: "java/lang/ClassNotFoundException".into(),
+            message: Some(binary.to_owned()),
+            frame: None,
         })
+    }
+
+    /// `Class#getInterfaces` from the class model.
+    ///
+    /// A class the model holds — the running jar's own or a linked library's —
+    /// answers the interfaces it declares, in class-file order. A class
+    /// outside the model (a game or JDK class) answers an empty array, the
+    /// same bounded answer the rest of the reflection surface gives instead of
+    /// inventing a hierarchy. The answer is a runtime-owned `Class[]`, so a
+    /// caller can index it, ask its length, or ask each element's name.
+    /// Whether an object marker is an instance of `wanted`.
+    ///
+    /// Objects are markers, so the check walks the jar's own superclass chain
+    /// and the interfaces each class declares, plus the collection, array and
+    /// enum marker namespaces the runtime itself builds. A marker that names
+    /// no class (a string, a type node) is still an `Object`, which is what the
+    /// JVM answers for a reference.
+    fn object_is_instance_of(&self, marker: &str, wanted: &str) -> bool {
+        if wanted == "java/lang/Object" {
+            return true;
+        }
+        if generic_type_instance_of(marker, wanted) {
+            return true;
+        }
+        // Collections and optionals keep their kind in the marker prefix.
+        let kind = marker.split_once('/').map_or(marker, |(kind, _)| kind);
+        let kind = kind.split_once('#').map_or(kind, |(kind, _)| kind);
+        let collection_kinds: &[&str] = match kind {
+            "list" => &[
+                "java/util/List",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            "set" => &[
+                "java/util/Set",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            "map" => &["java/util/Map"],
+            _ => &[],
+        };
+        if collection_kinds.contains(&wanted) {
+            return true;
+        }
+        if marker.starts_with("array/") {
+            return matches!(
+                wanted,
+                "java/lang/Cloneable" | "java/io/Serializable" | "java/lang/constant/Constable"
+            );
+        }
+        // An enum constant names its enum class after the prefix.
+        if let Some(rest) = marker.strip_prefix("enum/")
+            && let Some((class, _)) = rest.rsplit_once('/')
+        {
+            return self.class_is_instance(class, wanted);
+        }
+        self.class_is_instance(marker, wanted)
+    }
+
+    /// Whether `name` is `wanted` or a subclass (or implementor) of it.
+    fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
+        let mut current = name
+            .split_once('#')
+            .map_or(name, |(class, _)| class)
+            .to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file
+                .interface_names()
+                .iter()
+                .any(|interface| interface == wanted || self.interface_extends(interface, wanted))
+            {
+                return true;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
+    /// Whether an interface, or one it extends, is `wanted`.
+    fn interface_extends(&self, interface: &str, wanted: &str) -> bool {
+        let mut current = interface.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file.super_name.is_empty() {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
+    fn invoke_class_interfaces(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+    ) -> Option<Value> {
+        if r.owner != "java/lang/Class"
+            || r.name != "getInterfaces"
+            || r.descriptor != "()[Ljava/lang/Class;"
+        {
+            return None;
+        }
+        let name = receiver
+            .and_then(expect_ref)
+            .map(|marker| marker.replace('.', "/"))?;
+        let interfaces = self
+            .class(&name)
+            .map(ClassFile::interface_names)
+            .unwrap_or_default();
+        let marker = self.new_array("java/lang/Class", &r.name);
+        let values = interfaces
+            .into_iter()
+            .map(|interface| Value::Ref(Some(interface)))
+            .collect();
+        self.arrays.insert(marker.clone(), values);
+        Some(Value::Ref(Some(marker)))
     }
 
     /// Execute the small reflective-array surface used by Fabric API helpers.
     /// This operates on arrays owned by the current bounded invocation; it
     /// never loads classes or reaches the filesystem.
+    /// Answer `java.util.Arrays`' copy and fill helpers.
+    ///
+    /// An array stays a marker with its element list, so a copy is a new
+    /// marker with the same elements; the new tail takes the element type's
+    /// JVM zero, which the return descriptor names.
+    fn invoke_arrays(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/util/Arrays" {
+            return Ok(None);
+        }
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("copyOf", _) | ("copyOfRange", _) => {
+                let source = self.array(StdHost::argument(r, args, 0)?)?.clone();
+                let (start, end) = if r.name == "copyOf" {
+                    let length = expect_int(r, StdHost::argument(r, args, 1)?)?;
+                    let length = usize::try_from(length).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOf length is negative".into())
+                    })?;
+                    (0, length)
+                } else {
+                    let from = expect_int(r, StdHost::argument(r, args, 1)?)?;
+                    let to = expect_int(r, StdHost::argument(r, args, 2)?)?;
+                    let from = usize::try_from(from).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOfRange start is negative".into())
+                    })?;
+                    let to = usize::try_from(to).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOfRange end is negative".into())
+                    })?;
+                    (from, to.max(from))
+                };
+                let element = return_desc(&r.descriptor)
+                    .trim_start_matches('[')
+                    .to_owned();
+                let mut values = Vec::with_capacity(end.saturating_sub(start));
+                for index in start..end {
+                    values.push(
+                        source
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| Value::default_for(&element)),
+                    );
+                }
+                let marker = self.new_array(class, method);
+                self.arrays.insert(marker.clone(), values);
+                Ok(Some(Value::Ref(Some(marker))))
+            }
+            ("fill", descriptor) if descriptor.starts_with('[') => {
+                let Some(marker) = args.first().and_then(expect_ref).cloned() else {
+                    return Ok(None);
+                };
+                let value = args.get(1).cloned().unwrap_or(Value::Ref(None));
+                if let Some(values) = self.arrays.get_mut(&marker) {
+                    values.fill(value);
+                }
+                Ok(Some(Value::Void))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn invoke_reflect_array(
         &mut self,
         r: &MethodRef,
@@ -15962,7 +18541,7 @@ impl<H: Host> Runtime<'_, H> {
             let descriptor = declared
                 .map(|(descriptor, _)| descriptor.to_owned())
                 .or_else(|| {
-                    self.classes.get(class).and_then(|file| {
+                    self.class(class).and_then(|file| {
                         file.fields
                             .iter()
                             .find(|field| field.name == name)
@@ -15970,8 +18549,7 @@ impl<H: Host> Runtime<'_, H> {
                     })
                 });
             let signature = descriptor.as_deref().and_then(|descriptor| {
-                self.classes
-                    .get(class)
+                self.class(class)
                     .and_then(|file| file.field_signature(name, descriptor))
             });
             let value = signature
@@ -16084,8 +18662,7 @@ impl<H: Host> Runtime<'_, H> {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let declared = r.name == "getDeclaredFields";
             let fields = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .map(|file| {
                     file.fields
                         .iter()
@@ -16110,8 +18687,7 @@ impl<H: Host> Runtime<'_, H> {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let name = expect_string(StdHost::argument(r, args, 0)?);
             let marker = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .and_then(|file| {
                     file.fields.iter().find(|field| {
                         field.name == name
@@ -16133,8 +18709,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let methods = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .map(|file| {
                     file.methods
                         .iter()
@@ -16194,7 +18769,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             let class = expect_string(receiver.unwrap_or(&Value::Ref(None)));
             let wanted = expect_string(StdHost::argument(r, args, 0)?);
-            let found = self.classes.get(class).and_then(|file| {
+            let found = self.class(class).and_then(|file| {
                 file.annotations
                     .iter()
                     .find(|annotation| annotation_is(annotation, wanted))
@@ -16215,7 +18790,7 @@ impl<H: Host> Runtime<'_, H> {
                     let (name, descriptor) = member
                         .find('(')
                         .map_or((member, None), |at| (&member[..at], Some(&member[at..])));
-                    let file = self.classes.get(class)?;
+                    let file = self.class(class)?;
                     let method = file.methods.iter().find(|candidate| {
                         candidate.name == name
                             && descriptor
@@ -16243,7 +18818,7 @@ impl<H: Host> Runtime<'_, H> {
             let declared = declared
                 .map(|(descriptor, access)| (descriptor.to_owned(), access))
                 .or_else(|| {
-                    self.classes.get(class).and_then(|file| {
+                    self.class(class).and_then(|file| {
                         file.fields
                             .iter()
                             .find(|field| field.name == name)
@@ -16309,7 +18884,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(Some(Value::Int(arg_count(descriptor) as i32)));
                 }
                 ("newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
-                    if !self.classes.contains_key(class) {
+                    if !self.has_class(class) {
                         return Err(NativeError::MissingMethod(format!(
                             "{class}#<init>{descriptor}"
                         )));
@@ -16354,8 +18929,7 @@ impl<H: Host> Runtime<'_, H> {
                 self.array(invocation_args)?.clone()
             };
             let class_file = self
-                .classes
-                .get(owner)
+                .class(owner)
                 .ok_or_else(|| NativeError::MissingMethod(format!("{owner}#{name}")))?;
             let target = class_file
                 .methods
@@ -16407,7 +18981,7 @@ impl<H: Host> Runtime<'_, H> {
         parameters: &[Value],
     ) -> Option<String> {
         if parameters.is_empty() {
-            return self.classes.get(class).and_then(|file| {
+            return self.class(class).and_then(|file| {
                 file.methods
                     .iter()
                     .find(|candidate| {
@@ -16422,8 +18996,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         descriptor.push(')');
         Some(
-            self.classes
-                .get(class)
+            self.class(class)
                 .and_then(|file| {
                     file.methods
                         .iter()
@@ -16515,6 +19088,82 @@ impl<H: Host> Runtime<'_, H> {
         Some(Value::Ref(Some(marker)))
     }
 
+    /// Answer the vanilla static helpers mod bootstraps call.
+    ///
+    /// `Util.make(Supplier)` and `Util.make(value, Consumer)` are shorthands
+    /// for running a lambda, and a mod's static initializer relies on the
+    /// lambda's side effect and its return value. The game class is outside the
+    /// jar, so the interpreter runs the callback itself instead of letting the
+    /// host answer a null.
+    fn invoke_game_helpers(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        // A value-component builder is a fluent game object. Bootstrap code
+        // only needs the builder to exist (`Objects.requireNonNull` refuses a
+        // null one) and every setter to answer itself; the component value is
+        // recorded by the registry declaration table, not by this marker.
+        if r.owner == "net/minecraft/core/component/DataComponentType"
+            && r.name == "builder"
+            && r.descriptor == "()Lnet/minecraft/core/component/DataComponentType$Builder;"
+        {
+            return Ok(Some(self.new_object(
+                "net/minecraft/core/component/DataComponentType$Builder",
+            )));
+        }
+        if r.owner == "net/minecraft/core/component/DataComponentType$Builder"
+            && let Some(receiver) = receiver.and_then(expect_ref)
+        {
+            if r.name == "build"
+                && r.descriptor == "()Lnet/minecraft/core/component/DataComponentType;"
+            {
+                return Ok(Some(
+                    self.new_object("net/minecraft/core/component/DataComponentType"),
+                ));
+            }
+            if return_desc(&r.descriptor)
+                == "Lnet/minecraft/core/component/DataComponentType$Builder;"
+            {
+                return Ok(Some(Value::Ref(Some(receiver.to_owned()))));
+            }
+        }
+        // `BlockPos.betweenClosedStream` is the game's own bounding-box stream.
+        // A mod filters and maps it for a shape offset table; the bounded host
+        // models the stream shape, not every position in a crafted box.
+        if r.owner == "net/minecraft/core/BlockPos"
+            && r.name == "betweenClosedStream"
+            && r.descriptor.ends_with(")Ljava/util/stream/Stream;")
+        {
+            return Ok(Some(self.new_stream(class, method, Vec::new())));
+        }
+        if r.owner != "net/minecraft/util/Util" {
+            return Ok(None);
+        }
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("make", "(Ljava/util/function/Supplier;)Ljava/lang/Object;") => {
+                let Some(callback) = args.first() else {
+                    return Ok(None);
+                };
+                Ok(Some(
+                    self.invoke_callback(callback, &[])?
+                        .unwrap_or(Value::Ref(None)),
+                ))
+            }
+            ("make", "(Ljava/lang/Object;Ljava/util/function/Consumer;)Ljava/lang/Object;") => {
+                let value = args.first().cloned().unwrap_or(Value::Ref(None));
+                if let Some(callback) = args.get(1) {
+                    self.invoke_callback(callback, std::slice::from_ref(&value))?;
+                }
+                Ok(Some(value))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Answer `StringBuilder`/`StringBuffer` members for a builder this
     /// invocation constructed.
     ///
@@ -16596,6 +19245,965 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// The path text a `File`, `Path`, string or stream marker names.
+    ///
+    /// A `File`/`FileInputStream`/`FileWriter` marker resolves through
+    /// [`Runtime::io_paths`]; a `Path` marker carries its text after
+    /// `path:`; anything else is a plain string path.
+    fn io_path_of(&self, value: &Value) -> Option<String> {
+        let text = expect_ref(value)?;
+        if let Some(path) = self.io_paths.get(text) {
+            return Some(path.clone());
+        }
+        if let Some(path) = text.strip_prefix("path:") {
+            return Some(path.to_owned());
+        }
+        Some(text.to_owned())
+    }
+
+    /// The sink a modelled writer marker appends into.
+    fn io_sink_key(&self, marker: &str) -> Option<String> {
+        if let Some(path) = self.io_paths.get(marker) {
+            return Some(format!("file:{path}"));
+        }
+        let key = format!("mem:{marker}");
+        self.io_writers.contains_key(&key).then_some(key)
+    }
+
+    /// Open a writer marker over `path`, or in memory when the writer wraps a
+    /// stream that names no file. `truncate` is what Java does when the
+    /// constructor opens the file itself; a wrapper keeps the bytes written so
+    /// far.
+    fn io_open_writer(&mut self, marker: &str, path: Option<String>, truncate: bool) {
+        let key = match path {
+            Some(path) => {
+                self.io_paths.insert(marker.to_owned(), path.clone());
+                format!("file:{path}")
+            }
+            None => format!("mem:{marker}"),
+        };
+        if truncate {
+            self.io_writers.insert(key, String::new());
+        } else {
+            self.io_writers.entry(key).or_default();
+        }
+    }
+
+    /// Append text to a modelled writer's sink.
+    fn io_write(&mut self, marker: &str, text: &str) {
+        let Some(key) = self.io_sink_key(marker) else {
+            return;
+        };
+        self.io_writers.entry(key).or_default().push_str(text);
+    }
+
+    /// Copy a writer's sink into the virtual file it names. A close or flush
+    /// repeats harmlessly because every wrapper shares one sink per file.
+    fn io_commit(&mut self, marker: &str) {
+        let Some(path) = self.io_paths.get(marker).cloned() else {
+            return;
+        };
+        if let Some(text) = self.io_writers.get(&format!("file:{path}")) {
+            self.io_files.insert(path, text.clone());
+        }
+    }
+
+    /// Open a reader marker over a virtual file, or report the exception Java
+    /// raises for a file that does not exist. A config loader guards its read
+    /// with `exists` or catches the `IOException` and writes defaults.
+    fn io_open_reader(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        path: &str,
+        required: bool,
+    ) -> Result<(), NativeError> {
+        let Some(text) = self.io_files.get(path).cloned() else {
+            if !required {
+                // `Files.newBufferedReader` over a path the invocation never
+                // wrote answers an empty stream: a jar resource the host
+                // resolves elsewhere still reaches its own reader, and a
+                // bootstrap that checks `exists` first writes defaults.
+                self.string_readers.insert(marker.to_owned(), String::new());
+                return Ok(());
+            }
+            let class = if r.owner == "java/nio/file/Files" {
+                "java/nio/file/NoSuchFileException"
+            } else {
+                "java/io/FileNotFoundException"
+            };
+            return Err(NativeError::UncaughtException {
+                class: class.into(),
+                message: Some(path.to_string()),
+                frame: None,
+            });
+        };
+        self.string_readers.insert(marker.to_owned(), text);
+        Ok(())
+    }
+
+    /// Answer the bounded `java.io` and `java.nio.file` surface config code
+    /// reaches.
+    ///
+    /// The native path never touches the host filesystem: files a jar writes
+    /// live in [`Runtime::io_files`] for the length of one invocation, so a
+    /// bootstrap that saves defaults and reads them back sees its own bytes and
+    /// nothing else. A read of a path the invocation never wrote reports the
+    /// exception Java would raise. Readers keep their text in
+    /// [`Runtime::string_readers`], which is also what `Gson.fromJson(Reader,
+    /// Class)` reads; writers append into [`Runtime::io_writers`], which is
+    /// what `Gson.toJson(value, Appendable)` writes.
+    fn invoke_io(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let receiver_marker = receiver.and_then(expect_ref).cloned();
+        match r.owner.as_str() {
+            "java/io/File" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if r.name == "<init>" {
+                    let path = match r.descriptor.as_str() {
+                        "(Ljava/lang/String;)V" => args
+                            .first()
+                            .and_then(expect_ref)
+                            .map(|text| text.to_owned()),
+                        "(Ljava/lang/String;Ljava/lang/String;)V" => {
+                            let parent = args.first().and_then(expect_ref).cloned();
+                            let child = args.get(1).and_then(expect_ref).cloned();
+                            parent
+                                .zip(child)
+                                .map(|(parent, child)| path_join(&parent, &child))
+                        }
+                        "(Ljava/io/File;Ljava/lang/String;)V" => {
+                            let parent = args.first().and_then(|value| self.io_path_of(value));
+                            let child = args.get(1).and_then(expect_ref).cloned();
+                            parent
+                                .zip(child)
+                                .map(|(parent, child)| path_join(&parent, &child))
+                        }
+                        _ => return Ok(None),
+                    };
+                    if let Some(path) = path {
+                        self.io_paths.insert(marker, path);
+                    }
+                    return Ok(Some(Value::Void));
+                }
+                let Some(path) = self.io_paths.get(&marker).cloned() else {
+                    return Ok(None);
+                };
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("exists", "()Z") | ("isFile", "()Z") => {
+                        Value::Int(i32::from(self.io_files.contains_key(&path)))
+                    }
+                    ("isDirectory", "()Z") => Value::Int(0),
+                    ("length", "()J") => {
+                        Value::Long(self.io_files.get(&path).map_or(0, |text| text.len() as i64))
+                    }
+                    ("getName", "()Ljava/lang/String;") => {
+                        Value::Ref(Some(path.rsplit('/').next().unwrap_or(&path).to_owned()))
+                    }
+                    ("getParent", "()Ljava/lang/String;") => Value::Ref(
+                        path.rsplit_once('/')
+                            .map(|(parent, _)| parent.to_owned())
+                            .filter(|parent| !parent.is_empty()),
+                    ),
+                    ("getParentFile", "()Ljava/io/File;") => {
+                        match path.rsplit_once('/').map(|(parent, _)| parent) {
+                            Some(parent) if !parent.is_empty() => {
+                                let value = self.new_object("java/io/File");
+                                if let Some(marker) = expect_ref(&value) {
+                                    self.io_paths.insert(marker.to_owned(), parent.to_owned());
+                                }
+                                value
+                            }
+                            _ => Value::Ref(None),
+                        }
+                    }
+                    ("toPath", "()Ljava/nio/file/Path;") => path_value(&path),
+                    ("mkdir", "()Z") | ("mkdirs", "()Z") | ("createNewFile", "()Z") => {
+                        self.io_files.entry(path).or_default();
+                        Value::Int(1)
+                    }
+                    ("delete", "()Z") => {
+                        self.io_files.remove(&path);
+                        Value::Int(1)
+                    }
+                    (
+                        "getPath" | "getAbsolutePath" | "getCanonicalPath" | "toString",
+                        "()Ljava/lang/String;",
+                    ) => Value::Ref(Some(path)),
+                    _ => return Ok(None),
+                }))
+            }
+            "java/nio/file/Path" if r.name == "toFile" => {
+                let Some(path) = receiver.map(path_text).map(str::to_owned) else {
+                    return Ok(None);
+                };
+                let value = self.new_object("java/io/File");
+                if let Some(marker) = expect_ref(&value) {
+                    self.io_paths.insert(marker.to_owned(), path);
+                }
+                Ok(Some(value))
+            }
+            "java/nio/file/Files" => {
+                let Some(path) = args.first().map(path_text).map(str::to_owned) else {
+                    return Ok(None);
+                };
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("exists", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
+                        if !self.io_files.contains_key(&path) {
+                            // A resource the jar ships still answers through the
+                            // host's table.
+                            return Ok(None);
+                        }
+                        Value::Int(1)
+                    }
+                    ("notExists", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        if !self.io_files.contains_key(&path) {
+                            return Ok(None);
+                        }
+                        Value::Int(0)
+                    }
+                    ("readString", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        match self.io_files.get(&path) {
+                            Some(text) => Value::Ref(Some(text.clone())),
+                            None => return Ok(None),
+                        }
+                    }
+                    ("writeString", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let text = args
+                            .get(1)
+                            .map(|value| expect_string(value).to_owned())
+                            .unwrap_or_default();
+                        self.io_files.insert(path, text);
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("write", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
+                        let text = args
+                            .get(1)
+                            .and_then(|value| expect_ref(value))
+                            .and_then(|marker| self.arrays.get(marker))
+                            .map(|bytes| {
+                                let bytes = bytes
+                                    .iter()
+                                    .map(|value| match value {
+                                        Value::Int(byte) => *byte as u8,
+                                        _ => 0,
+                                    })
+                                    .collect::<Vec<_>>();
+                                String::from_utf8_lossy(&bytes).into_owned()
+                            })
+                            .unwrap_or_default();
+                        self.io_files.insert(path, text);
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("createFile", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        self.io_files.entry(path).or_default();
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("delete" | "deleteIfExists", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        self.io_files.remove(&path);
+                        Value::Int(1)
+                    }
+                    ("newBufferedReader", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/BufferedReader");
+                        if let Some(reader) = expect_ref(&value) {
+                            self.io_open_reader(r, reader, &path, false)?;
+                        }
+                        value
+                    }
+                    ("newBufferedWriter", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/BufferedWriter");
+                        if let Some(writer) = expect_ref(&value) {
+                            self.io_open_writer(writer, Some(path), true);
+                        }
+                        value
+                    }
+                    ("newInputStream", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/FileInputStream");
+                        if let Some(stream) = expect_ref(&value) {
+                            self.io_open_reader(r, stream, &path, false)?;
+                        }
+                        value
+                    }
+                    ("newOutputStream", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/FileOutputStream");
+                        if let Some(stream) = expect_ref(&value) {
+                            self.io_open_writer(stream, Some(path), true);
+                        }
+                        value
+                    }
+                    _ => return Ok(None),
+                }))
+            }
+            "java/io/FileWriter" | "java/io/PrintWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let appending = r.descriptor.ends_with("Z)V")
+                    && args
+                        .get(1)
+                        .is_some_and(|value| expect_int(r, value).unwrap_or(0) != 0);
+                // `PrintWriter(Writer)` and `PrintWriter(OutputStream)` wrap one
+                // of ours; a `File`/`String` argument is a file the constructor
+                // itself opens.
+                if let Some(wrapped) = args.first().filter(|value| {
+                    expect_ref(value).is_some_and(|marker| self.io_paths.contains_key(marker))
+                }) {
+                    let path = self.io_path_of(wrapped);
+                    self.io_open_writer(&marker, path, false);
+                } else {
+                    let path = args.first().and_then(|value| self.io_path_of(value));
+                    self.io_open_writer(&marker, path, !appending);
+                }
+                Ok(Some(Value::Void))
+            }
+            "java/io/OutputStreamWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let path = args.first().and_then(|value| self.io_path_of(value));
+                self.io_open_writer(&marker, path, false);
+                Ok(Some(Value::Void))
+            }
+            "java/io/BufferedWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let path = args.first().and_then(|value| self.io_path_of(value));
+                self.io_open_writer(&marker, path, false);
+                Ok(Some(Value::Void))
+            }
+            "java/io/StringWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                self.io_open_writer(&marker, None, true);
+                Ok(Some(Value::Void))
+            }
+            "java/io/FileOutputStream" | "java/io/FileInputStream" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(path) = args.first().and_then(|value| self.io_path_of(value)) else {
+                    return Ok(None);
+                };
+                if r.owner == "java/io/FileInputStream" {
+                    self.io_open_reader(r, &marker, &path, true)?;
+                } else {
+                    let appending = r.descriptor.ends_with("Z)V")
+                        && args
+                            .get(1)
+                            .is_some_and(|value| expect_int(r, value).unwrap_or(0) != 0);
+                    self.io_open_writer(&marker, Some(path), !appending);
+                }
+                Ok(Some(Value::Void))
+            }
+            "java/io/FileReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(path) = args.first().and_then(|value| self.io_path_of(value)) else {
+                    return Ok(None);
+                };
+                self.io_open_reader(r, &marker, &path, true)?;
+                Ok(Some(Value::Void))
+            }
+            "java/io/InputStreamReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let text = match args.first().and_then(expect_ref) {
+                    Some(stream) => match self.string_readers.get(stream).cloned() {
+                        Some(text) => text,
+                        // A jar resource opened by the host is read here, so a
+                        // config loader's `getResourceAsStream` reaches Gson.
+                        None => self.host.resource_stream_text(stream).unwrap_or_default(),
+                    },
+                    None => String::new(),
+                };
+                self.string_readers.insert(marker, text);
+                Ok(Some(Value::Void))
+            }
+            "java/io/BufferedReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let text = args
+                    .first()
+                    .and_then(expect_ref)
+                    .and_then(|reader| self.string_readers.remove(reader))
+                    .unwrap_or_default();
+                self.string_readers.insert(marker, text);
+                Ok(Some(Value::Void))
+            }
+            "java/io/Writer"
+            | "java/io/BufferedWriter"
+            | "java/io/FileWriter"
+            | "java/io/OutputStreamWriter"
+            | "java/io/StringWriter"
+            | "java/io/PrintWriter" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(_) = self.io_sink_key(&marker) else {
+                    return Ok(None);
+                };
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("write", "(Ljava/lang/String;)V") => {
+                        let text = args.first().map(expect_string).unwrap_or_default();
+                        self.io_write(&marker, text);
+                        Value::Void
+                    }
+                    ("write", "(Ljava/lang/String;II)V") => {
+                        let text = args.first().map(expect_string).unwrap_or_default();
+                        let start = args
+                            .get(1)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let length = args
+                            .get(2)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let slice = slice_utf16(text, start, length);
+                        self.io_write(&marker, &slice);
+                        Value::Void
+                    }
+                    ("write", "(I)V") => {
+                        let code = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let text = char::from_u32(code as u32).unwrap_or('\u{fffd}');
+                        self.io_write(&marker, &text.to_string());
+                        Value::Void
+                    }
+                    ("write", "(CC)V") => {
+                        let high = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let low = args
+                            .get(1)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let text = char::from_u32(high as u32)
+                            .into_iter()
+                            .chain(char::from_u32(low as u32))
+                            .collect::<String>();
+                        self.io_write(&marker, &text);
+                        Value::Void
+                    }
+                    ("append", descriptor)
+                        if descriptor.ends_with(")Ljava/io/Writer;")
+                            || descriptor.ends_with(")Ljava/io/PrintWriter;")
+                            || descriptor.ends_with(")Ljava/io/FileWriter;")
+                            || descriptor.ends_with(")Ljava/io/OutputStreamWriter;")
+                            || descriptor.ends_with(")Ljava/io/BufferedWriter;")
+                            || descriptor.ends_with(")Ljava/io/StringWriter;") =>
+                    {
+                        let text = args
+                            .first()
+                            .map(|value| java_value_text(value, descriptor))
+                            .unwrap_or_default();
+                        self.io_write(&marker, &text);
+                        Value::Ref(Some(marker))
+                    }
+                    ("newLine", "()V") => {
+                        self.io_write(&marker, "\n");
+                        Value::Void
+                    }
+                    ("print", _) | ("println", _) => {
+                        let mut text = match args.first() {
+                            Some(value) => {
+                                let argument = descriptor_arguments(&r.descriptor)
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "Ljava/lang/Object;".into());
+                                java_value_text(value, &argument)
+                            }
+                            None => String::new(),
+                        };
+                        if r.name == "println" {
+                            text.push('\n');
+                        }
+                        self.io_write(&marker, &text);
+                        Value::Void
+                    }
+                    ("printf", _) | ("format", _) => {
+                        let formatted = format_java_string_call(
+                            self,
+                            &MethodRef {
+                                owner: "java/lang/String".into(),
+                                name: "format".into(),
+                                descriptor:
+                                    "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
+                                        .into(),
+                            },
+                            args,
+                        )
+                        .map(|value| expect_string(&value).to_owned())
+                        .unwrap_or_default();
+                        self.io_write(&marker, &formatted);
+                        Value::Void
+                    }
+                    ("flush", "()V") | ("close", "()V") => {
+                        self.io_commit(&marker);
+                        Value::Void
+                    }
+                    ("checkError", "()Z") => Value::Int(0),
+                    ("toString", "()Ljava/lang/String;") => {
+                        Value::Ref(Some(self.io_sink_text(&marker)))
+                    }
+                    ("getBuffer", "()Ljava/lang/StringBuffer;") => {
+                        Value::Ref(Some(self.io_sink_text(&marker)))
+                    }
+                    _ => return Ok(None),
+                }))
+            }
+            "java/io/InputStream" | "java/io/FileInputStream" | "java/io/ByteArrayInputStream" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if !self.string_readers.contains_key(&marker) {
+                    return Ok(None);
+                }
+                // A stream this invocation opened carries its bytes as UTF-8
+                // text: reading drains from the front, exactly the way the
+                // bounded reader surface consumes a file.
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("readAllBytes", "()[B") | ("readNBytes", "()[B") => {
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        self.string_readers.insert(marker.clone(), String::new());
+                        self.io_bytes_array(text.into_bytes(), class, method)
+                    }
+                    ("read", "()I") => {
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let mut bytes = text.into_bytes();
+                        if bytes.is_empty() {
+                            self.string_readers.insert(marker.clone(), String::new());
+                            Value::Int(-1)
+                        } else {
+                            let rest = bytes.split_off(1);
+                            let byte = bytes[0];
+                            self.string_readers.insert(
+                                marker.clone(),
+                                String::from_utf8_lossy(&rest).into_owned(),
+                            );
+                            Value::Int(i32::from(byte as i8))
+                        }
+                    }
+                    ("read", "([B)I") | ("read", "([BII)I") => {
+                        let Some(array) = args.first().and_then(expect_ref).cloned() else {
+                            return Ok(None);
+                        };
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let bytes = text.into_bytes();
+                        let offset = if r.descriptor == "([BII)I" {
+                            args.get(1)
+                                .map(|value| expect_int(r, value))
+                                .transpose()?
+                                .unwrap_or(0)
+                                .max(0) as usize
+                        } else {
+                            0
+                        };
+                        let length = if r.descriptor == "([BII)I" {
+                            args.get(2)
+                                .map(|value| expect_int(r, value))
+                                .transpose()?
+                                .unwrap_or(0)
+                                .max(0) as usize
+                        } else {
+                            bytes.len()
+                        };
+                        let count = length.min(bytes.len());
+                        if let Some(values) = self.arrays.get_mut(&array) {
+                            for index in 0..count {
+                                if let Some(slot) = values.get_mut(offset + index) {
+                                    *slot = Value::Int(i32::from(bytes[index] as i8));
+                                }
+                            }
+                        }
+                        self.string_readers.insert(
+                            marker.clone(),
+                            String::from_utf8_lossy(&bytes[count..]).into_owned(),
+                        );
+                        if count == 0 {
+                            Value::Int(-1)
+                        } else {
+                            Value::Int(count as i32)
+                        }
+                    }
+                    ("available", "()I") => Value::Int(
+                        self.string_readers
+                            .get(&marker)
+                            .map_or(0, |text| text.len() as i32),
+                    ),
+                    ("skip", "(J)J") => {
+                        let requested = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let requested = requested.max(0) as usize;
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let mut bytes = text.into_bytes();
+                        let skipped = requested.min(bytes.len());
+                        bytes.drain(..skipped);
+                        self.string_readers
+                            .insert(marker.clone(), String::from_utf8_lossy(&bytes).into_owned());
+                        Value::Long(skipped as i64)
+                    }
+                    ("close", "()V") => Value::Void,
+                    _ => return Ok(None),
+                }))
+            }
+            "java/io/Reader"
+            | "java/io/BufferedReader"
+            | "java/io/FileReader"
+            | "java/io/InputStreamReader"
+            | "java/io/StringReader"
+            | "java/io/LineNumberReader" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if !self.string_readers.contains_key(&marker) {
+                    return Ok(None);
+                }
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("read", "()I") => match self.string_readers.get_mut(&marker) {
+                        Some(text) if !text.is_empty() => {
+                            let mut units = text.encode_utf16();
+                            let first = units.next().unwrap_or(0);
+                            let consumed = if (0xd800..0xdc00).contains(&first) {
+                                2
+                            } else {
+                                1
+                            };
+                            let mut remaining = text.encode_utf16().collect::<Vec<_>>();
+                            remaining.drain(..consumed.min(remaining.len()));
+                            *text = String::from_utf16_lossy(&remaining);
+                            Value::Int(first as i32)
+                        }
+                        _ => Value::Int(-1),
+                    },
+                    ("read", "(I)I") => Value::Int(-1),
+                    ("readLine", "()Ljava/lang/String;") => {
+                        let text = self
+                            .string_readers
+                            .get_mut(&marker)
+                            .cloned()
+                            .unwrap_or_default();
+                        let (line, rest) = match text.split_once('\n') {
+                            Some((line, rest)) => (line.strip_suffix('\r').unwrap_or(line), rest),
+                            None => (text.as_str(), ""),
+                        };
+                        let line = if line.is_empty() && text.is_empty() {
+                            Value::Ref(None)
+                        } else {
+                            Value::Ref(Some(line.to_owned()))
+                        };
+                        self.string_readers.insert(marker.clone(), rest.to_owned());
+                        line
+                    }
+                    ("ready", "()Z") => Value::Int(i32::from(
+                        self.string_readers
+                            .get(&marker)
+                            .is_some_and(|text| !text.is_empty()),
+                    )),
+                    ("skip", "(J)J") => {
+                        let requested = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let requested = requested.max(0) as usize;
+                        let text = self
+                            .string_readers
+                            .get_mut(&marker)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut units = text.encode_utf16().collect::<Vec<_>>();
+                        let skipped = requested.min(units.len());
+                        units.drain(..skipped);
+                        self.string_readers
+                            .insert(marker.clone(), String::from_utf16_lossy(&units));
+                        Value::Long(skipped as i64)
+                    }
+                    ("close", "()V") => Value::Void,
+                    _ => return Ok(None),
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// A `byte[]` marker holding `bytes`, as `InputStream#readAllBytes`
+    /// answers.
+    fn io_bytes_array(&mut self, bytes: Vec<u8>, class: &str, method: &str) -> Value {
+        let marker = self.new_array(class, method);
+        let values = bytes
+            .into_iter()
+            .map(|byte| Value::Int(i32::from(byte as i8)))
+            .collect();
+        self.arrays.insert(marker.clone(), values);
+        Value::Ref(Some(marker))
+    }
+
+    /// The text a modelled in-memory writer currently holds.
+    fn io_sink_text(&self, marker: &str) -> String {
+        self.io_sink_key(marker)
+            .and_then(|key| self.io_writers.get(&key).cloned())
+            .unwrap_or_default()
+    }
+
+    /// `Gson.fromJson` for a document whose target is the jar's own class.
+    ///
+    /// Gson's reflective adapter allocates the object without running a
+    /// constructor and sets the declared instance fields, and a config class
+    /// then reads them back through ordinary field accesses. The interpreter
+    /// does the same: the field table is keyed by the declaring class, so the
+    /// accessors the mod generates find what the document declared. A document
+    /// that names no field this class declares, or a class the runtime does not
+    /// hold, keeps the previous JSON-shaped answer.
+    fn gson_from_json(&mut self, text: &str, class: &str) -> Result<Value, NativeError> {
+        let Some(json) = gson_document(text)? else {
+            return Ok(Value::Ref(None));
+        };
+        let class = class.replace('.', "/");
+        if let Some(value) = self.gson_materialize(&json, &class)? {
+            return Ok(value);
+        }
+        gson_json_value(&json, &class)
+    }
+
+    /// The erased runtime type a `TypeToken` names.
+    ///
+    /// A token subclass declares its type argument in its `Signature`; when
+    /// that resolves, the token behaves like the same class literal would.
+    /// A token the model cannot read answers `Object`, which the JSON shape
+    /// still materializes into a map or a list.
+    fn type_token_class(&self, _token: &str) -> String {
+        "java/lang/Object".into()
+    }
+
+    /// Allocate one instance of `class` and inject the document's fields.
+    fn gson_materialize(
+        &mut self,
+        json: &serde_json::Value,
+        class: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let serde_json::Value::Object(document) = json else {
+            return Ok(None);
+        };
+        if class.starts_with("java/") || !self.has_class(class) {
+            return Ok(None);
+        }
+        let fields = self.instance_fields(class);
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        self.ensure_initialized(class)?;
+        let value = self.new_object(class);
+        for (declaring, name, descriptor) in fields {
+            let Some(raw) = document.get(&name) else {
+                continue;
+            };
+            let Some(field_value) = self.gson_field_value(raw, &descriptor)? else {
+                return Ok(None);
+            };
+            let field = MethodRef {
+                owner: declaring,
+                name,
+                descriptor,
+            };
+            if let Some(key) = instance_field_key(&value, &field) {
+                self.fields.insert(key, field_value);
+            }
+        }
+        Ok(Some(value))
+    }
+
+    /// The instance fields `class` declares, superclasses first-in-walk order.
+    fn instance_fields(&self, class: &str) -> Vec<(String, String, String)> {
+        let mut fields: Vec<(String, String, String)> = Vec::new();
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let Some(file) = self.class(&current) else {
+                break;
+            };
+            for field in &file.fields {
+                if field.is_static() || fields.iter().any(|(_, name, _)| name == &field.name) {
+                    continue;
+                }
+                fields.push((
+                    current.clone(),
+                    field.name.clone(),
+                    field.descriptor.clone(),
+                ));
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                break;
+            }
+            current = file.super_name.clone();
+        }
+        fields
+    }
+
+    /// Convert one JSON value to the field descriptor it must land in.
+    ///
+    /// A shape the runtime cannot represent answers `None`, and the caller
+    /// keeps the JSON-shaped value rather than an object with masked fields.
+    fn gson_field_value(
+        &mut self,
+        json: &serde_json::Value,
+        descriptor: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        if json.is_null() {
+            return Ok(Some(Value::Ref(None)));
+        }
+        Ok(Some(match descriptor {
+            "Ljava/lang/String;" => match json {
+                serde_json::Value::String(text) => Value::Ref(Some(text.clone())),
+                serde_json::Value::Bool(flag) => Value::Ref(Some(flag.to_string())),
+                serde_json::Value::Number(number) => Value::Ref(Some(number.to_string())),
+                _ => return Ok(None),
+            },
+            "Z" => match json {
+                serde_json::Value::Bool(flag) => Value::Int(i32::from(*flag)),
+                _ => return Ok(None),
+            },
+            "B" | "S" | "I" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Int(number as i32),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "J" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Long(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "F" | "D" => match json {
+                serde_json::Value::Number(number) => match number.as_f64() {
+                    Some(number) => Value::Float(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Boolean;" => match json {
+                serde_json::Value::Bool(flag) => boolean_value(*flag),
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Byte;" | "Ljava/lang/Short;" | "Ljava/lang/Integer;" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Int(number as i32),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Long;" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Long(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Float;" | "Ljava/lang/Double;" => match json {
+                serde_json::Value::Number(number) => match number.as_f64() {
+                    Some(number) => Value::Float(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/util/List;"
+            | "Ljava/util/Collection;"
+            | "Ljava/util/ArrayList;"
+            | "Ljava/util/LinkedList;" => match json {
+                serde_json::Value::Array(values) => {
+                    let mut materialized = Vec::with_capacity(values.len());
+                    for value in values {
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("list", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            "Ljava/util/Set;" | "Ljava/util/HashSet;" | "Ljava/util/LinkedHashSet;" => match json {
+                serde_json::Value::Array(values) => {
+                    let mut materialized = Vec::with_capacity(values.len());
+                    for value in values {
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("set", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            "Ljava/util/Map;" | "Ljava/util/HashMap;" | "Ljava/util/LinkedHashMap;" => match json {
+                serde_json::Value::Object(values) => {
+                    let mut materialized = Vec::with_capacity(values.len() * 2);
+                    for (key, value) in values {
+                        materialized.push(Value::Ref(Some(key.clone())));
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("map", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            descriptor if descriptor.starts_with("L") && descriptor.ends_with(';') => {
+                let class = &descriptor[1..descriptor.len() - 1];
+                if !self.has_class(class) {
+                    return Ok(None);
+                }
+                match json {
+                    serde_json::Value::Object(_) => match self.gson_materialize(json, class)? {
+                        Some(value) => value,
+                        None => return Ok(None),
+                    },
+                    // A JSON string for a jar class is its enum constant name.
+                    serde_json::Value::String(name) => {
+                        Value::Ref(Some(format!("enum/{class}/{name}")))
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     /// Answer the bounded `com.google.gson` surface config code reaches.
     ///
     /// The adapter models the two calls that make a config bootstrap work:
@@ -16662,6 +20270,22 @@ impl<H: Host> Runtime<'_, H> {
                 ("newBuilder", "()Lcom/google/gson/GsonBuilder;") => {
                     Ok(Some(self.new_object("com/google/gson/GsonBuilder")))
                 }
+                // `getAdapter(Class)` names the adapter a codec's own method
+                // references later use. Bootstrap code only checks that the
+                // adapter exists (`Objects.requireNonNull`), so answer the
+                // adapter marker rather than a null the check refuses.
+                (name, descriptor)
+                    if name == "getAdapter"
+                        && descriptor.ends_with(")Lcom/google/gson/TypeAdapter;") =>
+                {
+                    Ok(Some(self.new_object("com/google/gson/TypeAdapter")))
+                }
+                (name, descriptor)
+                    if name == "getDelegateAdapter"
+                        && descriptor.ends_with(")Lcom/google/gson/TypeAdapter;") =>
+                {
+                    Ok(Some(self.new_object("com/google/gson/TypeAdapter")))
+                }
                 // Gson declares one `toJson` overload per element type
                 // (`JsonElement`, `Object`, and the `Type` variants). They
                 // all write the same value, so the descriptor only has to
@@ -16684,9 +20308,14 @@ impl<H: Host> Runtime<'_, H> {
                     let target = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.toJson needs an Appendable receiver".into())
                     })?;
+                    if let Some(key) = self.io_sink_key(target) {
+                        self.io_writers.entry(key).or_default().push_str(&text);
+                        return Ok(Some(Value::Void));
+                    }
                     let builder = self.string_builders.get_mut(target).ok_or_else(|| {
                         NativeError::Metadata(format!(
-                            "Gson.toJson Appendable {target} is not a modelled StringBuilder"
+                            "Gson.toJson Appendable {target} is not a modelled StringBuilder, \
+                             StringWriter or file writer"
                         ))
                     })?;
                     builder.push_str(&text);
@@ -16699,21 +20328,60 @@ impl<H: Host> Runtime<'_, H> {
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
-                    Ok(Some(gson_from_json(text, class)?))
+                    Ok(Some(self.gson_from_json(text, class)?))
                 }
                 ("fromJson", "(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;") => {
                     let reader = args.first().and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Reader".into())
                     })?;
-                    let text = self.string_readers.get(reader).ok_or_else(|| {
+                    let text = self.string_readers.get(reader).cloned().ok_or_else(|| {
                         NativeError::Metadata(format!(
-                            "Gson.fromJson Reader {reader} is not a modelled StringReader"
+                            "Gson.fromJson Reader {reader} is not a modelled StringReader, \
+                             file or stream reader"
                         ))
                     })?;
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
-                    Ok(Some(gson_from_json(text, class)?))
+                    Ok(Some(self.gson_from_json(&text, class)?))
+                }
+                // `Gson.fromJson(Reader, TypeToken)` takes the token's erased
+                // type: a document that is an object becomes a map and an
+                // array a list, which is what every JSON-shaped token resolves
+                // to in the bounded adapter.
+                (
+                    "fromJson",
+                    "(Ljava/io/Reader;Lcom/google/gson/reflect/TypeToken;)Ljava/lang/Object;",
+                )
+                | (
+                    "fromJson",
+                    "(Ljava/lang/String;Lcom/google/gson/reflect/TypeToken;)Ljava/lang/Object;",
+                ) => {
+                    let (text, class) = if r.descriptor.starts_with("(Ljava/io/Reader;") {
+                        let reader = args.first().and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a Reader".into())
+                        })?;
+                        let text = self.string_readers.get(reader).cloned().ok_or_else(|| {
+                            NativeError::Metadata(format!(
+                                "Gson.fromJson Reader {reader} is not a modelled reader"
+                            ))
+                        })?;
+                        let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                        })?;
+                        (text, self.type_token_class(token))
+                    } else {
+                        let text = args
+                            .first()
+                            .map(expect_string)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                        })?;
+                        (text, self.type_token_class(token))
+                    };
+                    Ok(Some(self.gson_from_json(&text, &class)?))
                 }
                 ("fromJson", "(Ljava/lang/String;Ljava/lang/reflect/Type;)Ljava/lang/Object;") => {
                     let text = args.first().map(expect_string).ok_or_else(|| {
@@ -16728,7 +20396,7 @@ impl<H: Host> Runtime<'_, H> {
                             _ => None,
                         })
                         .unwrap_or_else(|| "java/lang/Object".into());
-                    Ok(Some(gson_from_json(text, &raw)?))
+                    Ok(Some(self.gson_from_json(text, &raw)?))
                 }
                 _ => Ok(None),
             },
@@ -16999,8 +20667,7 @@ impl<H: Host> Runtime<'_, H> {
         // which avoids re-running an override whose class state the bounded
         // interpreter may not have initialized.
         let symbolic_is_abstract = self
-            .classes
-            .get(&r.owner)
+            .class(&r.owner)
             .and_then(|file| file.method(&r.name, &r.descriptor))
             .is_some_and(|method| method.code.is_none());
         if symbolic_is_abstract
@@ -17023,13 +20690,13 @@ impl<H: Host> Runtime<'_, H> {
         if let Some((class, _)) = marker.split_once('#') {
             return Some(class);
         }
-        self.classes.contains_key(marker).then_some(marker.as_str())
+        self.has_class(marker).then_some(marker.as_str())
     }
 
     fn member_owner(&self, class: &str, name: &str, descriptor: &str) -> Option<(String, bool)> {
         let mut current = class.to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
-            let Some(file) = self.classes.get(&current) else {
+            let Some(file) = self.class(&current) else {
                 return Some((current, false));
             };
             if file.method(name, descriptor).is_some() {
@@ -17065,7 +20732,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             let delivers = match handler.catch_type.as_deref() {
                 None => true,
-                Some(catch) => exception_is_subtype(self.classes, thrown, catch),
+                Some(catch) => exception_is_subtype(self.classes, &self.linked, thrown, catch),
             };
             if delivers {
                 return Ok(Some(handler.handler_pc as usize));
@@ -17173,6 +20840,26 @@ impl<H: Host> Runtime<'_, H> {
             };
             return Ok(Some(self.new_stream(class, method, values)));
         }
+        // `Stream.concat(first, second)` is the two-source shape a constant
+        // table builder uses; both sides are streams this runtime owns.
+        if r.owner == "java/util/stream/Stream"
+            && r.name == "concat"
+            && r.descriptor
+                == "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;"
+        {
+            let mut values = self
+                .stream(args.first().ok_or_else(|| {
+                    NativeError::Metadata("Stream.concat needs a first stream".into())
+                })?)?
+                .clone();
+            values.extend(
+                self.stream(args.get(1).ok_or_else(|| {
+                    NativeError::Metadata("Stream.concat needs a second stream".into())
+                })?)?
+                .clone(),
+            );
+            return Ok(Some(self.new_stream(class, method, values)));
+        }
         // `ServiceLoader.stream()` hands out one `Provider` per seeded
         // service entry; the provider marker names its implementation class
         // so the following `Provider.get` can build the real instance.
@@ -17245,6 +20932,27 @@ impl<H: Host> Runtime<'_, H> {
                     }
                 }
                 self.new_stream(class, method, filtered)
+            }
+            ("flatMap", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
+                let callback = StdHost::argument(r, args, 0)?;
+                let mut flattened = Vec::new();
+                for value in &values {
+                    let mapped =
+                        match self.invoke_callback(callback, std::slice::from_ref(value))? {
+                            Some(result) => result,
+                            None => self.host.invoke_instance(
+                                &MethodRef {
+                                    owner: "java/util/function/Function".into(),
+                                    name: "apply".into(),
+                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
+                                },
+                                callback,
+                                std::slice::from_ref(value),
+                            )?,
+                        };
+                    flattened.extend(self.stream(&mapped)?.clone());
+                }
+                self.new_stream(class, method, flattened)
             }
             ("distinct", "()Ljava/util/stream/Stream;") => {
                 let mut distinct = Vec::with_capacity(values.len());
@@ -17372,6 +21080,10 @@ impl<H: Host> Runtime<'_, H> {
                         let parts = payload.split('\u{1f}').collect::<Vec<_>>();
                         let (prefix, delimiter, suffix) = match parts.as_slice() {
                             [delimiter] => ("", *delimiter, ""),
+                            // `joining(delimiter)` writes the empty prefix
+                            // before the separator, so its payload splits into
+                            // an empty head and the delimiter.
+                            ["", delimiter] => ("", *delimiter, ""),
                             [prefix, delimiter, suffix] => (*prefix, *delimiter, *suffix),
                             _ => return Ok(None),
                         };
@@ -17409,7 +21121,47 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(result))
     }
 
+    /// Enter one jar frame under the execution's recursion and time bounds.
+    ///
+    /// The bound is checked here rather than in [`Self::invoke_frame`] so every
+    /// nested jar call — direct, `super`, virtual, callback or `<clinit>` —
+    /// passes through it, and the depth is released on both the value and the
+    /// error path.
     fn invoke(
+        &mut self,
+        class: &str,
+        method: &str,
+        desc: &str,
+        receiver: Option<Value>,
+        args: &[Value],
+    ) -> Result<Value, NativeError> {
+        if self.depth >= MAX_JAR_CALL_DEPTH {
+            return Err(NativeError::CallDepthExceeded {
+                class: class.to_owned(),
+                method: method.to_owned(),
+                limit: MAX_JAR_CALL_DEPTH,
+            });
+        }
+        if self.budget.expired() {
+            return Err(self.budget_exceeded(class, method));
+        }
+        self.depth += 1;
+        let result = self.invoke_frame(class, method, desc, receiver, args);
+        self.depth -= 1;
+        result
+    }
+
+    /// The budget diagnostic for the frame the check ran in.
+    fn budget_exceeded(&self, class: &str, method: &str) -> NativeError {
+        NativeError::ExecutionBudgetExceeded {
+            class: class.to_owned(),
+            method: method.to_owned(),
+            budget: self.budget.limit().unwrap_or_default(),
+        }
+    }
+
+    /// One jar frame, executed instruction by instruction.
+    fn invoke_frame(
         &mut self,
         class: &str,
         method: &str,
@@ -17420,15 +21172,40 @@ impl<H: Host> Runtime<'_, H> {
         if method != "<clinit>" {
             self.ensure_initialized(class)?;
         }
-        let file = self
-            .classes
-            .get(class)
-            .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
+        // Snapshot the table so the frame's class reference outlives the
+        // `&mut self` calls the instruction loop makes.
+        let linked = Arc::clone(&self.linked);
+        let file = match self.classes.get(class) {
+            Some(file) => file,
+            None => linked
+                .get(class)
+                .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?,
+        };
         let target = file
             .method(method, desc)
             .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         let Some(ref code) = target.code else {
+            // An `@Accessor`/`@Invoker` member also has no body of its own:
+            // real Mixin generates the getter, setter or forwarding call. The
+            // interpreter runs that contract here, before the functional
+            // callback path, so the member reads or writes the bounded field
+            // table or dispatches the named target.
+            if let Some(value) =
+                self.invoke_mixin_accessor(receiver.as_ref(), class, method, desc, args)?
+            {
+                return Ok(value);
+            }
+            // An abstract method is the functional-interface contract a lambda
+            // implements. When the receiver is the callback the invokedynamic
+            // site bound, the body is that method, not the interface's own
+            // (absent) code — a config validator or a custom `Supplier` shape
+            // would otherwise answer `null`.
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(value) = self.invoke_callback(receiver, args)?
+            {
+                return Ok(value);
+            }
             return Ok(Value::default_for(return_desc(desc)));
         };
         let mut locals = vec![Value::Ref(None); target.max_locals.max(1) as usize];
@@ -17451,6 +21228,10 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut stack = Vec::new();
         let mut pc = 0;
+        // Bytecode instructions since the last wall-clock check. A loop that
+        // calls nothing (a `goto` on itself) would otherwise never reach the
+        // frame-entry check in `invoke`.
+        let mut budget_ticks = 0_usize;
         // A throw raised by a nested jar frame or by a host call lands in this
         // frame's own exception table before it leaves the invocation, exactly
         // as the JVM delivers it. Only a throw no row catches becomes
@@ -17485,6 +21266,10 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         while pc < code.len() {
+            budget_ticks = budget_ticks.wrapping_add(1);
+            if budget_ticks & (BUDGET_CHECK_INSTRUCTIONS - 1) == 0 && self.budget.expired() {
+                return Err(self.budget_exceeded(class, method));
+            }
             let at = pc;
             let op = code[pc];
             pc += 1;
@@ -18162,30 +21947,49 @@ impl<H: Host> Runtime<'_, H> {
                     stack.push(Value::Int(values.len() as i32));
                 }
                 0x2e..=0x35 => {
-                    let index = array_index(pop_int(&mut stack, class, method, at)?)?;
+                    let index = pop_int(&mut stack, class, method, at)?;
                     let array = pop(&mut stack, class, method, at)?;
                     let values = self
                         .array(&array)
                         .map_err(|error| array_operand_error(error, "xaload", class, method, at))?;
-                    let value = values.get(index).cloned().ok_or_else(|| {
-                        NativeError::Metadata(format!("array index {index} out of bounds"))
-                    })?;
-                    stack.push(value);
+                    let length = values.len();
+                    let loaded = match usize::try_from(index)
+                        .ok()
+                        .and_then(|index| values.get(index).cloned())
+                    {
+                        Some(value) => Ok(value),
+                        None => Err(array_index_out_of_bounds(index, length)),
+                    };
+                    // A Java bounds error is a catchable exception, so the
+                    // frame's own table decides where it lands.
+                    stack.push(invoke_or_catch!(at, loaded));
                 }
                 0x4f..=0x56 => {
                     let value = pop(&mut stack, class, method, at)?;
-                    let index = array_index(pop_int(&mut stack, class, method, at)?)?;
+                    let index = pop_int(&mut stack, class, method, at)?;
                     let array = pop(&mut stack, class, method, at)?;
                     let marker = expect_array_marker(&array).map_err(|error| {
                         array_operand_error(error, "xastore", class, method, at)
                     })?;
+                    let length = self.arrays.get(marker).map_or(0, Vec::len);
+                    let in_bounds = usize::try_from(index).is_ok_and(|index| index < length);
+                    invoke_or_catch!(
+                        at,
+                        if in_bounds {
+                            Ok(())
+                        } else {
+                            Err(array_index_out_of_bounds(index, length))
+                        }
+                    );
                     let values = self.arrays.get_mut(marker).ok_or_else(|| {
                         NativeError::Metadata("array is not owned by this invocation".into())
                     })?;
-                    let slot = values.get_mut(index).ok_or_else(|| {
-                        NativeError::Metadata(format!("array index {index} out of bounds"))
-                    })?;
-                    *slot = value;
+                    if let Some(slot) = usize::try_from(index)
+                        .ok()
+                        .and_then(|index| values.get_mut(index))
+                    {
+                        *slot = value;
+                    }
                 }
                 0xc5 => {
                     // multianewarray: one dimension count per bracket group,
@@ -18233,9 +22037,10 @@ impl<H: Host> Runtime<'_, H> {
                     // and a class marker answers `Class`. Every other marker
                     // keeps the interpreter's previous neutral answer.
                     let matches = expect_ref(&value).is_some_and(|marker| {
-                        generic_type_instance_of(marker, &wanted)
+                        self.object_is_instance_of(marker, &wanted)
+                            || generic_type_instance_of(marker, &wanted)
                             || (wanted == "java/lang/Class"
-                                && class_marker_like(marker, self.classes))
+                                && class_marker_like(marker, self.classes, &self.linked))
                     });
                     stack.push(Value::Int(i32::from(matches)));
                 }
@@ -18247,7 +22052,14 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb2 => {
                     let i = read_u16(code, &mut pc)?;
-                    let field = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    // An inherited field is declared by a superclass, so the
+                    // read resolves through the chain before it initializes
+                    // or keys anything.
+                    let field = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     // Reading a static field initializes its declaring class
                     // first, exactly as the JVM does. Without this a jar's
                     // `ItemInit.HANGING_POT_ITEM` read from another class's
@@ -18273,7 +22085,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb3 => {
                     let i = read_u16(code, &mut pc)?;
-                    let field = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let field = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     invoke_or_catch!(at, self.ensure_initialized(&field.owner));
                     let value = pop(&mut stack, class, method, at)?;
                     let outcome = self.dispatch_field_anchor(
@@ -18292,7 +22108,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb4 => {
                     let i = read_u16(code, &mut pc)?;
-                    let r = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let r = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     let receiver = pop(&mut stack, class, method, at)?;
                     let outcome =
                         self.dispatch_field_anchor(&r, false, None, class, method, desc, at)?;
@@ -18316,7 +22136,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb5 => {
                     let i = read_u16(code, &mut pc)?;
-                    let r = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let r = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     let value = pop(&mut stack, class, method, at)?;
                     let receiver = pop(&mut stack, class, method, at)?;
                     let outcome = self.dispatch_field_anchor(
@@ -18410,9 +22234,16 @@ impl<H: Host> Runtime<'_, H> {
                         self.invoke_reflect_array(&r, &args, class, method)?
                     {
                         value
+                    } else if let Some(value) = self.invoke_arrays(&r, &args, class, method)? {
+                        value
                     } else if let Some(value) =
                         self.invoke_stream(&r, receiver.as_ref(), &args, class, method)?
                     {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_io(&r, receiver.as_ref(), &args, class, method)
+                    ) {
                         value
                     } else if let Some(value) = self.invoke_gson(&r, receiver.as_ref(), &args)? {
                         value
@@ -18428,7 +22259,10 @@ impl<H: Host> Runtime<'_, H> {
                         && r.name == "forName"
                         && r.descriptor.ends_with(")Ljava/lang/Class;")
                     {
-                        self.class_for_name(&args)?
+                        invoke_or_catch!(at, self.class_for_name(&args))
+                    } else if let Some(value) = self.invoke_class_interfaces(&r, receiver.as_ref())
+                    {
+                        value
                     } else if let Some(value) = self.invoke_array_clone(&r, receiver.as_ref()) {
                         value
                     } else if let Some(value) =
@@ -18436,6 +22270,10 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         value
                     } else if let Some(value) = self.invoke_game_enum_values(&r, class, method) {
+                        value
+                    } else if let Some(value) =
+                        self.invoke_game_helpers(&r, receiver.as_ref(), &args, class, method)?
+                    {
                         value
                     } else if let Some((owner, jar_owned)) =
                         self.dispatch_owner(&r, op, receiver.as_ref())
@@ -18483,7 +22321,20 @@ impl<H: Host> Runtime<'_, H> {
                                     | "java/util/function/Supplier"
                             ) {
                                 if let Some(receiver) = receiver.as_ref() {
-                                    if let Some(value) =
+                                    // A default combinator (`Consumer.andThen`,
+                                    // `Function.compose`, `Predicate.and`) closes
+                                    // over both callbacks. Running the receiver
+                                    // as a callback would pass the second
+                                    // callback as its argument and answer the
+                                    // callback's void, which loses the value the
+                                    // combinator returns.
+                                    if let Some(value) = functional_composition_marker(
+                                        &resolved,
+                                        expect_ref(receiver).map(String::as_str).unwrap_or(""),
+                                        &args,
+                                    ) {
+                                        value
+                                    } else if let Some(value) =
                                         invoke_or_catch!(at, self.invoke_callback(receiver, &args))
                                     {
                                         value
@@ -19796,6 +23647,62 @@ fn skipped_modify_variable_plan(
 
 /// One line of at most [`MAX_WEAVE_REASON_CHARS`] characters, so a weaver error
 /// quoting a mod's own names cannot flood a report.
+/// Validate a `@Inject` callback against a game hook site's declared target.
+///
+/// A host hook passes the target's arguments the same way the woven path does,
+/// so the callback must mirror them and may add one trailing `CallbackInfo`.
+/// The target is always `void` for a hook site (the census carries no result),
+/// so a `CallbackInfoReturnable` is a mismatch rather than an override.
+fn game_hook_callback(
+    classes: &BTreeMap<String, ClassFile>,
+    callback: &MethodRef,
+    site: &GameHookSite,
+) -> Result<(), MixinSkipReason> {
+    let method = classes
+        .get(&callback.owner)
+        .and_then(|class| class.method(&callback.name, &callback.descriptor))
+        .ok_or_else(|| {
+            MixinSkipReason::Weaver(bounded_weave_reason(&format!(
+                "hook point {} callback {}#{}{} is not in this jar",
+                site.hook, callback.owner, callback.name, callback.descriptor
+            )))
+        })?;
+    if return_desc(&callback.descriptor) != "V" {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} callback {}#{}{} must return void",
+                site.hook, callback.owner, callback.name, callback.descriptor
+            ),
+        )));
+    }
+    let target_args = descriptor_arguments(site.target_descriptor);
+    let callback_args = descriptor_arguments(&callback.descriptor);
+    let mirrors = callback_args == target_args
+        || (callback_args.len() == target_args.len() + 1
+            && callback_args
+                .last()
+                .is_some_and(|arg| arg == CALLBACK_INFO_DESC)
+            && callback_args[..target_args.len()] == target_args[..]);
+    if !mirrors {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo",
+                site.hook, callback.owner, callback.name, callback.descriptor, site.target_name
+            ),
+        )));
+    }
+    let _ = method;
+    Ok(())
+}
+
+/// The diagnostic a refused game-hook callback registration carries.
+fn game_hook_error(reason: &MixinSkipReason) -> NativeError {
+    match reason.detail() {
+        Some(detail) => NativeError::Metadata(format!("{}: {detail}", reason.label())),
+        None => NativeError::Metadata(reason.label().to_owned()),
+    }
+}
+
 fn bounded_weave_reason(reason: &str) -> String {
     let mut bounded = reason
         .chars()
@@ -20862,6 +24769,7 @@ fn mixin_anchor_sort_key(
     &str,
     Option<&str>,
     Option<u8>,
+    Option<i32>,
     &str,
     &str,
     &str,
@@ -20873,6 +24781,7 @@ fn mixin_anchor_sort_key(
         &plan.at,
         plan.site.as_deref(),
         plan.opcode,
+        plan.shift.map(|shift| shift.by),
         &plan.callback.owner,
         &plan.callback.name,
         &plan.callback.descriptor,
@@ -21054,6 +24963,7 @@ fn mixin_modify_arg_sort_key(
     &str,
     usize,
     Option<usize>,
+    bool,
 ) {
     (
         &plan.target.owner,
@@ -21067,6 +24977,7 @@ fn mixin_modify_arg_sort_key(
         &plan.callback.descriptor,
         plan.index,
         plan.ordinal,
+        plan.slice.is_some(),
     )
 }
 
@@ -21097,6 +25008,44 @@ fn mixin_modify_variable_sort_key(
     )
 }
 
+/// Resolve the bounded `@Slice` a `@ModifyArg` selector counts its call sites
+/// inside.
+///
+/// A nested `@At.slice` wins; otherwise a single `@ModifyArg.slice` applies,
+/// the same default-slice rule [`resolve_injection_modifiers`] uses for
+/// `@Inject`.  More than one annotation slice is ambiguous without the id
+/// vocabulary, so it is a reason instead of a guess.
+fn resolve_modify_arg_slice(
+    anchor: &AtSelector,
+    annotation_slices: &[(Option<String>, Option<String>)],
+) -> Result<Option<SliceBounds>, String> {
+    let inline = bounded_slice_bounds(
+        anchor.slice_from.as_deref(),
+        anchor.slice_to.as_deref(),
+        "@At.slice",
+    )?;
+    let bounds = match inline {
+        Some(bounds) => Some(bounds),
+        None => match annotation_slices {
+            [] => None,
+            [one] => bounded_slice_bounds(one.0.as_deref(), one.1.as_deref(), "@ModifyArg.slice")?,
+            many => {
+                return Err(format!(
+                    "@ModifyArg.slice declares {} slices; the bounded weaver models exactly one",
+                    many.len()
+                ));
+            }
+        },
+    };
+    match bounds {
+        None => Ok(None),
+        Some((from, to)) => Ok(Some(SliceBounds {
+            from: parse_slice_boundary(&from)?,
+            to: parse_slice_boundary(&to)?,
+        })),
+    }
+}
+
 /// Validate one `@ModifyArg` selector and callback, filling `plan` when it is
 /// executable.
 fn modify_arg_plan_reason(
@@ -21104,7 +25053,7 @@ fn modify_arg_plan_reason(
     callback: &MethodRef,
     index: i32,
     cancellable: bool,
-    slices: bool,
+    slice: Option<SliceBounds>,
     plan: &mut MixinModifyArgPlan,
 ) -> Option<String> {
     let label = format!(
@@ -21114,11 +25063,6 @@ fn modify_arg_plan_reason(
     if cancellable {
         return Some(format!(
             "@ModifyArg callback {label} is cancellable; argument modification is not a cancellable injector"
-        ));
-    }
-    if slices {
-        return Some(format!(
-            "@ModifyArg callback {label} declares @Slice; slices are not modeled for argument modification"
         ));
     }
     if anchor.anchor != "INVOKE" {
@@ -21144,6 +25088,7 @@ fn modify_arg_plan_reason(
         ));
     }
     plan.index = usize::try_from(index).unwrap_or_default();
+    plan.slice = slice;
     plan.ordinal = anchor
         .ordinal
         .and_then(|ordinal| usize::try_from(ordinal).ok());
@@ -21320,6 +25265,7 @@ fn anchor_plan(
     anchor: &AtSelector,
     redirect: bool,
     cancellable: bool,
+    shift: Option<ShiftBy>,
 ) -> MixinAnchorPlan {
     let (target_name, target_descriptor) =
         split_injection_method(method_spec).unwrap_or((method_spec, ""));
@@ -21341,6 +25287,7 @@ fn anchor_plan(
         ordinal: anchor.ordinal,
         slice_from: anchor.slice_from.clone(),
         slice_to: anchor.slice_to.clone(),
+        shift,
         redirect,
     }
 }
@@ -21472,13 +25419,10 @@ fn is_bounded_jump_opcode(opcode: u8) -> bool {
 }
 
 /// Resolve one anchor plan's raw selector to the bounded site it names.
+/// Resolve the site one anchor plan names, leaving `@At.ordinal`, `@Slice` and
+/// `shift` to the caller: the load-time weaver applies all three, while the
+/// bounded interpreter selects whole-method sites and refuses them explicitly.
 fn resolve_anchor_site(plan: &MixinAnchorPlan) -> Result<ResolvedAnchor, String> {
-    if plan.slice_from.is_some() || plan.slice_to.is_some() {
-        return Err(format!(
-            "native Mixin @At(\"{}\") anchor does not model @Slice; slices are supported only for HEAD/RETURN/TAIL/INVOKE injection plans",
-            plan.at
-        ));
-    }
     if plan.ordinal.is_some_and(|ordinal| ordinal < 0) {
         return Err(format!(
             "@At.ordinal {} is negative; native anchors use a non-negative site ordinal",
@@ -21565,31 +25509,89 @@ fn resolve_anchor_site(plan: &MixinAnchorPlan) -> Result<ResolvedAnchor, String>
     }
 }
 
-/// Return a stable report-only reason for modifiers that the call-site anchor
-/// runtime cannot apply without changing the selected bytecode operation.
+/// Resolve an `@At(shift = ..., by = ...)` pair to the signed instruction
+/// distance an anchor insert moves.
 ///
-/// `@At(shift = NONE)` is the default no-op and remains executable.  A
-/// non-trivial shift or `by` value is intentionally kept out of the native
-/// anchor set; the bounded weaver currently applies those modifiers only to
-/// `MixinInjectionPlan` INVOKE/HEAD/RETURN/TAIL selectors.
-fn unsupported_anchor_modifiers(anchor: &AtSelector) -> Option<String> {
-    if anchor.slice_from.is_some() || anchor.slice_to.is_some() {
-        return Some(format!(
-            "native Mixin @At(\"{}\") anchor does not model @Slice; slices are supported only for HEAD/RETURN/TAIL/INVOKE injection plans",
+/// `BEFORE by n` names `n` instruction boundaries before the site, `AFTER by n`
+/// `n + 1` after it, and `BY n` its signed amount, the same distances the
+/// bounded weaver already applies to `MixinInjectionPlan` selectors.  Mixin's
+/// default `NONE` is a no-op; an unknown direction, a `by` without a shift and
+/// a distance outside [`weaver::MAX_SHIFT_BY`] are reasons instead of guesses.
+fn anchor_shift(anchor: &AtSelector) -> Result<Option<ShiftBy>, String> {
+    let Some(value) = anchor.shift.as_deref() else {
+        if anchor.by.is_some() {
+            return Err(format!(
+                "@At.by is set without @At.shift on the {} anchor; the bounded weaver only moves an insert for shift = BEFORE, AFTER or BY",
+                anchor.anchor
+            ));
+        }
+        return Ok(None);
+    };
+    let name = value.rsplit('.').next().unwrap_or(value);
+    let bound = i32::from(weaver::MAX_SHIFT_BY);
+    let distance = match name {
+        "NONE" => {
+            if anchor.by.is_some() {
+                return Err(format!(
+                    "@At.shift NONE on the {} anchor ignores @At.by; the bounded weaver only moves an insert for shift = BEFORE, AFTER or BY",
+                    anchor.anchor
+                ));
+            }
+            return Ok(None);
+        }
+        "BEFORE" => -anchor.by.unwrap_or(1),
+        "AFTER" => anchor.by.unwrap_or(1) + 1,
+        "BY" => anchor.by.ok_or_else(|| {
+            format!(
+                "@At.shift BY on the {} anchor needs a @At.by distance",
+                anchor.anchor
+            )
+        })?,
+        other => {
+            return Err(format!(
+                "@At.shift {other:?} on the {} anchor is not a bounded shift; native weaving supports BEFORE, AFTER and BY",
+                anchor.anchor
+            ));
+        }
+    };
+    if !(-bound..=bound).contains(&distance) {
+        return Err(format!(
+            "@At.shift {name} on the {} anchor moves the insert {distance} instruction(s), outside the bounded shift of -{bound}..={bound}",
             anchor.anchor
         ));
     }
-    let shift = anchor
-        .shift
-        .as_deref()
-        .map(|value| value.rsplit('.').next().unwrap_or(value));
-    if anchor.by.is_some() || shift.is_some_and(|value| value != "NONE") {
-        return Some(format!(
-            "native Mixin @At(\"{}\") anchor does not model shift/by; call-site shifts are supported only for INVOKE injection plans",
+    Ok(Some(ShiftBy { by: distance }))
+}
+
+/// The executable modifiers of one anchor selector.
+///
+/// A nested `@Slice` is carried on the plan as written and validated here
+/// against the bounded boundary vocabulary (`HEAD`, `RETURN`, `TAIL`,
+/// `INVOKE:<call site>`) the weaver reads.  A shift is resolved to its signed
+/// distance; a `@Redirect` cannot be shifted, because its replacement bytes
+/// have to stay on the instruction they replace, so that shape stays
+/// report-only.
+fn resolve_anchor_modifiers(
+    anchor: &AtSelector,
+    redirect: bool,
+) -> Result<Option<ShiftBy>, String> {
+    let bounds = bounded_slice_bounds(
+        anchor.slice_from.as_deref(),
+        anchor.slice_to.as_deref(),
+        "@At.slice",
+    )?;
+    if let Some((from, to)) = &bounds {
+        parse_slice_boundary(from)?;
+        parse_slice_boundary(to)?;
+    }
+    let shift = anchor_shift(anchor)?;
+    if redirect && shift.is_some() {
+        return Err(format!(
+            "@Redirect at {} cannot be shifted; its replacement bytes have to stay on the instruction they replace",
             anchor.anchor
         ));
     }
-    None
+    Ok(shift)
 }
 
 /// Whether a callback's parameter list is `base`, or `base` plus one trailing
@@ -22070,7 +26072,7 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     /// A class with one static `m()V` that returns, the smallest shape the
@@ -22454,6 +26456,7 @@ mod tests {
         let mut host = NullHost;
         let runtime = Runtime {
             classes: &BTreeMap::new(),
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -22470,6 +26473,9 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -22477,6 +26483,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
             owner: "java/lang/String".into(),
@@ -22500,6 +26508,7 @@ mod tests {
         let mut host = NullHost;
         let runtime = Runtime {
             classes: &BTreeMap::new(),
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -22513,6 +26522,9 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -22520,6 +26532,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
             owner: "java/lang/String".into(),
@@ -23776,6 +27790,194 @@ modId="minecraft"
         assert!(matches!(error, NativeError::InvalidBranch { .. }));
     }
 
+    /// Runs `f` on a thread with the 2 MiB stack the game's server, render and
+    /// worker threads run with, so a bound proven here holds where jars run.
+    fn on_a_game_thread_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .name("recursion-bound".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn the bounded thread")
+            .join()
+            .expect("the depth bound keeps the recursion on its own stack")
+    }
+
+    /// A jar that recurses without bound is one failed jar, not a process
+    /// abort: the interpreter's frames are Rust frames, and a stack overflow
+    /// cannot be caught by the batch's `catch_unwind`.
+    #[test]
+    fn unbounded_recursion_fails_with_the_depth_bound() {
+        // `static int f(int n) { return f(n); }`
+        let class = ClassFile {
+            name: "demo/Recurse".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::MethodRef { class: 2, nt: 3 },
+                Cp::Class(4),
+                Cp::NameType {
+                    name: 5,
+                    descriptor: 6,
+                },
+                Cp::Utf8("demo/Recurse".into()),
+                Cp::Utf8("f".into()),
+                Cp::Utf8("(I)I".into()),
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "f".into(),
+                descriptor: "(I)I".into(),
+                access: 9,
+                code: Some(vec![0x1a, 0xb8, 0x00, 0x01, 0xac]),
+                max_locals: 1,
+                max_stack: 1,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        on_a_game_thread_stack(move || {
+            let jar = NativeJar::from_classes([class]);
+            let error = jar
+                .invoke_method_with_args(
+                    "demo.Recurse",
+                    "f",
+                    "(I)I",
+                    None,
+                    &[Value::Int(1)],
+                    &mut NullHost,
+                )
+                .expect_err("an unbounded recursion must fail");
+            let text = error.to_string();
+            match error {
+                NativeError::CallDepthExceeded {
+                    class,
+                    method,
+                    limit,
+                } => {
+                    assert_eq!(class, "demo/Recurse");
+                    assert_eq!(method, "f");
+                    assert_eq!(limit, MAX_JAR_CALL_DEPTH);
+                }
+                other => panic!("expected the depth bound, got {other:?}"),
+            }
+            assert!(
+                text.contains(&format!(
+                    "{MAX_JAR_CALL_DEPTH} nested jar frames at demo/Recurse#f"
+                )),
+                "{text}"
+            );
+        });
+    }
+
+    /// The bound leaves a legitimate recursive method alone: a chain just
+    /// under it answers normally.
+    #[test]
+    fn recursion_below_the_bound_still_runs() {
+        // `static int down(int n) { if (n == 0) return 0; return down(n - 1); }`
+        let class = ClassFile {
+            name: "demo/Countdown".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::MethodRef { class: 2, nt: 3 },
+                Cp::Class(4),
+                Cp::NameType {
+                    name: 5,
+                    descriptor: 6,
+                },
+                Cp::Utf8("demo/Countdown".into()),
+                Cp::Utf8("down".into()),
+                Cp::Utf8("(I)I".into()),
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "down".into(),
+                descriptor: "(I)I".into(),
+                access: 9,
+                code: Some(vec![
+                    0x1a, 0x99, 0x00, 0x05, 0x03, 0xac, 0x1a, 0x04, 0x64, 0xb8, 0x00, 0x01, 0xac,
+                ]),
+                max_locals: 1,
+                max_stack: 1,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        let depth = (MAX_JAR_CALL_DEPTH - 4) as i32;
+        let result = on_a_game_thread_stack(move || {
+            NativeJar::from_classes([class])
+                .invoke_method_with_args(
+                    "demo.Countdown",
+                    "down",
+                    "(I)I",
+                    None,
+                    &[Value::Int(depth)],
+                    &mut NullHost,
+                )
+                .unwrap()
+        });
+        assert_eq!(result, Value::Int(0));
+    }
+
+    /// A jar that loops without calling anything still stops at its budget:
+    /// the check also runs inside a frame, not only when a frame is entered.
+    #[test]
+    fn a_jar_that_never_returns_stops_at_its_execution_budget() {
+        // `static void spin() { while (true) {} }`
+        let class = ClassFile {
+            name: "demo/Spin".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![Cp::Empty],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "spin".into(),
+                descriptor: "()V".into(),
+                access: 9,
+                code: Some(vec![0xa7, 0x00, 0x00]),
+                max_locals: 0,
+                max_stack: 0,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        let jar = NativeJar::from_classes([class]);
+        let limit = std::time::Duration::from_millis(5);
+        let budget = ExecutionBudget::within(limit);
+        let started = std::time::Instant::now();
+        let error = jar
+            .execute_with_budget("demo.Spin", Some("spin"), "main", &mut NullHost, &budget)
+            .expect_err("a loop past its budget must fail");
+        assert!(
+            started.elapsed() >= limit,
+            "the budget was honoured, not guessed: {:?}",
+            started.elapsed()
+        );
+        match error {
+            NativeError::ExecutionBudgetExceeded {
+                class,
+                method,
+                budget,
+            } => {
+                assert_eq!(class, "demo/Spin");
+                assert_eq!(method, "spin");
+                assert_eq!(budget, limit);
+            }
+            other => panic!("expected the execution budget, got {other:?}"),
+        }
+    }
+
     #[test]
     fn neoforge_marker_is_discoverable_without_fml() {
         let class = ClassFile {
@@ -23871,6 +28073,324 @@ mandatory = true
                 },
             ]
         );
+    }
+
+    /// A tiny entrypoint class whose one method calls a bounded host method.
+    ///
+    /// `Boolean.valueOf(Z)` is modelled, so the host counts the call: a test can
+    /// tell "the entrypoint ran" from "the class was merely found".
+    fn entrypoint_probe_class(
+        name: &str,
+        super_name: &str,
+        method: &str,
+        access: u16,
+    ) -> ClassFile {
+        ClassFile {
+            name: name.into(),
+            super_name: super_name.into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::Utf8("java/lang/Boolean".into()),
+                Cp::Class(1),
+                Cp::Utf8("valueOf".into()),
+                Cp::Utf8("(Z)Ljava/lang/Boolean;".into()),
+                Cp::NameType {
+                    name: 3,
+                    descriptor: 4,
+                },
+                Cp::MethodRef { class: 2, nt: 5 },
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![
+                entry_only_constructor(),
+                Method {
+                    name: method.into(),
+                    descriptor: "()V".into(),
+                    access,
+                    code: Some(vec![0x04, 0xb8, 0x00, 0x06, 0x57, 0xb1]),
+                    max_stack: 2,
+                    max_locals: 1,
+                    annotations: Vec::new(),
+                },
+            ],
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        }
+    }
+
+    fn entry_only_constructor() -> Method {
+        Method {
+            name: "<init>".into(),
+            descriptor: "()V".into(),
+            access: 1,
+            code: Some(vec![0xb1]),
+            max_stack: 1,
+            max_locals: 1,
+            annotations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kotlin_entrypoint_object_runs_through_the_host() {
+        // fabric-language-kotlin's adapter is what fabric.mod.json names for a
+        // Kotlin `object`; the object compiles to a class whose `onInitialize`
+        // is plain JVM bytecode, so the bounded host runs it with the default
+        // invocation contract and the jar needs no loader.
+        let jar = NativeJar {
+            classes: BTreeMap::from([(
+                "demo/Main".to_owned(),
+                entrypoint_probe_class("demo/Main", "java/lang/Object", "onInitialize", 1),
+            )]),
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: Some("kotlin".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        // The declaration stays readable from metadata for ledger rows even
+        // though discovery resolves it.
+        assert_eq!(
+            jar.declared_entrypoint_adapter("main", "demo.Main"),
+            Some("kotlin")
+        );
+        let entries = jar.discover_entrypoints("main");
+        assert_eq!(
+            entries[0].adapter, None,
+            "the host implements the kotlin adapter itself"
+        );
+        let mut host = StdHost::new();
+        let report = jar
+            .execute("demo.Main", None, "main", &mut host)
+            .expect("a Kotlin object's onInitialize is plain bytecode");
+        assert_eq!(report.method, "onInitialize");
+        assert_eq!(report.calls, 1, "the object entrypoint ran");
+    }
+
+    #[test]
+    fn kotlin_entrypoint_without_its_class_reports_a_native_gap() {
+        // A jar can declare an adapter entrypoint it does not package. Nothing
+        // can run that (a loader reads the same metadata), so the refusal is a
+        // precise verdict rather than a crash or a generic adapter message.
+        let jar = NativeJar {
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Missing".into(),
+                    method: None,
+                    adapter: Some("kotlin".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let entries = jar.discover_entrypoints("main");
+        assert_eq!(entries[0].adapter, None);
+        let error = jar
+            .execute("demo.Missing", None, "main", &mut StdHost::new())
+            .expect_err("the class is not in the jar");
+        let skip = error.entrypoint_skip().expect("a named verdict");
+        assert_eq!(skip, EntrypointSkip::MissingClass);
+        assert_eq!(skip.label(), "native-gap");
+        assert!(skip.reason().contains("does not contain"), "{skip:?}");
+    }
+
+    #[test]
+    fn kotlin_runtime_reach_routes_to_the_loader_vocabulary() {
+        // The Kotlin standard library ships as its own mod jar; the native path
+        // links one jar at a time, so an entrypoint that reaches it is a job
+        // for a loader that loads fabric-language-kotlin.
+        let missing = NativeError::MissingMethod(
+            "kotlin/jvm/internal/Intrinsics#checkNotNullParameter(Ljava/lang/Object;Ljava/lang/String;)V"
+                .into(),
+        );
+        assert_eq!(
+            missing.entrypoint_skip(),
+            Some(EntrypointSkip::KotlinRuntime)
+        );
+        assert_eq!(missing.entrypoint_skip().unwrap().label(), "needs-loader");
+        let host_call = NativeError::UnknownHostCall(MethodRef {
+            owner: "kotlin/jvm/internal/Intrinsics".into(),
+            name: "stringPlus".into(),
+            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        });
+        assert_eq!(
+            host_call.entrypoint_skip(),
+            Some(EntrypointSkip::KotlinRuntime)
+        );
+        // A jar's own missing member is not a Kotlin runtime question.
+        let theirs = NativeError::MissingMethod("demo/Main#onInitialize()V".into());
+        assert_eq!(theirs.entrypoint_skip(), None);
+    }
+
+    #[test]
+    fn unmodelled_entrypoint_adapter_keeps_the_refusal() {
+        // An adapter the native path does not implement stays on the entry, so
+        // no caller mistakes it for a default invocation, and its verdict is
+        // the ledger's `native-gap`.
+        let jar = NativeJar {
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: Some("some-language-adapter".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let entries = jar.discover_entrypoints("main");
+        let adapter = EntrypointAdapter::of(&entries[0]);
+        assert_eq!(adapter, EntrypointAdapter::Unsupported);
+        assert!(!adapter.is_native());
+        assert_eq!(entries[0].adapter.as_deref(), Some("some-language-adapter"));
+        assert_eq!(EntrypointSkip::UnsupportedAdapter.label(), "native-gap");
+        // Fabric's own `default` adapter is the default contract, not a gap.
+        let default_entry = Entrypoint {
+            class: "demo.Main".into(),
+            method: None,
+            adapter: Some("default".into()),
+        };
+        assert!(EntrypointAdapter::of(&default_entry).is_native());
+    }
+
+    #[test]
+    fn entrypoint_inherits_initialize_from_a_base_class() {
+        // DistantHorizons declares one class under both Fabric roles and
+        // inherits `onInitializeClient`/`onInitializeServer` from an abstract
+        // base in the same jar. The JVM dispatches to the declaring class; a
+        // lookup on the entry class alone refuses a method the jar really has.
+        let jar = NativeJar {
+            classes: BTreeMap::from([
+                (
+                    "demo/Base".to_owned(),
+                    entrypoint_probe_class(
+                        "demo/Base",
+                        "java/lang/Object",
+                        "onInitializeServer",
+                        1,
+                    ),
+                ),
+                (
+                    "demo/Main".to_owned(),
+                    ClassFile {
+                        name: "demo/Main".into(),
+                        super_name: "demo/Base".into(),
+                        pool: vec![Cp::Empty],
+                        bootstrap_methods: Vec::new(),
+                        fields: Vec::new(),
+                        methods: vec![entry_only_constructor()],
+                        annotations: Vec::new(),
+                        raw: Vec::new(),
+                    },
+                ),
+            ]),
+            fabric_entrypoints: BTreeMap::from([(
+                "server".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: None,
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let mut host = StdHost::new();
+        let report = jar
+            .execute("demo.Main", None, "server", &mut host)
+            .expect("an inherited onInitializeServer runs");
+        assert_eq!(report.class, "demo.Main");
+        assert_eq!(report.method, "onInitializeServer");
+        assert_eq!(report.calls, 1);
+    }
+
+    #[test]
+    fn wrapper_bounds_and_boxed_booleans_decode() {
+        let mut host = StdHost::new();
+        let statics = [
+            ("java/lang/Integer", "MAX_VALUE", "I", Value::Int(i32::MAX)),
+            ("java/lang/Integer", "MIN_VALUE", "I", Value::Int(i32::MIN)),
+            ("java/lang/Integer", "SIZE", "I", Value::Int(32)),
+            ("java/lang/Short", "MIN_VALUE", "S", Value::Int(-32768)),
+            ("java/lang/Byte", "MAX_VALUE", "B", Value::Int(127)),
+            ("java/lang/Character", "MAX_VALUE", "C", Value::Int(0xffff)),
+            ("java/lang/Character", "MIN_VALUE", "C", Value::Int(0)),
+        ];
+        for (owner, name, descriptor, expected) in statics {
+            let field = MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            };
+            assert_eq!(host.get_static(&field).unwrap(), expected, "{owner}#{name}");
+        }
+        // `Boolean.TRUE`/`FALSE` answer the same boxed marker `Boolean.valueOf`
+        // does, so `booleanValue`/`equals` decode them.
+        let true_field = MethodRef {
+            owner: "java/lang/Boolean".into(),
+            name: "TRUE".into(),
+            descriptor: "Ljava/lang/Boolean;".into(),
+        };
+        let true_value = host.get_static(&true_field).unwrap();
+        assert_eq!(true_value, Value::Ref(Some("boolean:true".into())));
+        let boolean_value = MethodRef {
+            owner: "java/lang/Boolean".into(),
+            name: "booleanValue".into(),
+            descriptor: "()Z".into(),
+        };
+        assert_eq!(
+            host.invoke_instance(&boolean_value, &true_value, &[])
+                .unwrap(),
+            Value::Int(1)
+        );
+        // The bare marker written before the two forms converged keeps working.
+        assert_eq!(
+            host.invoke_instance(&boolean_value, &Value::Ref(Some("true".into())), &[])
+                .unwrap(),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn pack_type_values_answer_their_constants() {
+        // `PackType.values()` is how a mod registers a resource pack for each
+        // side; an unknown enum answered null and the following `arraylength`
+        // refused the jar.
+        assert_eq!(
+            game_enum_constants("net/minecraft/server/packs/PackType"),
+            Some(&["CLIENT_RESOURCES", "SERVER_DATA"][..])
+        );
+    }
+
+    #[test]
+    fn unmodelled_array_returns_stay_non_null() {
+        // Java never answers null from a method declared to return an array,
+        // and a null costs the caller its very next `arraylength`. A class the
+        // jar does not ship therefore answers an empty owned array; other
+        // unmodelled returns keep their neutral value.
+        let mut host = StdHost::new();
+        let array_call = MethodRef {
+            owner: "some/library/Api".into(),
+            name: "values".into(),
+            descriptor: "()[Lsome/library/T;".into(),
+        };
+        assert_eq!(
+            host.unknown_host_call(&array_call).unwrap(),
+            Value::Ref(Some("array/empty".into()))
+        );
+        let reference_call = MethodRef {
+            owner: "some/library/Api".into(),
+            name: "create".into(),
+            descriptor: "()Lsome/library/T;".into(),
+        };
+        assert_eq!(
+            host.unknown_host_call(&reference_call).unwrap(),
+            Value::Ref(None)
+        );
+        assert_eq!(host.unknown_host_calls().len(), 2);
     }
 
     #[test]
@@ -28727,6 +33247,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -28740,6 +33261,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -28747,6 +33271,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let first = runtime.new_object("demo/Fields");
         let second = runtime.new_object("demo/Fields");
@@ -28875,6 +33401,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -28888,6 +33415,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -28895,6 +33425,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let new_instance = MethodRef {
             owner: "java/lang/reflect/Array".into(),
@@ -29076,6 +33608,7 @@ mandatory = true
             .unwrap();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -29089,6 +33622,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -29096,6 +33632,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let stream = runtime
             .invoke_stream(
@@ -29373,6 +33911,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -29394,6 +33933,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -29401,6 +33943,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let lookup = MethodRef {
             owner: "java/lang/Class".into(),
@@ -29544,9 +34088,50 @@ mandatory = true
                 .unwrap(),
             Value::Ref(Some("demo/Reflective".into()))
         );
+        // The JVM throws for an absent class; a platform probe catches the
+        // exception and tries its next loader.
+        let missing = runtime
+            .class_for_name(&[Value::Ref(Some("demo.Missing".into()))])
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            NativeError::UncaughtException { class, .. }
+                if class == "java/lang/ClassNotFoundException"
+        ));
+    }
+
+    #[test]
+    fn fabric_custom_values_come_from_the_jars_own_metadata() {
+        let mut host = StdHost::new().with_resource_bytes(
+            "fabric.mod.json",
+            br#"{"id":"demo","version":"1.0","custom":{"commit":"abcdef0123456789","ci":true}}"#
+                .to_vec(),
+        );
+        let metadata = Value::Ref(Some("metadata/demo/1.0".into()));
+        let get = MethodRef {
+            owner: "net/fabricmc/loader/api/metadata/ModMetadata".into(),
+            name: "getCustomValue".into(),
+            descriptor: "(Ljava/lang/String;)Lnet/fabricmc/loader/api/metadata/CustomValue;".into(),
+        };
+        let commit = host
+            .invoke_instance(&get, &metadata, &[Value::Ref(Some("commit".into()))])
+            .unwrap();
         assert_eq!(
-            runtime
-                .class_for_name(&[Value::Ref(Some("demo.Missing".into()))])
+            commit,
+            Value::Ref(Some("custom-value/abcdef0123456789".into()))
+        );
+        let text = MethodRef {
+            owner: "net/fabricmc/loader/api/metadata/CustomValue".into(),
+            name: "getAsString".into(),
+            descriptor: "()Ljava/lang/String;".into(),
+        };
+        assert_eq!(
+            host.invoke_instance(&text, &commit, &[]).unwrap(),
+            Value::Ref(Some("abcdef0123456789".into()))
+        );
+        // A key the document does not declare stays null, as Fabric answers.
+        assert_eq!(
+            host.invoke_instance(&get, &metadata, &[Value::Ref(Some("absent".into()))])
                 .unwrap(),
             Value::Ref(None)
         );
@@ -29606,6 +34191,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -29619,6 +34205,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -29626,6 +34215,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let class = Value::Ref(Some("demo/ReflectiveFields".into()));
         let declared_fields = runtime
@@ -31006,31 +35597,665 @@ mandatory = true
         assert_eq!(game_enum_constants("demo/Unknown"), None);
     }
 
+    /// A scratch tree for a test that has to run `javac`.
+    fn scratch_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("horizon-native-java-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    /// Compile `sources` into `root/<name>/classes`, answering the classes
+    /// directory and every parsed class. `None` when no JDK is installed, so a
+    /// checkout without one still runs the rest of the suite. `classpath`
+    /// names directories an earlier call produced, which is how one jar's
+    /// sources compile against another jar's classes.
+    fn compile_java_classes(
+        root: &Path,
+        name: &str,
+        sources: &[(&str, &str)],
+        classpath: &[&Path],
+    ) -> Option<(PathBuf, Vec<ClassFile>)> {
+        let javac = javac()?;
+        let base = root.join(name);
+        let classes = base.join("classes");
+        std::fs::create_dir_all(&classes).unwrap();
+        let mut paths = Vec::new();
+        for (relative, body) in sources {
+            let path = base.join("src").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            paths.push(path);
+        }
+        let mut command = Command::new(javac);
+        command.arg("--release").arg("17").arg("-d").arg(&classes);
+        if !classpath.is_empty() {
+            command
+                .arg("-classpath")
+                .arg(std::env::join_paths(classpath).unwrap());
+        }
+        let status = command.args(&paths).status().unwrap();
+        assert!(status.success(), "javac failed for {name}");
+        Some((classes.clone(), class_files_under(&classes)))
+    }
+
+    fn class_files_under(root: &Path) -> Vec<ClassFile> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "class")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(root, &mut paths);
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| ClassFile::parse(&std::fs::read(path).unwrap()).unwrap())
+            .collect()
+    }
+
+    /// One library jar and one mod jar, compiled separately: the mod's bytecode
+    /// names the library's class, and only the host's linked table makes that
+    /// symbol resolve.
+    const CROSS_JAR_LIBRARY: &[(&str, &str)] = &[(
+        "lib/Config.java",
+        "package lib;\n\
+         public final class Config {\n\
+             public static String name = \"linked\";\n\
+             public static int number() { return 41; }\n\
+         }\n",
+    )];
+
+    const CROSS_JAR_MOD: &[(&str, &str)] = &[(
+        "demo/Entry.java",
+        "package demo;\n\
+         import lib.Config;\n\
+         public class Entry {\n\
+             public static String probe() {\n\
+                 boolean found;\n\
+                 try {\n\
+                     found = Class.forName(\"lib.Config\") != null;\n\
+                 } catch (ClassNotFoundException e) {\n\
+                     found = false;\n\
+                 }\n\
+                 return Config.name + \"/\" + Config.number() + \"/\" + found;\n\
+             }\n\
+             public static void onInitialize() {\n\
+                 String seen = probe();\n\
+                 if (seen.startsWith(\"null\")) {\n\
+                     throw new IllegalStateException(seen);\n\
+                 }\n\
+             }\n\
+         }\n",
+    )];
+
+    #[test]
+    fn a_linked_jar_supplies_another_jars_static_symbols() {
+        let root = scratch_root("cross-jar-static");
+        let Some((library_dir, library)) =
+            compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[])
+        else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(&root, "app", CROSS_JAR_MOD, &[&library_dir])
+        else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let probe = |host: &mut StdHost| {
+            entry
+                .invoke_method("demo/Entry", "probe", "()Ljava/lang/String;", None, host)
+                .unwrap()
+        };
+
+        // Without a linked jar the library is foreign: a static field reads
+        // null, a static call answers the descriptor's default, and
+        // `Class.forName` does not see the class. This is the corpus symptom
+        // the linked table removes.
+        let mut unlinked = StdHost::new();
+        assert_eq!(
+            probe(&mut unlinked),
+            Value::Ref(Some("null/0/false".into()))
+        );
+        // The entrypoint path sees the same values, and the fixture turns them
+        // into a failure a loader would report.
+        let unlinked_error = entry
+            .execute("demo/Entry", None, "main", &mut unlinked)
+            .expect_err("the unlinked run must not see the library");
+        assert!(
+            unlinked_error
+                .to_string()
+                .contains("java/lang/IllegalStateException: null/0/false"),
+            "{unlinked_error}"
+        );
+
+        let mut linked = StdHost::new();
+        assert_eq!(linked.link_classes("lib", library).unwrap(), 1);
+        assert_eq!(linked.linked_classes().class_count(), 1);
+        assert_eq!(
+            linked.linked_classes().jar_ids().collect::<Vec<_>>(),
+            ["lib"]
+        );
+        assert_eq!(
+            probe(&mut linked),
+            Value::Ref(Some("linked/41/true".into()))
+        );
+        entry
+            .execute("demo/Entry", None, "main", &mut linked)
+            .expect("the linked library must satisfy the entrypoint");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_linked_jar_is_shared_by_copy_and_still_links() {
+        // A caller that runs many jars builds one table and shares it, so the
+        // class bytes are parsed and copied once.
+        let root = scratch_root("cross-jar-shared");
+        let Some((_, library)) = compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[]) else {
+            return;
+        };
+        let mut table = LinkedClassTable::default();
+        assert_eq!(table.link_classes("lib", library).unwrap(), 1);
+        let table = Arc::new(table);
+        let first = StdHost::new().with_linked_class_table(Arc::clone(&table));
+        let second = StdHost::new().with_linked_class_table(Arc::clone(&table));
+        assert_eq!(table.class_count(), 1);
+        // Both hosts answer from the same table and neither owns a second copy.
+        assert_eq!(Arc::strong_count(&table), 3);
+        assert_eq!(first.linked_classes().class_count(), 1);
+        assert_eq!(second.linked_classes().class_count(), 1);
+        drop(first);
+        drop(second);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_linked_table_bounds_its_jars_and_refuses_repeats() {
+        let mut table = LinkedClassTable::default();
+        let class = ClassFile::parse(&weavable_class_bytes("demo/One")).unwrap();
+        assert_eq!(
+            table.link_classes("first", [class.clone()]).unwrap(),
+            1,
+            "a new jar adds its names"
+        );
+        assert_eq!(
+            table.link_classes("second", [class]).unwrap(),
+            0,
+            "a name another jar supplied keeps the first jar's class"
+        );
+        assert_eq!(table.class_count(), 1);
+        let repeat = table
+            .link_classes("first", Vec::new())
+            .expect_err("one jar identity cannot be registered twice");
+        assert!(
+            repeat.to_string().contains("already registered"),
+            "{repeat}"
+        );
+
+        let mut full = LinkedClassTable::default();
+        for index in 0..LinkedClassTable::MAX_JARS {
+            full.link_classes(format!("jar-{index}"), Vec::new())
+                .unwrap();
+        }
+        let overflow = full
+            .link_classes("one-too-many", Vec::new())
+            .expect_err("the jar bound must hold");
+        assert!(overflow.to_string().contains("256 jars"), "{overflow}");
+        assert_eq!(full.jar_count(), LinkedClassTable::MAX_JARS);
+    }
+
+    #[test]
+    fn a_linked_jar_brings_its_service_providers() {
+        let path = std::env::temp_dir().join(format!(
+            "horizon-native-java-linked-services-{}.jar",
+            std::process::id()
+        ));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("META-INF/services/demo.Service", options)
+            .unwrap();
+        zip.write_all(b"lib/Provider\nlib/Other # the rest of the line is a comment\n")
+            .unwrap();
+        zip.finish().unwrap();
+        let jar = NativeJar::from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let mut host = StdHost::new();
+        host.link_jar("lib", &jar).unwrap();
+        // Code the interpreter runs from the link asks `ServiceLoader` for the
+        // providers its class path declares; the host answers the linked jar's
+        // own `META-INF/services` rows and still never scans a process
+        // class path.
+        assert_eq!(
+            Host::service_providers(&host, "demo/Service"),
+            ["lib/Provider", "lib/Other"]
+        );
+        assert!(
+            Host::service_providers(&host, "demo/Unknown").is_empty(),
+            "an unseeded service keeps its empty answer"
+        );
+        assert_eq!(host.linked_classes().provider_count(), 2);
+        assert_eq!(
+            host.linked_classes().service_providers("demo/Service"),
+            ["lib/Provider", "lib/Other"]
+        );
+    }
+
+    /// A `switch` over an enum from another jar makes javac emit a synthetic
+    /// `$SwitchMap` holder class whose `<clinit>` sizes the map from the
+    /// library enum's `values()` and indexes it by `ordinal()`.
+    #[test]
+    fn a_switch_map_over_a_linked_enum_initialises_from_the_library() {
+        let root = scratch_root("cross-jar-switch");
+        let Some((library_dir, library)) = compile_java_classes(
+            &root,
+            "lib",
+            &[(
+                "lib/Color.java",
+                "package lib;\npublic enum Color { RED, GREEN, BLUE }\n",
+            )],
+            &[],
+        ) else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[(
+                "demo/Entry.java",
+                "package demo;\n\
+                 public class Entry {\n\
+                     public static String probe() {\n\
+                         switch (lib.Color.GREEN) {\n\
+                             case RED: return \"red\";\n\
+                             case GREEN: return \"green\";\n\
+                             default: return \"other\";\n\
+                         }\n\
+                     }\n\
+                 }\n",
+            )],
+            &[&library_dir],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        // The synthetic holder is part of the mod jar, so the switch itself is
+        // local; only the enum it maps lives in the library.
+        let mut unlinked = StdHost::new();
+        let unlinked_error = entry
+            .invoke_method(
+                "demo/Entry",
+                "probe",
+                "()Ljava/lang/String;",
+                None,
+                &mut unlinked,
+            )
+            .expect_err("the map cannot be sized without the enum's values");
+        // The unmodelled `values()` answers an empty array, so the synthetic
+        // `$SwitchMap` store is out of bounds; the holder's `try` only catches
+        // `NoSuchFieldError`, so the throw leaves the invocation as the JDK
+        // exception it is.
+        assert!(
+            unlinked_error
+                .to_string()
+                .contains("ArrayIndexOutOfBoundsException"),
+            "{unlinked_error}"
+        );
+
+        let mut linked = StdHost::new();
+        linked.link_classes("lib", library).unwrap();
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "probe",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut linked
+                )
+                .unwrap(),
+            Value::Ref(Some("green".into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn class_get_interfaces_answers_from_the_class_model() {
+        let root = scratch_root("class-interfaces");
+        let Some((library_dir, library)) = compile_java_classes(
+            &root,
+            "lib",
+            &[
+                (
+                    "lib/Marker.java",
+                    "package lib;\npublic interface Marker {}\n",
+                ),
+                (
+                    "lib/Linked.java",
+                    "package lib;\npublic class Linked implements Marker {}\n",
+                ),
+            ],
+            &[],
+        ) else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[
+                (
+                    "demo/Alpha.java",
+                    "package demo;\npublic interface Alpha {}\n",
+                ),
+                (
+                    "demo/Beta.java",
+                    "package demo;\npublic interface Beta {}\n",
+                ),
+                (
+                    "demo/Impl.java",
+                    "package demo;\npublic class Impl implements Alpha, Beta {}\n",
+                ),
+                (
+                    "demo/Entry.java",
+                    "package demo;\n\
+                     public class Entry {\n\
+                         public static String own() {\n\
+                             Class<?>[] direct = Impl.class.getInterfaces();\n\
+                             return direct.length + \":\" + direct[0].getName()\n\
+                                 + \":\" + direct[1].getName();\n\
+                         }\n\
+                         public static String linked() throws Exception {\n\
+                             Class<?>[] direct = Class.forName(\"lib.Linked\").getInterfaces();\n\
+                             return direct.length + \":\" + direct[0].getName();\n\
+                         }\n\
+                     }\n",
+                ),
+            ],
+            &[&library_dir],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let mut host = StdHost::new();
+        host.link_classes("lib", library).unwrap();
+        assert_eq!(
+            entry
+                .invoke_method("demo/Entry", "own", "()Ljava/lang/String;", None, &mut host)
+                .unwrap(),
+            Value::Ref(Some("2:demo.Alpha:demo.Beta".into()))
+        );
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "linked",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut host
+                )
+                .unwrap(),
+            Value::Ref(Some("1:lib.Marker".into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn class_file_keeps_declared_interfaces_in_class_file_order() {
+        let root = scratch_root("interface-order");
+        let Some((_, classes)) = compile_java_classes(
+            &root,
+            "app",
+            &[
+                (
+                    "demo/Alpha.java",
+                    "package demo;\npublic interface Alpha {}\n",
+                ),
+                (
+                    "demo/Beta.java",
+                    "package demo;\npublic interface Beta {}\n",
+                ),
+                (
+                    "demo/Impl.java",
+                    "package demo;\npublic class Impl implements Alpha, Beta {}\n",
+                ),
+                ("demo/Plain.java", "package demo;\npublic class Plain {}\n"),
+            ],
+            &[],
+        ) else {
+            return;
+        };
+        let by_name = |name: &str| {
+            classes
+                .iter()
+                .find(|class| class.name == name)
+                .unwrap()
+                .interface_names()
+        };
+        assert_eq!(by_name("demo/Impl"), vec!["demo/Alpha", "demo/Beta"]);
+        assert!(by_name("demo/Plain").is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn array_bounds_errors_are_catchable_jdk_exceptions() {
+        let root = scratch_root("array-bounds");
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[(
+                "demo/Entry.java",
+                "package demo;\n\
+                 public class Entry {\n\
+                     public static int caughtByType() {\n\
+                         int[] values = new int[2];\n\
+                         try { return values[5]; }\n\
+                         catch (ArrayIndexOutOfBoundsException e) { return 7; }\n\
+                     }\n\
+                     public static int caughtBySupertype() {\n\
+                         int[] values = new int[2];\n\
+                         try { values[3] = 1; return 0; }\n\
+                         catch (IndexOutOfBoundsException e) { return 8; }\n\
+                     }\n\
+                     public static String message() {\n\
+                         int[] values = new int[2];\n\
+                         try { return \"\" + values[4]; }\n\
+                         catch (RuntimeException e) { return e.getMessage(); }\n\
+                     }\n\
+                     public static int uncaught() {\n\
+                         int[] values = new int[2];\n\
+                         return values[-1];\n\
+                     }\n\
+                 }\n",
+            )],
+            &[],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let mut host = StdHost::new();
+        let call = |name: &str, host: &mut StdHost| {
+            entry.invoke_method("demo/Entry", name, "()I", None, host)
+        };
+        assert_eq!(call("caughtByType", &mut host).unwrap(), Value::Int(7));
+        assert_eq!(call("caughtBySupertype", &mut host).unwrap(), Value::Int(8));
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "message",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut host
+                )
+                .unwrap(),
+            Value::Ref(Some("Index 4 out of bounds for length 2".into()))
+        );
+        match call("uncaught", &mut host) {
+            Err(NativeError::UncaughtException { class, message, .. }) => {
+                assert_eq!(class, "java/lang/ArrayIndexOutOfBoundsException");
+                assert_eq!(
+                    message.as_deref(),
+                    Some("Index -1 out of bounds for length 2")
+                );
+            }
+            other => panic!("uncaught bounds error reported {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The class path a loader gives the jars of one pack: every jar in
+    /// `root`, keyed by file name.
+    fn pack_class_table(root: &Path) -> LinkedClassTable {
+        let mut table = LinkedClassTable::default();
+        let mut jars = std::fs::read_dir(root)
+            .expect("list the pack")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+            .collect::<Vec<_>>();
+        jars.sort();
+        for path in jars {
+            let id = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Ok(jar) = NativeJar::from_path(&path) else {
+                eprintln!("skipped {id}: the jar could not be read");
+                continue;
+            };
+            // A pack past the table's bound is one this probe cannot
+            // represent; the bound itself has a unit test.
+            if let Err(error) = table.link_jar(id.clone(), &jar) {
+                eprintln!("skipped {id}: {error}");
+            }
+        }
+        table
+    }
+
+    /// Run the corpus rows of one real mod pack twice: alone, then with every
+    /// other jar in the directory linked, which is the class path a loader
+    /// gives them. This is the refused-row check for the cross-jar bucket; the
+    /// corpus lives outside this repository, so the paths come from the
+    /// environment and the test is ignored by default. `HORIZON_JAVA_CORPUS_JAR`
+    /// narrows the run to one row.
+    ///
+    /// ```sh
+    /// HORIZON_JAVA_CORPUS_DIR=~/horizon-corpus/corpus-xl     /// HORIZON_JAVA_CORPUS_KIND=client     /// cargo test -p horizon-native-java --lib -- --ignored corpus_rows_link --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads a real mod pack outside the repository"]
+    fn corpus_rows_link_the_library_jars_beside_them() {
+        let Ok(dir) = std::env::var("HORIZON_JAVA_CORPUS_DIR") else {
+            eprintln!(
+                "skipping: set HORIZON_JAVA_CORPUS_DIR (and optionally HORIZON_JAVA_CORPUS_JAR)"
+            );
+            return;
+        };
+        let root = PathBuf::from(dir);
+        let kind = std::env::var("HORIZON_JAVA_CORPUS_KIND").unwrap_or_else(|_| "client".into());
+        let only = std::env::var("HORIZON_JAVA_CORPUS_JAR").ok();
+        let budget = ExecutionBudget::within(std::time::Duration::from_secs(60));
+        // One table: a loader hands every row the same class path, and parsing
+        // the directory once keeps a pack-sized report quick.
+        let shared = Arc::new(pack_class_table(&root));
+        let mut rows = std::fs::read_dir(&root)
+            .expect("list the pack")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+            .filter(|path| {
+                only.as_deref()
+                    .is_none_or(|only| path.file_name() == Some(only.as_ref()))
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        let mut ran = 0_usize;
+        let mut moved = 0_usize;
+        for path in rows {
+            let Ok(jar) = NativeJar::from_path(&path) else {
+                continue;
+            };
+            let Some(entry) = jar.discover_entrypoints(&kind).into_iter().next() else {
+                continue;
+            };
+            if entry.adapter.is_some() {
+                continue;
+            }
+            let run = |linked: Option<Arc<LinkedClassTable>>| {
+                let mut host = jar.seed_host(
+                    StdHost::new()
+                        .with_environment_type(if kind == "client" { "CLIENT" } else { "SERVER" })
+                        .with_linked_class_table(linked.unwrap_or_default()),
+                );
+                jar.execute_with_budget(
+                    &entry.class,
+                    entry.method.as_deref(),
+                    &kind,
+                    &mut host,
+                    &budget,
+                )
+                .map(|report| report.calls)
+            };
+            let unlinked = run(None);
+            let linked = run(Some(Arc::clone(&shared)));
+            let outcome = |result: &Result<usize, NativeError>| match result {
+                Ok(calls) => format!("ok ({calls} host calls)"),
+                Err(error) => bounded_weave_reason(&error.to_string()),
+            };
+            ran += 1;
+            if format!("{:?}", unlinked) != format!("{:?}", linked) {
+                moved += 1;
+            }
+            println!(
+                "{} [{kind}] | unlinked: {} | linked: {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                outcome(&unlinked),
+                outcome(&linked)
+            );
+        }
+        eprintln!(
+            "{ran} row(s) ran, {moved} changed with {} linked jar(s)",
+            shared.jar_count()
+        );
+    }
+
     #[test]
     fn exception_catch_types_walk_the_bounded_jdk_hierarchy() {
         let classes = BTreeMap::new();
+        let linked = LinkedClassTable::default();
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/Exception"
         ));
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/RuntimeException"
         ));
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/Throwable"
         ));
         assert!(!exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/io/IOException"
         ));
         assert!(!exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/IllegalStateException",
             "java/lang/IllegalArgumentException"
         ));
@@ -31452,6 +36677,7 @@ mandatory = true
             ordinal: None,
             slice_from: None,
             slice_to: None,
+            shift: None,
             redirect: false,
         };
 
@@ -31476,36 +36702,163 @@ mandatory = true
         assert!(resolve_anchor_site(&plan("JUMP", Some("not-an-offset"), None)).is_err());
         assert!(resolve_anchor_site(&plan("JUMP", None, Some(0x2a))).is_err());
 
+        // `@Slice` is a modifier, not part of the site: the load-time weaver
+        // applies it, and the interpreter refuses it where it executes.
         let mut sliced = plan("FIELD", Some("#count:I"), None);
         sliced.slice_from = Some("HEAD".into());
         sliced.slice_to = Some("RETURN".into());
-        let error = resolve_anchor_site(&sliced).expect_err("anchor slices stay report-only");
-        assert!(error.contains("does not model @Slice"));
+        assert_eq!(
+            resolve_anchor_site(&sliced).unwrap(),
+            ResolvedAnchor::Field(parse_field_selector("#count:I").unwrap())
+        );
     }
 
     #[test]
-    fn anchor_modifier_diagnostics_keep_noop_shift_executable() {
-        let selector = AtSelector {
-            anchor: "FIELD".into(),
+    fn anchor_modifiers_resolve_slice_and_shift_distances() {
+        let selector = |anchor: &str, shift: Option<&str>, by: Option<i32>| AtSelector {
+            anchor: anchor.into(),
             target: Some("#count:I".into()),
             opcode: None,
             ordinal: None,
-            shift: Some("NONE".into()),
-            by: None,
+            shift: shift.map(str::to_owned),
+            by,
             slice_from: None,
             slice_to: None,
         };
-        assert!(unsupported_anchor_modifiers(&selector).is_none());
+        let bounded = |shift| Some(ShiftBy { by: shift });
 
-        let mut shifted = selector.clone();
-        shifted.shift = Some("AFTER".into());
-        let error = unsupported_anchor_modifiers(&shifted).expect("shift must be reported");
-        assert!(error.contains("does not model shift/by"));
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", None, None), false),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("NONE"), None), false),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("BEFORE"), None), false),
+            Ok(bounded(-1))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), None), false),
+            Ok(bounded(2))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), Some(2)), false),
+            Ok(bounded(3))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("JUMP", Some("BY"), Some(-3)), false),
+            Ok(bounded(-3))
+        );
 
-        shifted.shift = None;
-        shifted.by = Some(2);
-        let error = unsupported_anchor_modifiers(&shifted).expect("by must be reported");
-        assert!(error.contains("does not model shift/by"));
+        // A shift outside the bounded distance, an unknown direction and a
+        // `by` without a shift are reasons, not silent no-ops.
+        assert!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), Some(8)), false).is_err()
+        );
+        assert!(resolve_anchor_modifiers(&selector("FIELD", Some("BY"), Some(99)), false).is_err());
+        assert!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("SOMEWHERE"), None), false).is_err()
+        );
+        assert!(resolve_anchor_modifiers(&selector("FIELD", None, Some(2)), false).is_err());
+        // A redirect's replacement bytes have to stay on the instruction.
+        assert!(resolve_anchor_modifiers(&selector("FIELD", Some("BEFORE"), None), true).is_err());
+
+        // Anchors accept the same bounded `@Slice` vocabulary as injections.
+        let mut sliced = selector("FIELD", None, None);
+        sliced.slice_from = Some("HEAD".into());
+        sliced.slice_to = Some("RETURN".into());
+        assert_eq!(resolve_anchor_modifiers(&sliced, false), Ok(None));
+        sliced.slice_to = Some("INVOKE:Ldemo/Probe;mark(Ljava/lang/String;I)V".into());
+        assert_eq!(resolve_anchor_modifiers(&sliced, false), Ok(None));
+        sliced.slice_to = Some("STORE".into());
+        assert!(resolve_anchor_modifiers(&sliced, false).is_err());
+        sliced.slice_to = None;
+        assert!(resolve_anchor_modifiers(&sliced, false).is_err());
+    }
+
+    #[test]
+    fn anchor_plan_shift_reaches_the_anchor_request() {
+        let plan = MixinAnchorPlan {
+            target: MethodRef {
+                owner: "demo/Target".into(),
+                name: "run".into(),
+                descriptor: "()V".into(),
+            },
+            callback: MethodRef {
+                owner: "demo/Mixin".into(),
+                name: "hook".into(),
+                descriptor: "()V".into(),
+            },
+            at: "FIELD".into(),
+            site: Some("#count:I".into()),
+            opcode: None,
+            cancellable: false,
+            ordinal: None,
+            slice_from: Some("HEAD".into()),
+            slice_to: Some("RETURN".into()),
+            shift: Some(ShiftBy { by: 2 }),
+            redirect: false,
+        };
+        let request = weaver::AnchorRequest::from_plan(&plan).expect("a bounded plan");
+        assert_eq!(request.shift, Some(ShiftBy { by: 2 }));
+        assert_eq!(
+            request.slice,
+            Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Return,
+            })
+        );
+    }
+
+    #[test]
+    fn modify_arg_slices_resolve_from_the_inline_or_annotation_selector() {
+        let selector = |slice_from: Option<&str>, slice_to: Option<&str>| AtSelector {
+            anchor: "INVOKE".into(),
+            target: Some("Ldemo/Probe;mark(Ljava/lang/String;I)V".into()),
+            opcode: None,
+            ordinal: None,
+            shift: None,
+            by: None,
+            slice_from: slice_from.map(str::to_owned),
+            slice_to: slice_to.map(str::to_owned),
+        };
+
+        assert_eq!(
+            resolve_modify_arg_slice(&selector(None, None), &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_modify_arg_slice(&selector(Some("HEAD"), Some("RETURN")), &[]),
+            Ok(Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Return,
+            }))
+        );
+        // An annotation-level `@ModifyArg.slice` applies when the `@At` has no
+        // nested one; more than one is ambiguous.
+        assert_eq!(
+            resolve_modify_arg_slice(
+                &selector(None, None),
+                &[(Some("HEAD".into()), Some("TAIL".into()))]
+            ),
+            Ok(Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Tail,
+            }))
+        );
+        assert!(
+            resolve_modify_arg_slice(
+                &selector(None, None),
+                &[
+                    (Some("HEAD".into()), Some("TAIL".into())),
+                    (Some("HEAD".into()), Some("RETURN".into())),
+                ]
+            )
+            .is_err()
+        );
+        assert!(resolve_modify_arg_slice(&selector(Some("HEAD"), None), &[]).is_err());
     }
 
     #[test]
@@ -33796,6 +39149,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -33809,6 +39163,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -33816,6 +39173,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let marker = runtime.new_multidim_array("[[I", "demo/M", "m", &[2, 3]);
         let outer = runtime.arrays.get(&marker).unwrap();
@@ -33836,6 +39195,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -33849,6 +39209,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -33856,6 +39219,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let error = runtime
             .invoke_string_split(

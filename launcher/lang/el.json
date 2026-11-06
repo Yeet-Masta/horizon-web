@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Χρειάζεται τον φορτωτή: τα σχέδιά του στοχεύουν το παιχνίδι",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Εκτέλεση: αναφέρθηκαν {count} αρχεία jar",
   "Clear compatibility cache": "Εκκαθάριση προσωρινής μνήμης συμβατότητας",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Η προσωρινή μνήμη συμβατότητας για το {name} εκκαθαρίστηκε. Θα ελεγχθεί ξανά στην επόμενη εγκατάσταση, ενημέρωση ή αναζήτηση.",
-  "(+{count} more)": "(+{count} ακόμη)"
+  "(+{count} more)": "(+{count} ακόμη)",
+  "Hybrid: native + loader": "Υβριδικό: εγγενές + φορτωτής"
 }

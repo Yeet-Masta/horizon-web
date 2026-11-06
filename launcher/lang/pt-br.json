@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Precisa do loader: seus planos miram o jogo",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Execução: {count} jar(s) relatado(s)",
   "Clear compatibility cache": "Limpar cache de compatibilidade",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "O cache de compatibilidade de {name} foi limpo. Ele será verificado novamente na próxima instalação, atualização ou busca.",
-  "(+{count} more)": "(+{count} mais)"
+  "(+{count} more)": "(+{count} mais)",
+  "Hybrid: native + loader": "Híbrido: nativo + carregador"
 }

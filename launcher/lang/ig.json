@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Chọrọ loader: atụmatụ ya na-eche ihu egwuregwu",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Oge ọsọ: akọpụtara faịlụ jar {count}",
   "Clear compatibility cache": "Hichapụ cache ndakọrịta",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Ehichapụrụ cache ndakọrịta maka {name}. A ga-elele ya ọzọ na nwụnye, mmelite ma ọ bụ ọchụchọ ọzọ.",
-  "(+{count} more)": "(+{count} ndị ọzọ)"
+  "(+{count} more)": "(+{count} ndị ọzọ)",
+  "Hybrid: native + loader": "Ngwakọta: nke ala + onye nbubata"
 }

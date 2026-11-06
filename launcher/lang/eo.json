@@ -1,4 +1,5 @@
 {
+  "Needs the loader: its plans target the game": "Bezonas la ŝargilon: ĝiaj planoj celas la ludon",
   "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.": "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
   "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.": "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
   "It does not come over yet.": "It does not come over yet.",
@@ -1231,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Rultempo: {count} jar-dosieroj raportitaj",
   "Clear compatibility cache": "Forigi la kongruecan kaŝmemoron",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "La kongrueca kaŝmemoro por {name} estis forigita. Ĝi estos rekontrolita ĉe la sekva instalo, ĝisdatigo aŭ serĉo.",
-  "(+{count} more)": "(+{count} pli)"
+  "(+{count} more)": "(+{count} pli)",
+  "Hybrid: native + loader": "Hibrida: denaska + ŝargilo"
 }

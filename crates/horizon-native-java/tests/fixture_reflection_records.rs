@@ -70,8 +70,14 @@ final class Probe {
     }
 
     public static String classLookup() throws Exception {
+        String missing;
+        try {
+            missing = Class.forName("demo.Missing").getName();
+        } catch (ClassNotFoundException expected) {
+            missing = "absent";
+        }
         return new StringBuilder().append(Class.forName("demo.Model").getName()).append(',')
-            .append(Class.forName("demo.Missing") == null ? "absent" : "present").toString();
+            .append(missing).toString();
     }
 
     public static String fieldFacts() throws Exception {
