@@ -83,6 +83,17 @@ const LAUNCH_CAPTURE_BYTES: usize = 64 * 1024;
 /// Characters of that output echoed to stderr when the launch did not exit 0.
 const LAUNCH_OUTPUT_ECHO_CHARS: usize = 4000;
 const LAUNCH_SERVER_PORT_ENV: &str = "HORIZON_SERVER_PORT";
+/// Pins the scratch directory `--launch-game` uses, so a harness can read the
+/// exact game log its own run wrote instead of guessing from the temp folder.
+/// The path must not exist yet; the supervisor creates it and never deletes it.
+const LAUNCH_DIR_ENV: &str = "HORIZON_LAUNCH_DIR";
+/// `--mixin-audit`: Mixin's verbose switch turns every applied mixin into one
+/// INFO line (`Mixing <mixin> from <config> into <target>`), so a launch
+/// records in its own log which mods' mixins really reached a game class.
+const MIXIN_AUDIT_FLAG: &str = "--mixin-audit";
+const MIXIN_VERBOSE_OPTION: &str = "-Dmixin.debug.verbose=true";
+/// The bounded line `--mixin-audit` prints after a launch.
+const MIXIN_AUDIT_PREFIX: &str = "mixin-audit: ";
 
 /// The second `--launch-game` gate.
 fn real_launch_enabled() -> bool {
@@ -94,7 +105,6 @@ import java.io.*;
 import java.lang.reflect.*;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /** Small reflection-only bridge used by the embedded Fabric probe. */
 @SuppressWarnings({"unchecked", "rawtypes"})
@@ -152,6 +162,9 @@ public final class HorizonLoaderBridge {
   // through `getPostMixinClassByteArray` -> `IMixinTransformer`.
   private static boolean knotLaunch;
   private static ClassLoader knotLoader;
+  /** The provider `bootstrapProduction` created; its entrypoint is the class
+   * `EntrypointPatch` inserts `Hooks.startServer` into. */
+  private static Object gameProvider;
   private static String knotLaunchOutcome;
   private static String knotTransformedClass;
   private static final String PROBE_MARKER = "KNOT-RAW";
@@ -164,6 +177,7 @@ public final class HorizonLoaderBridge {
     classPathUnlock = unlock;
     knotLaunch = launch;
     knotLoader = null;
+    gameProvider = null;
     knotLaunchOutcome = null;
     knotTransformedClass = null;
     classPath = null;
@@ -304,31 +318,37 @@ public final class HorizonLoaderBridge {
   }
 
   /**
-   * `FabricLauncher.getClassByteArray(name, runTransformers)`, which
-   * `Knot.getClassByteArray` answers with
-   * `KnotClassDelegate.getPostMixinClassByteArray` (public interface method in
-   * newer loaders, private on the delegate in 0.20.x). Without this, the
-   * launcher read raw system-loader resources and the game's first transformed
-   * class would bypass Mixin.
+   * `FabricLauncher.getClassByteArray(name, runTransformers)`. Real
+   * `Knot.getClassByteArray` answers `runTransformers` with
+   * `KnotClassLoaderInterface.getPreMixinClassBytes` (class-tweaker output,
+   * mixins not yet applied) and the other case with `getRawClassBytes`; the
+   * post-mixin bytes are only produced inside the class loader
+   * (`tryLoadClass` -> `getPostMixinClassByteArray`).
+   *
+   * Reading post-mixin bytes here instead re-enters `IMixinTransformer` while
+   * Mixin is preparing its configs: the prepare phase loads every target class
+   * node through this method, `MixinProcessor.couldTransformClass` sees the
+   * same thread twice (`ReEntranceLock`) and raises
+   * `ReEntrantTransformerError: Re-entrance error` -- which turns the first
+   * game class load into "Mixin transformation of net.minecraft.server.Main
+   * failed" and leaves the server running with no mod mixin applied.
    */
   private static byte[] classBytes(String name, boolean runTransformers) {
     if (classPath == null) return null;
     try {
       String internal = name.replace('.', '/');
-      if (!runTransformers) {
+      String method = runTransformers ? "getPreMixinClassBytes" : "getRawClassBytes";
+      Method read = classPathType.getDeclaredMethod(method, String.class);
+      read.setAccessible(true);
+      Object bytes = read.invoke(classPath, internal);
+      if (runTransformers && bytes == null) {
+        // A non-game class (the loader's own, a library, a mod) has no Knot
+        // bytes; Mixin falls back to the class loader for those.
         Method raw = classPathType.getDeclaredMethod("getRawClassBytes", String.class);
         raw.setAccessible(true);
         return (byte[]) raw.invoke(classPath, internal);
       }
-      Method post;
-      try {
-        post = classPathType.getDeclaredMethod("getPostMixinClassByteArray", String.class, boolean.class);
-      } catch (NoSuchMethodException older) {
-        // 0.20.x keeps the post-mixin read private on the delegate.
-        post = classPath.getClass().getDeclaredMethod("getPostMixinClassByteArray", String.class, boolean.class);
-      }
-      post.setAccessible(true);
-      return (byte[]) post.invoke(classPath, name, Boolean.TRUE);
+      return (byte[]) bytes;
     } catch (Throwable failure) {
       if (classPathFailure == null) classPathFailure = "getClassByteArray: " + summarize(failure);
       return null;
@@ -759,6 +779,7 @@ public final class HorizonLoaderBridge {
       installLauncher(launcher);
       Class<?> providerClass = Class.forName("net.fabricmc.loader.impl.game.minecraft.MinecraftGameProvider");
       Object provider = providerClass.getConstructor().newInstance();
+      gameProvider = provider;
       if (!(Boolean) providerClass.getMethod("isEnabled").invoke(provider)) {
         throw new IllegalStateException("fabric.skipMcProvider disabled the Minecraft game provider");
       }
@@ -893,8 +914,24 @@ public final class HorizonLoaderBridge {
     return Proxy.newProxyInstance(launcherIface.getClassLoader(), new Class<?>[]{launcherIface}, (p, m, a) -> {
       switch (m.getName()) {
         case "getClassPath": {
-          List<Path> paths = Arrays.stream(System.getProperty("java.class.path").split(File.pathSeparator))
-              .map(Paths::get).collect(Collectors.toList());
+          // The *game* classpath: the jars the caller named as Minecraft game
+          // jars, then whatever the provider itself added through
+          // `addToClassPath` (the bundler's extracted libraries, mod code
+          // sources). A real Knot launch answers with the Minecraft
+          // installation's own classpath, never with the loader's jars.
+          //
+          // Answering with the whole `java.class.path` made
+          // `MinecraftGameProvider.unlockClassPath` classify the loader jar and
+          // every loader library as "misc game libraries" and register them as
+          // Knot code sources. `KnotClassDelegate.tryLoadClass` then found
+          // `net.fabricmc.loader.impl.FabricLoaderImpl` through its own
+          // `findResourceFwd` and *defined a second copy inside Knot*; that
+          // copy's static initializer calls
+          // `LoaderUtil.verifyNotInTargetCl(FabricLoaderImpl.class)` and dies
+          // with "trying to load net.fabricmc.loader.impl.FabricLoaderImpl from
+          // target class loader", which any mod touching the loader API (c2me's
+          // config system, mixin plugins) then reports.
+          List<Path> paths = new ArrayList<>();
           for (String jar : gameJars) paths.add(Paths.get(jar));
           if (classPathUnlock) {
             for (String jar : classPathJars) {
@@ -937,10 +974,27 @@ public final class HorizonLoaderBridge {
         case "getEnvironmentType":
           return Enum.valueOf((Class) Class.forName("net.fabricmc.api.EnvType"), client ? "CLIENT" : "SERVER");
         case "isDevelopment": return development;
-        case "getEntrypoint":
-          return realLaunch ? "HorizonLoaderBridge$StubEntrypoint"
-              : (client ? "net.fabricmc.loader.impl.launch.knot.KnotClient"
-              : "net.fabricmc.loader.impl.launch.knot.KnotServer");
+        case "getEntrypoint": {
+          if (realLaunch) return "HorizonLoaderBridge$StubEntrypoint";
+          // `EntrypointPatch` only patches a class whose name starts with
+          // `net.minecraft.` (`GameTransformer` compares it with this value)
+          // and inserts `Hooks.startServer` into its `main`; that hook is what
+          // invokes every mod's `main`/`server` entrypoint. Answering
+          // `KnotServer` here (the launcher class Fabric's own `Knot.launch`
+          // loads, not the game's) skipped the patch, so a launched server
+          // booted with the loader's mod list but none of the mods' code was
+          // ever run.
+          Object provider = gameProvider;
+          if (provider != null) {
+            try {
+              Object entrypoint = provider.getClass().getMethod("getEntrypoint").invoke(provider);
+              if (entrypoint instanceof String && !((String) entrypoint).isEmpty()) {
+                return entrypoint;
+              }
+            } catch (Throwable ignored) { }
+          }
+          return client ? "net.minecraft.client.main.Main" : "net.minecraft.server.Main";
+        }
         case "getManifest": return null;
         case "getMappingConfiguration": return mappingConfiguration(gameVersion);
         case "isClassLoaded": return classLoaded((String) a[0]);
@@ -1069,25 +1123,37 @@ public final class HorizonLoaderBridge {
   private static Object mappingConfiguration(String gameVersion) throws Exception {
     Class<?> type = Class.forName("net.fabricmc.loader.impl.launch.MappingConfiguration");
     Object config = type.getConstructor().newInstance();
-    setField(type, config, "namespace", "named");
+    String mappingPath = System.getProperty("horizon.mapping.path");
+    boolean hasMappings = mappingPath != null && !mappingPath.isBlank();
+    // The game jar the loader is handed carries Minecraft's own (Mojang) names,
+    // and without `--mappings` no mapping tree exists to rename anything, so
+    // the runtime namespace is the loader's own "official" fallback
+    // (`computeRuntimeNamespace`). Hard-coding "named" there made the loader
+    // reject every mod's `accessWidener v1 official` header ("Namespace
+    // (official) does not match current runtime namespace (named)"), which
+    // aborted `FabricMixinBootstrap` before it installed a mixin transformer:
+    // the game booted with no mod mixin applied. A supplied mapping tree
+    // targets the readable namespace, which is what `--mappings` means.
+    setField(type, config, "namespace", hasMappings ? "named" : "official");
     setField(type, config, "gameId", "minecraft");
     setField(type, config, "gameVersion", gameVersion);
-    String mappingPath = System.getProperty("horizon.mapping.path");
-    setField(type, config, "mappingName", mappingPath == null ? "none" : "horizon");
+    setField(type, config, "mappingName", hasMappings ? "horizon" : "none");
     setField(type, config, "namespaces", Arrays.asList("official", "intermediary", "named"));
     setField(type, config, "initializedMetadata", true);
     setField(type, config, "initializedMappings", true);
     Class<?> tree = Class.forName("net.fabricmc.loader.impl.lib.mappingio.tree.MemoryMappingTree");
     Object mappings = tree.getConstructor().newInstance();
-    if (mappingPath != null && !mappingPath.isBlank()) {
+    if (hasMappings) {
       Class<?> reader = Class.forName("net.fabricmc.loader.impl.lib.mappingio.MappingReader");
       Class<?> visitor = Class.forName("net.fabricmc.loader.impl.lib.mappingio.MappingVisitor");
       reader.getMethod("read", Path.class, visitor).invoke(null, Paths.get(mappingPath), mappings);
     } else {
       // The provider dereferences the mapping tree unconditionally when no
-      // installation supplied a real tree, so retain the historical empty tree.
+      // installation supplied a real tree, so retain an empty tree. Its source
+      // namespace must differ from the destination namespace (mappingio
+      // rejects the same name on both sides); an empty tree maps nothing.
       tree.getMethod("visitNamespaces", String.class, java.util.List.class)
-          .invoke(mappings, "named", Arrays.asList("official"));
+          .invoke(mappings, "intermediary", Arrays.asList("official"));
     }
     setField(type, config, "mappings", mappings);
     return config;
@@ -1155,7 +1221,7 @@ fn main() -> ExitCode {
 }
 
 /// The usage line, kept as data so a test can check the kinds it names.
-const USAGE: &str = "usage: horizon-jvm [--entry <class>] [--entry-kind <main|client|server|preLaunch|neoforge|datagen>] [--real-loader] [--real-launch] [--fabric-discovery] [--classpath-unlock] [--knot-launch] [--launch-game] [--accept-eula] [--mixin-apply-probe <class#method=value>] [--game-jar <jar>]... [--game-version <v>] [--provider-report] [--datagen-output <dir>] [--list-entrypoints] [--list-mixin-configs] [--list-fml-mods] [--fml-report] [--json] [--mixin-config <path>]... [--fabric-development] [--stubs <jar>] [--loader <jar>] [--libs <dir>] [--measure [--measure-timeout <secs>] [--measure-sample-ms <ms>] [--measure-repeat <n>]] <jar>...";
+const USAGE: &str = "usage: horizon-jvm [--entry <class>] [--entry-kind <main|client|server|preLaunch|neoforge|datagen>] [--real-loader] [--real-launch] [--fabric-discovery] [--classpath-unlock] [--knot-launch] [--launch-game] [--accept-eula] [--mixin-apply-probe <class#method=value>] [--mixin-audit] [--game-jar <jar>]... [--game-version <v>] [--provider-report] [--datagen-output <dir>] [--list-entrypoints] [--list-mixin-configs] [--list-fml-mods] [--fml-report] [--json] [--mixin-config <path>]... [--fabric-development] [--stubs <jar>] [--loader <jar>] [--libs <dir>] [--measure [--measure-timeout <secs>] [--measure-sample-ms <ms>] [--measure-repeat <n>]] <jar>...";
 
 /// The FML listing/report flags, removed from the jar list before anything is
 /// resolved. `--fml-list` is the short spelling of `--list-fml-mods`.
@@ -1209,6 +1275,13 @@ fn run() -> Result<(), String> {
     let accept_eula = take_flag(&mut args, &["--accept-eula"]);
     if accept_eula && !launch_game_flag {
         return Err("--accept-eula requires --launch-game".to_owned());
+    }
+    // `--mixin-audit` makes the launched JVM log one line per applied mixin and
+    // summarises the game log afterwards. It changes nothing unless a launch
+    // happens, so it is accepted next to `--launch-game` only.
+    let mixin_audit = take_flag(&mut args, &[MIXIN_AUDIT_FLAG]);
+    if mixin_audit && !launch_game_flag {
+        return Err("--mixin-audit requires --launch-game".to_owned());
     }
     let launch_this_process = launch_game_flag && real_launch_enabled();
     // A mixin-application probe loads a class through Knot after the loader is
@@ -1350,12 +1423,15 @@ fn run() -> Result<(), String> {
     // `HORIZON_REAL_LAUNCH=1` are required; without them the run is exactly
     // what it was before the flag existed, and the game never starts.
     if launch_game_flag && !launch_game_child {
-        let status = if launch_this_process {
-            run_launch_game_child(accept_eula)?
+        let (status, audit) = if launch_this_process {
+            run_launch_game_child(accept_eula, mixin_audit)?
         } else {
-            LAUNCH_GAME_GATE_SKIPPED.to_owned()
+            (LAUNCH_GAME_GATE_SKIPPED.to_owned(), None)
         };
         println!("{}", launch_game_line(&status));
+        if let Some(audit) = &audit {
+            println!("{MIXIN_AUDIT_PREFIX}{audit}");
+        }
         if provider_report {
             print_provider_report(
                 &ProviderReport::not_run(
@@ -1517,6 +1593,11 @@ fn run() -> Result<(), String> {
     // the JVM options rather than set after `JavaVM::new`.
     for option in mixin_jvm_options(mixin_property.as_deref()) {
         init = init.option(option);
+    }
+    // `--mixin-audit` turns Mixin's verbose switch on before the launcher reads
+    // it: every applied mixin then logs one INFO line into the game's log.
+    if mixin_audit {
+        init = init.option(MIXIN_VERBOSE_OPTION);
     }
     // Same for Fabric's developer properties: the loader reads them while it
     // discovers mods, which happens on the first loader class that loads.
@@ -1878,8 +1959,21 @@ impl LaunchHomes {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| format!("clock: {error}"))?
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("horizon-launch-{}-{stamp}", std::process::id()));
+        let root = match std::env::var_os(LAUNCH_DIR_ENV) {
+            Some(value) if !value.is_empty() => {
+                let path = PathBuf::from(value);
+                if path.exists() {
+                    return Err(format!(
+                        "{} already exists; {LAUNCH_DIR_ENV} must name a fresh directory",
+                        path.display()
+                    ));
+                }
+                path
+            }
+            _ => {
+                std::env::temp_dir().join(format!("horizon-launch-{}-{stamp}", std::process::id()))
+            }
+        };
         let homes = Self {
             game: root.join("game"),
             home: root.join("home"),
@@ -2079,17 +2173,76 @@ fn asm_readiness(libs: &Path) -> Option<String> {
     }
 }
 
-/// The port the scratch server.properties names (the readiness probe connects to it).
-fn launch_server_port(game: &Path) -> u16 {
-    fs::read_to_string(game.join("server.properties"))
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                line.strip_prefix("server-port=")
-                    .and_then(|value| value.trim().parse::<u16>().ok())
-            })
-        })
-        .unwrap_or(25565)
+/// The applied-mixin lines Mixin's verbose mode writes, and the failures that
+/// mean a config did not reach its target.
+const MIXIN_APPLY_MARKER: &str = "Mixing ";
+const MIXIN_FAILURE_MARKERS: [&str; 5] = [
+    "mixin apply failed",
+    "critical injection failure",
+    "mixin transformation failed",
+    "invalidinjectionexception",
+    "mixinexception",
+];
+
+/// `applied=<n> configs=<k> targets=<t> failed=<m>` for a game log: one count
+/// per `Mixing <mixin> from <config> into <target>` line, distinct configs and
+/// targets, and the mixin failures that stopped a config from applying.
+///
+/// This is the launch's own evidence: the lines come from the transformer the
+/// live Knot loader installed, not from a probe's bookkeeping, so a non-zero
+/// `applied` means a mod's `@Mixin` really reached a class in this run.
+fn mixin_audit_summary(log: &str) -> String {
+    let mut applied = 0usize;
+    let mut configs = std::collections::BTreeSet::new();
+    let mut targets = std::collections::BTreeSet::new();
+    let mut failed = 0usize;
+    for line in log.lines() {
+        let lower = line.to_ascii_lowercase();
+        if MIXIN_FAILURE_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+        {
+            failed += 1;
+            continue;
+        }
+        let Some(at) = line.find(MIXIN_APPLY_MARKER) else {
+            continue;
+        };
+        let rest = &line[at + MIXIN_APPLY_MARKER.len()..];
+        // `<mixin> from <config> into <target>`; a line without all three
+        // parts is a different message and not an application.
+        let mut parts = rest.splitn(3, " into ");
+        let Some(head) = parts.next() else {
+            continue;
+        };
+        let Some(target) = parts.next() else {
+            continue;
+        };
+        let Some((_, config)) = head.split_once(" from ") else {
+            continue;
+        };
+        let target = target.split_whitespace().next().unwrap_or("");
+        if config.is_empty() || target.is_empty() {
+            continue;
+        }
+        applied += 1;
+        configs.insert(config.trim().to_owned());
+        targets.insert(target.to_owned());
+    }
+    format!(
+        "applied={applied} configs={} targets={} failed={failed}",
+        configs.len(),
+        targets.len()
+    )
+}
+
+/// Read the launch's own game log and summarise its mixin lines. A launch that
+/// never wrote a log has no evidence, which is reported rather than hidden.
+fn mixin_audit_from_log(log: &std::path::Path) -> String {
+    match fs::read_to_string(log) {
+        Ok(text) => mixin_audit_summary(&text),
+        Err(_) => "no game log".to_owned(),
+    }
 }
 
 fn seed_launch_game_files(game: &Path, accept_eula: bool) -> Result<(), String> {
@@ -2193,7 +2346,10 @@ fn absolutize_launch_args(args: Vec<OsString>, cwd: &Path) -> Vec<OsString> {
 /// Run the gated launch in a child of this binary and return the one status
 /// value. The parent never starts a JVM itself, so a game that ignores every
 /// shutdown path still dies with the process group at the deadline.
-fn run_launch_game_child(accept_eula: bool) -> Result<String, String> {
+fn run_launch_game_child(
+    accept_eula: bool,
+    mixin_audit: bool,
+) -> Result<(String, Option<String>), String> {
     let homes = LaunchHomes::new()?;
     seed_launch_game_files(&homes.game, accept_eula)?;
     let exe = std::env::current_exe().map_err(|error| format!("launch child: {error}"))?;
@@ -2245,8 +2401,6 @@ fn run_launch_game_child(accept_eula: bool) -> Result<String, String> {
     // readiness line (the corpus ledgers, CI) stops the child at "Done (".
     // The game logs it to its own latest.log, not the parent's stdout.
     let stop_at_done = std::env::var("HORIZON_LAUNCH_STOP_AT_DONE").as_deref() == Ok("1");
-    let ready_port = launch_server_port(&homes.game);
-    let ready_addr = std::net::SocketAddr::from(([127, 0, 0, 1], ready_port));
     let done_log = homes.game.join("logs").join("latest.log");
     let mut done_log_len = 0u64;
     let mut stopped_at_done = false;
@@ -2265,17 +2419,13 @@ fn run_launch_game_child(accept_eula: bool) -> Result<String, String> {
             }
         }
         if stop_at_done {
-            // The one signal that cannot lie: the server accepts connections.
-            // "Done" may only reach the game's own log, and that log is not
-            // written in every configuration.
-            let mut done = std::net::TcpStream::connect_timeout(
-                &ready_addr,
-                std::time::Duration::from_millis(50),
-            )
-            .is_ok();
-            if !done {
-                done = stdout_capture.text().contains("Done (");
-            }
+            // "Done" is the only readiness signal that means every mod has
+            // finished loading: the server socket is bound far earlier, while
+            // the level is still being prepared, so a bound port stops the run
+            // before the mods' mixins reach the classes they target. The line
+            // may only reach the game's own log, so both streams and the log
+            // are checked.
+            let mut done = stdout_capture.text().contains("Done (");
             if !done {
                 if let Ok(meta) = std::fs::metadata(&done_log) {
                     if meta.len() != done_log_len {
@@ -2339,7 +2489,8 @@ fn run_launch_game_child(accept_eula: bool) -> Result<String, String> {
             eprintln!("launch-game output:\n{tail}");
         }
     }
-    Ok(bounded_classpath_unlock(&status))
+    let audit = mixin_audit.then(|| mixin_audit_from_log(&done_log));
+    Ok((bounded_classpath_unlock(&status), audit))
 }
 
 /// Whether the last part of a log file contains `needle` (the game's readiness
@@ -7404,14 +7555,47 @@ fn is_minecraft_runtime_jar(path: &Path) -> bool {
         return false;
     };
     let mut game_classes = 0usize;
+    let mut bundled = Vec::new();
     for index in 0..archive.len() {
         let Ok(entry) = archive.by_index(index) else {
             continue;
         };
-        if is_minecraft_class(entry.name()) {
+        let name = entry.name().to_owned();
+        if is_minecraft_class(&name) {
             game_classes += 1;
             if game_classes >= 32 {
                 return true;
+            }
+        }
+        // Minecraft ships its server as a bundler: the game classes live in the
+        // nested `META-INF/versions/<version>/<game>.jar`, not in the outer jar.
+        // A launcher starts that jar (this probe's `--game-jar` names it), so it
+        // is a Minecraft runtime jar and must not be classified as a mod.
+        if name.starts_with("META-INF/versions/") && name.ends_with(".jar") {
+            bundled.push(name);
+        }
+    }
+    for name in bundled {
+        let Ok(mut entry) = archive.by_name(&name) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
+            continue;
+        };
+        let mut classes = 0usize;
+        for index in 0..inner.len() {
+            let Ok(entry) = inner.by_index(index) else {
+                continue;
+            };
+            if is_minecraft_class(entry.name()) {
+                classes += 1;
+                if classes >= 32 {
+                    return true;
+                }
             }
         }
     }
@@ -7513,15 +7697,16 @@ mod tests {
         is_duplicate_log4j_jar, is_minecraft_class, is_minecraft_runtime_jar, knot_init_line,
         knot_init_value, knot_launch_line, knot_launch_value, launch_failure_reason,
         launch_game_line, launch_game_value, launch_status_line, link_failure,
-        missing_entry_message, mixin_apply_line, mixin_apply_value, mixin_bootstrap_line,
-        mixin_config_names, mixin_config_property, mixin_configs_line, mixin_jvm_options,
-        mixin_registered_count, mixin_stages, neoforge_constructor, neoforge_constructor_args,
-        neoforge_constructor_descriptor, neoforge_ctor_fallback_line, neoforge_ctor_line,
-        neoforge_dist, neoforge_dist_fields, neoforge_metadata, nested_jar_name,
-        parse_constructors, parse_mixin_config, parse_provider_outcome, pre_launch_entries,
-        quilt_entrypoint_kind, quilt_mixin_configs, register_mixin_configs, report_mixin_configs,
-        run_mixin_phase, select_mixin_configs, should_retry_no_arg, skip_mc_provider_requested,
-        skipped_mixin_configs, split_entrypoint, take_game_provider_args,
+        missing_entry_message, mixin_apply_line, mixin_apply_value, mixin_audit_summary,
+        mixin_bootstrap_line, mixin_config_names, mixin_config_property, mixin_configs_line,
+        mixin_jvm_options, mixin_registered_count, mixin_stages, neoforge_constructor,
+        neoforge_constructor_args, neoforge_constructor_descriptor, neoforge_ctor_fallback_line,
+        neoforge_ctor_line, neoforge_dist, neoforge_dist_fields, neoforge_metadata,
+        nested_jar_name, parse_constructors, parse_mixin_config, parse_provider_outcome,
+        pre_launch_entries, quilt_entrypoint_kind, quilt_mixin_configs, register_mixin_configs,
+        report_mixin_configs, run_mixin_phase, select_mixin_configs, should_retry_no_arg,
+        skip_mc_provider_requested, skipped_mixin_configs, split_entrypoint,
+        take_game_provider_args,
     };
     use std::{
         fs,
@@ -7531,6 +7716,28 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn summarises_applied_mixins_and_failures_from_the_game_log() {
+        let log = "\
+[10:00:00] [Thread-0/INFO]: Mixing a.AMixin from mod.mixins.json into net.minecraft.A
+[10:00:00] [Thread-0/INFO]: Mixing b.BMixin from mod.mixins.json into net.minecraft.A
+[10:00:01] [Thread-0/INFO]: Mixing c.CMixin from other.mixins.json into net.minecraft.B
+[10:00:02] [Thread-0/WARN]: Mixin apply failed other.mixins.json:d.DMixin -> net.minecraft.C: target not found
+[10:00:03] [Thread-0/INFO]: Renaming synthetic method reload_exceptions$0()V in other.mixins.json
+[10:00:04] [Thread-0/INFO]: Done (1.0s)! For help, type \"help\"";
+        // Three distinct applications into two classes from two configs, and one
+        // failure; the synthetic rename mentions "exception" but is not one.
+        assert_eq!(
+            mixin_audit_summary(log),
+            "applied=3 configs=2 targets=2 failed=1"
+        );
+        // A log without Mixin lines reports zeroes rather than inventing a run.
+        assert_eq!(
+            mixin_audit_summary("Starting minecraft server version 26.3\n"),
+            "applied=0 configs=0 targets=0 failed=0"
+        );
+    }
 
     /// A throwaway jar built from `(entry name, bytes)` pairs.
     fn build_jar(tag: &str, files: &[(&str, &[u8])]) -> PathBuf {
@@ -7657,6 +7864,36 @@ mod tests {
             "net/fabricmc/fabric/api/event/Event.class"
         ));
         assert!(!is_minecraft_class("net/minecraft/data/README.txt"));
+    }
+
+    #[test]
+    fn recognizes_a_bundled_server_as_a_runtime_jar() {
+        // A Minecraft server jar is a bundler: the game classes live in
+        // `META-INF/versions/<version>/<game>.jar`, and the outer entry list has
+        // no `net/minecraft` class at all.
+        let inner = build_jar(
+            "bundled-inner",
+            &(0..32)
+                .map(|index| (format!("net/minecraft/Generated{index}.class"), Vec::new()))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        let inner_bytes = fs::read(&inner).unwrap();
+        let outer = build_jar(
+            "bundled-outer",
+            &[
+                ("version.json", b"{}".as_slice()),
+                (
+                    "META-INF/versions/26.3/server-26.3.jar",
+                    inner_bytes.as_slice(),
+                ),
+            ],
+        );
+        assert!(is_minecraft_runtime_jar(&outer));
+        let _ = fs::remove_file(inner);
+        let _ = fs::remove_file(outer);
     }
 
     #[test]
