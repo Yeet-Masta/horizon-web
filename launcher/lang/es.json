@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "Se dejó fuera {name}: necesita {other}, que se dejó fuera",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "No se compila en el Horizon que juegas ({code}): la compilación lo deja fuera hasta que su autor lo actualice",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Donde estás, el set fundador se reclama con un pago gratuito en playhorizon.dev. Reclámalo desde la Tienda: te abre el pago.",
-  "The founder set can't be claimed from your country.": "El set fundador no se puede reclamar desde tu país."
+  "The founder set can't be claimed from your country.": "El set fundador no se puede reclamar desde tu país.",
+  "Java runtime": "Tiempo de ejecución de Java",
+  "No runtime report": "No hay informe de ejecución",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Ejecución: {engine} · cargador: {loader} · tejidos: {woven} · omitidos: {skipped} · registros: {registrations} · opacos: {opaque} · cargas útiles: {payloads}",
+  "Runtime skipped: {reason}": "Omitido en la ejecución: {reason}",
+  "Runtime isolation: {error}": "Aislamiento en la ejecución: {error}",
+  "Runtime: {count} jar(s) reported": "Ejecución: {count} jar(s) informados",
+  "Clear compatibility cache": "Borrar la caché de compatibilidad",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Se borró la caché de compatibilidad de {name}. Se comprobará de nuevo la próxima vez que se instale, actualice o aparezca en una búsqueda.",
+  "(+{count} more)": "(+{count} más)"
 }

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} איז אויסגעלאָזט געוואָרן: עס דאַרף {other}, וואָס איז אויסגעלאָזט געוואָרן",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "בויט זיך נישט אויף דעם Horizon וואָס דו שפּילסט ({code}): אַ בוי לאָזט עס אויס ביז דער מחבר דערהייַנטיקט עס",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "וווּ דו ביסט, באַקומט מען דעם גרינדער־סעט דורך אַ פֿרייער באַצאָלונג אויף playhorizon.dev. נעם אים פֿון דער קראָם: זי עפֿנט פֿאַר דיר די באַצאָלונג.",
-  "The founder set can't be claimed from your country.": "מען קען נישט באַקומען דעם גרינדער־סעט פֿון דײַן לאַנד."
+  "The founder set can't be claimed from your country.": "מען קען נישט באַקומען דעם גרינדער־סעט פֿון דײַן לאַנד.",
+  "Java runtime": "Java אויספֿירונג־צײַט",
+  "No runtime report": "קיין אויספֿירונג־באַריכט",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "אויספֿירונג: {engine} · לאָודער: {loader} · געוועבט: {woven} · איבערגעהיפּט: {skipped} · רעגיסטראַציעס: {registrations} · אומדורכזיכטיק: {opaque} · פּעלאָודס: {payloads}",
+  "Runtime skipped: {reason}": "איבערגעהיפּט דורך אויספֿירונג: {reason}",
+  "Runtime isolation: {error}": "אויספֿירונג־איזאָלאַציע: {error}",
+  "Runtime: {count} jar(s) reported": "אויספֿירונג: {count} jar טעקעס געמאָלדן",
+  "Clear compatibility cache": "אויסמעקן קאָמפּאַטיביליטעט־קאַש",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "דער קאָמפּאַטיביליטעט־קאַש פֿאַר {name} איז אויסגעמעקט. ער וועט נאָכגעקוקט ווערן ביים קומענדיקן אינסטאַלירן, דערהײַנטיקן אָדער זוכן.",
+  "(+{count} more)": "(+{count} מער)"
 }

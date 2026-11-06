@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "A fi {name} sílẹ̀: ó nílò {other}, tí a fi sílẹ̀",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Kò kọ́ lórí Horizon tí o ń ṣe ({code}): ìkọ́ yóò fi sílẹ̀ títí òǹkọ̀wé rẹ̀ yóò fi ṣe àtúnṣe",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Níbi tí o wà, a máa ń gba àpapọ̀ olùdásílẹ̀ nípasẹ̀ ìsanwó ọ̀fẹ́ lórí playhorizon.dev. Gbà á láti Ṣọ́ọ̀bù: ó máa ṣí ìsanwó náà fún ọ.",
-  "The founder set can't be claimed from your country.": "A kò lè gba àpapọ̀ olùdásílẹ̀ láti orílẹ̀-èdè rẹ."
+  "The founder set can't be claimed from your country.": "A kò lè gba àpapọ̀ olùdásílẹ̀ láti orílẹ̀-èdè rẹ.",
+  "Java runtime": "Àkókò ìṣiṣẹ́ Java",
+  "No runtime report": "Kò sí ìròyìn àkókò ìṣiṣẹ́",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Àkókò ìṣiṣẹ́: {engine} · ẹrù-ìkó: {loader} · tí a hun: {woven} · tí a fò: {skipped} · ìforúkọsílẹ̀: {registrations} · aláìṣeéfojú: {opaque} · ẹrù: {payloads}",
+  "Runtime skipped: {reason}": "Àkókò ìṣiṣẹ́ fò: {reason}",
+  "Runtime isolation: {error}": "Ìyàsọ́tọ̀ àkókò ìṣiṣẹ́: {error}",
+  "Runtime: {count} jar(s) reported": "Àkókò ìṣiṣẹ́: a ti ìròyìn fáìlì jar {count}",
+  "Clear compatibility cache": "Pa káṣì ìbámu rẹ́",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "A ti pa káṣì ìbámu fún {name} rẹ́. Yóò tún jẹ́ àyẹ̀wò ní ìgbà ìfiṣe, ìmúdójúìwọnlọ tàbí ìwádìí tó ń bọ̀.",
+  "(+{count} more)": "(+{count} mìíràn)"
 }

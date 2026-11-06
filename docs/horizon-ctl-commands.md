@@ -114,6 +114,7 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `servers` | `servers` | The Multiplayer screen's server list: name and address | none |
 | `lan open [PORT] [commands] [force] \| lan close \| lan status` | `lan` (network) | Open the world to LAN (Open to LAN), stop, or see the guests | `action` (open, close, status, required): what to do<br>`port` (integer): port for open<br>`commands` (boolean): allow cheats<br>`force` (boolean): force the game mode |
 | `friends host\|stop\|status` | `friends` (network) | Play with Friends: share the open world behind an invite code, stop, or see who joined | `action` (host, stop, status, required): what to do |
+| `payload send CHANNEL HEX\|utf8:TEXT client\|server` | CLI only | Inject one declared mod payload to the guests of the open world | `action` (send, required): what to do<br>`channel` (string, required): declared channel id<br>`value` (string, required): hex bytes, or utf8:TEXT<br>`role` (client, server, required): which side the frame is for |
 
 ## World and cheats
 

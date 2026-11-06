@@ -162,6 +162,11 @@ mod item_areas;
 mod item_draw;
 mod item_particles;
 mod item_use;
+mod java_content;
+mod java_mods;
+mod java_payloads;
+mod java_registry;
+mod java_runtime_file;
 mod jigsaw_blocks;
 mod jigsaw_edit;
 mod jukebox;
@@ -568,6 +573,8 @@ struct Options {
     benchmark: Option<String>,
     /// `--dev-mod PATH` (repeatable): content mods always on.
     dev_mods: Vec<PathBuf>,
+    /// `--java-mod PATH` (repeatable): native Java entrypoint jar.
+    java_mods: Vec<PathBuf>,
     /// What this Game executes; independent of its current server connection.
     execution_role: execution_role::ExecutionRole,
     /// `--fullscreen` (vanilla's): the window opens fullscreen whatever options.txt says,
@@ -712,6 +719,7 @@ impl Options {
             transfers: None,
             benchmark: None,
             dev_mods: Vec::new(),
+            java_mods: Vec::new(),
             execution_role: execution_role::ExecutionRole::Client,
             fullscreen: false,
             game_dir: None,
@@ -816,6 +824,7 @@ impl Options {
                             // ...and this player's own folder (logging::set_player_dir).
                             "--player-dir" => {}
                             "--dev-mod" => o.dev_mods.push(std::path::absolute(&value)?),
+                            "--java-mod" => o.java_mods.push(std::path::absolute(&value)?),
                             "--benchmark" => {
                                 if horizon_client::benchmark::scenes(&value).is_none() {
                                     return Err(format!(
@@ -22531,6 +22540,26 @@ fn run_app_native(mut app: App) -> Result<()> {
     Ok(())
 }
 
+/// The Java rows the content root layers: a client runs its jars here, in the
+/// client role; a dedicated server ran them at startup
+/// (`dedicated::load_java_mods`), before its content root was built.
+fn java_content_for_root(options: &Options) -> Vec<horizon_client::mod_content::ContentMod> {
+    if !options.execution_role.is_client() {
+        return dedicated::take_java_content();
+    }
+    java_mods::run_java_mods(&options.java_mods, options.execution_role)
+        .map(|(content, reports)| {
+            for report in reports {
+                log::info!("Horizon: Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}", report.jar.display(), report.engine.name(), report.loader.map_or("unknown", java_mods::JavaLoader::name), report.entrypoints, report.registrations, report.opaque);
+            }
+            content
+        })
+        .unwrap_or_else(|error| {
+            log::warn!("Horizon: Java mods not loaded: {error}");
+            Vec::new()
+        })
+}
+
 pub use launch_api::{UsageError, exit_code};
 
 pub fn run_with() -> Result<()> {
@@ -22593,6 +22622,12 @@ pub fn run_with() -> Result<()> {
         }
         return Err(error.into());
     }
+    // The server role's Java entrypoints run once here, in the server role,
+    // before the content root and the resources are built; a client's run at
+    // the content-root build below, in the client role.
+    if options.execution_role == execution_role::ExecutionRole::DedicatedServer {
+        dedicated::load_java_mods(&options)?;
+    }
     // Someone is playing: the anonymous ping behind the launcher's "N playing now", and the
     // official server in their list (servers.dat in the game folder, the working directory). Not
     // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
@@ -22649,10 +22684,11 @@ pub fn run_with() -> Result<()> {
             pack_error = Some(e.to_string());
             vanilla_root.clone()
         });
-    options.resources = mods::content_root(
+    options.resources = mods::content_root_with_java(
         &options.resources,
         &early_settings.mods.enabled,
         &options.dev_mods,
+        java_content_for_root(&options),
     );
     let loaded = load_resources(
         options.resources.clone(),
@@ -23020,6 +23056,20 @@ fn is_game_master_block(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_repeatable_java_mod_paths() {
+        let options = super::Options::parse(
+            ["--java-mod", "one.jar", "--java-mod", "two.jar"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(options.java_mods.len(), 2);
+        assert!(options.java_mods[0].ends_with("one.jar"));
+        assert!(options.java_mods[1].ends_with("two.jar"));
+    }
+
     #[test]
     fn weather_follows_the_dimension_type_not_the_id() {
         use super::level_can_have_weather as w;

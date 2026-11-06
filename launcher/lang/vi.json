@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "Đã bỏ qua {name}: cần {other}, mà {other} đã bị bỏ qua",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Không build được trên Horizon bạn đang chơi ({code}): bản build sẽ bỏ qua nó cho đến khi tác giả cập nhật",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Ở nơi bạn sống, bộ người sáng lập được nhận qua một lần thanh toán miễn phí trên playhorizon.dev. Hãy nhận nó trong Cửa hàng: cửa hàng sẽ mở trang thanh toán cho bạn.",
-  "The founder set can't be claimed from your country.": "Không thể nhận bộ người sáng lập từ quốc gia của bạn."
+  "The founder set can't be claimed from your country.": "Không thể nhận bộ người sáng lập từ quốc gia của bạn.",
+  "Java runtime": "Môi trường chạy Java",
+  "No runtime report": "Không có báo cáo môi trường chạy",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Môi trường chạy: {engine} · bộ tải: {loader} · đã dệt: {woven} · đã bỏ qua: {skipped} · đăng ký: {registrations} · không trong suốt: {opaque} · tải trọng: {payloads}",
+  "Runtime skipped: {reason}": "Môi trường chạy đã bỏ qua: {reason}",
+  "Runtime isolation: {error}": "Cách ly môi trường chạy: {error}",
+  "Runtime: {count} jar(s) reported": "Môi trường chạy: đã báo cáo {count} tệp jar",
+  "Clear compatibility cache": "Xóa bộ nhớ đệm tương thích",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Đã xóa bộ nhớ đệm tương thích cho {name}. Nó sẽ được kiểm tra lại trong lần cài đặt, cập nhật hoặc tìm kiếm tiếp theo.",
+  "(+{count} more)": "(+{count} nữa)"
 }

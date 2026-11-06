@@ -1,0 +1,95 @@
+name: perf smoke
+# What two minutes of measured runs say about the numbers a regression moves first: a dedicated server's startup
+# and memory, a client's startup, memory and median frame time (tools/efficiency/, docs/efficiency.md). The
+# ceilings are tools/efficiency/thresholds.json; a machine with other hardware keeps its own and passes it with
+# --thresholds. Measuring needs prepared resources (.local/horizon-client/<version>), which Horizon never
+# downloads, so a machine without them says so and skips. Started by hand, by a push to a perf-smoke/* branch, by
+# a pull request that changes the harness, or weekly.
+on:
+  push:
+    branches: ['perf-smoke/**']
+  pull_request:
+    paths:
+      - 'tools/efficiency/**'
+      - '.github/workflows/perf-smoke.yml'
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      thresholds:
+        description: Path to the ceilings to enforce
+        default: tools/efficiency/thresholds.json
+      runs:
+        description: Dedicated server runs (the median is the figure)
+        default: '3'
+      seconds:
+        description: How long the client bench measures frames
+        default: '8'
+permissions:
+  contents: read
+env:
+  HORIZON_TELEMETRY_URL: "off"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  smoke:
+    # Our checks runners (docs/ci-runners.md): the machine holds the maintainer's Minecraft and a GPU. GitHub's
+    # runners have neither, so there the run below skips.
+    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' && fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust and the ALSA and udev headers
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$HOSTED" = true ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+          fi
+          rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          shared-key: perf-smoke
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Tools from the runner
+        if: runner.environment == 'self-hosted'
+        run: bash tools/ci/runner-env.sh
+      - name: Vanilla data, when this runner has it
+        # A runner without the maintainer's own files cannot measure anything: that is a skip, not a failure.
+        if: runner.environment == 'self-hosted'
+        continue-on-error: true
+        run: bash tools/ci/vanilla-data.sh
+      - name: Is a prepared install here?
+        id: install
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' research-lock.json | head -1)
+          if [ -f ".local/horizon-client/$version/horizon-resources.json" ]; then
+            echo "ready=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::No prepared install in .local/horizon-client/$version: no game files on this machine, so the perf smoke skips."
+          fi
+      - name: Harness self-test
+        # Parsing, aggregation and the thresholds themselves: no game files needed, so it runs even when the run skips.
+        run: python3 tools/efficiency/selftest.py
+      - name: Build (fast profile)
+        if: steps.install.outputs.ready == '1'
+        run: cargo build --locked --profile fast -p horizon-client -p horizon-client-lib --bins
+      - name: Measure and compare
+        if: steps.install.outputs.ready == '1'
+        env:
+          THRESHOLDS: ${{ inputs.thresholds || 'tools/efficiency/thresholds.json' }}
+          RUNS: ${{ inputs.runs || '3' }}
+          SECONDS: ${{ inputs.seconds || '8' }}
+        run: |
+          python3 tools/efficiency/smoke.py --thresholds "$THRESHOLDS" --runs "$RUNS" --seconds "$SECONDS" \
+            --out .local/efficiency/smoke.json
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.install.outputs.ready == '1'
+        with:
+          name: perf-smoke.json
+          path: .local/efficiency/smoke.json
+          if-no-files-found: warn
+          retention-days: 14

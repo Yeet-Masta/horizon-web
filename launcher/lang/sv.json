@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} utelämnades: den behöver {other}, som utelämnades",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Bygger inte på den Horizon du spelar ({code}): ett bygge utelämnar den tills författaren uppdaterar den",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Där du är får du grundarsetet genom en gratis kassa på playhorizon.dev. Gör anspråk på det i Butik: den öppnar kassan åt dig.",
-  "The founder set can't be claimed from your country.": "Grundarsetet kan inte fås från ditt land."
+  "The founder set can't be claimed from your country.": "Grundarsetet kan inte fås från ditt land.",
+  "Java runtime": "Java-körtid",
+  "No runtime report": "Ingen körtidsrapport",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Körtid: {engine} · laddare: {loader} · vävt: {woven} · överhoppat: {skipped} · registreringar: {registrations} · ogenomskinligt: {opaque} · nyttolaster: {payloads}",
+  "Runtime skipped: {reason}": "Överhoppat av körtiden: {reason}",
+  "Runtime isolation: {error}": "Körtidsisolering: {error}",
+  "Runtime: {count} jar(s) reported": "Körtid: {count} jar-filer rapporterade",
+  "Clear compatibility cache": "Rensa kompatibilitetscachen",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetscachen för {name} rensades. Den kontrolleras igen vid nästa installation, uppdatering eller sökning.",
+  "(+{count} more)": "(+{count} fler)"
 }

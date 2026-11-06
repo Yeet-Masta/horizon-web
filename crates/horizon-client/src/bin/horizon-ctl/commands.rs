@@ -547,6 +547,10 @@ pub const COMMANDS: &[Cmd] = &[
     cmd!("friends", Multiplayer, "friends host|stop|status", "Play with Friends: share the open world behind an invite code, stop, or see who joined",
         "status gives the code: share it only when the player asks. Friends join with connect friend:CODE.",
         ["horizon-ctl friends host", "horizon-ctl friends status"], &[p("action", Ty::Enum(&["host", "stop", "status"]), "what to do")], mcp: true, local: false),
+    cmd!("payload", Multiplayer, "payload send CHANNEL HEX|utf8:TEXT client|server", "inject one declared mod payload to the guests of the open world",
+        "CHANNEL is a channel a Java mod declared (a resource location, up to 256 bytes); the payload is hex (a hex: prefix is optional) or utf8:TEXT, up to 1 MiB. client sends a client-bound frame to each placed guest, server a server-bound one. Needs an open world with a guest, on this game's LAN host or its integrated server.",
+        ["horizon-ctl payload send demo:down utf8:hello client", "horizon-ctl payload send demo:up 00ff server"],
+        &[p("action", Ty::Enum(&["send"]), "what to do"), p("channel", Ty::Str, "declared channel id"), p("value", Ty::Str, "hex bytes, or utf8:TEXT"), p("role", Ty::Enum(&["client", "server"]), "which side the frame is for")], mcp: false, local: false),
     // World
     cmd!("give", World, "give ITEM [COUNT]", "add items to the inventory", "", ["horizon-ctl give oak_log 16"],
         &[p("item", Ty::Str, "item id"), opt("count", Ty::Int, "how many (default 1)")], mcp: true, local: false),

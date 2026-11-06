@@ -7,7 +7,7 @@
 //! client predicts its own movement; the server stays authoritative for
 //! everything else.
 use super::remote_chunks::{ChunkDecoder, ChunkFormat, Next};
-use super::{Dim, Game, Mining, Screen};
+use super::{Dim, Game, Mining, Screen, java_content, java_payloads};
 use horizon_client::actions::Action;
 use horizon_client::first_person::{Hand, SwingAnimation};
 use horizon_client::{
@@ -37,6 +37,7 @@ use horizon_protocol::{
     item::{Hashed, Stack},
     packets::{
         Empty,
+        configuration::CustomPayload,
         play::{self, Clientbound as C, Serverbound as S},
     },
     registry::{Builtin, DimensionType, Dynamic, SyncedNames, ceil_log2},
@@ -487,6 +488,11 @@ pub(super) struct Remote {
     pub quiet_commands: bool,
     /// The server announced it carries mod messages.
     pub mod_net: bool,
+    /// Registered Java payload channels and frames the server sent, plus the
+    /// assemblers of oversized frames and registrations (`java_payloads`).
+    pub(super) payloads: java_payloads::PayloadLink,
+    payload_chunks: java_payloads::ChunkAssembler,
+    registration_chunks: java_payloads::ChunkAssembler,
     /// The synced attachments the server sent, by holder.
     pub attachments: HashMap<Holder, Attachments>,
     /// The server samples far terrain for us, this far at most (`lod_net`).
@@ -1067,6 +1073,9 @@ impl Game<'_> {
             features: vec!["minecraft:vanilla".into()],
             quiet_commands: false,
             mod_net: false,
+            payloads: java_payloads::PayloadLink::from_declared(),
+            payload_chunks: java_payloads::ChunkAssembler::new(),
+            registration_chunks: java_payloads::ChunkAssembler::new(),
             attachments: HashMap::new(),
             far_terrain: None,
             builtin,
@@ -3231,6 +3240,57 @@ impl Game<'_> {
             // The server's recipes its native mods asked to send.
             C::CustomPayload(p) if p.channel == horizon_client::lan::recipes::CONTENT_CHANNEL => {
                 self.remote_recipe_content(&p.data);
+            }
+            // The host's declared Java content, right after the channel
+            // registration, so declared ids resolve before the first chunk.
+            C::CustomPayload(p) if p.channel == java_content::CHANNEL => {
+                if self.remote.is_some() {
+                    match java_content::apply(&p.data) {
+                        Ok(java_content::Outcome::Applied(count)) => {
+                            log::info!("Horizon: server declared {count} Java content id(s)")
+                        }
+                        Ok(java_content::Outcome::Refused(reason)) => {
+                            java_content::warn_refused_once(&reason)
+                        }
+                        Err(error) => java_content::warn_once(&error),
+                    }
+                }
+            }
+            // A declared Java payload channel's list, then its frames.
+            C::CustomPayload(p) if p.channel == java_payloads::REGISTER_CHANNEL => {
+                match self.remote.as_mut() {
+                    Some(r) => match java_payloads::receive_registration(
+                        &mut r.payloads,
+                        &mut r.registration_chunks,
+                        &p.data,
+                    ) {
+                        Ok(Some(count)) => {
+                            log::info!("Horizon: server declared {count} mod payload channel(s)")
+                        }
+                        Ok(None) => {}
+                        Err(error) => log::warn!("Horizon: bad mod payload registration: {error}"),
+                    },
+                    None => log::debug!("Horizon: a mod payload registration with no connection"),
+                }
+            }
+            C::CustomPayload(p) if p.channel == java_payloads::CHANNEL => {
+                match self.remote.as_mut() {
+                    Some(r) if r.payloads.registry().declarations().next().is_some() => {
+                        if let Err(error) = java_payloads::receive_payload(
+                            &mut r.payloads,
+                            &mut r.payload_chunks,
+                            &p.data,
+                        ) {
+                            log::warn!("Horizon: bad mod payload from the server: {error}");
+                        }
+                    }
+                    Some(_) => {
+                        log::debug!(
+                            "Horizon: a mod payload arrived before the server declared its channels"
+                        )
+                    }
+                    None => log::debug!("Horizon: a mod payload with no connection"),
+                }
             }
             // PingDebugMonitor.onPongReceived.
             C::PongResponse(p) => {
@@ -6007,6 +6067,8 @@ impl Game<'_> {
         self.native_net.to_server = 0;
         self.native_tick();
         self.tell_native_now();
+        // Java mod payload frames both ways, a bounded number each tick.
+        self.tick_remote_payloads();
         // Far tiles the samplers asked for (`lod_net`).
         if let Some(r) = &self.remote {
             r.session.send_far_terrain();
@@ -6018,6 +6080,84 @@ impl Game<'_> {
             self.send(S::ClientTickEnd(Empty));
         }
         Ok(())
+    }
+
+    /// Move this window's Java mod payload frames both ways, at most
+    /// [`java_payloads::PAYLOAD_TICK_CAP`] each: frames the server sent run
+    /// the client's own receivers, and frames its Java mods queued for the
+    /// server go out as `horizon:payload`. A remainder stays queued for the
+    /// next tick.
+    fn tick_remote_payloads(&mut self) {
+        let Some(r) = self.remote.as_mut() else {
+            return;
+        };
+        // Frames wait in the queue until the connection has joined.
+        let send_cap = if r.joined {
+            java_payloads::PAYLOAD_TICK_CAP
+        } else {
+            0
+        };
+        let pump = java_payloads::pump_client_payloads(
+            &mut r.payloads,
+            java_payloads::PAYLOAD_TICK_CAP,
+            send_cap,
+            &mut |frame| {
+                java_payloads::dispatch_received_as(
+                    frame,
+                    java_payloads::PayloadDirection::PlayToClient,
+                )
+            },
+            &mut java_payloads::take_java_to_server,
+        );
+        for id in &pump.unhandled {
+            log::warn!("Horizon: no Java handler for payload {id}");
+        }
+        for (id, error) in &pump.failed {
+            log::warn!("Horizon: Java payload {id} handler failed: {error}");
+        }
+        for (id, error) in &pump.rejected {
+            log::warn!("Horizon: mod payload {id} was not sent: {error}");
+        }
+        for data in pump.encoded {
+            self.send(S::CustomPayload(CustomPayload {
+                channel: java_payloads::CHANNEL.to_owned(),
+                data,
+            }));
+        }
+    }
+
+    /// Send one declared mod payload frame to the server.
+    #[allow(dead_code)] // wired for mod-triggered sends once Java hooks call it
+    pub(super) fn remote_send_payload(
+        &mut self,
+        id: &str,
+        direction: java_payloads::PayloadDirection,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<(), String> {
+        let Some(r) = self.remote.as_mut() else {
+            return Err("not connected to a server".to_owned());
+        };
+        let data = r.payloads.send(id, direction, bytes)?;
+        // The frame goes out right here; the link's own copy would only pile
+        // up against its queue cap.
+        r.payloads.take_outgoing();
+        // A frame above the packet envelope travels as consecutive chunks the
+        // server joins; a smaller one is the frame itself.
+        for envelope in java_payloads::chunk_envelopes(&data)? {
+            self.send(S::CustomPayload(CustomPayload {
+                channel: java_payloads::CHANNEL.to_owned(),
+                data: envelope,
+            }));
+        }
+        Ok(())
+    }
+
+    /// Frames the server sent, in arrival order.
+    #[allow(dead_code)] // consumed by the mod hook dispatcher once wired
+    pub(super) fn take_remote_payloads(&mut self) -> Vec<java_payloads::PayloadFrame> {
+        self.remote
+            .as_mut()
+            .map_or_else(Vec::new, |r| r.payloads.take_incoming())
     }
 
     fn tick_remote_level(&mut self) -> Result<()> {

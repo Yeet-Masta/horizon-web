@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} е изоставен: му треба {other}, кој е изоставен",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Не се гради на Horizon што го играш ({code}): градењето го изоставува додека авторот не го ажурира",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Таму каде што сте, комплетот на основачите се зема преку бесплатно плаќање на playhorizon.dev. Земете го од Продавницата: таа ќе ви го отвори плаќањето.",
-  "The founder set can't be claimed from your country.": "Комплетот на основачите не може да се земе од вашата земја."
+  "The founder set can't be claimed from your country.": "Комплетот на основачите не може да се земе од вашата земја.",
+  "Java runtime": "Java околина за извршување",
+  "No runtime report": "Нема извештај за извршување",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Извршување: {engine} · вчитувач: {loader} · вткаено: {woven} · прескокнато: {skipped} · регистрации: {registrations} · непровидно: {opaque} · корисни оптоварувања: {payloads}",
+  "Runtime skipped: {reason}": "Прескокнато од извршувањето: {reason}",
+  "Runtime isolation: {error}": "Изолација на извршувањето: {error}",
+  "Runtime: {count} jar(s) reported": "Извршување: пријавени {count} jar датотеки",
+  "Clear compatibility cache": "Исчисти го кешот за компатибилност",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кешот за компатибилност за {name} е исчистен. Ќе биде повторно проверен при следното инсталирање, ажурирање или пребарување.",
+  "(+{count} more)": "(+{count} повеќе)"
 }

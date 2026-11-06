@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} a fost omis: are nevoie de {other}, care a fost omis",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nu se compilează pe Horizon-ul pe care îl joci ({code}): compilarea îl omite până când autorul îl actualizează",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Acolo unde ești, setul fondatorilor se revendică printr-o plată gratuită pe playhorizon.dev. Revendică-l din Magazin: îți deschide plata.",
-  "The founder set can't be claimed from your country.": "Setul fondatorilor nu poate fi revendicat din țara ta."
+  "The founder set can't be claimed from your country.": "Setul fondatorilor nu poate fi revendicat din țara ta.",
+  "Java runtime": "Runtime Java",
+  "No runtime report": "Niciun raport de runtime",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Runtime: {engine} · încărcător: {loader} · țesut: {woven} · omis: {skipped} · înregistrări: {registrations} · opac: {opaque} · încărcături: {payloads}",
+  "Runtime skipped: {reason}": "Omis de runtime: {reason}",
+  "Runtime isolation: {error}": "Izolare runtime: {error}",
+  "Runtime: {count} jar(s) reported": "Runtime: {count} fișiere jar raportate",
+  "Clear compatibility cache": "Șterge cache-ul de compatibilitate",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache-ul de compatibilitate pentru {name} a fost șters. Va fi verificat din nou la următoarea instalare, actualizare sau listare în căutare.",
+  "(+{count} more)": "(+{count} mai multe)"
 }

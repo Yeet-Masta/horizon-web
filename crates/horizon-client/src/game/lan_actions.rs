@@ -8,6 +8,7 @@
 use super::{
     Dim, Game, GuestUse, Hit, InteractTarget, Mining, Screen,
     building_players::{BuildingPlayer, BuildingPlayers},
+    java_payloads,
     lan::LanHost,
     lan_crafting::MenuRemoval,
     respawn_anchor::RespawnConfig,
@@ -1621,6 +1622,7 @@ impl Game<'_> {
     /// keep their existing return-to-inventory behavior.
     pub(super) fn guest_disconnected(&mut self, host: &mut LanHost, conn: u32) {
         self.guest_remove_menus(host, conn, MenuRemoval::Disconnected);
+        super::java_payloads::forget_guest(conn);
     }
 
     /// `AbstractContainerMenu.removed`: close the guest's active menu using
@@ -2648,6 +2650,11 @@ impl Game<'_> {
             }
             S::CustomPayload(p) if p.channel == horizon_client::lod_net::CHANNEL => {
                 self.guest_far_terrain(host, conn, &p.data)
+            }
+            // A Java mod's payload frame, joined from its chunks when it is
+            // one and checked against the channels this run declared.
+            S::CustomPayload(p) if p.channel == java_payloads::CHANNEL => {
+                self.guest_java_payload(host, conn, &p.data)
             }
             S::ChatCommandSigned(p) => self.guest_signed_command(host, conn, p),
             S::ChangeDifficulty(p) if host.hub.guests[gi].permission >= 2 => {
@@ -3862,6 +3869,10 @@ impl Game<'_> {
 
     /// Per tick, for every guest: dig, use items, pick up drops, die.
     pub(super) fn tick_guests(&mut self, host: &mut LanHost) {
+        // The channels and declared content the host has, then the frames its
+        // guests sent since the last tick, to the Java mods that registered.
+        self.tick_java_payloads(host);
+        super::java_content::tick_java_content(host);
         self.tick_guest_cameras(host);
         self.lan_merchant_tick(host);
         self.lan_stations_tick(host);

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} praleistas: jam reikia {other}, kuris praleistas",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nesukompiliuojamas tavo žaidžiamame Horizon ({code}): kompiliavimas jį praleidžia, kol autorius jo neatnaujins",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Ten, kur esate, įkūrėjų rinkinys gaunamas per nemokamą apmokėjimą playhorizon.dev svetainėje. Gaukite jį Parduotuvėje: ji atidarys apmokėjimą už jus.",
-  "The founder set can't be claimed from your country.": "Įkūrėjų rinkinio negalima gauti iš jūsų šalies."
+  "The founder set can't be claimed from your country.": "Įkūrėjų rinkinio negalima gauti iš jūsų šalies.",
+  "Java runtime": "Java vykdymo aplinka",
+  "No runtime report": "Nėra vykdymo ataskaitos",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Vykdymas: {engine} · įkėlėjas: {loader} · austas: {woven} · praleista: {skipped} · registracijos: {registrations} · nepermatomas: {opaque} · naudingosios apkrovos: {payloads}",
+  "Runtime skipped: {reason}": "Vykdymas praleido: {reason}",
+  "Runtime isolation: {error}": "Vykdymo izoliacija: {error}",
+  "Runtime: {count} jar(s) reported": "Vykdymas: pranešta apie {count} jar failus",
+  "Clear compatibility cache": "Išvalyti suderinamumo podėlį",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} suderinamumo podėlis išvalytas. Jis bus patikrintas iš naujo per kitą diegimą, atnaujinimą ar paiešką.",
+  "(+{count} more)": "(+{count} daugiau)"
 }

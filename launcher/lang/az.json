@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} kənarda qaldı: ona {other} lazımdır, o da kənarda qaldı",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Oynadığın Horizon-da qurulmur ({code}): müəllifi yeniləyənə qədər quraşdırma onu kənarda saxlayır",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Olduğunuz yerdə qurucu dəsti playhorizon.dev saytında pulsuz ödəniş vasitəsilə alınır. Onu Mağazadan alın: ödəniş səhifəsini sizin üçün açacaq.",
-  "The founder set can't be claimed from your country.": "Qurucu dəsti sizin ölkənizdən alına bilməz."
+  "The founder set can't be claimed from your country.": "Qurucu dəsti sizin ölkənizdən alına bilməz.",
+  "Java runtime": "Java işləmə mühiti",
+  "No runtime report": "İşləmə hesabatı yoxdur",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "İşləmə: {engine} · yükləyici: {loader} · toxunmuş: {woven} · atlanmış: {skipped} · qeydiyyatlar: {registrations} · qeyri-şəffaf: {opaque} · yüklər: {payloads}",
+  "Runtime skipped: {reason}": "İşləmə mühiti atladı: {reason}",
+  "Runtime isolation: {error}": "İşləmə təcridi: {error}",
+  "Runtime: {count} jar(s) reported": "İşləmə: {count} jar faylı bildirildi",
+  "Clear compatibility cache": "Uyğunluq keşini təmizlə",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} üçün uyğunluq keşi təmizləndi. Növbəti quraşdırma, yeniləmə və ya axtarışda yenidən yoxlanılacaq.",
+  "(+{count} more)": "(+{count} daha)"
 }

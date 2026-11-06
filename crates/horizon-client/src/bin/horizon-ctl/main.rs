@@ -191,6 +191,9 @@ impl Session {
                 "use horizon-ctl COMMAND --help outside scripts",
             ));
         }
+        if name == "payload" {
+            return payload_command(self, words);
+        }
         let number = |i: usize, what: &str| -> Result<f64, Failure> {
             words
                 .get(i)
@@ -343,6 +346,69 @@ fn logs(home: &Path, words: &[String]) -> Result<Value, Failure> {
 
 fn usage(name: &str) -> String {
     commands::find(name).map_or_else(|| name.to_owned(), |c| format!("horizon-ctl {}", c.usage))
+}
+
+/// A control payload channel id's bytes at most, and the bytes one frame may
+/// carry: the transport's bounds (`game/java_payloads.rs`). Checked here too so
+/// a typo fails as a usage error before the socket, and so a huge argument is
+/// refused before it is hex-encoded.
+const MAX_PAYLOAD_CHANNEL: usize = 256;
+const MAX_PAYLOAD_BYTES: usize = 1 << 20;
+
+/// `payload send CHANNEL HEX|utf8:TEXT client|server` as the game's command
+/// line. The payload always travels as hex, so a `utf8:` text with spaces
+/// stays one argument.
+fn payload_line(words: &[String]) -> Result<String, Failure> {
+    let usage = "usage: horizon-ctl payload send CHANNEL HEX|utf8:TEXT client|server";
+    let [_, action, channel, value, role] = words else {
+        return Err(Failure::usage(usage));
+    };
+    if action != "send" {
+        return Err(Failure::usage(usage));
+    }
+    if channel.is_empty() || channel.len() > MAX_PAYLOAD_CHANNEL {
+        return Err(Failure::usage(format!(
+            "CHANNEL must be 1..{MAX_PAYLOAD_CHANNEL} bytes"
+        )));
+    }
+    if role != "client" && role != "server" {
+        return Err(Failure::usage("ROLE must be client or server"));
+    }
+    let bytes = if let Some(text) = value.strip_prefix("utf8:") {
+        text.as_bytes().to_vec()
+    } else {
+        let hex = value.strip_prefix("hex:").unwrap_or(value);
+        if !hex.len().is_multiple_of(2) {
+            return Err(Failure::usage("HEX must have an even number of digits"));
+        }
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().as_chunks::<2>().0 {
+            let high = (pair[0] as char).to_digit(16);
+            let low = (pair[1] as char).to_digit(16);
+            let Some((high, low)) = high.zip(low) else {
+                return Err(Failure::usage("HEX contains an invalid digit"));
+            };
+            bytes.push(((high << 4) | low) as u8);
+        }
+        bytes
+    };
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(Failure::usage(format!(
+            "payload is {} bytes (max {MAX_PAYLOAD_BYTES})",
+            bytes.len()
+        )));
+    }
+    let encoded = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("payload send {channel} {encoded} {role}"))
+}
+
+/// `payload send ...`: validate and normalize the arguments, then hand the
+/// frame to the game (the LAN host or its integrated server sends it).
+fn payload_command(session: &mut Session, words: &[String]) -> Result<Value, Failure> {
+    session.game(&payload_line(words)?)
 }
 
 /// Paths are written by the game process: make them absolute here.
@@ -826,5 +892,70 @@ mod tests {
         let mut words = vec!["screenshot".to_owned(), "a.png".to_owned()];
         absolute_paths(&mut words);
         assert!(Path::new(&words[1]).is_absolute());
+    }
+
+    #[test]
+    fn payload_lines_normalize_the_payload_and_check_its_bounds() {
+        let words = |s: &str| -> Vec<String> { s.split_whitespace().map(str::to_owned).collect() };
+        assert_eq!(
+            payload_line(&words("payload send demo:down utf8:hello client")).unwrap(),
+            "payload send demo:down 68656c6c6f client"
+        );
+        assert_eq!(
+            payload_line(&words("payload send demo:up hex:00ff server")).unwrap(),
+            "payload send demo:up 00ff server"
+        );
+        // Without `hex:` the digits are still hex, and case is normalized.
+        assert_eq!(
+            payload_line(&words("payload send demo:x 0A0b client")).unwrap(),
+            "payload send demo:x 0a0b client"
+        );
+        // A quoted text keeps its spaces: it is hex on the wire.
+        assert_eq!(
+            payload_line(&[
+                "payload".to_owned(),
+                "send".to_owned(),
+                "demo:x".to_owned(),
+                "utf8:hi there".to_owned(),
+                "server".to_owned(),
+            ])
+            .unwrap(),
+            "payload send demo:x 6869207468657265 server"
+        );
+
+        // The channel and the payload bounds are the transport's: 256 bytes
+        // and 1 MiB are in, one byte more is out.
+        let at_limit = "x".repeat(256);
+        assert!(payload_line(&words(&format!("payload send {at_limit} 00 client"))).is_ok());
+        let over = "x".repeat(257);
+        assert_eq!(
+            payload_line(&words(&format!("payload send {over} 00 client")))
+                .unwrap_err()
+                .status,
+            USAGE
+        );
+        let one_mib = "00".repeat(1 << 20);
+        assert!(payload_line(&words(&format!("payload send demo:x {one_mib} client"))).is_ok());
+        let too_big = "00".repeat((1 << 20) + 1);
+        assert_eq!(
+            payload_line(&words(&format!("payload send demo:x {too_big} client")))
+                .unwrap_err()
+                .status,
+            USAGE
+        );
+
+        for bad in [
+            "payload send demo:x 0 client",
+            "payload send demo:x gg client",
+            "payload send demo:x 00 either",
+            "payload take demo:x 00 client",
+            "payload send demo:x 00",
+        ] {
+            assert_eq!(
+                payload_line(&words(bad)).unwrap_err().status,
+                USAGE,
+                "{bad}"
+            );
+        }
     }
 }

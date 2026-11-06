@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} пропущен: ему нужен {other}, который пропущен",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Не собирается на Horizon, в который вы играете ({code}): сборка пропустит его, пока автор не обновит",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "В вашей стране набор основателя получают через бесплатное оформление на playhorizon.dev. Получите его в Магазине: он сам откроет оформление.",
-  "The founder set can't be claimed from your country.": "Набор основателя нельзя получить из вашей страны."
+  "The founder set can't be claimed from your country.": "Набор основателя нельзя получить из вашей страны.",
+  "Java runtime": "Среда выполнения Java",
+  "No runtime report": "Нет отчёта о среде выполнения",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Среда выполнения: {engine} · загрузчик: {loader} · вплетено: {woven} · пропущено: {skipped} · регистраций: {registrations} · непрозрачных: {opaque} · полезных нагрузок: {payloads}",
+  "Runtime skipped: {reason}": "Пропущено средой выполнения: {reason}",
+  "Runtime isolation: {error}": "Изоляция среды выполнения: {error}",
+  "Runtime: {count} jar(s) reported": "Среда выполнения: сообщено о {count} jar-файл(ах)",
+  "Clear compatibility cache": "Очистить кэш совместимости",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кэш совместимости для {name} очищен. Мод будет проверен снова при следующей установке, обновлении или появлении в поиске.",
+  "(+{count} more)": "(+{count} ещё)"
 }

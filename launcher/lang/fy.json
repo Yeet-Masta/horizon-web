@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} is weilitten: it hat {other} nedich, dat weilitten is",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Bout net op de Horizon dy't do spilest ({code}): in bou lit it fuort oant de makker it bywurket",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Dêr't do bist, wurdt de oprjochterset oanfrege fia in fergese betelling op playhorizon.dev. Claim him yn de Winkel: dy iepenet de betelling foar dy.",
-  "The founder set can't be claimed from your country.": "De oprjochterset kin net út dyn lân claimd wurde."
+  "The founder set can't be claimed from your country.": "De oprjochterset kin net út dyn lân claimd wurde.",
+  "Java runtime": "Java-rintyd",
+  "No runtime report": "Gjin rintydrapport",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Rintyd: {engine} · lader: {loader} · weefd: {woven} · oerslein: {skipped} · registraasjes: {registrations} · ûntrochsichtich: {opaque} · payloads: {payloads}",
+  "Runtime skipped: {reason}": "Oerslein troch rintyd: {reason}",
+  "Runtime isolation: {error}": "Rintydisolaasje: {error}",
+  "Runtime: {count} jar(s) reported": "Rintyd: {count} jar-bestannen rapportearre",
+  "Clear compatibility cache": "Kompatibiliteitscache wiskje",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De kompatibiliteitscache foar {name} is wiske. It wurdt by de folgjende ynstallaasje, bywurking of syktocht wer kontrolearre.",
+  "(+{count} more)": "(+{count} mear)"
 }

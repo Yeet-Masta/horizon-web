@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} bol vynechaný: potrebuje {other}, ktorý bol vynechaný",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nezostaví sa na Horizone, ktorý hráš ({code}): zostavenie ho vynechá, kým ho autor neaktualizuje",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Tam, kde ste, sa zakladateľská sada získava cez bezplatnú pokladňu na playhorizon.dev. Získajte ju v Obchode: pokladňu vám otvorí sám.",
-  "The founder set can't be claimed from your country.": "Zakladateľskú sadu nemožno získať z vašej krajiny."
+  "The founder set can't be claimed from your country.": "Zakladateľskú sadu nemožno získať z vašej krajiny.",
+  "Java runtime": "Behové prostredie Java",
+  "No runtime report": "Žiadna správa o behu",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Beh: {engine} · načítač: {loader} · vpletené: {woven} · preskočené: {skipped} · registrácie: {registrations} · nepriehľadné: {opaque} · užitočné zaťaženia: {payloads}",
+  "Runtime skipped: {reason}": "Preskočené behom: {reason}",
+  "Runtime isolation: {error}": "Izolácia behu: {error}",
+  "Runtime: {count} jar(s) reported": "Beh: nahlásených {count} súborov jar",
+  "Clear compatibility cache": "Vymazať vyrovnávaciu pamäť kompatibility",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Vyrovnávacia pamäť kompatibility pre {name} bola vymazaná. Znova sa skontroluje pri ďalšej inštalácii, aktualizácii alebo zobrazení vo vyhľadávaní.",
+  "(+{count} more)": "(+{count} ďalších)"
 }

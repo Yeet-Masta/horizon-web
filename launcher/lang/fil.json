@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "Hindi isinama ang {name}: kailangan nito ang {other}, na hindi isinama",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Hindi nabubuo sa Horizon na nilalaro mo ({code}): hindi ito isasama ng build hangga't hindi ito ina-update ng may-akda",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Kung nasaan ka, kinukuha ang founder set sa pamamagitan ng libreng checkout sa playhorizon.dev. I-claim ito sa Shop: bubuksan nito ang checkout para sa iyo.",
-  "The founder set can't be claimed from your country.": "Hindi makukuha ang founder set mula sa iyong bansa."
+  "The founder set can't be claimed from your country.": "Hindi makukuha ang founder set mula sa iyong bansa.",
+  "Java runtime": "Runtime ng Java",
+  "No runtime report": "Walang ulat ng runtime",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Runtime: {engine} · loader: {loader} · hinabi: {woven} · nilaktawan: {skipped} · mga rehistro: {registrations} · malabo: {opaque} · mga payload: {payloads}",
+  "Runtime skipped: {reason}": "Nilaktawan ng runtime: {reason}",
+  "Runtime isolation: {error}": "Paghiwalay ng runtime: {error}",
+  "Runtime: {count} jar(s) reported": "Runtime: {count} jar ang iniulat",
+  "Clear compatibility cache": "I-clear ang cache ng compatibility",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Na-clear ang cache ng compatibility para sa {name}. Susuriin itong muli sa susunod na pag-install, pag-update o paghahanap.",
+  "(+{count} more)": "(+{count} pa)"
 }

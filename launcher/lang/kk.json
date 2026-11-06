@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} алынып тасталды: оған {other} керек, ол алынып тасталды",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Сен ойнайтын Horizon-да жиналмайды ({code}): авторы жаңартқанша жинау оны алып тастайды",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Сіз тұрған жерде негізін қалаушылар жиынтығы playhorizon.dev сайтындағы тегін төлем арқылы алынады. Оны Дүкеннен алыңыз: ол төлемді сізге ашып береді.",
-  "The founder set can't be claimed from your country.": "Негізін қалаушылар жиынтығын сіздің еліңізден алу мүмкін емес."
+  "The founder set can't be claimed from your country.": "Негізін қалаушылар жиынтығын сіздің еліңізден алу мүмкін емес.",
+  "Java runtime": "Java орындау ортасы",
+  "No runtime report": "Орындау туралы есеп жоқ",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Орындау: {engine} · жүктеуші: {loader} · тоқылған: {woven} · өткізіп жіберілген: {skipped} · тіркеулер: {registrations} · мөлдір емес: {opaque} · пайдалы жүктемелер: {payloads}",
+  "Runtime skipped: {reason}": "Орындау ортасы өткізіп жіберді: {reason}",
+  "Runtime isolation: {error}": "Орындау оқшаулауы: {error}",
+  "Runtime: {count} jar(s) reported": "Орындау: {count} jar файлы туралы хабарланды",
+  "Clear compatibility cache": "Үйлесімділік кэшін тазалау",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} үшін үйлесімділік кэші тазаланды. Келесі орнату, жаңарту немесе іздеу кезінде қайта тексеріледі.",
+  "(+{count} more)": "(+{count} тағы)"
 }

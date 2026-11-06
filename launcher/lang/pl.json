@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "Pominięto {name}: potrzebuje {other}, który został pominięty",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nie buduje się na Horizonie, w który grasz ({code}): budowanie go pomija, dopóki autor go nie zaktualizuje",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Tam, gdzie jesteś, zestaw założyciela odbiera się przez bezpłatną płatność na playhorizon.dev. Odbierz go w Sklepie: otworzy płatność za ciebie.",
-  "The founder set can't be claimed from your country.": "Zestawu założyciela nie można odebrać z twojego kraju."
+  "The founder set can't be claimed from your country.": "Zestawu założyciela nie można odebrać z twojego kraju.",
+  "Java runtime": "Środowisko uruchomieniowe Java",
+  "No runtime report": "Brak raportu środowiska uruchomieniowego",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Środowisko: {engine} · loader: {loader} · wplecione: {woven} · pominięte: {skipped} · rejestracje: {registrations} · nieprzejrzyste: {opaque} · ładunki: {payloads}",
+  "Runtime skipped: {reason}": "Pominięte przez środowisko: {reason}",
+  "Runtime isolation: {error}": "Izolacja środowiska: {error}",
+  "Runtime: {count} jar(s) reported": "Środowisko: zgłoszono {count} plik(ów) jar",
+  "Clear compatibility cache": "Wyczyść pamięć podręczną zgodności",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Wyczyszczono pamięć podręczną zgodności dla {name}. Zostanie sprawdzony ponownie przy następnej instalacji, aktualizacji lub wyszukiwaniu.",
+  "(+{count} more)": "(+{count} więcej)"
 }

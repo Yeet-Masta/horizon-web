@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "ไม่ได้รวม {name}: ต้องใช้ {other} ซึ่งไม่ได้รวมไว้",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "สร้างบน Horizon ที่คุณเล่นไม่ได้ ({code}): การสร้างจะไม่รวมไว้จนกว่าผู้สร้างจะอัปเดต",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "ในพื้นที่ของคุณ ชุดผู้ก่อตั้งต้องรับผ่านการชำระเงินฟรีบน playhorizon.dev รับได้จากร้านค้า: ร้านค้าจะเปิดหน้าชำระเงินให้คุณ",
-  "The founder set can't be claimed from your country.": "ไม่สามารถรับชุดผู้ก่อตั้งจากประเทศของคุณได้"
+  "The founder set can't be claimed from your country.": "ไม่สามารถรับชุดผู้ก่อตั้งจากประเทศของคุณได้",
+  "Java runtime": "รันไทม์ Java",
+  "No runtime report": "ไม่มีรายงานรันไทม์",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "รันไทม์: {engine} · ตัวโหลด: {loader} · ทอแล้ว: {woven} · ข้ามแล้ว: {skipped} · การลงทะเบียน: {registrations} · ทึบ: {opaque} · เพย์โหลด: {payloads}",
+  "Runtime skipped: {reason}": "รันไทม์ข้าม: {reason}",
+  "Runtime isolation: {error}": "การแยกตัวของรันไทม์: {error}",
+  "Runtime: {count} jar(s) reported": "รันไทม์: รายงาน {count} ไฟล์ jar",
+  "Clear compatibility cache": "ล้างแคชความเข้ากันได้",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "ล้างแคชความเข้ากันได้ของ {name} แล้ว จะตรวจสอบอีกครั้งในการติดตั้ง อัปเดต หรือแสดงในการค้นหาครั้งถัดไป",
+  "(+{count} more)": "(+{count} เพิ่มเติม)"
 }

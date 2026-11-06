@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} kanpoan utzi da: {other} behar du, eta hura kanpoan utzi da",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Ez da eraikitzen jokatzen duzun Horizonen ({code}): eraikuntzak kanpoan uzten du egileak eguneratu arte",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Zauden lekuan, sortzaileen multzoa doako ordainketa baten bidez erreklamatzen da playhorizon.dev-en. Erreklamatu Dendatik: ordainketa irekiko dizu.",
-  "The founder set can't be claimed from your country.": "Sortzaileen multzoa ezin da zure herrialdetik erreklamatu."
+  "The founder set can't be claimed from your country.": "Sortzaileen multzoa ezin da zure herrialdetik erreklamatu.",
+  "Java runtime": "Java exekuzio-ingurunea",
+  "No runtime report": "Ez dago exekuzio-txostenik",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Exekuzioa: {engine} · kargatzailea: {loader} · ehuna: {woven} · saltatua: {skipped} · erregistroak: {registrations} · opakua: {opaque} · kargak: {payloads}",
+  "Runtime skipped: {reason}": "Exekuzioak saltatu du: {reason}",
+  "Runtime isolation: {error}": "Exekuzioaren isolamendua: {error}",
+  "Runtime: {count} jar(s) reported": "Exekuzioa: {count} jar fitxategi jakinarazi dira",
+  "Clear compatibility cache": "Garbitu bateragarritasun-cachea",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}(e)n bateragarritasun-cachea garbitu da. Hurrengo instalazioan, eguneratzean edo bilaketan berriro egiaztatuko da.",
+  "(+{count} more)": "(+{count} gehiago)"
 }

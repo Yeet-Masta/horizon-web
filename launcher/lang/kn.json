@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} ಅನ್ನು ಬಿಡಲಾಗಿದೆ: ಇದಕ್ಕೆ {other} ಬೇಕು, ಅದನ್ನು ಬಿಡಲಾಗಿದೆ",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "ನೀವು ಆಡುವ Horizon ನಲ್ಲಿ ಬಿಲ್ಡ್ ಆಗುವುದಿಲ್ಲ ({code}): ಅದರ ಲೇಖಕರು ನವೀಕರಿಸುವವರೆಗೆ ಬಿಲ್ಡ್ ಅದನ್ನು ಬಿಡುತ್ತದೆ",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "ನೀವು ಇರುವಲ್ಲಿ, ಸ್ಥಾಪಕರ ಸೆಟ್ ಅನ್ನು playhorizon.dev ನಲ್ಲಿ ಉಚಿತ ಚೆಕ್‌ಔಟ್ ಮೂಲಕ ಪಡೆಯಲಾಗುತ್ತದೆ. ಅಂಗಡಿಯಿಂದ ಪಡೆಯಿರಿ: ಅದು ನಿಮಗಾಗಿ ಚೆಕ್‌ಔಟ್ ತೆರೆಯುತ್ತದೆ.",
-  "The founder set can't be claimed from your country.": "ನಿಮ್ಮ ದೇಶದಿಂದ ಸ್ಥಾಪಕರ ಸೆಟ್ ಪಡೆಯಲು ಸಾಧ್ಯವಿಲ್ಲ."
+  "The founder set can't be claimed from your country.": "ನಿಮ್ಮ ದೇಶದಿಂದ ಸ್ಥಾಪಕರ ಸೆಟ್ ಪಡೆಯಲು ಸಾಧ್ಯವಿಲ್ಲ.",
+  "Java runtime": "Java ರನ್ಟೈಮ್",
+  "No runtime report": "ಯಾವುದೇ ರನ್ಟೈಮ್ ವರದಿ ಇಲ್ಲ",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "ರನ್ಟೈಮ್: {engine} · ಲೋಡರ್: {loader} · ನೇಯ್ದದ್ದು: {woven} · ಬಿಟ್ಟುಬಿಟ್ಟದ್ದು: {skipped} · ನೋಂದಣಿಗಳು: {registrations} · ಅಪಾರದರ್ಶಕ: {opaque} · ಪೇಲೋಡ್ಗಳು: {payloads}",
+  "Runtime skipped: {reason}": "ರನ್ಟೈಮ್ ಬಿಟ್ಟುಬಿಟ್ಟಿದೆ: {reason}",
+  "Runtime isolation: {error}": "ರನ್ಟೈಮ್ ಪ್ರತ್ಯೇಕತೆ: {error}",
+  "Runtime: {count} jar(s) reported": "ರನ್ಟೈಮ್: {count} jar ಫೈಲ್ಗಳನ್ನು ವರದಿ ಮಾಡಲಾಗಿದೆ",
+  "Clear compatibility cache": "ಹೊಂದಾಣಿಕೆ ಕ್ಯಾಶ್ ತೆರವುಗೊಳಿಸಿ",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} ನ ಹೊಂದಾಣಿಕೆ ಕ್ಯಾಶ್ ತೆರವುಗೊಳಿಸಲಾಗಿದೆ. ಮುಂದಿನ ಸ್ಥಾಪನೆ, ನವೀಕರಣ ಅಥವಾ ಹುಡುಕಾಟದಲ್ಲಿ ಮತ್ತೆ ಪರಿಶೀಲಿಸಲಾಗುತ್ತದೆ.",
+  "(+{count} more)": "(+{count} ಇನ್ನಷ್ಟು)"
 }

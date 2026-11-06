@@ -1,0 +1,115 @@
+Horizon native Java real-mod corpus run
+Date: 2026-11-05 (re-run on the CLASS-retention @Mixin discovery fix)
+Binary: target/fast/horizon-native-java + horizon-jvm (prebuilt, --bin-dir target/fast)
+Probe timeout: 60s; limit: 32 per root invocation; nested probing enabled (8 per jar, depth 1)
+
+Committed source fixtures:
+  fabric-fixture.jar sha256=8eacd78db5c2 size=5980
+  forge-fixture.jar sha256=d0d0b8ae5723 size=1565
+  neoforge-fixture.jar sha256=9b0128c580d4 size=2524
+
+Per-jar numbers are `plans=N` (mixin injection plans discovered), `unresolved=U`
+(plans whose invoke target was not found) and `configs=C` (mixin config files read).
+They come from `horizon-native-java --mixin-plans <jar>` on the same jar/entry as the
+corpus row, so an `ok` row can still carry plans: the entrypoint ran but the mixins
+were not woven (the loader does that).
+
+Fabric roots: /tmp/opencode/corpus-big; Better Realism mods
+  counts: ok=12 fallback=17 unsupported=3 metadata-only=0 total=32
+  unique jars: 75 (32 selected, 1 skipped, 42 deferred at the limit); duplicates: 0
+  plans: 18 of 32 outer jars report plans (442 plans, 2 unresolved); 12 of 32 nested jars report plans (56 plans)
+
+  fabric-api-0.165.0+26.3.jar | fabric-api 0.165.0+26.3 | 18442e2ad466 | ok | plans=0 unresolved=0 configs=0 | nested jar(s) ran: 8 nested jar(s): 1 ok, 6 fallback, 1 unsupported; 1 skipped
+    nested META-INF/jars/fabric-advancement-api-v1-1.0.1+38c7a2d55d.jar | fabric-advancement-api-v1 1.0.1+38c7a2d55d | fallback | plans=1 unresolved=0 configs=1 | no entrypoint; 1 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-api-base-2.0.6+fcdff87f5d.jar | fabric-api-base 2.0.6+fcdff87f5d | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/fabric-api-lookup-api-v1-2.0.24+3434d6d95d.jar | fabric-api-lookup-api-v1 2.0.24+3434d6d95d | ok | plans=0 unresolved=0 configs=1 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 1 mixin config(s) not applied)
+    nested META-INF/jars/fabric-biome-api-v1-20.1.1+85210bca5d.jar | fabric-biome-api-v1 20.1.1+85210bca5d | fallback | plans=7 unresolved=0 configs=1 | no entrypoint; 7 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-block-api-v1-3.1.0+0ae6f9115d.jar | fabric-block-api-v1 3.1.0+0ae6f9115d | fallback | plans=3 unresolved=0 configs=1 | no entrypoint; 3 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-block-getter-api-v2-2.0.9+3434d6d95d.jar | fabric-block-getter-api-v2 2.0.9+3434d6d95d | fallback | plans=2 unresolved=0 configs=2 | no entrypoint; 2 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-command-api-v2-3.1.2+fcdff87f5d.jar | fabric-command-api-v2 3.1.2+fcdff87f5d | fallback | plans=7 unresolved=0 configs=2 | no entrypoint; 7 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-content-registries-v0-15.0.6+74ed1ea55d.jar | fabric-content-registries-v0 15.0.6+74ed1ea55d | fallback | plans=8 unresolved=0 configs=2 | no entrypoint; 8 mixin plan(s) need the loader
+    nested-skip META-INF/jars/fabric-convention-tags-v2-4.10.5+187b64905d.jar: per-jar nested limit 8
+  1005914-8891048.jar | fzzy_config 0.7.7+26.3 | c66021b2eb15 | fallback | plans=0 unresolved=0 configs=0 | nested jars probed, none ok (3 nested jar(s): 3 unsupported; 0 skipped)
+    nested META-INF/jars/fabric-permissions-api-0.7.0.jar | fabric-permissions-api-v0 0.7.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/jankson-1.2.3.jar | blue_endless_jankson 1.2.3 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/tomlkt-jvm-0.3.7.jar | net_peanuuutz_tomlkt_tomlkt-jvm 0.3.7 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+  1283899-8898481.jar | player_animation_library 1.2.7+mc.26.3 | 6486818ff1e4 | fallback | plans=16 unresolved=0 configs=1 | nested jars probed, none ok (4 nested jar(s): 4 unsupported; 0 skipped)
+    nested META-INF/jars/lexer-6.0.1.jar | org_redlance_mochafloats_lexer 6.0.1 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/parser-6.0.1.jar | org_redlance_mochafloats_parser 6.0.1 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/runtime-6.0.1.jar | org_redlance_mochafloats_runtime 6.0.1 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/services-1.3.8.jar | org_redlance_common-utils_services 1.3.8 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+  1312687-7927503.jar | - - | 120897768eaa | unsupported | plans=0 unresolved=0 configs=0 | no fabric.mod.json or neoforge.mods.toml
+  1399257-8910835.jar | mossylib 1.5.2+26.3+fabric | 50fb6f3e9fdd | ok | plans=0 unresolved=0 configs=2 | native main entrypoint ran (1 entrypoint(s), 10 host call(s); 2 mixin config(s) not applied)
+  232131-8893535.jar | defaultoptions 26.3.0.1 | 8e40d9befb65 | fallback | plans=4 unresolved=0 configs=2 | no main entrypoint; declared kinds: client (1); needs the loader or embedded JVM
+  241160-8893517.jar | netherportalfix 26.3.0.1 | c873a57b4966 | ok | plans=0 unresolved=0 configs=2 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 2 mixin config(s) not applied)
+  241895-8893531.jar | kleeslabs 26.3.0.1 | 36ebc298aa5b | ok | plans=0 unresolved=0 configs=2 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 2 mixin config(s) not applied)
+  248787-8907912.jar | appleskin 3.0.10+mc26.3 | cb05087c39f0 | ok | plans=10 unresolved=0 configs=2 | native main entrypoint ran (1 entrypoint(s), 11 host call(s); 2 mixin config(s) not applied)
+  250398-8925557.jar | controlling 26.3.3 | d28a8a95c4f9 | fallback | plans=0 unresolved=0 configs=2 | no entrypoint; 2 mixin config(s) need the loader
+  257814-8894326.jar | creativecore 2.14.16 | 5732177080c9 | fallback | plans=6 unresolved=0 configs=2 | nested jars probed, none ok (1 nested jar(s): 1 unsupported; 0 skipped)
+    nested META-INF/jars/bus-7.2.0.jar | net_neoforged_bus 7.2.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+  258587-8894337.jar | itemphysic 1.8.15 | 0b395a832e81 | ok | plans=10 unresolved=0 configs=1 | native main entrypoint ran (1 entrypoint(s), 36 host call(s); 1 mixin config(s) not applied)
+  306612-8913512.jar | fabric-api 0.161.0+26.3 | 86f16178a3ce | ok | plans=0 unresolved=0 configs=0 | nested jar(s) ran: 8 nested jar(s): 1 ok, 6 fallback, 1 unsupported; 1 skipped
+    nested META-INF/jars/fabric-advancement-api-v1-1.0.0+38c7a2d55d.jar | fabric-advancement-api-v1 1.0.0+38c7a2d55d | fallback | plans=1 unresolved=0 configs=1 | no entrypoint; 1 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-api-base-2.0.6+fcdff87f5d.jar | fabric-api-base 2.0.6+fcdff87f5d | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/fabric-api-lookup-api-v1-2.0.24+3434d6d95d.jar | fabric-api-lookup-api-v1 2.0.24+3434d6d95d | ok | plans=0 unresolved=0 configs=1 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 1 mixin config(s) not applied)
+    nested META-INF/jars/fabric-biome-api-v1-20.0.9+74ed1ea55d.jar | fabric-biome-api-v1 20.0.9+74ed1ea55d | fallback | plans=7 unresolved=0 configs=1 | no entrypoint; 7 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-block-api-v1-3.1.0+0ae6f9115d.jar | fabric-block-api-v1 3.1.0+0ae6f9115d | fallback | plans=3 unresolved=0 configs=1 | no entrypoint; 3 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-block-getter-api-v2-2.0.9+3434d6d95d.jar | fabric-block-getter-api-v2 2.0.9+3434d6d95d | fallback | plans=2 unresolved=0 configs=2 | no entrypoint; 2 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-command-api-v2-3.1.2+fcdff87f5d.jar | fabric-command-api-v2 3.1.2+fcdff87f5d | fallback | plans=7 unresolved=0 configs=2 | no entrypoint; 7 mixin plan(s) need the loader
+    nested META-INF/jars/fabric-content-registries-v0-15.0.4+74ed1ea55d.jar | fabric-content-registries-v0 15.0.4+74ed1ea55d | fallback | plans=8 unresolved=0 configs=2 | no entrypoint; 8 mixin plan(s) need the loader
+    nested-skip META-INF/jars/fabric-convention-tags-v2-4.10.3+6b5b47fd5d.jar: per-jar nested limit 8
+  308769-8829788.jar | fabric-language-kotlin 1.14.1+kotlin.2.4.20 | 620c2709be2a | fallback | plans=0 unresolved=0 configs=0 | nested jars probed, none ok (8 nested jar(s): 8 unsupported; 1 skipped)
+    nested META-INF/jars/atomicfu-jvm-0.33.0.jar | org_jetbrains_kotlinx_atomicfu-jvm 0.33.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlin-reflect-2.4.20.jar | org_jetbrains_kotlin_kotlin-reflect 2.4.20 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlin-stdlib-2.4.20.jar | org_jetbrains_kotlin_kotlin-stdlib 2.4.20 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlin-stdlib-jdk7-2.4.20.jar | org_jetbrains_kotlin_kotlin-stdlib-jdk7 2.4.20 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlin-stdlib-jdk8-2.4.20.jar | org_jetbrains_kotlin_kotlin-stdlib-jdk8 2.4.20 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlinx-coroutines-core-jvm-1.11.0.jar | org_jetbrains_kotlinx_kotlinx-coroutines-core-jvm 1.11.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlinx-coroutines-jdk8-1.11.0.jar | org_jetbrains_kotlinx_kotlinx-coroutines-jdk8 1.11.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested META-INF/jars/kotlinx-datetime-jvm-0.8.0.jar | org_jetbrains_kotlinx_kotlinx-datetime-jvm 0.8.0 | unsupported | plans=0 unresolved=0 configs=0 | no main entrypoint and no mixin: {"error":"no entrypoint","kind":"main","stage":"discover","status":"error"}
+    nested-skip META-INF/jars/kotlinx-io-bytestring-jvm-0.9.1.jar: per-jar nested limit 8
+  320163-8900484.jar | ambientenvironment 26.3.2 | 450ea07f96ba | fallback | plans=1 unresolved=0 configs=2 | no main entrypoint; declared kinds: client (1); needs the loader or embedded JVM
+  326652-8890593.jar | cupboard 26.3-4.2 | e40192b79558 | fallback | plans=5 unresolved=0 configs=1 | native execution stopped: com.cupboard.Cupboard: Metadata("expected a native array marker"); embedded JVM fallback
+  334259-8890634.jar | presencefootsteps 1.14.0+26.3 | eefbce08d3da | fallback | plans=3 unresolved=0 configs=1 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/kirin-1.22.2+26.3.jar: total nested limit 32
+  342584-8921261.jar | collective 8.39 | 275dd05770ff | unsupported | plans=error unresolved=error configs=error | cannot load jar: InvalidClass("unsupported annotation element value")
+  348521-8884063.jar | cloth-config 26.3.158 | a8cded3c82cd | fallback | plans=0 unresolved=0 configs=0 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/basic-math-0.6.1.jar: total nested limit 32
+  348831-8926733.jar | doubledoors 7.2 | 59b43942c329 | ok | plans=15 unresolved=0 configs=3 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 3 mixin config(s) not applied)
+  361579-8918571.jar | spark 1.10.187 | 3fc00663caa5 | ok | plans=0 unresolved=0 configs=1 | native main entrypoint ran (1 entrypoint(s), 9 host call(s); 1 mixin config(s) not applied)
+    nested-skip META-INF/jars/fabric-permissions-api-0.7.0.jar: total nested limit 32
+  367706-8917645.jar | fancymenu 3.9.13 | fb2441e95e75 | fallback | plans=181 unresolved=0 configs=2 | native execution stopped: de.keksuccino.fancymenu.FancyMenuFabric: Metadata("java/util/Objects.requireNonNull received null"); embedded JVM fallback; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/animated-gif-lib-for-java-animated-gif-lib-1.7.jar: total nested limit 32
+  368825-8901843.jar | inventoryessentials 26.3.0.2 | 41bde70d1005 | fallback | plans=5 unresolved=0 configs=2 | native execution stopped: net.blay09.mods.inventoryessentials.fabric.FabricInventoryEssentials: Metadata("java/util/Objects.requireNonNull received null"); embedded JVM fallback
+  385587-8884656.jar | - - | 98ac741dee29 | unsupported | plans=0 unresolved=0 configs=0 | no fabric.mod.json or neoforge.mods.toml
+  394468-8888037.jar | sodium 0.9.2+mc26.3 | 87a5bb39f7e6 | fallback | plans=57 unresolved=0 configs=3 | no main entrypoint; declared kinds: client (1), preLaunch (1); needs the loader or embedded JVM; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/fabric-api-base-2.0.6+fcdff87f02.jar: total nested limit 32
+  407206-8893778.jar | chat_heads 1.2.9 | b891cfa6345b | fallback | plans=22 unresolved=0 configs=1 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM
+  410295-8911219.jar | konkrete 1.11.1 | 5c5e4da40889 | ok | plans=4 unresolved=0 configs=2 | native main entrypoint ran (1 entrypoint(s), 9 host call(s); 2 mixin config(s) not applied)
+    nested-skip META-INF/jars/mixinextras-fabric-0.5.4.jar: total nested limit 32
+  411813-8925261.jar | stackrefill 5.0 | 025b4a957355 | ok | plans=0 unresolved=0 configs=3 | native main entrypoint ran (1 entrypoint(s), 2 host call(s); 3 mixin config(s) not applied)
+  417510-8890526.jar | fallingleaves 2.0.8 | 0cd1fe186a33 | fallback | plans=9 unresolved=0 configs=1 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM
+  419699-8915075.jar | architectury 22.0.2 | e1531e9bb0f7 | ok | plans=76 unresolved=2 configs=2 | native main entrypoint ran (1 entrypoint(s), 90 host call(s); 2 mixin config(s) not applied)
+  433760-8929069.jar | notenoughanimations 1.12.6 | 81539e3bb8d2 | fallback | plans=14 unresolved=0 configs=1 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/TRansition-1.0.25-26.3-fabric-SNAPSHOT.jar: total nested limit 32
+  448233-8929291.jar | entityculling 1.11.1 | 338ae7e7716b | fallback | plans=4 unresolved=0 configs=1 | no main entrypoint; declared kinds: client (1), modmenu (1); needs the loader or embedded JVM; 1 nested jar(s) skipped
+    nested-skip META-INF/jars/TRansition-1.0.25-26.3-fabric-SNAPSHOT.jar: total nested limit 32
+  skipped jars: 1 (size cap)
+    254284-8894331.jar: 84821608 bytes is past the 67108864-byte cap
+  deferred jars: 42 (limit)
+
+NeoForge root: /tmp/opencode/nfrun/mods; server: /tmp/opencode/nf263
+  counts: ok=1 fallback=0 unsupported=0 metadata-only=0 total=1
+  fml-fixture.jar | fmlfixture 1.0 | 3f096879a4d5 | ok | plans=0 unresolved=0 configs=0 | FML listed the jar's 1 mod(s): fmlfixture (3 total)
+
+Changes against the stored 2026-11-05 run (before the CLASS-retention fix):
+  - verdict counts are unchanged (12 ok / 17 fallback / 3 unsupported, 32 total).
+  - nested fabric-api modules that used to say "N mixin config(s) need the loader" now
+    say "N mixin plan(s) need the loader": advancement 1, biome 7, block 3, block-getter 2,
+    command 7, content-registries 8 (for both the 0.165.0 and 0.161.0 bundles).
+  - outer jars now expose their plan counts: player_animation_library 16, fancymenu 181,
+    sodium 57, chat_heads 22, presencefootsteps 3, konkrete 4, appleskin 10, itemphysic 10
+    and architectury 76 (2 unresolved): the CLASS-retention @Mixin discovery sees plans
+    where the old scan saw none.
+  - selection is unchanged: 75 unique Fabric candidates, 32 selected, 1 skipped at the size
+    cap, 42 deferred at the limit, no duplicates; the NeoForge run is unchanged (1 ok).

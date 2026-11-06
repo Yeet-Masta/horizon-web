@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} is weggelaten: het heeft {other} nodig, dat is weggelaten",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Bouwt niet op de Horizon die je speelt ({code}): een build laat het weg tot de maker het bijwerkt",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Waar jij bent, claim je de founder-set via een gratis checkout op playhorizon.dev. Claim hem in de Winkel: die opent de checkout voor je.",
-  "The founder set can't be claimed from your country.": "De founder-set kan niet vanuit jouw land worden geclaimd."
+  "The founder set can't be claimed from your country.": "De founder-set kan niet vanuit jouw land worden geclaimd.",
+  "Java runtime": "Java-runtime",
+  "No runtime report": "Geen runtimeraaport",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Runtime: {engine} · lader: {loader} · geweven: {woven} · overgeslagen: {skipped} · registraties: {registrations} · ondoorzichtig: {opaque} · payloads: {payloads}",
+  "Runtime skipped: {reason}": "Overgeslagen door runtime: {reason}",
+  "Runtime isolation: {error}": "Runtime-isolatie: {error}",
+  "Runtime: {count} jar(s) reported": "Runtime: {count} jar-bestanden gemeld",
+  "Clear compatibility cache": "Compatibiliteitscache wissen",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De compatibiliteitscache voor {name} is gewist. Het wordt opnieuw gecontroleerd bij de volgende installatie, update of zoekopdracht.",
+  "(+{count} more)": "(+{count} meer)"
 }

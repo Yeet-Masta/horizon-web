@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "S'ha deixat fora {name}: necessita {other}, que s'ha deixat fora",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "No es compila a l'Horizon que jugues ({code}): la compilació el deixa fora fins que el seu autor l'actualitzi",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "On ets, el conjunt de fundadors es reclama amb un pagament gratuït a playhorizon.dev. Reclama'l des de la Botiga: t'obre el pagament.",
-  "The founder set can't be claimed from your country.": "El conjunt de fundadors no es pot reclamar des del teu país."
+  "The founder set can't be claimed from your country.": "El conjunt de fundadors no es pot reclamar des del teu país.",
+  "Java runtime": "Temps d’execució de Java",
+  "No runtime report": "No hi ha cap informe d’execució",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Execució: {engine} · carregador: {loader} · teixits: {woven} · omesos: {skipped} · registres: {registrations} · opacs: {opaque} · càrregues: {payloads}",
+  "Runtime skipped: {reason}": "Omès per l’execució: {reason}",
+  "Runtime isolation: {error}": "Aïllament de l’execució: {error}",
+  "Runtime: {count} jar(s) reported": "Execució: {count} fitxers jar informats",
+  "Clear compatibility cache": "Esborra la memòria cau de compatibilitat",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "S’ha esborrat la memòria cau de compatibilitat de {name}. Es tornarà a comprovar la propera vegada que s’instal·li, s’actualitzi o aparegui en una cerca.",
+  "(+{count} more)": "(+{count} més)"
 }

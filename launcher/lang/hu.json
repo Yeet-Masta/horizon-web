@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} kimaradt: szüksége van erre: {other}, ami kimaradt",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nem fordul le azon a Horizonon, amellyel játszol ({code}): a fordítás kihagyja, amíg a szerzője nem frissíti",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Ahol vagy, az alapítói szettet egy ingyenes fizetéssel lehet igényelni a playhorizon.dev oldalon. Igényeld a Boltban: megnyitja neked a fizetést.",
-  "The founder set can't be claimed from your country.": "Az alapítói szett nem igényelhető az országodból."
+  "The founder set can't be claimed from your country.": "Az alapítói szett nem igényelhető az országodból.",
+  "Java runtime": "Java futtatókörnyezet",
+  "No runtime report": "Nincs futtatókörnyezeti jelentés",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Futtatókörnyezet: {engine} · betöltő: {loader} · szőtt: {woven} · kihagyott: {skipped} · regisztrációk: {registrations} · átlátszatlan: {opaque} · hasznos terhek: {payloads}",
+  "Runtime skipped: {reason}": "Futtatókörnyezet kihagyta: {reason}",
+  "Runtime isolation: {error}": "Futtatókörnyezet elkülönítése: {error}",
+  "Runtime: {count} jar(s) reported": "Futtatókörnyezet: {count} jar jelentve",
+  "Clear compatibility cache": "Kompatibilitási gyorsítótár törlése",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "A(z) {name} kompatibilitási gyorsítótára törölve. A következő telepítéskor, frissítéskor vagy keresésben való megjelenéskor újra ellenőrzésre kerül.",
+  "(+{count} more)": "(+{count} további)"
 }

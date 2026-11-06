@@ -6,7 +6,13 @@
 //! its simulation and the play-state hub that LAN hosting uses, configured
 //! from server.properties, with the operator, whitelist and ban lists and a
 //! console on standard input.
-use super::{Game, Options, lan::LanSettings, world_loading::WorldRequest};
+use super::{
+    Game, Options,
+    execution_role::ExecutionRole,
+    java_mods::{JavaCompatibilityReport, JavaLoader},
+    lan::LanSettings,
+    world_loading::WorldRequest,
+};
 use horizon_client::{
     Result,
     lan::{LoginGate, NetConfig, NetLog, OnlineMode, hub::HubConfig},
@@ -348,6 +354,134 @@ fn capture_log(f: impl FnOnce()) -> Vec<String> {
     CAPTURE.set(Some(Vec::new()));
     f();
     CAPTURE.take().unwrap_or_default()
+}
+
+/// The prefix every Java compatibility line this role logs carries, so a
+/// server's log says which role read each jar.
+const JAVA_PREFIX: &str = "Horizon: dedicated Java compatibility: ";
+
+/// The longest refused-jar detail a log line carries.
+const MAX_JAVA_FAILURE: usize = 160;
+
+/// The rows [`load_java_mods`] returned, taken once by the content-root build
+/// after startup: a server has no window whose resource load would read them,
+/// so this is their hand-over.
+static JAVA_CONTENT: Mutex<Option<Vec<horizon_client::mod_content::ContentMod>>> = Mutex::new(None);
+
+/// The Java content the dedicated role loaded at startup, once.
+pub(super) fn take_java_content() -> Vec<horizon_client::mod_content::ContentMod> {
+    JAVA_CONTENT.lock().unwrap().take().unwrap_or_default()
+}
+
+/// `HORIZON_JAVA_STRICT=1`: a jar the loader refuses stops the server instead
+/// of being skipped. Any other value, or none, keeps the default tolerance.
+fn strict_policy(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// A refused jar's detail as one bounded line: control characters folded and
+/// the tail cut, so a jar's metadata never decides how much a log grows.
+fn bounded_java_failure(error: &str) -> String {
+    let one_line: String = error
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if one_line.chars().count() <= MAX_JAVA_FAILURE {
+        return one_line;
+    }
+    let mut bounded: String = one_line.chars().take(MAX_JAVA_FAILURE).collect();
+    bounded.push_str("...");
+    bounded
+}
+
+/// The one line a started jar contributes to the server's log.
+fn java_report_line(report: &JavaCompatibilityReport) -> String {
+    format!(
+        "{JAVA_PREFIX}{}: engine={} loader={} entrypoints={} registrations={} opaque={}",
+        report.jar.display(),
+        report.engine.name(),
+        report.loader.map_or("unknown", JavaLoader::name),
+        report.entrypoints,
+        report.registrations,
+        report.opaque
+    )
+}
+
+/// Run the jars `--java-mod` names for the standalone dedicated role: once,
+/// in the server role, before the content root and the resources are built.
+///
+/// A jar the loader refuses is logged and skipped; `HORIZON_JAVA_STRICT=1`
+/// makes the refusal stop startup instead. The rows the batch returned are
+/// handed to the content root through [`take_java_content`].
+pub(super) fn load_java_mods(options: &Options) -> Result<()> {
+    // The opt-in real NeoForge loader preflight is independent of the native
+    // interpreter path and runs before any jar is handed to it. Its failure
+    // stops startup only under `HORIZON_NEOFORGE_STRICT=1`, so it must stay
+    // outside the native path's `HORIZON_JAVA_STRICT` tolerance below.
+    super::java_mods::fml_preflight(ExecutionRole::DedicatedServer, &options.java_mods)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    load_java_mods_with(
+        &options.java_mods,
+        strict_policy(
+            horizon_platform::env::var("HORIZON_JAVA_STRICT")
+                .ok()
+                .as_deref(),
+        ),
+        super::java_mods::run_java_mods_batch,
+    )
+}
+
+/// What one Java batch run returns: the rows, one report per jar it started,
+/// each jar's typed declarations and why a jar that did not start was skipped.
+type JavaBatch = std::result::Result<super::java_mods::JavaBatchOutcome, String>;
+
+fn load_java_mods_with<F>(paths: &[PathBuf], strict: bool, run: F) -> Result<()>
+where
+    F: FnOnce(&[PathBuf], ExecutionRole) -> JavaBatch,
+{
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let batch = match run(paths, ExecutionRole::DedicatedServer) {
+        Ok(batch) => batch,
+        Err(error) => {
+            if strict {
+                return Err(format!("dedicated Java mod startup failed: {error}").into());
+            }
+            log(
+                "WARN",
+                &format!("{JAVA_PREFIX}{}", bounded_java_failure(&error)),
+            );
+            super::java_mods::JavaBatchOutcome::default()
+        }
+    };
+    for report in &batch.reports {
+        log("INFO", &java_report_line(report));
+    }
+    super::java_mods::record_java_reports(&batch.reports);
+    // The runner names every jar that never started and why. A strict server
+    // returns those lines, so the operator sees `<jar>: <reason>` instead of a
+    // path with no diagnosis.
+    let refused: Vec<String> = batch
+        .failures
+        .iter()
+        .map(|failure| bounded_java_failure(&failure.line()))
+        .collect();
+    if !refused.is_empty() {
+        if strict {
+            return Err(format!(
+                "dedicated Java mod startup failed: refused {}",
+                refused.join(", ")
+            )
+            .into());
+        }
+        log(
+            "WARN",
+            &format!("{JAVA_PREFIX}skipping {}", refused.join(", ")),
+        );
+    }
+    *JAVA_CONTENT.lock().unwrap() = Some(batch.content);
+    Ok(())
 }
 
 /// Main.main up to the server start: arguments, server.properties (stored
@@ -2366,17 +2500,148 @@ fn console_level(active: super::Dim) -> Option<super::Dim> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        capture_log, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
+    use super::super::java_mods::{
+        JavaBatchOutcome, JavaCompatibilityReport, JavaEngine, JavaJarFailure, JavaLoader,
     };
+    use super::ExecutionRole;
+    use super::{
+        JAVA_PREFIX, MAX_JAVA_FAILURE, bounded_java_failure, capture_log, java_report_line,
+        load_java_mods_with, log, log_from, overload_warning, panic_message,
+        parse_whitelist_bypass, strict_policy, take_java_content,
+    };
+    use horizon_client::mod_content::ContentMod;
+    use horizon_mods::Content;
     use horizon_platform::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
     use std::{
         io::{self, BufRead, BufReader, Read, Write},
+        path::PathBuf,
         process::{Command, Stdio},
     };
+
+    /// The Java hand-over is one process-wide cell; the tests that write it take turns.
+    fn java_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: horizon_platform::sync::Mutex<()> = horizon_platform::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    fn java_report(path: &std::path::Path) -> JavaCompatibilityReport {
+        JavaCompatibilityReport {
+            jar: path.to_path_buf(),
+            loader: Some(JavaLoader::Fabric),
+            engine: JavaEngine::Native,
+            entrypoints: 1,
+            registrations: 0,
+            opaque: 0,
+            isolation_failure: None,
+        }
+    }
+
+    /// `HORIZON_JAVA_STRICT`: only "1" turns a refused jar into a startup failure.
+    #[test]
+    fn java_strict_mode_reads_one_value() {
+        assert!(strict_policy(Some("1")));
+        assert!(!strict_policy(Some("0")));
+        assert!(!strict_policy(Some("true")));
+        assert!(!strict_policy(None));
+    }
+
+    #[test]
+    fn a_java_failure_line_is_bounded_and_single_line() {
+        let long = format!("{} \n {}", "x".repeat(400), "y".repeat(400));
+        let line = bounded_java_failure(&long);
+        assert!(!line.contains('\n'), "{line}");
+        assert_eq!(line.chars().count(), MAX_JAVA_FAILURE + 3);
+    }
+
+    /// The dedicated role runs the batch once, in its own role, and hands its
+    /// rows to the content root once.
+    #[test]
+    fn dedicated_java_runs_once_in_the_server_role_and_hands_over_its_rows() {
+        let _guard = java_test_lock();
+        let calls = std::cell::Cell::new(0);
+        let role: std::cell::Cell<Option<ExecutionRole>> = std::cell::Cell::new(None);
+        let paths = [PathBuf::from("one.jar"), PathBuf::from("two.jar")];
+        load_java_mods_with(&paths, false, |seen, kind| {
+            calls.set(calls.get() + 1);
+            role.set(Some(kind));
+            assert_eq!(seen.len(), 2, "one batch, not one call per jar");
+            Ok(JavaBatchOutcome {
+                content: vec![ContentMod {
+                    id: "demo".into(),
+                    content: Content::declared("demo"),
+                }],
+                reports: seen.iter().map(|path| java_report(path)).collect(),
+                ..JavaBatchOutcome::default()
+            })
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(role.get(), Some(ExecutionRole::DedicatedServer));
+        let rows = take_java_content();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "demo");
+        assert!(take_java_content().is_empty(), "the root takes them once");
+    }
+
+    /// A jar the loader refused is a log line by default and a startup error
+    /// under `HORIZON_JAVA_STRICT=1`; the strict message carries the runner's
+    /// reason, not just the path.
+    #[test]
+    fn a_refused_jar_is_skipped_unless_strict() {
+        let _guard = java_test_lock();
+        let paths = [PathBuf::from("refused.jar")];
+        let refuse = |_: &[PathBuf], _: ExecutionRole| {
+            Ok(JavaBatchOutcome {
+                failures: vec![JavaJarFailure {
+                    jar: PathBuf::from("refused.jar"),
+                    reason: "no native entrypoint".into(),
+                }],
+                ..JavaBatchOutcome::default()
+            })
+        };
+        capture_log(|| {
+            let tolerated = load_java_mods_with(&paths, false, refuse);
+            assert!(tolerated.is_ok());
+        });
+        assert!(take_java_content().is_empty());
+        let error = load_java_mods_with(&paths, true, refuse)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("dedicated Java mod startup failed"),
+            "{error}"
+        );
+        assert!(
+            error.contains("refused.jar: no native entrypoint"),
+            "{error}"
+        );
+    }
+
+    /// A started jar's line names the role's prefix and its verdict, with no
+    /// line break a second jar could hide behind.
+    #[test]
+    fn a_java_report_line_names_the_engine_and_loader() {
+        let line = java_report_line(&java_report(&PathBuf::from("demo.jar")));
+        assert!(line.starts_with(JAVA_PREFIX), "{line}");
+        assert!(line.contains("engine=native"), "{line}");
+        assert!(line.contains("loader=fabric"), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+    }
+
+    /// The hand-over cell starts empty for a server with no `--java-mod`.
+    #[test]
+    fn a_server_without_java_mods_runs_nothing() {
+        let calls = std::cell::Cell::new(0);
+        load_java_mods_with(&[], false, |_, _| {
+            calls.set(calls.get() + 1);
+            Ok(JavaBatchOutcome::default())
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+    }
 
     /// A console line runs in the overworld even after a server tick left the nether in place.
     #[test]

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} je bil izpuščen: potrebuje {other}, ki je bil izpuščen",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Se ne zgradi na Horizonu, ki ga igraš ({code}): gradnja ga izpusti, dokler ga avtor ne posodobi",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Tam, kjer ste, se komplet ustanoviteljev prevzame z brezplačnim plačilom na playhorizon.dev. Prevzemite ga v Trgovini: odpre vam plačilo.",
-  "The founder set can't be claimed from your country.": "Kompleta ustanoviteljev ni mogoče prevzeti iz vaše države."
+  "The founder set can't be claimed from your country.": "Kompleta ustanoviteljev ni mogoče prevzeti iz vaše države.",
+  "Java runtime": "Izvajalno okolje Java",
+  "No runtime report": "Ni poročila o izvajanju",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Izvajanje: {engine} · nalagalnik: {loader} · vtkane: {woven} · preskočeno: {skipped} · registracije: {registrations} · neprosojno: {opaque} · koristne obremenitve: {payloads}",
+  "Runtime skipped: {reason}": "Izvajanje je preskočilo: {reason}",
+  "Runtime isolation: {error}": "Izolacija izvajanja: {error}",
+  "Runtime: {count} jar(s) reported": "Izvajanje: prijavljenih {count} datotek jar",
+  "Clear compatibility cache": "Počisti predpomnilnik združljivosti",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Predpomnilnik združljivosti za {name} je bil počiščen. Ponovno bo preverjen ob naslednji namestitvi, posodobitvi ali iskanju.",
+  "(+{count} more)": "(+{count} več)"
 }
