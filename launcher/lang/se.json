@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} guđđojuvvui olggobeallái: dat dárbbaša {other}, mii guđđojuvvui olggobeallái",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Ii huksejuvvo Horizonis man speallat ({code}): huksen guođđá dan olggobeallái dassážii go dahkki ođasmahttá dan",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Doppe gos don leat, vuođđudeaddjiid sátta oažžu nuvttá máksima bokte playhorizon.dev:s. Gáibit dan Gávpis: dat rahpá máksima dutnje.",
-  "The founder set can't be claimed from your country.": "Vuođđudeaddjiid sáttá ii sáhte gáibidit du riikkas."
+  "The founder set can't be claimed from your country.": "Vuođđudeaddjiid sáttá ii sáhte gáibidit du riikkas.",
+  "Java runtime": "Java čuolmmaáigi",
+  "No runtime report": "Ii leat čuolmmaraporta",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Čuolmmaáigi: {engine} · lasihahtti: {loader} · gođđon: {woven} · njuikon: {skipped} · registreren: {registrations} · čielggasmeahttun: {opaque} · lasttat: {payloads}",
+  "Runtime skipped: {reason}": "Čuolmmaáigi njuikko: {reason}",
+  "Runtime isolation: {error}": "Čuolmmaáiggi sierraorrun: {error}",
+  "Runtime: {count} jar(s) reported": "Čuolmmaáigi: {count} jar-fiilla almmuhuvvon",
+  "Clear compatibility cache": "Sihkke kompatibilitetsgárddi",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetsgárddi {name}-várás sihkkojuvvui. Dat geahčaduvvo fas boahtte ásahusas, ođastusas dahje ohcanas.",
+  "(+{count} more)": "(+{count} lasi)"
 }

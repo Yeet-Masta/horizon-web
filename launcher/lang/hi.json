@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} छोड़ दिया गया: इसे {other} चाहिए, जो छोड़ दिया गया",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "आप जो Horizon खेलते हैं उस पर नहीं बनता ({code}): बिल्ड इसे तब तक छोड़ देता है जब तक इसका लेखक इसे अपडेट न करे",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "आप जहाँ हैं, वहाँ संस्थापक सेट playhorizon.dev पर मुफ़्त चेकआउट से लिया जाता है। इसे दुकान से लें: वह आपके लिए चेकआउट खोल देती है।",
-  "The founder set can't be claimed from your country.": "संस्थापक सेट आपके देश से नहीं लिया जा सकता।"
+  "The founder set can't be claimed from your country.": "संस्थापक सेट आपके देश से नहीं लिया जा सकता।",
+  "Java runtime": "Java रनटाइम",
+  "No runtime report": "कोई रनटाइम रिपोर्ट नहीं",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "रनटाइम: {engine} · लोडर: {loader} · बुना: {woven} · छोड़ा: {skipped} · पंजीकरण: {registrations} · अपारदर्शी: {opaque} · पेलोड: {payloads}",
+  "Runtime skipped: {reason}": "रनटाइम में छोड़ा गया: {reason}",
+  "Runtime isolation: {error}": "रनटाइम अलगाव: {error}",
+  "Runtime: {count} jar(s) reported": "रनटाइम: {count} jar रिपोर्ट किए गए",
+  "Clear compatibility cache": "संगतता कैश साफ़ करें",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} के लिए संगतता कैश साफ़ कर दिया गया। अगली बार इंस्टॉल, अपडेट या खोज में सूचीबद्ध होने पर इसे फिर से जाँचा जाएगा।",
+  "(+{count} more)": "(+{count} और)"
 }

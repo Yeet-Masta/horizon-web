@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} киллэриллибэтэ: кини {other} наада, ол эмиэ киллэриллибэтэ",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Эн оонньуур Horizon-ҥар хомуллубат ({code}): ааптар саҥардыар диэри хомуйуу киниэхэ киллэрбэт",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Эһиги баар сиргитигэр төрдүттэр иинэ playhorizon.dev сайтка босхо төлөбүр нөҥүө ылыллар. Кинини Маҕаһыынтан ылыҥ: төлөбүрү бэйэтэ арыйыа.",
-  "The founder set can't be claimed from your country.": "Төрдүттэр иинин эһиги дойдугуттан ылар кыах суох."
+  "The founder set can't be claimed from your country.": "Төрдүттэр иинин эһиги дойдугуттан ылар кыах суох.",
+  "Java runtime": "Java үлэлиир кэм",
+  "No runtime report": "Үлэлиир кэм туһунан отчуот суох",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Үлэлиир кэм: {engine} · тиэйээччи: {loader} · өрөммүт: {woven} · көтүтүллүбүт: {skipped} · бэлиэтээһиннэр: {registrations} · кырааската суох: {opaque} · сүк: {payloads}",
+  "Runtime skipped: {reason}": "Үлэлиир кэм көтүттэ: {reason}",
+  "Runtime isolation: {error}": "Үлэлиир кэм араарыыта: {error}",
+  "Runtime: {count} jar(s) reported": "Үлэлиир кэм: {count} jar файл туһунан биллэриллибит",
+  "Clear compatibility cache": "Сөптөөх кэһи таһаар",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} сөптөөх кэһэ таһаарылынна. Кэлэр туруоруу, саҥардыы эбэтэр көрдөөһүн кэмигэр хаттаан бэрэбиэркэлэнэр.",
+  "(+{count} more)": "(+{count} эбии)"
 }

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "I-{name} ishiywe ngaphandle: idinga i-{other}, eshiywe ngaphandle",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Ayakhiwa ku-Horizon oyidlalayo ({code}): ukwakha kuyayishiya ngaphandle kuze kube umbhali wayo uyayibuyekeza",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Lapho ukhona, isethi yabasunguli ithathwa ngokukhokha mahhala ku-playhorizon.dev. Yithathe esitolo: sizokuvulela ukukhokha.",
-  "The founder set can't be claimed from your country.": "Isethi yabasunguli ayikwazi ukuthathwa ezweni lakho."
+  "The founder set can't be claimed from your country.": "Isethi yabasunguli ayikwazi ukuthathwa ezweni lakho.",
+  "Java runtime": "Isikhathi sokusebenza se-Java",
+  "No runtime report": "Awukho umbiko wesikhathi sokusebenza",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Isikhathi sokusebenza: {engine} · isilayishi: {loader} · okulukiwe: {woven} · kweqiwe: {skipped} · ukubhaliswa: {registrations} · okungacacile: {opaque} · imithwalo: {payloads}",
+  "Runtime skipped: {reason}": "Kweqiwe isikhathi sokusebenza: {reason}",
+  "Runtime isolation: {error}": "Ukuhlukaniswa kwesikhathi sokusebenza: {error}",
+  "Runtime: {count} jar(s) reported": "Isikhathi sokusebenza: kubikwe amafayela e-jar angu-{count}",
+  "Clear compatibility cache": "Sula inqolobane yokuhambisana",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Inqolobane yokuhambisana ye-{name} isuliwe. Izophinde ihlolwe ekufakweni, ekubuyekezweni noma ekusesheni okulandelayo.",
+  "(+{count} more)": "(+{count} okunye)"
 }

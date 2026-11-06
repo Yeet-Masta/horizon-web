@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} var sleppt: það þarf {other}, sem var sleppt",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Byggist ekki á þeirri Horizon sem þú spilar ({code}): smíði sleppir því þar til höfundurinn uppfærir það",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Þar sem þú ert færðu stofnendasettið með ókeypis greiðslu á playhorizon.dev. Gerðu tilkall til þess í Versluninni: hún opnar greiðsluna fyrir þig.",
-  "The founder set can't be claimed from your country.": "Ekki er hægt að gera tilkall til stofnendasettsins frá þínu landi."
+  "The founder set can't be claimed from your country.": "Ekki er hægt að gera tilkall til stofnendasettsins frá þínu landi.",
+  "Java runtime": "Java keyrsluumhverfi",
+  "No runtime report": "Engin keyrsluskýrsla",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Keyrsla: {engine} · hleðslutæki: {loader} · ofið: {woven} · sleppt: {skipped} · skráningar: {registrations} · ógagnsætt: {opaque} · farmar: {payloads}",
+  "Runtime skipped: {reason}": "Sleppt af keyrslunni: {reason}",
+  "Runtime isolation: {error}": "Einangrun keyrslu: {error}",
+  "Runtime: {count} jar(s) reported": "Keyrsla: tilkynnt um {count} jar-skrá",
+  "Clear compatibility cache": "Hreinsa samhæfnisbiðminni",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Samhæfnisbiðminni fyrir {name} var hreinsað. Það verður athugað aftur við næstu uppsetningu, uppfærslu eða leit.",
+  "(+{count} more)": "(+{count} fleiri)"
 }

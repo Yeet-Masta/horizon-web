@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} tħalla barra: jeħtieġ {other}, li tħalla barra",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Ma jinbeniex fuq il-Horizon li qed tilgħab ({code}): bini jħallih barra sakemm l-awtur jaġġornah",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Fejn int, is-sett tal-fundaturi jintalab permezz ta' ħlas b'xejn fuq playhorizon.dev. Itolbu mill-Ħanut: jiftaħlek il-ħlas.",
-  "The founder set can't be claimed from your country.": "Is-sett tal-fundaturi ma jistax jintalab minn pajjiżek."
+  "The founder set can't be claimed from your country.": "Is-sett tal-fundaturi ma jistax jintalab minn pajjiżek.",
+  "Java runtime": "Ħin tal-eżekuzzjoni Java",
+  "No runtime report": "M’hemm l-ebda rapport tal-eżekuzzjoni",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Eżekuzzjoni: {engine} · tagħbija: {loader} · minsuġ: {woven} · maqbuż: {skipped} · reġistrazzjonijiet: {registrations} · opak: {opaque} · tagħbijiet: {payloads}",
+  "Runtime skipped: {reason}": "Maqbuż mill-eżekuzzjoni: {reason}",
+  "Runtime isolation: {error}": "Iżolament tal-eżekuzzjoni: {error}",
+  "Runtime: {count} jar(s) reported": "Eżekuzzjoni: ġew irrappurtati {count} fajls jar",
+  "Clear compatibility cache": "Ħassar il-cache tal-kompatibilità",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Il-cache tal-kompatibilità għal {name} tħassar. Se jerġa’ jiġi ċċekkjat fl-installazzjoni, aġġornament jew tfittxija li jmiss.",
+  "(+{count} more)": "(+{count} aktar)"
 }

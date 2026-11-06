@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} tidak disertakan: membutuhkan {other}, yang tidak disertakan",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Tidak bisa dibangun di Horizon yang kamu mainkan ({code}): build tidak menyertakannya sampai pembuatnya memperbaruinya",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Di tempatmu, set pendiri diklaim lewat checkout gratis di playhorizon.dev. Klaim dari Toko: Toko akan membukakan checkout untukmu.",
-  "The founder set can't be claimed from your country.": "Set pendiri tidak bisa diklaim dari negaramu."
+  "The founder set can't be claimed from your country.": "Set pendiri tidak bisa diklaim dari negaramu.",
+  "Java runtime": "Runtime Java",
+  "No runtime report": "Tidak ada laporan runtime",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Runtime: {engine} · pemuat: {loader} · ditenun: {woven} · dilewati: {skipped} · registrasi: {registrations} · buram: {opaque} · muatan: {payloads}",
+  "Runtime skipped: {reason}": "Dilewati runtime: {reason}",
+  "Runtime isolation: {error}": "Isolasi runtime: {error}",
+  "Runtime: {count} jar(s) reported": "Runtime: {count} jar dilaporkan",
+  "Clear compatibility cache": "Hapus cache kompatibilitas",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache kompatibilitas untuk {name} dihapus. Akan diperiksa lagi saat dipasang, diperbarui, atau muncul di pencarian berikutnya.",
+  "(+{count} more)": "(+{count} lagi)"
 }

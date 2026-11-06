@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} ຖືກປະໄວ້: ມັນຕ້ອງການ {other} ເຊິ່ງຖືກປະໄວ້",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "ບໍ່ສາມາດສ້າງໃນ Horizon ທີ່ທ່ານຫຼິ້ນ ({code}): ການສ້າງຈະປະມັນໄວ້ຈົນກວ່າຜູ້ສ້າງຈະອັບເດດ",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "ຢູ່ບ່ອນທີ່ທ່ານຢູ່, ຊຸດຜູ້ກໍ່ຕັ້ງຮັບໄດ້ຜ່ານການຊຳລະເງິນຟຣີທີ່ playhorizon.dev. ຮັບມັນຈາກຮ້ານ: ມັນຈະເປີດການຊຳລະເງິນໃຫ້ທ່ານ.",
-  "The founder set can't be claimed from your country.": "ບໍ່ສາມາດຮັບຊຸດຜູ້ກໍ່ຕັ້ງຈາກປະເທດຂອງທ່ານໄດ້."
+  "The founder set can't be claimed from your country.": "ບໍ່ສາມາດຮັບຊຸດຜູ້ກໍ່ຕັ້ງຈາກປະເທດຂອງທ່ານໄດ້.",
+  "Java runtime": "ເວລາແລ່ນ Java",
+  "No runtime report": "ບໍ່ມີລາຍງານເວລາແລ່ນ",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "ເວລາແລ່ນ: {engine} · ຕົວໂຫຼດ: {loader} · ທໍແລ້ວ: {woven} · ຂ້າມແລ້ວ: {skipped} · ການລົງທະບຽນ: {registrations} · ທຶບ: {opaque} · ສິ່ງບັນທຸກ: {payloads}",
+  "Runtime skipped: {reason}": "ເວລາແລ່ນຂ້າມ: {reason}",
+  "Runtime isolation: {error}": "ການແຍກເວລາແລ່ນ: {error}",
+  "Runtime: {count} jar(s) reported": "ເວລາແລ່ນ: ລາຍງານ {count} ໄຟລ໌ jar",
+  "Clear compatibility cache": "ລຶບແຄຊຄວາມເຂົ້າກັນໄດ້",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "ລຶບແຄຊຄວາມເຂົ້າກັນໄດ້ຂອງ {name} ແລ້ວ. ຈະກວດສອບຄືນໃນການຕິດຕັ້ງ, ອັບເດດ ຫຼື ການຄົ້ນຫາຄັ້ງຕໍ່ໄປ.",
+  "(+{count} more)": "(+{count} ເພີ່ມເຕີມ)"
 }

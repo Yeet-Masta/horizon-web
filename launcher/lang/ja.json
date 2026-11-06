@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} は除外されました: 除外された {other} が必要です",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "プレイ中の Horizon ではビルドできません ({code}): 作者が更新するまでビルドから除外されます",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "お住まいの地域では、ファウンダーセットは playhorizon.dev の無料チェックアウトで受け取ります。ショップから受け取ってください。チェックアウトが開きます。",
-  "The founder set can't be claimed from your country.": "お住まいの国ではファウンダーセットを受け取れません。"
+  "The founder set can't be claimed from your country.": "お住まいの国ではファウンダーセットを受け取れません。",
+  "Java runtime": "Java ランタイム",
+  "No runtime report": "ランタイムレポートがありません",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "ランタイム: {engine} · ローダー: {loader} · 織り込み: {woven} · スキップ: {skipped} · 登録: {registrations} · 不透明: {opaque} · ペイロード: {payloads}",
+  "Runtime skipped: {reason}": "ランタイムがスキップ: {reason}",
+  "Runtime isolation: {error}": "ランタイムの分離: {error}",
+  "Runtime: {count} jar(s) reported": "ランタイム: {count} 個の jar が報告されました",
+  "Clear compatibility cache": "互換性キャッシュを消去",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} の互換性キャッシュを消去しました。次回のインストール、更新、または検索での表示時に再確認されます。",
+  "(+{count} more)": "(+{count} 件)"
 }

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} кӗртмен: ӑна {other} кирлӗ, ӑна та кӗртмен",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Эсӗ вылякан Horizon-ра пуҫтарӑнмасть ({code}): авторӗ ҫӗнетмесен, пуҫтару ӑна кӗртмест",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Эсир пур вырӑнта никӗслекен пуххине playhorizon.dev сайтӑнче тӳлевсӗр тӳлев урлӑ илеҫҫӗ. Ӑна Лавккаран илӗр: вӑл тӳлеве хӑех уҫать.",
-  "The founder set can't be claimed from your country.": "Никӗслекен пуххине сирӗн ҫӗршывран илме ҫук."
+  "The founder set can't be claimed from your country.": "Никӗслекен пуххине сирӗн ҫӗршывран илме ҫук.",
+  "Java runtime": "Java ӗҫлев вӑхӑчӗ",
+  "No runtime report": "Ӗҫлев вӑхӑчӗ ҫинчен отчёт ҫук",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Ӗҫлев: {engine} · тиекен: {loader} · тӗрнӗ: {woven} · ирттернӗ: {skipped} · ҫырӑнусем: {registrations} · уҫӑ мар: {opaque} · тиевсем: {payloads}",
+  "Runtime skipped: {reason}": "Ӗҫлев вӑхӑчӗ ирттерчӗ: {reason}",
+  "Runtime isolation: {error}": "Ӗҫлев уйрӑмлӑхӗ: {error}",
+  "Runtime: {count} jar(s) reported": "Ӗҫлев: {count} jar файл ҫинчен пӗлтернӗ",
+  "Clear compatibility cache": "Ҫыхӑну кэшне тасат",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} валли ҫыхӑну кэшӗ тасатрӗ. Вӑл тепӗр вырнаҫтарнӑ чух, ҫӗнетнӗ чух е шыравра каллех тӗрӗсленӗ.",
+  "(+{count} more)": "(+{count} тата)"
 }

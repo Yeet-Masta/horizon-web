@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} ditinggalkan: ia memerlukan {other}, yang ditinggalkan",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Tidak dibina pada Horizon yang anda mainkan ({code}): binaan meninggalkannya sehingga pengarangnya mengemas kininya",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Di tempat anda, set pengasas dituntut melalui pembayaran percuma di playhorizon.dev. Tuntut dari Kedai: ia membuka pembayaran untuk anda.",
-  "The founder set can't be claimed from your country.": "Set pengasas tidak boleh dituntut dari negara anda."
+  "The founder set can't be claimed from your country.": "Set pengasas tidak boleh dituntut dari negara anda.",
+  "Java runtime": "Masa jalan Java",
+  "No runtime report": "Tiada laporan masa jalan",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Masa jalan: {engine} · pemuat: {loader} · ditenun: {woven} · dilangkau: {skipped} · pendaftaran: {registrations} · legap: {opaque} · muatan: {payloads}",
+  "Runtime skipped: {reason}": "Dilangkau oleh masa jalan: {reason}",
+  "Runtime isolation: {error}": "Pengasingan masa jalan: {error}",
+  "Runtime: {count} jar(s) reported": "Masa jalan: {count} fail jar dilaporkan",
+  "Clear compatibility cache": "Kosongkan cache keserasian",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache keserasian untuk {name} telah dikosongkan. Ia akan disemak semula pada pemasangan, kemas kini atau carian seterusnya.",
+  "(+{count} more)": "(+{count} lagi)"
 }

@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} chiqarib tashlandi: unga {other} kerak, u chiqarib tashlandi",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Siz o'ynaydigan Horizonda yig'ilmaydi ({code}): muallifi yangilamaguncha yig'ish uni chiqarib tashlaydi",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Siz turgan joyda asoschilar to‘plami playhorizon.dev saytidagi bepul to‘lov orqali olinadi. Uni Do‘kondan oling: u to‘lovni siz uchun ochib beradi.",
-  "The founder set can't be claimed from your country.": "Asoschilar to‘plamini sizning mamlakatingizdan olib bo‘lmaydi."
+  "The founder set can't be claimed from your country.": "Asoschilar to‘plamini sizning mamlakatingizdan olib bo‘lmaydi.",
+  "Java runtime": "Java ish vaqti",
+  "No runtime report": "Ish vaqti hisoboti yo’q",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Ish vaqti: {engine} · yuklovchi: {loader} · to’qilgan: {woven} · o’tkazib yuborilgan: {skipped} · ro’yxatdan o’tishlar: {registrations} · shaffof emas: {opaque} · yuklamalar: {payloads}",
+  "Runtime skipped: {reason}": "Ish vaqti o’tkazib yubordi: {reason}",
+  "Runtime isolation: {error}": "Ish vaqti izolyatsiyasi: {error}",
+  "Runtime: {count} jar(s) reported": "Ish vaqti: {count} jar fayli haqida xabar berildi",
+  "Clear compatibility cache": "Moslik keshini tozalash",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} uchun moslik keshi tozalandi. Keyingi o’rnatish, yangilash yoki qidiruvda qayta tekshiriladi.",
+  "(+{count} more)": "(+{count} ta)"
 }

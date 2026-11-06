@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} چھوڑ دیا گیا: اسے {other} چاہیے، جو چھوڑ دیا گیا",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "آپ جو Horizon کھیلتے ہیں اس پر نہیں بنتا ({code}): بلڈ اسے تب تک چھوڑ دیتا ہے جب تک اس کا مصنف اسے اپڈیٹ نہ کرے",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "آپ جہاں ہیں، وہاں بانیوں کا سیٹ playhorizon.dev پر مفت چیک آؤٹ کے ذریعے لیا جاتا ہے۔ اسے دکان سے لیں: وہ آپ کے لیے چیک آؤٹ کھول دیتی ہے۔",
-  "The founder set can't be claimed from your country.": "بانیوں کا سیٹ آپ کے ملک سے نہیں لیا جا سکتا۔"
+  "The founder set can't be claimed from your country.": "بانیوں کا سیٹ آپ کے ملک سے نہیں لیا جا سکتا۔",
+  "Java runtime": "Java رن ٹائم",
+  "No runtime report": "کوئی رن ٹائم رپورٹ نہیں",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "رن ٹائم: {engine} · لوڈر: {loader} · بنا ہوا: {woven} · چھوڑا: {skipped} · رجسٹریشن: {registrations} · غیر شفاف: {opaque} · پے لوڈز: {payloads}",
+  "Runtime skipped: {reason}": "رن ٹائم نے چھوڑا: {reason}",
+  "Runtime isolation: {error}": "رن ٹائم تنہائی: {error}",
+  "Runtime: {count} jar(s) reported": "رن ٹائم: {count} jar فائلیں رپورٹ ہوئیں",
+  "Clear compatibility cache": "مطابقت کا کیش صاف کریں",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} کا مطابقت کا کیش صاف کر دیا گیا۔ اگلی بار انسٹال، اپ ڈیٹ یا تلاش میں دکھائی دینے پر دوبارہ جانچا جائے گا۔",
+  "(+{count} more)": "(+{count} مزید)"
 }

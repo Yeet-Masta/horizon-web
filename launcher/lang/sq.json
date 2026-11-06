@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} u la jashtë: i duhet {other}, që u la jashtë",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Nuk ndërtohet në Horizon-in që luan ({code}): ndërtimi e lë jashtë derisa autori ta përditësojë",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Atje ku jeni, seti i themeluesve merret me një pagesë falas në playhorizon.dev. Merreni nga Dyqani: ai jua hap pagesën.",
-  "The founder set can't be claimed from your country.": "Seti i themeluesve nuk mund të merret nga vendi juaj."
+  "The founder set can't be claimed from your country.": "Seti i themeluesve nuk mund të merret nga vendi juaj.",
+  "Java runtime": "Mjedisi i ekzekutimit Java",
+  "No runtime report": "Nuk ka raport ekzekutimi",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Ekzekutimi: {engine} · ngarkuesi: {loader} · i endur: {woven} · i anashkaluar: {skipped} · regjistrimet: {registrations} · i errët: {opaque} · ngarkesat: {payloads}",
+  "Runtime skipped: {reason}": "I anashkaluar nga ekzekutimi: {reason}",
+  "Runtime isolation: {error}": "Izolimi i ekzekutimit: {error}",
+  "Runtime: {count} jar(s) reported": "Ekzekutimi: u raportuan {count} skedarë jar",
+  "Clear compatibility cache": "Pastro cache-in e përputhshmërisë",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache-i i përputhshmërisë për {name} u pastrua. Ai do të kontrollohet përsëri në instalimin, përditësimin ose kërkimin tjetër.",
+  "(+{count} more)": "(+{count} më shumë)"
 }

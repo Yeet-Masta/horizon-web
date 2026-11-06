@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} is weggelaote: 't haet {other} nóddig, wat weggelaote is",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Bouwt neet op de Horizon die se speuls ({code}): 'ne bouw laot 't weg tot de maker 't biewerk",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Wo se bis, wurt de oprichtersset geclaimd via 'n gratis betaling op playhorizon.dev. Claim 'm in de Winkel: dae maak de betaling veur dich aope.",
-  "The founder set can't be claimed from your country.": "De oprichtersset kin neet oet dien land geclaimd waere."
+  "The founder set can't be claimed from your country.": "De oprichtersset kin neet oet dien land geclaimd waere.",
+  "Java runtime": "Java-runtied",
+  "No runtime report": "Geine runtiedrapport",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Runtied: {engine} · lajer: {loader} · geweve: {woven} · euvergeslage: {skipped} · registraties: {registrations} · ónzjichtig: {opaque} · lajinge: {payloads}",
+  "Runtime skipped: {reason}": "Euvergeslage door runtied: {reason}",
+  "Runtime isolation: {error}": "Runtied-isolatie: {error}",
+  "Runtime: {count} jar(s) reported": "Runtied: {count} jar-bestenj gemeld",
+  "Clear compatibility cache": "Compatibiliteitscache wösje",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De compatibiliteitscache veur {name} is gewösj. ’t Weurt bie de volgende installatie, update of zeukactie opnuuj gecontroleerd.",
+  "(+{count} more)": "(+{count} mieë)"
 }

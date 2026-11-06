@@ -8,6 +8,7 @@
 //! are listed on its Modpacks tab.
 use super::line_edit::{self, Key, LineEdit};
 use super::*;
+use crate::i18n;
 use horizon_launcher::browser::{
     self, horizon, installed, java, java_instance, Kind as PackKind, Project, Query, SourceId,
     Support,
@@ -29,6 +30,8 @@ const KINDS: [(PackKind, &str, &str); 5] = [
 ];
 /// Java mods checked at once.
 const CHECKING: usize = 2;
+/// Installed Java mods whose runtime diagnostics the panel lists before "(+N more)".
+const DIAGNOSED: usize = 5;
 /// The sources to pick from on the tabs that have both ([`switches`]); CurseForge is shown
 /// beside them as coming soon.
 pub(super) const SOURCES: [(SourceId, &str); 2] = [
@@ -120,6 +123,9 @@ pub(super) struct Mods {
     native_files: std::cell::RefCell<Option<(String, Vec<native_status::Installed>)>>,
     /// Java mods' checks, by source and project.
     pub(super) checks: HashMap<(SourceId, String), Checking>,
+    /// Installed Java mods' cached checks, read from disk once, by the entry's checksum; `None`
+    /// when the cache has none. Emptied whenever a check is written or cleared.
+    diagnostics: HashMap<String, Option<Box<Check>>>,
     /// Horizon registry projects' trust and capabilities, by id ([`horizon::trust_and_capabilities`]).
     pub(super) about: HashMap<String, Vec<String>>,
     /// The project page, filters and images.
@@ -206,6 +212,7 @@ impl Mods {
             picked: None,
             shown: None,
             checks: HashMap::new(),
+            diagnostics: HashMap::new(),
             about: HashMap::new(),
             browse: Default::default(),
             tx,
@@ -380,6 +387,7 @@ impl Launcher {
                     }
                     m.message = Some(result);
                     m.installed = installed::Installed::load(&m.home()).entries;
+                    m.diagnostics.clear();
                     m.installed_list.reset();
                     if modpack {
                         // The Modpacks page reads its list again.
@@ -393,6 +401,9 @@ impl Launcher {
                         Err(e) => Checking::Failed(e),
                     };
                     m.checks.insert(key, state);
+                    // A check just written may be the cache an installed row reads.
+                    m.diagnostics.clear();
+                    m.installed_list.reset();
                 }
                 Event::Loaded(l) => loaded.push(l),
                 Event::About(about) => {
@@ -1336,9 +1347,154 @@ impl Launcher {
         memo.as_ref().unwrap().1.clone()
     }
 
+    /// Clears the cached compatibility check of an installed Java mod, so it is probed again
+    /// the next time its jar is checked (an install, an update or a search listing it).
+    fn mods_clear_check(&mut self, entry: &installed::Entry) {
+        let home = self.mods.home();
+        self.mods.message = Some(java::clear_check(&home, &entry.checksum).map(|_| {
+            trf(
+                "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.",
+                &[("name", &entry.title)],
+            )
+        }));
+        self.mods
+            .checks
+            .remove(&(entry.source, entry.project.clone()));
+        self.mods.diagnostics.clear();
+        self.mods.installed_list.reset();
+    }
+
+    /// The runtime panel for installed Java mods, from the game's `java-runtime.json`: the
+    /// [`DIAGNOSED`] most relevant rows, each with a button that clears its compatibility cache,
+    /// then "(+N more)`. A game that wrote no report says so.
+    fn mods_runtime(&self, entries: &[&installed::Entry], cx: &mut Context<Self>) -> Option<Div> {
+        let candidates: Vec<&installed::Entry> = entries
+            .iter()
+            .copied()
+            .filter(|e| {
+                e.kind == PackKind::Mod
+                    && e.source != SourceId::Horizon
+                    && !native_status::is_native_file(&e.file)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let t = self.theme;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(caps(tr("Java runtime")).text_color(t.muted));
+        let report = java::runtime_report(&self.mods.home());
+        let cached = |e: &installed::Entry| {
+            self.mods
+                .diagnostics
+                .get(&e.checksum)
+                .is_some_and(|check| check.is_some())
+        };
+        // A mod with a cached check but no runtime line still gets a row and its clear button.
+        let found: Vec<(&installed::Entry, java::RuntimeLines)> = candidates
+            .into_iter()
+            .filter_map(|e| {
+                let name = std::path::Path::new(&e.file).file_name()?.to_str()?;
+                let runtime = report
+                    .as_ref()
+                    .and_then(|report| java::runtime_lines_in(i18n::current(), report, name));
+                (runtime.is_some() || cached(e)).then_some((e, runtime.unwrap_or_default()))
+            })
+            .collect();
+        if found.is_empty() {
+            let line = match &report {
+                Some(report) => java::runtime_summary_in(i18n::current(), report),
+                None => tr("No runtime report").to_string(),
+            };
+            return Some(panel.child(text(theme::CAPTION).text_color(t.ink_soft).child(line)));
+        }
+        if report.is_none() {
+            panel = panel.child(
+                text(theme::CAPTION)
+                    .text_color(t.ink_soft)
+                    .child(tr("No runtime report")),
+            );
+        }
+        let (shown, more) = diagnosed(found);
+        for (e, runtime) in shown {
+            let entry = e.clone();
+            let failed = runtime.failed;
+            let mut row = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(e.title.clone());
+            if self
+                .mods
+                .diagnostics
+                .get(&e.checksum)
+                .is_some_and(|cached| cached.is_some())
+            {
+                row = row.child(
+                    button(
+                        SharedString::from(format!("mods-clear-check-{}", e.project)),
+                        "Clear compatibility cache",
+                        Kind::Ghost,
+                        &t,
+                    )
+                    .on_click(cx.listener(
+                        move |this, _: &ClickEvent, _, cx| {
+                            this.mods_clear_check(&entry);
+                            cx.notify();
+                        },
+                    )),
+                );
+            }
+            panel = panel.child(
+                plate(&t)
+                    .p(px(12.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(row)
+                    .children(runtime.lines.into_iter().map(|line| {
+                        text(theme::CAPTION)
+                            .font_family(theme::MONO)
+                            .text_color(if failed { t.warn } else { t.ink_soft })
+                            .child(line)
+                    })),
+            );
+        }
+        if more > 0 {
+            panel = panel.child(
+                text(theme::CAPTION)
+                    .text_color(t.muted)
+                    .child(trf("(+{count} more)", &[("count", &more.to_string())])),
+            );
+        }
+        Some(panel)
+    }
+
+    /// Reads the cached checks of the installed Java mods the browser put in `horizon-mods`,
+    /// once per checksum (until a check is written or cleared).
+    fn load_diagnostics(&mut self) {
+        if self.mods.java.is_some() || self.mods.kind != PackKind::Mod {
+            return;
+        }
+        let home = self.mods.home();
+        for e in &self.mods.installed {
+            if e.kind == PackKind::Mod && e.source != SourceId::Horizon {
+                self.mods
+                    .diagnostics
+                    .entry(e.checksum.clone())
+                    .or_insert_with(|| java::cached_for_entry(&home, &e.checksum).map(Box::new));
+            }
+        }
+    }
+
     fn mods_installed_list(&mut self, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let kind = self.mods.kind;
+        self.load_diagnostics();
         // Each project's own icon (Modrinth's, asked for once), at the row's size.
         let ids = self
             .mods
@@ -1549,6 +1705,9 @@ impl Launcher {
             },
             row,
         );
+        let runtime = (self.mods.java.is_none() && kind == PackKind::Mod)
+            .then(|| self.mods_runtime(&entries, cx))
+            .flatten();
         Some(
             div()
                 .flex()
@@ -1563,7 +1722,8 @@ impl Launcher {
                         .children(update_all),
                 )
                 .children(native.then(|| self.native_build(cx)).flatten())
-                .child(list),
+                .child(list)
+                .children(runtime),
         )
     }
 
@@ -2037,6 +2197,23 @@ fn source_switch(
     segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
 }
 
+/// The runtime panel's rows: the [`DIAGNOSED`] most relevant of `found` (a failed isolation
+/// first, then the most skipped, ties by mod name) and how many it leaves out for "(+N more)".
+fn diagnosed<'a>(
+    found: impl IntoIterator<Item = (&'a installed::Entry, java::RuntimeLines)>,
+) -> (Vec<(&'a installed::Entry, java::RuntimeLines)>, usize) {
+    let mut found: Vec<_> = found.into_iter().collect();
+    found.sort_by(|(ea, a), (eb, b)| {
+        b.failed
+            .cmp(&a.failed)
+            .then_with(|| b.skipped.cmp(&a.skipped))
+            .then_with(|| ea.title.cmp(&eb.title))
+    });
+    let more = found.len().saturating_sub(DIAGNOSED);
+    found.truncate(DIAGNOSED);
+    (found, more)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2049,5 +2226,70 @@ mod tests {
         let sum = format!("SHA-512:{}", "ab".repeat(64));
         assert_eq!(short_sum(&sum), "SHA-512 abababababab…abababab");
         assert_eq!(short_sum("SHA-1:abcd"), "SHA-1:abcd");
+    }
+
+    fn installed_entry(title: &str, checksum: &str) -> installed::Entry {
+        installed::Entry {
+            source: SourceId::Modrinth,
+            project: title.to_lowercase(),
+            slug: title.to_lowercase(),
+            title: title.into(),
+            kind: PackKind::Mod,
+            version: "1.0.0".into(),
+            number: "1".into(),
+            file: format!("horizon-mods/{title}/{}", title.to_lowercase()),
+            checksum: checksum.into(),
+            page: String::new(),
+            dependency: false,
+            verdict: None,
+            skipped: Vec::new(),
+            namespaces: Vec::new(),
+        }
+    }
+
+    fn runtime_lines(failed: bool, skipped: usize) -> java::RuntimeLines {
+        java::RuntimeLines {
+            lines: vec!["Runtime: native".into()],
+            failed,
+            skipped,
+        }
+    }
+
+    /// The panel lists the five most relevant (a failed isolation first, then the most
+    /// skipped; ties by name) and says how many the rest are.
+    #[test]
+    fn runtime_panel_bounds_the_list_and_counts_the_rest() {
+        let entries = [
+            installed_entry("Failed", "a"),
+            installed_entry("Heavy", "b"),
+            installed_entry("Alpha", "c"),
+            installed_entry("Beta", "d"),
+            installed_entry("Gamma", "e"),
+            installed_entry("Delta", "f"),
+            installed_entry("Epsilon", "g"),
+        ];
+        let lines = [
+            runtime_lines(true, 0),
+            runtime_lines(false, 9),
+            runtime_lines(false, 0),
+            runtime_lines(false, 0),
+            runtime_lines(false, 5),
+            runtime_lines(false, 0),
+            runtime_lines(false, 0),
+        ];
+        let (shown, more) = diagnosed(entries.iter().zip(lines.iter().cloned()));
+        assert_eq!(more, 2);
+        assert_eq!(shown.len(), DIAGNOSED);
+        assert_eq!(
+            shown
+                .iter()
+                .map(|(e, _)| e.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Failed", "Heavy", "Gamma", "Alpha", "Beta"]
+        );
+        // Fewer than the panel shows: no "+N more" line.
+        let (shown, more) = diagnosed(entries[..3].iter().zip(lines[..3].iter().cloned()));
+        assert_eq!(more, 0);
+        assert_eq!(shown.len(), 3);
     }
 }

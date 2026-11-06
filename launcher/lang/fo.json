@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} varð útihildin: hon tørvar {other}, sum varð útihildin",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Byggir ikki á tí Horizon, tú spælir ({code}): ein bygging heldur hana úti, til høvundurin dagførir hana",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Har tú ert, fæst stovnarasettið gjøgnum ein ókeypis gjalding á playhorizon.dev. Krev tað í Handlinum: hann letur gjaldingina upp fyri teg.",
-  "The founder set can't be claimed from your country.": "Stovnarasettið kann ikki krevjast úr tínum landi."
+  "The founder set can't be claimed from your country.": "Stovnarasettið kann ikki krevjast úr tínum landi.",
+  "Java runtime": "Java koyritíð",
+  "No runtime report": "Ongin koyritíðarfrágreiðing",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Koyritíð: {engine} · innlesari: {loader} · vovið: {woven} · yvirloypt: {skipped} · skrásetingar: {registrations} · ógagnsætt: {opaque} · byrðar: {payloads}",
+  "Runtime skipped: {reason}": "Yvirloypt av koyritíðini: {reason}",
+  "Runtime isolation: {error}": "Avmarking av koyritíð: {error}",
+  "Runtime: {count} jar(s) reported": "Koyritíð: {count} jar-fílur fráboðaðar",
+  "Clear compatibility cache": "Strika samsvarandi fyrimynd",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Samsvarandi fyrimyndin fyri {name} varð strikað. Hon verður kannað aftur næsta innlegging, dagføring ella leiting.",
+  "(+{count} more)": "(+{count} fleiri)"
 }

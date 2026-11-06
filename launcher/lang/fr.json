@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} a été laissé de côté : il a besoin de {other}, laissé de côté",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Ne se compile pas sur le Horizon auquel vous jouez ({code}) : une compilation le laisse de côté jusqu'à ce que son auteur le mette à jour",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Là où vous êtes, le set fondateur se réclame par un paiement gratuit sur playhorizon.dev. Réclamez-le depuis la Boutique : elle ouvre le paiement pour vous.",
-  "The founder set can't be claimed from your country.": "Le set fondateur ne peut pas être réclamé depuis votre pays."
+  "The founder set can't be claimed from your country.": "Le set fondateur ne peut pas être réclamé depuis votre pays.",
+  "Java runtime": "Exécution Java",
+  "No runtime report": "Aucun rapport d’exécution",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Exécution : {engine} · chargeur : {loader} · tissés : {woven} · ignorés : {skipped} · enregistrements : {registrations} · opaques : {opaque} · charges utiles : {payloads}",
+  "Runtime skipped: {reason}": "Ignoré à l’exécution : {reason}",
+  "Runtime isolation: {error}": "Isolation à l’exécution : {error}",
+  "Runtime: {count} jar(s) reported": "Exécution : {count} fichier(s) signalé(s)",
+  "Clear compatibility cache": "Effacer le cache de compatibilité",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache de compatibilité effacé pour {name}. Il sera vérifié à nouveau lors de sa prochaine installation, mise à jour ou apparition dans une recherche.",
+  "(+{count} more)": "(+{count} autres)"
 }

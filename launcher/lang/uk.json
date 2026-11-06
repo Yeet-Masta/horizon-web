@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} пропущено: йому потрібен {other}, який пропущено",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Не збирається на Horizon, у який ви граєте ({code}): збирання пропустить його, доки автор не оновить",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Там, де ви є, набір засновника отримують через безкоштовне оформлення на playhorizon.dev. Отримайте його в Крамниці: вона сама відкриє оформлення.",
-  "The founder set can't be claimed from your country.": "Набір засновника не можна отримати з вашої країни."
+  "The founder set can't be claimed from your country.": "Набір засновника не можна отримати з вашої країни.",
+  "Java runtime": "Середовище виконання Java",
+  "No runtime report": "Немає звіту про середовище виконання",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Середовище: {engine} · завантажувач: {loader} · вплетено: {woven} · пропущено: {skipped} · реєстрацій: {registrations} · непрозорих: {opaque} · корисних навантажень: {payloads}",
+  "Runtime skipped: {reason}": "Пропущено середовищем: {reason}",
+  "Runtime isolation: {error}": "Ізоляція середовища: {error}",
+  "Runtime: {count} jar(s) reported": "Середовище: повідомлено про {count} jar-файл(ів)",
+  "Clear compatibility cache": "Очистити кеш сумісності",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кеш сумісності для {name} очищено. Його буде перевірено знову під час наступного встановлення, оновлення або появи в пошуку.",
+  "(+{count} more)": "(+{count} ще)"
 }

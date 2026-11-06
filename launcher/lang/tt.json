@@ -1222,5 +1222,14 @@
   "{name} was left out: it needs {other}, which was left out": "{name} төшереп калдырылды: аңа {other} кирәк, ә ул төшереп калдырылды",
   "Doesn't build on the Horizon you play ({code}): a build leaves it out until its author updates it": "Син уйнаган Horizon'да җыелмый ({code}): авторы яңартмыйча, җыю аны төшереп калдыра",
   "Where you are, the founder set is claimed through a free checkout on playhorizon.dev. Claim it from the Shop: it opens the checkout for you.": "Сез булган җирдә нигез салучылар комплекты playhorizon.dev сайтында бушлай түләү аша алына. Аны Кибеттән алыгыз: ул түләүне сезгә үзе ача.",
-  "The founder set can't be claimed from your country.": "Нигез салучылар комплектын сезнең илдән алып булмый."
+  "The founder set can't be claimed from your country.": "Нигез салучылар комплектын сезнең илдән алып булмый.",
+  "Java runtime": "Java башкару вакыты",
+  "No runtime report": "Башкару вакыты турында хисап юк",
+  "Runtime: {engine} · loader: {loader} · woven: {woven} · skipped: {skipped} · registrations: {registrations} · opaque: {opaque} · payloads: {payloads}": "Башкару: {engine} · йөкләүче: {loader} · тукылган: {woven} · үткәрелгән: {skipped} · теркәлүләр: {registrations} · тонык: {opaque} · йөкләмәләр: {payloads}",
+  "Runtime skipped: {reason}": "Башкару вакыты үткәрде: {reason}",
+  "Runtime isolation: {error}": "Башкару вакыты изоляциясе: {error}",
+  "Runtime: {count} jar(s) reported": "Башкару: {count} jar файлы турында хәбәр ителде",
+  "Clear compatibility cache": "Ярашлылык кэшын чистарту",
+  "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} өчен ярашлылык кэшы чистартылды. Ул киләсе урнаштыру, яңарту яки эзләү вакытында яңадан тикшереләчәк.",
+  "(+{count} more)": "(+{count} тагын)"
 }
