@@ -1422,6 +1422,9 @@ impl Launcher {
         for (e, runtime) in shown {
             let entry = e.clone();
             let failed = runtime.failed;
+            // The report names the first plan it skipped; a game-class target is exactly what the
+            // in-game weaver cannot rewrite, so the row says the jar needs the real loader.
+            let loader = needs_loader(&runtime);
             let mut row = div()
                 .flex()
                 .items_center()
@@ -1449,20 +1452,25 @@ impl Launcher {
                     )),
                 );
             }
-            panel = panel.child(
-                plate(&t)
-                    .p(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(row)
-                    .children(runtime.lines.into_iter().map(|line| {
-                        text(theme::CAPTION)
-                            .font_family(theme::MONO)
-                            .text_color(if failed { t.warn } else { t.ink_soft })
-                            .child(line)
-                    })),
-            );
+            let mut card = plate(&t)
+                .p(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(row);
+            if loader {
+                card = card.child(
+                    text(theme::CAPTION)
+                        .text_color(t.warn)
+                        .child(tr("Needs the loader: its plans target the game")),
+                );
+            }
+            panel = panel.child(card.children(runtime.lines.into_iter().map(|line| {
+                text(theme::CAPTION)
+                    .font_family(theme::MONO)
+                    .text_color(if failed { t.warn } else { t.ink_soft })
+                    .child(line)
+            })));
         }
         if more > 0 {
             panel = panel.child(
@@ -2197,6 +2205,18 @@ fn source_switch(
     segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
 }
 
+/// Skip labels that name a plan whose target is a game class (`net/minecraft`): the weaver only
+/// rewrites classes inside the jar, so such a plan needs the real loader to apply.
+const GAME_TARGET_SKIPS: [&str; 3] = ["target-outside-jar", "game-class", "net/minecraft/"];
+
+/// Whether a runtime row's skip reason says the jar's plans target the game.
+fn needs_loader(runtime: &java::RuntimeLines) -> bool {
+    runtime
+        .lines
+        .iter()
+        .any(|line| GAME_TARGET_SKIPS.iter().any(|marker| line.contains(marker)))
+}
+
 /// The runtime panel's rows: the [`DIAGNOSED`] most relevant of `found` (a failed isolation
 /// first, then the most skipped, ties by mod name) and how many it leaves out for "(+N more)".
 fn diagnosed<'a>(
@@ -2253,6 +2273,31 @@ mod tests {
             failed,
             skipped,
         }
+    }
+
+    /// A plan that targets a game class makes its row say the loader is needed; one skipped for a
+    /// reason that does not name the game (a family the weaver does not model) does not.
+    #[test]
+    fn runtime_rows_say_when_their_plans_need_the_loader() {
+        let game = java::RuntimeLines {
+            lines: vec![
+                "Runtime: native-qualified · loader: fabric · woven: 0 · skipped: 12 · registrations: 3 · opaque: 0 · payloads: 0".into(),
+                "Runtime skipped: target-outside-jar HEAD net/minecraft/world/level/Level#tick".into(),
+            ],
+            failed: false,
+            skipped: 12,
+        };
+        let elsewhere = java::RuntimeLines {
+            lines: vec![
+                "Runtime: native · loader: fabric · woven: 2 · skipped: 1 · registrations: 0 · opaque: 0 · payloads: 0".into(),
+                "Runtime skipped: unsupported-family INVOKE demo/Target#run".into(),
+            ],
+            failed: false,
+            skipped: 1,
+        };
+        assert!(needs_loader(&game));
+        assert!(!needs_loader(&elsewhere));
+        assert!(!needs_loader(&java::RuntimeLines::default()));
     }
 
     /// The panel lists the five most relevant (a failed isolation first, then the most
