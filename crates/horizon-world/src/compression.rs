@@ -1,5 +1,5 @@
 //! Region codecs, including lz4-java's block framing (not the LZ4 frame format).
-use flate2::{Compression as Level, Decompress, FlushDecompress, Status};
+use flate2::{Compress, Compression as Level, Decompress, FlushCompress, FlushDecompress, Status};
 use std::io::{self, Read, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +28,11 @@ impl TryFrom<u8> for Compression {
             ))),
         }
     }
+}
+
+thread_local! {
+    /// This thread's zlib compressor ([`Compression::encode`]).
+    static ZLIB: std::cell::RefCell<Option<Compress>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Compression {
@@ -100,11 +105,24 @@ impl Compression {
                 encoder.write_all(bytes)?;
                 encoder.finish()
             }
-            Self::Zlib => {
-                let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Level::default());
-                encoder.write_all(bytes)?;
-                encoder.finish()
-            }
+            Self::Zlib => ZLIB.with_borrow_mut(|slot| {
+                // One compressor per thread, reset between chunks: a new one allocated and
+                // zeroed its state (hundreds of KiB) for every chunk saved, which on the web
+                // build went through the allocator's lock, with four save workers at once.
+                let encoder = slot.get_or_insert_with(|| Compress::new(Level::default(), true));
+                encoder.reset();
+                let mut output = Vec::with_capacity(bytes.len() / 4 + 64);
+                loop {
+                    let input = &bytes[encoder.total_in() as usize..];
+                    let status = encoder
+                        .compress_vec(input, &mut output, FlushCompress::Finish)
+                        .map_err(io::Error::other)?;
+                    if status == Status::StreamEnd {
+                        return Ok(output);
+                    }
+                    output.reserve(output.capacity().max(4096));
+                }
+            }),
             Self::Lz4 => Ok(encode_lz4(bytes)),
         }
     }

@@ -1570,7 +1570,31 @@ pub struct EndPortalFill {
 pub fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     u32::from(a) << 24 | u32::from(b) << 16 | u32::from(g) << 8 | u32::from(r)
 }
+thread_local! {
+    /// The vertex list of the last frame's HUD, given back once drawn ([`HudBatch::recycle`])
+    /// for the next one ([`HudBatch::for_frame`]): grown from empty every frame (thousands of
+    /// vertices with the frame graph shown), it was copied at each doubling.
+    static FRAME_VERTICES: std::cell::RefCell<Vec<HudVertex>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 impl HudBatch {
+    /// [`HudBatch::new`] for a frame's HUD, on the vertex list the last frame's gave back.
+    pub fn for_frame(window: [u32; 2]) -> Self {
+        let mut batch = Self::new(window);
+        batch.vertices = FRAME_VERTICES.with_borrow_mut(std::mem::take);
+        batch
+    }
+    /// Gives this batch's vertex list, emptied, to the next [`HudBatch::for_frame`] on this
+    /// thread.
+    pub fn recycle(&mut self) {
+        let mut vertices = std::mem::take(&mut self.vertices);
+        vertices.clear();
+        FRAME_VERTICES.with_borrow_mut(|spare| {
+            if vertices.capacity() > spare.capacity() {
+                *spare = vertices;
+            }
+        });
+    }
     /// Window.calculateScale: the largest scale keeping >= 320x240 GUI pixels,
     /// capped by the GUI Scale option (0 = auto).
     pub fn new(window: [u32; 2]) -> Self {

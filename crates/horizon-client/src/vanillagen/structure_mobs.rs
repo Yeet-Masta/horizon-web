@@ -38,7 +38,10 @@ struct Data {
     camel_husk: (f32, f32),
 }
 fn load(root: &std::path::Path) -> Option<Data> {
-    let types = MobTypes::load(root).ok()?.types;
+    // Their facts only, as the dedicated server's: parsing every entity model as well took
+    // a chunk worker's first structure 1.5 s of allocations on the web build, with every
+    // other thread waiting on the allocator meanwhile.
+    let types = MobTypes::load_for_server(root).ok()?.types;
     let camel = types.get("minecraft:camel_husk")?;
     let camel_husk = (camel.width as f32, camel.height as f32);
     Some(Data {

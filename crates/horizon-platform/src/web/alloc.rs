@@ -49,7 +49,12 @@ const fn keep(c: usize) -> u32 {
         by_bytes as u32
     }
 }
-/// Every class's blocks are aligned this far.
+/// Every class's blocks are aligned this far: as far as std's allocator aligns
+/// everything (dlmalloc's 8 bytes on wasm32), as a block aligned further took
+/// its `memalign`, which allocates more and splits it, under the lock.
+#[cfg(target_arch = "wasm32")]
+const ALIGN: usize = 8;
+#[cfg(not(target_arch = "wasm32"))]
 const ALIGN: usize = 16;
 /// Below this address a thread-local's address is only its offset in the
 /// block: the thread's storage isn't set up yet (its base is 0).
@@ -202,7 +207,7 @@ unsafe impl GlobalAlloc for Cached {
             if lists.len[c] >= keep(c) {
                 return false;
             }
-            // SAFETY: the block is at least 16 bytes, 16-aligned, and ours now.
+            // SAFETY: the block is at least 16 bytes, aligned for a pointer, and ours now.
             unsafe { *block_ptr.cast::<*mut u8>() = lists.head[c] };
             lists.head[c] = block_ptr;
             lists.len[c] += 1;
