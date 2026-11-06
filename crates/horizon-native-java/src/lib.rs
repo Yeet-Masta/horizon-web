@@ -415,6 +415,11 @@ pub enum MixinSkipReason {
     ConfigPlugin,
     /// The target class is not in this jar, the case for every Minecraft target.
     TargetOutsideJar,
+    /// The target is a game class whose call site a host hook point exposes,
+    /// but this plan's shape (its side, anchor, cancellation, selector or
+    /// callback) does not fit that hook's contract, so it stays refused rather
+    /// than approximated.
+    GameHookMismatch(String),
     /// The target class declares no method matching the selector.
     TargetMissing,
     /// The selector matches several overloads, or two selectors name one method.
@@ -442,11 +447,20 @@ impl MixinSkipReason {
             Self::OtherSide => "other-side",
             Self::ConfigPlugin => "config-plugin",
             Self::TargetOutsideJar => "target-outside-jar",
+            Self::GameHookMismatch(_) => "game-hook-mismatch",
             Self::TargetMissing => "target-missing",
             Self::AmbiguousTarget => "ambiguous-target",
             Self::ConstructorTarget => "constructor-target",
             Self::Weaver(_) => "weaver-rejected",
             Self::ListedWithoutPlan => "listed-without-plan",
+        }
+    }
+
+    /// The bounded sentence a reason carries, for the two variants that do.
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Weaver(detail) | Self::GameHookMismatch(detail) => Some(detail),
+            _ => None,
         }
     }
 }
@@ -480,11 +494,288 @@ impl std::fmt::Display for SkippedMixinPlan {
             self.callback.name,
             self.callback.descriptor,
         )?;
-        if let MixinSkipReason::Weaver(detail) = &self.reason {
+        if let MixinSkipReason::Weaver(detail) | MixinSkipReason::GameHookMismatch(detail) =
+            &self.reason
+        {
             write!(f, ": {detail}")?;
         }
         Ok(())
     }
+}
+
+/// What a game hook point's contract lets a host do with the callbacks bound to
+/// it.
+///
+/// The words mirror `native-hooks.json`'s `mod_api.contract`, so the census
+/// test can compare them by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameHookContract {
+    /// The host only tells the callback the point was reached.
+    Listen,
+    /// The host hands the callback the census's out-parameter (`out`) and
+    /// reads it back, so `CallbackInfo.cancel()` has something to write where
+    /// the vanilla code checks.
+    Cancel {
+        /// The out-parameter's name in the census (`canceled`, `claimed`...).
+        out: &'static str,
+    },
+}
+
+impl GameHookContract {
+    /// The census contract word (`listen` or `cancel`).
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Listen => "listen",
+            Self::Cancel { .. } => "cancel",
+        }
+    }
+}
+
+/// What a game hook point hands the interpreter as the callback's `this`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameHookReceiver {
+    /// A static target, so the callback has no receiver.
+    None,
+    /// The hook names the target object itself. The host passes its marker
+    /// (for example `player/<id>`), and an instance callback receives it.
+    Named(&'static str),
+}
+
+/// One game class method whose call site a host hook point exposes.
+///
+/// A site is the mapping a `@Inject` plan on a Minecraft class needs: the plan
+/// cannot be woven (the class is outside the jar), but the host already calls a
+/// named hook at that position, so the callback can run there natively. The
+/// table is deliberately small and hand-checked against the hook's own
+/// documentation: a wrong entry would run mod code at the wrong moment, which
+/// is worse than the honest `target-outside-jar` refusal.
+///
+/// Adding a site is a host change, not a parser change: the hook must already
+/// be in `native-hooks.json` with the same contract word, side and cancellation,
+/// and it must be able to hand the interpreter the target's receiver and every
+/// target argument. Today only the receiver-carrying, argument-free and
+/// single-argument hooks qualify (see `game_hook_sites`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameHookSite {
+    /// The census hook name (`native-hooks.json`'s `name`).
+    pub hook: &'static str,
+    /// The census contract version the call site implements.
+    pub version: u32,
+    /// The vanilla class the hooked call site belongs to.
+    pub target_owner: &'static str,
+    /// The vanilla method name.
+    pub target_name: &'static str,
+    /// The vanilla method descriptor. Empty plan descriptors resolve to it.
+    pub target_descriptor: &'static str,
+    /// The `@At` anchors the hook's position answers (`HEAD`, `RETURN`, `TAIL`).
+    pub anchors: &'static [&'static str],
+    /// What the hook lets the callback do.
+    pub contract: GameHookContract,
+    /// The physical side the hook fires on; `None` for both.
+    pub side: Option<MixinSide>,
+    /// The object the host passes as the callback's receiver.
+    pub receiver: GameHookReceiver,
+    /// One sentence on what the hook actually covers, for a compatibility
+    /// screen: the population and position are part of the contract.
+    pub note: &'static str,
+}
+
+/// The game hook points this runtime maps a Minecraft `@Inject` target onto.
+///
+/// Coverage rule, in order: the plan's target is one of these sites; the hook's
+/// side is the weave side; the plan's anchor is one the hook's position
+/// exposes; a cancellable plan needs a `Cancel` contract; the target stays
+/// `void` for a post hook (the hook carries no result to override); the plan
+/// carries no `shift`, `slice` or `ordinal`; and the callback's descriptor
+/// mirrors the target's arguments with at most one trailing `CallbackInfo` and
+/// returns `void`. Anything else is skipped with
+/// [`MixinSkipReason::GameHookMismatch`], and a target with no site at all
+/// keeps [`MixinSkipReason::TargetOutsideJar`].
+///
+/// Only two sites qualify today because the rule is strict on purpose: the hook
+/// must fire at the same position and for the same population as the vanilla
+/// method. `entity_tick_pre`/`_post` are batched per family and exclude
+/// players and projectiles, so `Entity#tick` does not map onto them.
+pub const GAME_HOOK_SITES: &[GameHookSite] = &[
+    GameHookSite {
+        hook: "player_tick",
+        version: 1,
+        target_owner: "net/minecraft/server/level/ServerPlayer",
+        target_name: "tick",
+        target_descriptor: "()V",
+        anchors: &["TAIL"],
+        contract: GameHookContract::Listen,
+        side: Some(MixinSide::Server),
+        receiver: GameHookReceiver::Named("player"),
+        note: "at the end of ServerPlayer.tick, for a living player, on the authoritative server",
+    },
+    GameHookSite {
+        hook: "item_picked_up",
+        version: 1,
+        target_owner: "net/minecraft/world/entity/item/ItemEntity",
+        target_name: "playerTouch",
+        target_descriptor: "(Lnet/minecraft/world/entity/player/Player;)V",
+        anchors: &["HEAD"],
+        contract: GameHookContract::Cancel { out: "canceled" },
+        side: Some(MixinSide::Server),
+        receiver: GameHookReceiver::Named("item"),
+        note: "at ItemEntity.playerTouch, before the stack is taken, on the authoritative server",
+    },
+];
+
+/// The sites a report or a launcher can list, in table order.
+pub fn game_hook_sites() -> &'static [GameHookSite] {
+    GAME_HOOK_SITES
+}
+
+/// The site whose call site a plan target names, if any.
+///
+/// A plan descriptor that is empty (real Mixin's `method = "tick"`) matches the
+/// site's descriptor; a non-empty one must match it exactly.
+pub fn game_hook_site_for(target: &MethodRef) -> Option<&'static GameHookSite> {
+    GAME_HOOK_SITES.iter().find(|site| {
+        site.target_owner == target.owner
+            && site.target_name == target.name
+            && (target.descriptor.is_empty() || target.descriptor == site.target_descriptor)
+    })
+}
+
+/// Why one shape cannot use a site, or `Ok(())` when it can.
+///
+/// This is the coverage rule without the jar: the caller still has to resolve
+/// and validate the callback's descriptor against [`GameHookSite::target_descriptor`].
+pub fn game_hook_site_fits(
+    site: &GameHookSite,
+    anchor: &str,
+    cancellable: bool,
+    side: MixinSide,
+) -> Result<(), MixinSkipReason> {
+    let anchor = if anchor.is_empty() { "HEAD" } else { anchor };
+    if site.side.is_some_and(|only| only != side) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} fires on the {} side only; this weave is {}",
+                site.hook,
+                match site.side {
+                    Some(MixinSide::Client) => "client",
+                    Some(MixinSide::Server) => "server",
+                    None => "either",
+                },
+                match side {
+                    MixinSide::Client => "client",
+                    MixinSide::Server => "server",
+                }
+            ),
+        )));
+    }
+    if !site.anchors.contains(&anchor) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} fires {} on {}#{}; @Inject at {anchor} has no call site there",
+                site.hook,
+                site.anchors.join("/"),
+                site.target_owner,
+                site.target_name
+            ),
+        )));
+    }
+    if cancellable && !matches!(site.contract, GameHookContract::Cancel { .. }) {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} only listens; a cancellable @Inject needs a hook whose contract cancels",
+                site.hook
+            ),
+        )));
+    }
+    if return_desc(site.target_descriptor) != "V" {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} names {}#{}{}, which returns a value; a host hook carries no result to override",
+                site.hook, site.target_owner, site.target_name, site.target_descriptor
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// One `@Inject` plan a game hook point runs instead of a bytecode weave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GameHookPlan {
+    /// The census hook name the callback is registered under.
+    pub hook: &'static str,
+    /// The hook contract version this registration was validated against.
+    pub version: u32,
+    /// The plan's anchor, with an empty `@At` read as `HEAD`.
+    pub anchor: String,
+    /// The plan with its concrete target descriptor.
+    pub plan: MixinInjectionPlan,
+}
+
+/// One callback bound to one host hook point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredGameHook {
+    /// The census hook name.
+    pub hook: String,
+    /// The hook contract version.
+    pub version: u32,
+    /// The resolved vanilla target, with its concrete descriptor.
+    pub target: MethodRef,
+    /// The jar callback the host runs at the point.
+    pub callback: MethodRef,
+    /// The plan's anchor, with an empty `@At` read as `HEAD`.
+    pub anchor: String,
+    /// Whether `CallbackInfo.cancel()` is honoured at this point.
+    pub cancellable: bool,
+}
+
+/// The callbacks one jar registered at host hook points, grouped by hook and
+/// kept in Mixin apply order inside each group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GameHookRegistrations {
+    by_hook: BTreeMap<String, Vec<RegisteredGameHook>>,
+}
+
+impl GameHookRegistrations {
+    /// Every hook name with at least one callback, in name order.
+    pub fn hooks(&self) -> impl Iterator<Item = &str> {
+        self.by_hook.keys().map(String::as_str)
+    }
+
+    /// The callbacks bound to `hook`, in Mixin apply order. An unknown hook
+    /// answers an empty slice, so a host can ask unconditionally.
+    pub fn entries(&self, hook: &str) -> &[RegisteredGameHook] {
+        self.by_hook.get(hook).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The number of callbacks over every hook.
+    pub fn len(&self) -> usize {
+        self.by_hook.values().map(Vec::len).sum()
+    }
+
+    /// Whether the jar registered no hook callback at all.
+    pub fn is_empty(&self) -> bool {
+        self.by_hook.values().all(Vec::is_empty)
+    }
+
+    fn insert(&mut self, hook: RegisteredGameHook) {
+        self.by_hook
+            .entry(hook.hook.clone())
+            .or_default()
+            .push(hook);
+    }
+}
+
+/// What one firing of a host hook point did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GameHookRun {
+    /// The hook name that fired.
+    pub hook: String,
+    /// How many callbacks ran (a cancellation stops the ones after it).
+    pub ran: usize,
+    /// Whether one of them cancelled the vanilla work.
+    pub cancelled: bool,
+    /// Every callback result, in run order.
+    pub results: Vec<Value>,
 }
 
 /// What [`NativeJar::plan_load_time_weave`] decided for one jar.
@@ -501,6 +792,10 @@ pub struct LoadTimeMixinWeave {
     pub woven_modify_args: Vec<MixinModifyArgPlan>,
     /// The resolved @ModifyVariable plans the bytes carry.
     pub woven_modify_variables: Vec<MixinModifyVariablePlan>,
+    /// The `@Inject` plans a host hook point runs instead of the bytecode
+    /// weave. Only [`NativeJar::plan_load_time_weave_with_game_hooks`] fills
+    /// this; the default weave refuses those plans as `target-outside-jar`.
+    pub game_hooks: Vec<GameHookPlan>,
     /// Everything else the jar's Mixin classes declare.
     pub skipped: Vec<SkippedMixinPlan>,
 }
@@ -11739,6 +12034,30 @@ impl NativeJar {
     /// rewrites an instruction the next family counts would otherwise see an
     /// insert as a site of its own.
     pub fn plan_load_time_weave(&self, side: MixinSide) -> LoadTimeMixinWeave {
+        self.plan_load_time_weave_on(side, false)
+    }
+
+    /// [`Self::plan_load_time_weave`], with the game-class hook tier on.
+    ///
+    /// A `@Inject` plan whose target class is outside the jar is normally
+    /// refused as [`MixinSkipReason::TargetOutsideJar`]. With this entry point,
+    /// a target that names a [`GameHookSite`] and whose shape fits that hook's
+    /// contract becomes a [`GameHookPlan`] in [`LoadTimeMixinWeave::game_hooks`]
+    /// instead: the host registers the callback at its own hook point
+    /// ([`Self::register_game_hooks`]) and runs it there
+    /// ([`Self::run_game_hook`]). A site whose shape does not fit stays a
+    /// [`SkippedMixinPlan`] with [`MixinSkipReason::GameHookMismatch`], and a
+    /// target with no site keeps the `target-outside-jar` refusal.
+    ///
+    /// The game's loader uses [`Self::plan_load_time_weave`]: it does not yet
+    /// register host hook callbacks, so claiming those plans would report a jar
+    /// as native while its callbacks never run. This entry point is what a host
+    /// with hook points available uses, and what the fixture proves end to end.
+    pub fn plan_load_time_weave_with_game_hooks(&self, side: MixinSide) -> LoadTimeMixinWeave {
+        self.plan_load_time_weave_on(side, true)
+    }
+
+    fn plan_load_time_weave_on(&self, side: MixinSide, game_hooks: bool) -> LoadTimeMixinWeave {
         let (mut plans, unresolved) = self.mixin_plan_scan();
         let (anchors, unresolved_anchors) = self.mixin_anchor_scan();
         let (overwrites, unresolved_overwrites) = self.mixin_overwrite_scan();
@@ -11800,6 +12119,19 @@ impl NativeJar {
         let mut modify_variable_by_owner: BTreeMap<String, Vec<MixinModifyVariablePlan>> =
             BTreeMap::new();
         for plan in &plans {
+            if game_hooks {
+                match self.game_hook_plan(plan, side, &configs, &config_sides) {
+                    Ok(Some(hook)) => {
+                        weave.game_hooks.push(hook);
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(reason) => {
+                        weave.skipped.push(skipped_plan(plan, reason));
+                        continue;
+                    }
+                }
+            }
             match self.load_time_inject_plan(plan, side, &configs, &config_sides) {
                 Ok(concrete) => {
                     let group = injection_by_owner
@@ -12050,6 +12382,44 @@ impl NativeJar {
         let mut concrete = plan.clone();
         concrete.target.descriptor = target.descriptor.clone();
         Ok(concrete)
+    }
+
+    /// Decide whether one `@Inject` plan maps onto a host hook point.
+    ///
+    /// `Ok(None)` means the target is not a game hook site, so the ordinary
+    /// weave path decides. `Err` means the target *is* a site but this plan's
+    /// shape does not fit it, and the plan must be reported, never
+    /// approximated: the callback would run at a call site the mod did not ask
+    /// for.
+    fn game_hook_plan(
+        &self,
+        plan: &MixinInjectionPlan,
+        side: MixinSide,
+        configs: &[MixinConfig],
+        config_sides: &BTreeMap<String, MixinSide>,
+    ) -> Result<Option<GameHookPlan>, MixinSkipReason> {
+        let Some(site) = game_hook_site_for(&plan.target) else {
+            return Ok(None);
+        };
+        mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
+        if plan.shift.is_some() || plan.slice.is_some() || plan.ordinal.is_some() {
+            return Err(MixinSkipReason::SelectorModifier);
+        }
+        let anchor = if plan.at.is_empty() {
+            "HEAD"
+        } else {
+            plan.at.as_str()
+        };
+        game_hook_site_fits(site, anchor, plan.cancellable, side)?;
+        game_hook_callback(&self.classes, &plan.callback, site)?;
+        let mut concrete = plan.clone();
+        concrete.target.descriptor = site.target_descriptor.to_owned();
+        Ok(Some(GameHookPlan {
+            hook: site.hook,
+            version: site.version,
+            anchor: anchor.to_owned(),
+            plan: concrete,
+        }))
     }
 
     /// Resolve the target overload and callback that every load-time family
@@ -13066,6 +13436,221 @@ impl NativeJar {
             matched_anchor_sites: 0,
             skipped_plans: Vec::new(),
         })
+    }
+
+    /// Bind the game-hook plans of `weave` to this jar's callbacks.
+    ///
+    /// Each plan is re-checked against the site table and the jar's own
+    /// callback bytes before it becomes a registration, so a weave that was
+    /// edited, or a plan built by hand, cannot register a callback the host
+    /// would fail to run. The registrations keep the plans' apply order inside
+    /// each hook.
+    pub fn register_game_hooks(
+        &self,
+        weave: &LoadTimeMixinWeave,
+    ) -> Result<GameHookRegistrations, NativeError> {
+        let mut registrations = GameHookRegistrations::default();
+        for hook in &weave.game_hooks {
+            let site = GAME_HOOK_SITES
+                .iter()
+                .find(|site| site.hook == hook.hook && site.version == hook.version)
+                .ok_or_else(|| {
+                    NativeError::Metadata(format!(
+                        "game hook plan names {} version {}, which this runtime does not know",
+                        hook.hook, hook.version
+                    ))
+                })?;
+            if hook.plan.target.owner != site.target_owner
+                || hook.plan.target.name != site.target_name
+                || hook.plan.target.descriptor != site.target_descriptor
+            {
+                return Err(NativeError::Metadata(format!(
+                    "game hook plan at {} targets {}#{}{}, but the site is {}#{}{}",
+                    site.hook,
+                    hook.plan.target.owner,
+                    hook.plan.target.name,
+                    hook.plan.target.descriptor,
+                    site.target_owner,
+                    site.target_name,
+                    site.target_descriptor
+                )));
+            }
+            game_hook_callback(&self.classes, &hook.plan.callback, site)
+                .map_err(|reason| game_hook_error(&reason))?;
+            registrations.insert(RegisteredGameHook {
+                hook: site.hook.to_owned(),
+                version: site.version,
+                target: hook.plan.target.clone(),
+                callback: hook.plan.callback.clone(),
+                anchor: hook.anchor.clone(),
+                cancellable: hook.plan.cancellable,
+            });
+        }
+        Ok(registrations)
+    }
+
+    /// Run the callbacks a jar registered at one host hook point.
+    ///
+    /// The host calls this where its hook point fires, with the target object's
+    /// marker as `receiver` and the target method's arguments in `args`. The
+    /// callbacks run in registration order (Mixin apply order) with a
+    /// runtime-owned `CallbackInfo`; a cancellable callback that calls
+    /// `cancel()` stops the ones after it and sets [`GameHookRun::cancelled`].
+    ///
+    /// A hook whose registrations are empty is an error rather than a silent
+    /// no-op: a host that fires a point no jar registered at has a bug, and the
+    /// launcher's report should say so. Arguments are counted against the
+    /// site's target descriptor before any callback runs, and every callback is
+    /// validated before the first one runs, so a bad registration cannot leave
+    /// half of a hook's callbacks executed.
+    pub fn run_game_hook<H: Host>(
+        &self,
+        registrations: &GameHookRegistrations,
+        hook: &str,
+        receiver: Option<Value>,
+        args: &[Value],
+        host: &mut H,
+    ) -> Result<GameHookRun, NativeError> {
+        let entries = registrations.entries(hook);
+        let Some(first) = entries.first() else {
+            return Err(NativeError::Metadata(format!(
+                "no native game hook callback is registered at {hook}"
+            )));
+        };
+        let expected = arg_count(&first.target.descriptor);
+        if args.len() != expected {
+            return Err(NativeError::Metadata(format!(
+                "game hook point {hook} passes {} argument(s) to {}#{}{}, got {}",
+                expected,
+                first.target.owner,
+                first.target.name,
+                first.target.descriptor,
+                args.len()
+            )));
+        }
+        let mut checked = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let site = GAME_HOOK_SITES
+                .iter()
+                .find(|site| site.hook == entry.hook && site.version == entry.version)
+                .ok_or_else(|| {
+                    NativeError::Metadata(format!(
+                        "game hook registration names {} version {}, which this runtime does not know",
+                        entry.hook, entry.version
+                    ))
+                })?;
+            game_hook_callback(&self.classes, &entry.callback, site)
+                .map_err(|reason| game_hook_error(&reason))?;
+            checked.push(self.game_hook_callback_values(entry, args)?);
+        }
+        let (persistent_static_fields, persistent_initialized_classes) =
+            host.persistent_class_state();
+        let mut callback_infos = CallbackInfos::new();
+        let mut results = Vec::with_capacity(entries.len());
+        let mut cancelled = false;
+        {
+            let mut runtime = Runtime {
+                classes: &self.classes,
+                host,
+                calls: 0,
+                fields: BTreeMap::new(),
+                static_fields: persistent_static_fields,
+                initialized_classes: persistent_initialized_classes,
+                arrays: BTreeMap::new(),
+                next_array: 0,
+                next_object: 0,
+                streams: BTreeMap::new(),
+                next_stream: 0,
+                enum_constants: BTreeMap::new(),
+                string_builders: BTreeMap::new(),
+                string_readers: BTreeMap::new(),
+                annotations: BTreeMap::new(),
+                next_annotation: 0,
+                callback_infos: &mut callback_infos,
+                invoke_hooks: None,
+                anchor_hooks: None,
+                modify_hooks: None,
+                pending_skipped_new: Vec::new(),
+                depth: 0,
+                budget: &ExecutionBudget::UNBOUNDED,
+            };
+            for (entry, (is_static, values)) in entries.iter().zip(checked) {
+                let marker = callback_info_marker(&entry.target);
+                // Open the object even when this callback does not declare it:
+                // every callback at one hook point shares the object Mixin
+                // would hand the injection point, so a `cancel()` in one is
+                // what the next one observes.
+                runtime.open_callback_info(&marker)?;
+                let callback_receiver = (!is_static).then(|| {
+                    receiver
+                        .clone()
+                        .unwrap_or_else(|| Value::Ref(Some(entry.callback.owner.clone())))
+                });
+                let result = runtime.invoke(
+                    &entry.callback.owner,
+                    &entry.callback.name,
+                    &entry.callback.descriptor,
+                    callback_receiver,
+                    &values,
+                )?;
+                results.push(result);
+                if entry.cancellable && runtime.callback_info_cancelled(&marker)? {
+                    cancelled = true;
+                    break;
+                }
+            }
+            runtime.persist_class_state()?;
+        }
+        Ok(GameHookRun {
+            hook: hook.to_owned(),
+            ran: results.len(),
+            cancelled,
+            results,
+        })
+    }
+
+    /// The receiver/static flag and full argument list for one registered hook
+    /// callback, mirroring `check_mixin_callback` without a target class in the
+    /// jar: the site's descriptor is the target's.
+    fn game_hook_callback_values(
+        &self,
+        entry: &RegisteredGameHook,
+        args: &[Value],
+    ) -> Result<(bool, Vec<Value>), NativeError> {
+        let callback_class = self.classes.get(&entry.callback.owner).ok_or_else(|| {
+            NativeError::MissingMethod(format!(
+                "{}#{}{}",
+                entry.callback.owner, entry.callback.name, entry.callback.descriptor
+            ))
+        })?;
+        let method = callback_class
+            .method(&entry.callback.name, &entry.callback.descriptor)
+            .ok_or_else(|| {
+                NativeError::MissingMethod(format!(
+                    "{}#{}{}",
+                    entry.callback.owner, entry.callback.name, entry.callback.descriptor
+                ))
+            })?;
+        let target_args = descriptor_arguments(&entry.target.descriptor);
+        let callback_args = descriptor_arguments(&entry.callback.descriptor);
+        let mut values = args.to_vec();
+        if callback_args.len() == target_args.len() + 1
+            && callback_args
+                .last()
+                .is_some_and(|arg| arg == CALLBACK_INFO_DESC)
+            && callback_args[..target_args.len()] == target_args[..]
+        {
+            values.push(Value::Ref(Some(callback_info_marker(&entry.target))));
+        } else if callback_args != target_args {
+            return Err(NativeError::Metadata(format!(
+                "native game hook callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo",
+                entry.callback.owner,
+                entry.callback.name,
+                entry.callback.descriptor,
+                entry.target.name
+            )));
+        }
+        Ok((!method.is_static(), values))
     }
 
     /// Execute an ordered chain of compatible void-only injectors while invoking
@@ -15156,6 +15741,16 @@ impl<H: Host> Runtime<'_, H> {
             self.static_fields.clone(),
             self.initialized_classes.clone(),
         )
+    }
+
+    /// Open one `CallbackInfo` object for a host hook callback.
+    fn open_callback_info(&mut self, marker: &str) -> Result<(), NativeError> {
+        self.callback_infos.open(marker)
+    }
+
+    /// Whether a host hook callback cancelled its call.
+    fn callback_info_cancelled(&self, marker: &str) -> Result<bool, NativeError> {
+        self.callback_infos.flag(marker)
     }
 
     /// Answer the bounded `CallbackInfo` surface for the object this execution
@@ -20054,6 +20649,62 @@ fn skipped_modify_variable_plan(
 
 /// One line of at most [`MAX_WEAVE_REASON_CHARS`] characters, so a weaver error
 /// quoting a mod's own names cannot flood a report.
+/// Validate a `@Inject` callback against a game hook site's declared target.
+///
+/// A host hook passes the target's arguments the same way the woven path does,
+/// so the callback must mirror them and may add one trailing `CallbackInfo`.
+/// The target is always `void` for a hook site (the census carries no result),
+/// so a `CallbackInfoReturnable` is a mismatch rather than an override.
+fn game_hook_callback(
+    classes: &BTreeMap<String, ClassFile>,
+    callback: &MethodRef,
+    site: &GameHookSite,
+) -> Result<(), MixinSkipReason> {
+    let method = classes
+        .get(&callback.owner)
+        .and_then(|class| class.method(&callback.name, &callback.descriptor))
+        .ok_or_else(|| {
+            MixinSkipReason::Weaver(bounded_weave_reason(&format!(
+                "hook point {} callback {}#{}{} is not in this jar",
+                site.hook, callback.owner, callback.name, callback.descriptor
+            )))
+        })?;
+    if return_desc(&callback.descriptor) != "V" {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} callback {}#{}{} must return void",
+                site.hook, callback.owner, callback.name, callback.descriptor
+            ),
+        )));
+    }
+    let target_args = descriptor_arguments(site.target_descriptor);
+    let callback_args = descriptor_arguments(&callback.descriptor);
+    let mirrors = callback_args == target_args
+        || (callback_args.len() == target_args.len() + 1
+            && callback_args
+                .last()
+                .is_some_and(|arg| arg == CALLBACK_INFO_DESC)
+            && callback_args[..target_args.len()] == target_args[..]);
+    if !mirrors {
+        return Err(MixinSkipReason::GameHookMismatch(bounded_weave_reason(
+            &format!(
+                "hook point {} callback {}#{}{} must mirror {}'s arguments and may add one trailing CallbackInfo",
+                site.hook, callback.owner, callback.name, callback.descriptor, site.target_name
+            ),
+        )));
+    }
+    let _ = method;
+    Ok(())
+}
+
+/// The diagnostic a refused game-hook callback registration carries.
+fn game_hook_error(reason: &MixinSkipReason) -> NativeError {
+    match reason.detail() {
+        Some(detail) => NativeError::Metadata(format!("{}: {detail}", reason.label())),
+        None => NativeError::Metadata(reason.label().to_owned()),
+    }
+}
+
 fn bounded_weave_reason(reason: &str) -> String {
     let mut bounded = reason
         .chars()

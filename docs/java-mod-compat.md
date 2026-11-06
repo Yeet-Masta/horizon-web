@@ -458,6 +458,78 @@ which the weaver rejects, and their targets are Minecraft classes outside the ja
 selectors and every method outside that subset run only through the interpreter's own entry points or the
 standalone JVM runner. In a game run they do not run at all, and the jar reads `native-qualified`.
 
+### Game-class hook tier (experiment)
+
+`target-outside-jar` is the largest skip class, and it is not always a real limit: Horizon already calls a named
+hook at many of the positions a mod wants (`native-hooks.json`, 432 entries today), and those hook points are the
+same call sites Mixin would weave into. The hook tier turns that overlap into a second, non-bytecode execution
+path for `@Inject` plans whose target is a game class:
+
+1. **Plan.** `NativeJar::plan_load_time_weave_with_game_hooks` classifies each discovered `@Inject`. A target
+   that names a `GameHookSite` and whose shape fits that hook becomes a `GameHookPlan` in
+   `LoadTimeMixinWeave::game_hooks`; the plan's empty `method = "tick"` descriptor takes the site's concrete
+   descriptor.
+2. **Register.** `NativeJar::register_game_hooks(&weave)` re-checks each plan against the site table and the
+   jar's own callback bytes, then answers a `GameHookRegistrations`: hook name → callbacks, in Mixin apply order
+   (priority, then config order, then method order).
+3. **Run.** Where the hook point fires, the host calls
+   `NativeJar::run_game_hook(&registrations, hook, receiver, args, &mut host)`. The callbacks run with a
+   runtime-owned `CallbackInfo`; a cancellable one that calls `cancel()` stops the ones after it and sets
+   `GameHookRun::cancelled`. The target object's marker is the callback receiver, and a callback's static fields
+   are the jar's: they persist to the next firing, exactly as a woven callback's would.
+
+The site table (`GAME_HOOK_SITES`) is deliberately tiny and hand-checked, because running a mod's callback at the
+wrong moment is worse than refusing it. It holds two sites:
+
+| Hook point | Target | Position | Contract |
+|---|---|---|---|
+| `player_tick` | `ServerPlayer#tick()V` | `TAIL` (at the end of the tick) | listen, server side |
+| `item_picked_up` | `ItemEntity#playerTouch(Player)V` | `HEAD` (before the stack is taken) | cancel, server side |
+
+**Coverage rule.** A plan maps only when every one of these holds; the first failure is reported with its own
+reason:
+
+- the target names a site in `GAME_HOOK_SITES` (otherwise the plan keeps `target-outside-jar`);
+- the site's physical side is the weave side;
+- the plan's anchor is one the hook's position exposes (`HEAD` for a pre hook, `RETURN`/`TAIL` for a post one);
+- a cancellable plan needs a hook whose census contract is `cancel`, not `listen`;
+- the target returns `void`, because a hook point carries no result to override;
+- the plan has no `shift`, `slice` or `ordinal`, which a named hook cannot honour;
+- the callback mirrors the target's arguments and adds at most one trailing `CallbackInfo`, and returns `void`.
+
+Anything else is a `SkippedMixinPlan` with `MixinSkipReason::GameHookMismatch` and a bounded sentence saying which
+clause failed (the same shape a compatibility screen shows for `weaver-rejected`). A target with no site at all
+keeps `MixinSkipReason::TargetOutsideJar`, unchanged. The census test
+(`crates/horizon-native-java/tests/fixture_game_hook_tier.rs`) fails if a site's name, version, contract, side or
+cancellation drifts from `native-hooks.json`, so the table cannot quietly disagree with the hook it claims.
+
+The tier is opt-in: the game's loader still calls `plan_load_time_weave`, which refuses every game-class plan as
+before, because Horizon's game has no code yet that fires these registrations. Claiming the plans without a host
+that fires them would label a jar `native` while its callbacks never ran. A host with hook points available uses
+`plan_load_time_weave_with_game_hooks`, registers once per jar at load, and calls `run_game_hook` at each point;
+a compatibility report reads `weave.game_hooks` for what mapped and `weave.skipped` for what did not.
+
+What the tier does not fix, and does not pretend to:
+
+- Real jars' `@Inject` annotations are `CLASS`-retention, so discovery still sees no plans until the port
+  pipeline surfaces them; the tier classifies plans, it does not make them appear.
+- A hook is only usable when its **population and position** equal the target's. `entity_tick_pre`/`_post` are
+  batched per entity family and skip players, projectiles, orbs and TNT, so `Entity#tick` does not map onto them
+  even though the names look close; `level_tick_pre` carries no `BooleanSupplier`, so `ServerLevel#tick` cannot
+  be mapped either. Those stay `target-outside-jar`.
+- Post hooks cannot override a result, and pre hooks cannot supply arguments the hook payload does not carry.
+  Adding a site is a host change (add or extend the hook, then add the table row), never a parser change.
+- Instance callbacks receive the target marker the host names; the host must be able to reconstruct the target
+  object from it. The tier does not build a bridge class, because there is no woven target to bridge into.
+
+The fixture `crates/horizon-native-java/tests/fixture_game_hook_tier.rs` compiles a jar with six `@Mixin`
+classes targeting game classes: `player_tick` (TAIL, maps), `item_picked_up` (HEAD, cancellable, maps),
+`Level#getBlockState` (no site, `target-outside-jar`), `ServerPlayer#tick` at `HEAD` (wrong position,
+`game-hook-mismatch`), a cancellable `player_tick` (listen-only, `game-hook-mismatch`) and a `playerTouch`
+callback that drops the player argument (`game-hook-mismatch`). It then registers the two mapped callbacks,
+fires both points, checks the host saw the callback bodies, checks the cancellation surfaced, and checks a
+callback's static counter survived to the second firing.
+
 Reproduce:
 
 ```sh
