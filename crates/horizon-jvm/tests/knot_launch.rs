@@ -44,6 +44,12 @@ fn compile_marker(root: &std::path::Path) -> Option<PathBuf> {
         .map(|home| home.join("bin").join("javac"))
         .unwrap_or_else(|| PathBuf::from("javac"));
     let Ok(status) = Command::new(javac)
+        // The fixture is read by the loader's ASM (9.8), which cannot parse a
+        // class file newer than the JDK it knows; a JDK 27 `javac` without this
+        // would emit major version 71 and the probe would fail on the class
+        // file, not on the transformation.
+        .arg("--release")
+        .arg("21")
         .arg("-Xlint:none")
         .arg("-nowarn")
         .arg("-d")
