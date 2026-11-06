@@ -16,7 +16,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools import java_differential_fuzz as fuzz
+# The tool imports `lab` by putting its own folder on sys.path; restore the
+# path afterwards so unittest discovery keeps resolving tests from `tests/`.
+_before = list(sys.path)
+from tools import java_differential_fuzz as fuzz  # noqa: E402
+sys.path[:] = _before
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "tools" / "java_differential_fuzz.py"
