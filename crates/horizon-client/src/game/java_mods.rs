@@ -337,9 +337,13 @@ fn run_one(
     role: ExecutionRole,
     payload_declarations: &mut Vec<super::java_payloads::PayloadDeclaration>,
 ) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String> {
-    let jar = horizon_native_java::NativeJar::from_path(path)
+    // Decide from loader metadata whether this jar can run in this role at
+    // all. Most jars in a real pack are client-only and never start on a
+    // server; parsing their classes first was 6.5 s of an 11.2 s batch. Only
+    // a jar whose entrypoints match the role is read again for execution.
+    let metadata = horizon_native_java::NativeJar::from_path_metadata(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    if jar.client_side_only && !role.is_client() {
+    if metadata.client_side_only && !role.is_client() {
         return Err(format!(
             "{}: clientSideOnly mod cannot run for server execution",
             path.display()
@@ -350,6 +354,23 @@ fn run_one(
     } else {
         ["server", "main", "neoforge"]
     };
+    let fabric_entrypoint = kinds
+        .iter()
+        .any(|kind| !metadata.discover_entrypoints(kind).is_empty());
+    // Fabric names its entrypoints in metadata; Forge/NeoForge only marks the
+    // class with `@Mod`, which the metadata read does not scan. A jar without
+    // Fabric metadata (or with Forge/NeoForge metadata too) keeps the full
+    // read so that discovery is exactly what it was.
+    let needs_class_discovery = metadata.fabric_id.is_none()
+        || metadata.neoforge_id.is_some()
+        || metadata
+            .resource_names()
+            .any(|name| name == "META-INF/mods.toml" || name == "META-INF/neoforge.mods.toml");
+    if !fabric_entrypoint && !needs_class_discovery {
+        return Err(format!("{}: no native entrypoint", path.display()));
+    }
+    let jar = horizon_native_java::NativeJar::from_path(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let (kind, entries) = kinds
         .iter()
         .find_map(|kind| {
@@ -488,13 +509,33 @@ pub(super) fn run_java_mods_batch(
     paths: &[PathBuf],
     role: ExecutionRole,
 ) -> Result<JavaBatchOutcome, String> {
+    run_java_mods_batch_with(paths, role, |path, role, payloads| {
+        run_one(path, role, payloads)
+    })
+}
+
+/// The batch loop with its per-jar step injectable, so a test can prove that
+/// two jars in one call both keep their declarations without needing a real
+/// Java toolchain or corpus.
+fn run_java_mods_batch_with<F>(
+    paths: &[PathBuf],
+    role: ExecutionRole,
+    mut run: F,
+) -> Result<JavaBatchOutcome, String>
+where
+    F: FnMut(
+        &std::path::Path,
+        ExecutionRole,
+        &mut Vec<super::java_payloads::PayloadDeclaration>,
+    ) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String>,
+{
     runtimes().lock().unwrap().clear();
     super::java_payloads::clear_handler_jars_as(handler_role(role));
     let mut batch = JavaBatchOutcome::default();
     let mut payload_declarations = Vec::new();
     for path in paths {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_one(path, role, &mut payload_declarations)
+            run(path, role, &mut payload_declarations)
         })) {
             Ok(Ok((c, r, d))) => {
                 batch.content.extend(c);
@@ -610,6 +651,60 @@ mod tests {
         assert_eq!(mods[0].content.blocks.len(), 1);
         assert_eq!(mods[0].content.items.len(), 1);
         assert_eq!(mods[0].content.items[0].id, "fixture:ruby_gem");
+    }
+
+    /// Every jar in one batch keeps its own rows. A regression guard for the
+    /// large-pack failure where only the last jar (or none) reached the content
+    /// root: the batch accumulator, the per-namespace content mods and the
+    /// registry snapshot must all carry both jars.
+    #[test]
+    fn two_jars_in_one_batch_both_contribute_declarations() {
+        let _guard = test_lock();
+        let paths = [
+            PathBuf::from("/mods/first.jar"),
+            PathBuf::from("/mods/second.jar"),
+        ];
+        let batch =
+            run_java_mods_batch_with(&paths, ExecutionRole::DedicatedServer, |path, role, _| {
+                assert_eq!(role, ExecutionRole::DedicatedServer);
+                let namespace = path.file_stem().unwrap().to_string_lossy().into_owned();
+                let entries = [block_entry(
+                    &format!("{namespace}:block"),
+                    "minecraft:stone",
+                )];
+                let declarations = declarations_from_entries(&entries)?;
+                let content = declarations
+                    .content_mods()?
+                    .into_iter()
+                    .map(|(id, content)| ContentMod { id, content })
+                    .collect();
+                Ok((
+                    content,
+                    JavaCompatibilityReport {
+                        jar: path.to_path_buf(),
+                        loader: Some(JavaLoader::Fabric),
+                        engine: JavaEngine::Native,
+                        entrypoints: 1,
+                        registrations: 1,
+                        opaque: 0,
+                        isolation_failure: None,
+                    },
+                    declarations,
+                ))
+            })
+            .unwrap();
+        assert!(batch.failures.is_empty(), "{:?}", batch.failures);
+        assert_eq!(batch.declarations.len(), 2, "one declaration set per jar");
+        assert_eq!(batch.content.len(), 2, "one content mod per namespace");
+        let mut ids: Vec<_> = batch.content.iter().map(|row| row.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["first", "second"]);
+        for row in &batch.content {
+            assert_eq!(row.content.blocks.len(), 1, "{} lost its block", row.id);
+        }
+        let snapshot = super::super::java_registry::snapshot();
+        assert!(snapshot.blocks.iter().any(|id| id == "first:block"));
+        assert!(snapshot.blocks.iter().any(|id| id == "second:block"));
     }
 
     /// A server role's declarations ask for one content rebuild; with none,

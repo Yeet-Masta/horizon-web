@@ -412,22 +412,22 @@ fn java_report_line(report: &JavaCompatibilityReport) -> String {
 /// makes the refusal stop startup instead. The rows the batch returned are
 /// handed to the content root through [`take_java_content`].
 pub(super) fn load_java_mods(options: &Options) -> Result<()> {
+    // The opt-in real NeoForge loader preflight is independent of the native
+    // interpreter path and runs before any jar is handed to it. Its failure
+    // stops startup only under `HORIZON_NEOFORGE_STRICT=1`, so it must stay
+    // outside the native path's `HORIZON_JAVA_STRICT` tolerance below.
+    super::java_mods::fml_preflight(ExecutionRole::DedicatedServer, &options.java_mods)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     load_java_mods_with(
         &options.java_mods,
         strict_policy(std::env::var("HORIZON_JAVA_STRICT").ok().as_deref()),
-        super::java_mods::run_java_mods,
+        super::java_mods::run_java_mods_batch,
     )
 }
 
-/// What one Java batch run returns: the content root's rows and one report per
-/// jar it started.
-type JavaBatch = std::result::Result<
-    (
-        Vec<horizon_client::mod_content::ContentMod>,
-        Vec<JavaCompatibilityReport>,
-    ),
-    String,
->;
+/// What one Java batch run returns: the rows, one report per jar it started,
+/// each jar's typed declarations and why a jar that did not start was skipped.
+type JavaBatch = std::result::Result<super::java_mods::JavaBatchOutcome, String>;
 
 fn load_java_mods_with<F>(paths: &[PathBuf], strict: bool, run: F) -> Result<()>
 where
@@ -436,7 +436,7 @@ where
     if paths.is_empty() {
         return Ok(());
     }
-    let (content, reports) = match run(paths, ExecutionRole::DedicatedServer) {
+    let batch = match run(paths, ExecutionRole::DedicatedServer) {
         Ok(batch) => batch,
         Err(error) => {
             if strict {
@@ -446,33 +446,35 @@ where
                 "WARN",
                 &format!("{JAVA_PREFIX}{}", bounded_java_failure(&error)),
             );
-            (Vec::new(), Vec::new())
+            super::java_mods::JavaBatchOutcome::default()
         }
     };
-    for report in &reports {
+    for report in &batch.reports {
         log("INFO", &java_report_line(report));
     }
-    status::record_java_reports(&reports);
-    // The runner leaves a jar it refused out of its reports, so the paths
-    // missing from them are the ones that never started: naming them keeps a
-    // strict run's answer specific.
-    let refused: Vec<String> = paths
+    super::java_mods::record_java_reports(&batch.reports);
+    // The runner names every jar that never started and why. A strict server
+    // returns those lines, so the operator sees `<jar>: <reason>` instead of a
+    // path with no diagnosis.
+    let refused: Vec<String> = batch
+        .failures
         .iter()
-        .filter(|path| {
-            !reports
-                .iter()
-                .any(|report| report.jar.as_path() == path.as_path())
-        })
-        .map(|path| bounded_java_failure(&path.display().to_string()))
+        .map(|failure| bounded_java_failure(&failure.line()))
         .collect();
     if !refused.is_empty() {
-        let refused = refused.join(", ");
         if strict {
-            return Err(format!("dedicated Java mod startup failed: refused {refused}").into());
+            return Err(format!(
+                "dedicated Java mod startup failed: refused {}",
+                refused.join(", ")
+            )
+            .into());
         }
-        log("WARN", &format!("{JAVA_PREFIX}skipping {refused}"));
+        log(
+            "WARN",
+            &format!("{JAVA_PREFIX}skipping {}", refused.join(", ")),
+        );
     }
-    *JAVA_CONTENT.lock().unwrap() = Some(content);
+    *JAVA_CONTENT.lock().unwrap() = Some(batch.content);
     Ok(())
 }
 
@@ -2489,7 +2491,9 @@ fn console_level(active: super::Dim) -> Option<super::Dim> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::java_mods::{JavaCompatibilityReport, JavaEngine, JavaLoader};
+    use super::super::java_mods::{
+        JavaBatchOutcome, JavaCompatibilityReport, JavaEngine, JavaJarFailure, JavaLoader,
+    };
     use super::ExecutionRole;
     use super::{
         JAVA_PREFIX, MAX_JAVA_FAILURE, bounded_java_failure, capture_log, java_report_line,
@@ -2553,13 +2557,14 @@ mod tests {
             calls.set(calls.get() + 1);
             role.set(Some(kind));
             assert_eq!(seen.len(), 2, "one batch, not one call per jar");
-            Ok((
-                vec![ContentMod {
+            Ok(JavaBatchOutcome {
+                content: vec![ContentMod {
                     id: "demo".into(),
                     content: Content::declared("demo"),
                 }],
-                seen.iter().map(|path| java_report(path)).collect(),
-            ))
+                reports: seen.iter().map(|path| java_report(path)).collect(),
+                ..JavaBatchOutcome::default()
+            })
         })
         .unwrap();
         assert_eq!(calls.get(), 1);
@@ -2571,12 +2576,21 @@ mod tests {
     }
 
     /// A jar the loader refused is a log line by default and a startup error
-    /// under `HORIZON_JAVA_STRICT=1`.
+    /// under `HORIZON_JAVA_STRICT=1`; the strict message carries the runner's
+    /// reason, not just the path.
     #[test]
     fn a_refused_jar_is_skipped_unless_strict() {
         let _guard = java_test_lock();
         let paths = [PathBuf::from("refused.jar")];
-        let refuse = |_: &[PathBuf], _: ExecutionRole| Ok((Vec::new(), Vec::new()));
+        let refuse = |_: &[PathBuf], _: ExecutionRole| {
+            Ok(JavaBatchOutcome {
+                failures: vec![JavaJarFailure {
+                    jar: PathBuf::from("refused.jar"),
+                    reason: "no native entrypoint".into(),
+                }],
+                ..JavaBatchOutcome::default()
+            })
+        };
         capture_log(|| {
             let tolerated = load_java_mods_with(&paths, false, refuse);
             assert!(tolerated.is_ok());
@@ -2589,7 +2603,10 @@ mod tests {
             error.contains("dedicated Java mod startup failed"),
             "{error}"
         );
-        assert!(error.contains("refused.jar"), "{error}");
+        assert!(
+            error.contains("refused.jar: no native entrypoint"),
+            "{error}"
+        );
     }
 
     /// A started jar's line names the role's prefix and its verdict, with no
@@ -2609,7 +2626,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         load_java_mods_with(&[], false, |_, _| {
             calls.set(calls.get() + 1);
-            Ok((Vec::new(), Vec::new()))
+            Ok(JavaBatchOutcome::default())
         })
         .unwrap();
         assert_eq!(calls.get(), 0);

@@ -7130,10 +7130,9 @@ fn class_of_value(value: &Value) -> Option<String> {
                 "java/util/LinkedHashSet"
             } else if marker == "map" || marker.starts_with("map/") {
                 "java/util/LinkedHashMap"
-            } else if let Some(rest) = marker.strip_prefix("enum/") {
-                return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
             } else {
-                return None;
+                let rest = marker.strip_prefix("enum/")?;
+                return rest.rsplit_once('/').map(|(class, _)| class.to_owned());
             };
             Some(class.to_owned())
         }
@@ -8668,17 +8667,17 @@ fn empty_collection_kind(descriptor: &str) -> Option<&'static str> {
         Some("map")
     } else if is_set_owner(name) {
         Some("set")
-    } else if is_list_owner(name) {
-        Some("list")
-    } else if matches!(
-        name,
-        "java/util/Collection"
-            | "java/util/Queue"
-            | "java/util/Deque"
-            | "java/util/BlockingQueue"
-            | "java/util/concurrent/BlockingQueue"
-            | "java/lang/Iterable"
-    ) {
+    } else if is_list_owner(name)
+        || matches!(
+            name,
+            "java/util/Collection"
+                | "java/util/Queue"
+                | "java/util/Deque"
+                | "java/util/BlockingQueue"
+                | "java/util/concurrent/BlockingQueue"
+                | "java/lang/Iterable"
+        )
+    {
         Some("list")
     } else {
         None
@@ -11332,7 +11331,27 @@ impl NativeJar {
         Ok(before)
     }
 
+    /// Reads the jar's loader metadata without parsing its classes.
+    ///
+    /// The fields a loader needs to decide whether a jar can run in a role —
+    /// its ids, entrypoints, required mods, `clientSideOnly` flag and resource
+    /// names — are all read from `fabric.mod.json`, Forge/NeoForge metadata and
+    /// `META-INF/horizon-native.json`. Class entries are not even decompressed,
+    /// so [`Self::classes`] and the annotation-discovered
+    /// [`Self::neoforge_entrypoints`] are empty: a caller that needs either
+    /// reads the jar again with [`Self::from_path`], and the jars it drops
+    /// never build a class model. A jar without Fabric metadata keeps the full
+    /// read because its NeoForge/Forge entrypoint is only in a class
+    /// annotation.
+    pub fn from_path_metadata(path: &Path) -> Result<Self, NativeError> {
+        Self::read(path, false)
+    }
+
     pub fn from_path(path: &Path) -> Result<Self, NativeError> {
+        Self::read(path, true)
+    }
+
+    fn read(path: &Path, parse_classes: bool) -> Result<Self, NativeError> {
         let file = File::open(path).map_err(|e| NativeError::Zip(e.to_string()))?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| NativeError::Zip(e.to_string()))?;
         let mut classes = Vec::new();
@@ -11380,6 +11399,11 @@ impl NativeJar {
                     }
                     continue;
                 }
+                // A metadata-only read keeps names but not payloads: nothing
+                // will seed a host from a jar that has not been chosen to run.
+                if !parse_classes && !metadata_entry {
+                    continue;
+                }
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(&mut e, &mut bytes)
                     .map_err(|e| NativeError::Zip(e.to_string()))?;
@@ -11410,6 +11434,9 @@ impl NativeJar {
                 && !name.ends_with("package-info.class")
                 && !name.starts_with("META-INF/versions/")
             {
+                if !parse_classes {
+                    continue;
+                }
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(&mut e, &mut bytes)
                     .map_err(|e| NativeError::Zip(e.to_string()))?;
@@ -17088,9 +17115,9 @@ impl<H: Host> Runtime<'_, H> {
             && r.descriptor == "()Ljava/util/stream/Stream;"
             && is_collection_owner(&r.owner)
             && !is_map_owner(&r.owner)
-            && receiver.is_some()
+            && let Some(receiver) = receiver
         {
-            let values = runtime_collection_values(self.host, receiver.expect("checked above"))?
+            let values = runtime_collection_values(self.host, receiver)?
                 .into_iter()
                 .map(|value| parse_collection_value(&value))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -22822,6 +22849,53 @@ mandatory = true
             jar.native_declarations[1].declaration,
             Some(RegistryDeclaration::Recipe { .. })
         ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// The metadata-first read keeps the loader's decisions but does not parse
+    /// class files or retain ordinary resource payloads; a jar chosen to run is
+    /// read again with `from_path`, which does.
+    #[test]
+    fn metadata_read_skips_class_parsing_and_resource_payloads() {
+        let path = std::env::temp_dir().join(format!(
+            "horizon-native-metadata-only-{}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("fabric.mod.json", options).unwrap();
+        zip.write_all(br#"{"id":"demo","version":"1.0","entrypoints":{"main":["demo.Main"]}}"#)
+            .unwrap();
+        zip.start_file("demo/Main.class", options).unwrap();
+        zip.write_all(&weavable_class_bytes("demo/Main")).unwrap();
+        zip.start_file("demo/Broken.class", options).unwrap();
+        zip.write_all(b"not a class file").unwrap();
+        zip.start_file("data/blob.bin", options).unwrap();
+        zip.write_all(b"payload").unwrap();
+        zip.finish().unwrap();
+
+        let metadata = NativeJar::from_path_metadata(&path).unwrap();
+        assert_eq!(metadata.fabric_id.as_deref(), Some("demo"));
+        assert!(
+            !metadata.discover_entrypoints("main").is_empty(),
+            "loader metadata still names the entrypoint"
+        );
+        assert!(
+            metadata
+                .resource_names()
+                .any(|name| name == "data/blob.bin")
+        );
+        assert!(metadata.classes.is_empty(), "no class is parsed");
+        assert!(metadata.neoforge_entrypoints.is_empty());
+        assert!(
+            !metadata.resource_bytes.contains_key("data/blob.bin"),
+            "a jar that will not run keeps no resource payload"
+        );
+        assert!(
+            NativeJar::from_path(&path).is_err(),
+            "the full read still parses every class"
+        );
         std::fs::remove_file(path).unwrap();
     }
 

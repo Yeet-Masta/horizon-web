@@ -66,9 +66,7 @@ fn backend_name(engine: JavaEngine) -> &'static str {
 }
 
 // The batch store belongs to the runner (`java_mods`): the integrated server
-// thread records into it too, and this module only answers from it. The
-// re-export keeps the dedicated startup's `status::record_java_reports` call.
-pub(super) use super::super::java_mods::record_java_reports;
+// thread records into it too, and this module only answers from it.
 
 /// The batch a role recorded: the runner keeps it because both roles that
 /// start jars answer `server-status` from the same process, not because a
