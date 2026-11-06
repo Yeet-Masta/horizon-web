@@ -2,8 +2,11 @@
 //! harness (`tools/java_conformance.py`).
 //!
 //! ```text
-//! horizon-java-run [--max-calls N] <jar> <main-class> [args...]
+//! horizon-java-run [--engine vm|bounded] [--max-calls N] [-ea] [-Dk=v] <jar> <main-class> [args...]
 //! ```
+//!
+//! `--engine vm` (the default) runs the program on the VM (`src/vm`);
+//! `--engine bounded` on the bounded interpreter the game used before it.
 //!
 //! It behaves like the `java` launcher as far as the harness compares: the
 //! program's output goes to stdout, an uncaught exception prints
@@ -15,8 +18,10 @@
 use horizon_native_java::{
     Host, MethodRef, MixinSide, NativeError, NativeJar, RegistryDeclaration, StdHost, Value,
 };
+use horizon_native_java::vm;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::process::ExitCode;
 
 /// What a run ended with, before it becomes an exit code.
@@ -401,8 +406,43 @@ fn run_mod(role: &str, path: &Path) -> serde_json::Value {
     })
 }
 
+/// Runs `main` on the VM, as the `java` launcher would.
+fn run_vm(jar: &Path, main_class: &str, args: &[String], options: vm::Options) -> ExitCode {
+    let bytes = match std::fs::read(jar) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("horizon-java-run: {}: {e}", jar.display());
+            return ExitCode::from(2);
+        }
+    };
+    let mut path = vm::JarClassPath::new();
+    if let Err(e) = path.add_jar(&bytes) {
+        eprintln!("horizon-java-run: {}: {e}", jar.display());
+        return ExitCode::from(2);
+    }
+    let run = vm::run_main(Arc::new(path), main_class, args, options);
+    let _ = std::io::stdout().write_all(&run.stdout);
+    let _ = std::io::stderr().write_all(&run.stderr);
+    match run.outcome {
+        vm::MainOutcome::Returned => ExitCode::SUCCESS,
+        vm::MainOutcome::Exited(code) => ExitCode::from(code as u8),
+        vm::MainOutcome::Uncaught { .. } => ExitCode::from(1),
+        vm::MainOutcome::Stopped(why) => {
+            eprintln!("horizon-java-run: interpreter error: {why}");
+            ExitCode::from(70)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut engine = "vm".to_string();
+    if let Some(at) = args.iter().position(|a| a == "--engine") {
+        if let Some(e) = args.get(at + 1) {
+            engine = e.clone();
+        }
+        args.drain(at..(at + 2).min(args.len()));
+    }
     if let Some(at) = args.iter().position(|a| a == "--max-calls") {
         // Accepted for the harness's command line; the bounded engine has its
         // own fixed limits.
@@ -419,16 +459,26 @@ fn main() -> ExitCode {
     }
     // Launcher options the harness passes to HotSpot too: assertions and
     // system properties. The bounded engine has no use for them.
+    let mut options = vm::Options::default();
     while args
         .first()
         .is_some_and(|arg| arg.starts_with("-D") || arg.starts_with("-ea") || arg == "-da")
     {
-        args.remove(0);
+        let arg = args.remove(0);
+        if let Some(prop) = arg.strip_prefix("-D") {
+            let (k, v) = prop.split_once('=').unwrap_or((prop, ""));
+            options.properties.push((k.to_string(), v.to_string()));
+        } else if arg.starts_with("-ea") {
+            options.assertions = true;
+        }
     }
     let (Some(jar), Some(main_class)) = (args.first(), args.get(1)) else {
         eprintln!("usage: horizon-java-run <jar> <main-class> [args...]");
         return ExitCode::from(2);
     };
+    if engine == "vm" {
+        return run_vm(Path::new(jar), main_class, &args[2..], options);
+    }
     let (outcome, out, err) = run(Path::new(jar), main_class);
     let _ = std::io::stdout().write_all(&out);
     let _ = std::io::stderr().write_all(&err);

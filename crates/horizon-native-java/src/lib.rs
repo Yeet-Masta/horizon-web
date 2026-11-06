@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+pub mod vm;
 pub mod weaver;
 
 use weaver::{

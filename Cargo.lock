@@ -1912,6 +1912,11 @@ dependencies = [
 name = "horizon-native-java"
 version = "0.1.0"
 dependencies = [
+ "libm",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "regex",
  "serde_json",
  "zip 2.6.1",
 ]
