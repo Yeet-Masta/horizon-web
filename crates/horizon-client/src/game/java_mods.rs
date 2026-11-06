@@ -10,13 +10,18 @@
 //! are published here instead ([`publish_server_declarations`]) and every
 //! later content build carries them ([`server_content`]) until a reload puts
 //! them in the root ([`mark_server_content_in_root`]).
+//!
+//! A batch bootstraps its jars on the process worker pool
+//! (`horizon_threads::jobs`); the rows, reports and declarations one jar
+//! produced merge back in path order, and the payload adoption that touches
+//! shared state happens only there, one jar at a time.
 use super::execution_role::ExecutionRole;
 use horizon_client::mod_content::ContentMod;
 use horizon_mods::native::NativeDeclarations;
 use std::{
     path::PathBuf,
     sync::{
-        Mutex, OnceLock,
+        Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -125,14 +130,6 @@ pub(in crate::game) fn java_reports() -> Vec<JavaCompatibilityReport> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
-}
-
-static RUNTIMES: OnceLock<
-    Mutex<Vec<(horizon_native_java::NativeJar, horizon_native_java::StdHost)>>,
-> = OnceLock::new();
-fn runtimes() -> &'static Mutex<Vec<(horizon_native_java::NativeJar, horizon_native_java::StdHost)>>
-{
-    RUNTIMES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 /// The declarations a server role (the integrated server's thread, in
@@ -332,6 +329,20 @@ fn handler_role(role: ExecutionRole) -> super::java_payloads::HandlerRole {
     }
 }
 
+/// One jar's bootstrap result, before any process-wide registry adopts it.
+///
+/// The jar and its host travel back with the rows so the batch's serial
+/// adoption step can publish the jar's payload channels (and keep the host
+/// only if it declared any); nothing else needs the parsed classes after its
+/// entrypoints ran.
+struct JavaJarRun {
+    jar: horizon_native_java::NativeJar,
+    host: horizon_native_java::StdHost,
+    content: Vec<ContentMod>,
+    report: JavaCompatibilityReport,
+    declarations: NativeDeclarations,
+}
+
 /// Wall-clock time one jar's entrypoints may consume before the runner treats
 /// the jar as failed.
 ///
@@ -341,11 +352,7 @@ fn handler_role(role: ExecutionRole) -> super::java_payloads::HandlerRole {
 /// its budget in the failure line, while every later jar still runs.
 const JAR_EXECUTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
-fn run_one(
-    path: &std::path::Path,
-    role: ExecutionRole,
-    payload_declarations: &mut Vec<super::java_payloads::PayloadDeclaration>,
-) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String> {
+fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, String> {
     // Decide from loader metadata whether this jar can run in this role at
     // all. Most jars in a real pack are client-only and never start on a
     // server; parsing their classes first was 6.5 s of an 11.2 s batch. Only
@@ -473,11 +480,17 @@ fn run_one(
             .count(),
         isolation_failure: None,
     };
-    // Publish the jar's payload channels and keep its host before the runtimes
-    // map takes ownership: dispatch resolves a marker through that host.
-    super::java_payloads::adopt_host(handler_role(role), &jar, &mut host, payload_declarations);
-    runtimes().lock().unwrap().push((jar, host));
-    Ok((content, report, declarations))
+    // The jar and its host go back to the batch's serial adoption step, which
+    // publishes its payload channels and keeps the host only if it declared
+    // any. Nothing here touches process-wide state, so jars bootstrap in
+    // parallel.
+    Ok(JavaJarRun {
+        jar,
+        host,
+        content,
+        report,
+        declarations,
+    })
 }
 
 /// The opt-in real-loader preflight (`fml`), logged once under the Java
@@ -527,46 +540,233 @@ pub(super) fn run_java_mods_batch(
     paths: &[PathBuf],
     role: ExecutionRole,
 ) -> Result<JavaBatchOutcome, String> {
-    run_java_mods_batch_with(paths, role, |path, role, payloads| {
-        run_one(path, role, payloads)
-    })
+    run_java_mods_batch_with(paths, role, run_one)
+}
+
+/// At most this many jars bootstrap at once. A started jar holds several times
+/// its own size while it is parsed and its entrypoints run (the 500-jar
+/// profile measured 6–10×), so handing every pool worker a jar would trade the
+/// old serial run's retention for a larger parse-time peak. Eight saturates
+/// zip decompression on a 16-thread machine without that.
+const BOOTSTRAP_CONCURRENCY: usize = 8;
+
+/// One batch's jobs on the process worker pool: paths are handed out by index
+/// and each result lands in its index's slot, so the merge in
+/// [`run_java_mods_batch_with`] sees path order whatever order the workers
+/// finish in.
+struct JarJobs<F> {
+    paths: Vec<PathBuf>,
+    role: ExecutionRole,
+    run: Arc<F>,
+    /// Jars that may bootstrap at once ([`BOOTSTRAP_CONCURRENCY`], or fewer on
+    /// a small machine).
+    cap: usize,
+    state: Mutex<JarJobsState>,
+    wake: Condvar,
+}
+
+struct JarJobsState {
+    /// The next path index to hand out.
+    next: usize,
+    /// The next index the caller will adopt; earlier slots are already gone.
+    consumed: usize,
+    /// Jars bootstrapping now, never more than the cap.
+    running: usize,
+    slots: Vec<Option<Result<JavaJarRun, JavaJarFailure>>>,
+}
+
+impl<F> horizon_threads::jobs::Source for JarJobs<F>
+where
+    F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String> + Send + Sync,
+{
+    fn next(&self) -> Option<horizon_threads::jobs::Rank> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        // Never run further ahead than the window: a slow early jar must not
+        // let the whole batch pile up behind it in the slots.
+        let window = self.cap * 2;
+        (state.next < self.paths.len()
+            && state.running < self.cap
+            && state.next < state.consumed + window)
+            .then(|| {
+                // Startup waits on this: urgent, and the index keeps start order.
+                horizon_threads::jobs::Rank::new(
+                    horizon_threads::jobs::Class::Urgent,
+                    state.next as i64,
+                )
+            })
+    }
+
+    fn run(&self, _worker: usize) -> bool {
+        let index = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.next >= self.paths.len() || state.running >= self.cap {
+                return false;
+            }
+            state.running += 1;
+            let index = state.next;
+            state.next += 1;
+            index
+        };
+        let outcome = bootstrap_one(&self.paths[index], self.role, &*self.run);
+        let more = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.slots[index] = Some(outcome);
+            state.running -= 1;
+            self.wake.notify_all();
+            state.next < self.paths.len() && state.next < state.consumed + self.cap * 2
+        };
+        if more {
+            // This jar freed a place in the cap: wake a worker that found none.
+            horizon_threads::jobs::pool().notify_all();
+        }
+        true
+    }
+}
+
+impl<F> JarJobs<F> {
+    /// Blocks until path `index` has a result and takes it. The caller adopts
+    /// paths strictly in order, so a result never outlives its turn by more
+    /// than the window.
+    fn take(&self, index: usize) -> Result<JavaJarRun, JavaJarFailure> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        debug_assert_eq!(index, state.consumed);
+        while state.slots[index].is_none() {
+            state = self.wake.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        let outcome = state.slots[index].take().expect("the slot was just seen");
+        state.consumed = index + 1;
+        drop(state);
+        // The consumer freed room in the window: workers may issue more.
+        horizon_threads::jobs::pool().notify_all();
+        outcome
+    }
+}
+
+/// Runs one jar, turning a panic into that jar's own failure so the batch never
+/// waits forever for a slot that a lost job would leave empty.
+fn bootstrap_one<F>(
+    path: &std::path::Path,
+    role: ExecutionRole,
+    run: &F,
+) -> Result<JavaJarRun, JavaJarFailure>
+where
+    F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(path, role))) {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(error)) => Err(jar_failure(path, error)),
+        Err(_) => Err(JavaJarFailure {
+            jar: path.to_path_buf(),
+            reason: "panicked and was skipped".to_owned(),
+        }),
+    }
+}
+
+/// Bootstraps every path and hands each result to `accept` in path order, as
+/// soon as the jars before it are done. The first result is adopted while the
+/// rest still run, so a large pack never holds every parsed jar at once. More
+/// than one jar runs on the process worker pool; the rows, reports and
+/// declarations are independent per jar, so only the caller's merge is serial.
+fn bootstrap_into<F, A>(paths: &[PathBuf], role: ExecutionRole, run: F, mut accept: A)
+where
+    F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String> + Send + Sync + 'static,
+    A: FnMut(Result<JavaJarRun, JavaJarFailure>),
+{
+    // One jar has nothing to parallelise, and starting the pool for it would
+    // cost more than it saves.
+    if paths.len() <= 1 {
+        for path in paths {
+            accept(bootstrap_one(path, role, &run));
+        }
+        return;
+    }
+    let pool = horizon_threads::jobs::pool();
+    let jobs = Arc::new(JarJobs {
+        paths: paths.to_vec(),
+        role,
+        run: Arc::new(run),
+        cap: pool.threads().clamp(1, BOOTSTRAP_CONCURRENCY),
+        state: Mutex::new(JarJobsState {
+            next: 0,
+            consumed: 0,
+            running: 0,
+            slots: (0..paths.len()).map(|_| None).collect(),
+        }),
+        wake: Condvar::new(),
+    });
+    let registration = pool.register(jobs.clone());
+    registration.notify_all();
+    for index in 0..paths.len() {
+        accept(jobs.take(index));
+    }
+    // Also waits for any job still running, though every slot was taken.
+    drop(registration);
+}
+
+/// Adopts one jar's bootstrap result into the batch and the role's shared
+/// payload state, in path order: publishes its channels, keeps its host only
+/// if it declared any, and drops the parsed jar.
+fn adopt_run(
+    batch: &mut JavaBatchOutcome,
+    payload_declarations: &mut Vec<super::java_payloads::PayloadDeclaration>,
+    role: ExecutionRole,
+    outcome: Result<JavaJarRun, JavaJarFailure>,
+) {
+    let JavaJarRun {
+        jar,
+        mut host,
+        content,
+        report,
+        declarations,
+    } = match outcome {
+        Ok(run) => run,
+        Err(failure) => {
+            batch.failures.push(failure);
+            return;
+        }
+    };
+    let id = handler_role(role);
+    let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::java_payloads::adopt_host(id, &jar, &mut host, payload_declarations);
+    }));
+    // Dispatch keeps the hosts that declared payload channels
+    // (`java_payloads::store_handler_host_as`); no other consumer needs the
+    // parsed jar or its resources after its entrypoints ran, so do not hold
+    // them for the process lifetime.
+    drop(jar);
+    drop(host);
+    if adopted.is_err() {
+        batch.failures.push(JavaJarFailure {
+            jar: report.jar.clone(),
+            reason: "panicked while its registrations were adopted".to_owned(),
+        });
+        return;
+    }
+    batch.content.extend(content);
+    batch.reports.push(report);
+    batch.declarations.push(declarations);
 }
 
 /// The batch loop with its per-jar step injectable, so a test can prove that
-/// two jars in one call both keep their declarations without needing a real
-/// Java toolchain or corpus.
+/// two jars in one call both keep their declarations (in path order, whatever
+/// order the workers finish in) without a real Java toolchain or corpus.
 fn run_java_mods_batch_with<F>(
     paths: &[PathBuf],
     role: ExecutionRole,
-    mut run: F,
+    run: F,
 ) -> Result<JavaBatchOutcome, String>
 where
-    F: FnMut(
-        &std::path::Path,
-        ExecutionRole,
-        &mut Vec<super::java_payloads::PayloadDeclaration>,
-    ) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String>,
+    F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String> + Send + Sync + 'static,
 {
-    runtimes().lock().unwrap().clear();
     super::java_payloads::clear_handler_jars_as(handler_role(role));
     let mut batch = JavaBatchOutcome::default();
+    // The shared adoption step is serial, in path order: `adopt_host` mutates
+    // the role's channel and handler maps, and a received frame answers from
+    // the batch that came before it.
     let mut payload_declarations = Vec::new();
-    for path in paths {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run(path, role, &mut payload_declarations)
-        })) {
-            Ok(Ok((c, r, d))) => {
-                batch.content.extend(c);
-                batch.reports.push(r);
-                batch.declarations.push(d);
-            }
-            Ok(Err(error)) => batch.failures.push(jar_failure(path, error)),
-            Err(_) => batch.failures.push(JavaJarFailure {
-                jar: path.to_path_buf(),
-                reason: "panicked and was skipped".to_owned(),
-            }),
-        }
-    }
+    bootstrap_into(paths, role, run, |outcome| {
+        adopt_run(&mut batch, &mut payload_declarations, role, outcome);
+    });
     if let Err(e) = super::java_registry::publish(&batch.declarations) {
         log::warn!("Horizon: Java registry snapshot not published: {e}");
     }
@@ -671,10 +871,11 @@ mod tests {
         assert_eq!(mods[0].content.items[0].id, "fixture:ruby_gem");
     }
 
-    /// Every jar in one batch keeps its own rows. A regression guard for the
-    /// large-pack failure where only the last jar (or none) reached the content
-    /// root: the batch accumulator, the per-namespace content mods and the
-    /// registry snapshot must all carry both jars.
+    /// Every jar in one batch keeps its own rows, and the batch merges them in
+    /// path order whatever order the workers finish in. A regression guard for
+    /// the large-pack failure where only the last jar (or none) reached the
+    /// content root: the batch accumulator, the per-namespace content mods and
+    /// the registry snapshot must all carry both jars.
     #[test]
     fn two_jars_in_one_batch_both_contribute_declarations() {
         let _guard = test_lock();
@@ -683,9 +884,16 @@ mod tests {
             PathBuf::from("/mods/second.jar"),
         ];
         let batch =
-            run_java_mods_batch_with(&paths, ExecutionRole::DedicatedServer, |path, role, _| {
+            run_java_mods_batch_with(&paths, ExecutionRole::DedicatedServer, |path, role| {
                 assert_eq!(role, ExecutionRole::DedicatedServer);
                 let namespace = path.file_stem().unwrap().to_string_lossy().into_owned();
+                // The first jar finishes last, so a batch that merged in
+                // completion order would put "second" first.
+                std::thread::sleep(std::time::Duration::from_millis(if namespace == "first" {
+                    60
+                } else {
+                    5
+                }));
                 let entries = [block_entry(
                     &format!("{namespace}:block"),
                     "minecraft:stone",
@@ -696,9 +904,11 @@ mod tests {
                     .into_iter()
                     .map(|(id, content)| ContentMod { id, content })
                     .collect();
-                Ok((
+                Ok(JavaJarRun {
+                    jar: horizon_native_java::NativeJar::default(),
+                    host: horizon_native_java::StdHost::new(),
                     content,
-                    JavaCompatibilityReport {
+                    report: JavaCompatibilityReport {
                         jar: path.to_path_buf(),
                         loader: Some(JavaLoader::Fabric),
                         engine: JavaEngine::Native,
@@ -708,21 +918,81 @@ mod tests {
                         isolation_failure: None,
                     },
                     declarations,
-                ))
+                })
             })
             .unwrap();
         assert!(batch.failures.is_empty(), "{:?}", batch.failures);
         assert_eq!(batch.declarations.len(), 2, "one declaration set per jar");
         assert_eq!(batch.content.len(), 2, "one content mod per namespace");
-        let mut ids: Vec<_> = batch.content.iter().map(|row| row.id.as_str()).collect();
-        ids.sort();
-        assert_eq!(ids, ["first", "second"]);
+        let ids: Vec<_> = batch.content.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(ids, ["first", "second"], "content merges in path order");
+        let reports: Vec<_> = batch
+            .reports
+            .iter()
+            .map(|row| row.jar.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(reports, ["first", "second"], "reports keep path order");
         for row in &batch.content {
             assert_eq!(row.content.blocks.len(), 1, "{} lost its block", row.id);
         }
         let snapshot = super::super::java_registry::snapshot();
         assert!(snapshot.blocks.iter().any(|id| id == "first:block"));
         assert!(snapshot.blocks.iter().any(|id| id == "second:block"));
+    }
+
+    /// A jar that exhausts its execution budget is one failure line: every
+    /// other jar in the batch still starts and keeps its rows. This is the
+    /// tolerant policy the wall-clock guard relies on to isolate one jar.
+    #[test]
+    fn a_budget_failure_does_not_stop_the_next_jar() {
+        let _guard = test_lock();
+        let paths = [
+            PathBuf::from("/mods/spins.jar"),
+            PathBuf::from("/mods/fine.jar"),
+        ];
+        let batch = run_java_mods_batch_with(&paths, ExecutionRole::DedicatedServer, |path, _| {
+            if path.file_stem().unwrap() == "spins" {
+                return Err(format!(
+                    "{}: native interpreter exceeded its {:.1}s execution budget at demo/Spin#spin",
+                    path.display(),
+                    JAR_EXECUTION_BUDGET.as_secs_f64()
+                ));
+            }
+            let entries = [block_entry("fine:block", "minecraft:stone")];
+            let declarations = declarations_from_entries(&entries)?;
+            let content = declarations
+                .content_mods()?
+                .into_iter()
+                .map(|(id, content)| ContentMod { id, content })
+                .collect();
+            Ok(JavaJarRun {
+                jar: horizon_native_java::NativeJar::default(),
+                host: horizon_native_java::StdHost::new(),
+                content,
+                report: JavaCompatibilityReport {
+                    jar: path.to_path_buf(),
+                    loader: Some(JavaLoader::Fabric),
+                    engine: JavaEngine::Native,
+                    entrypoints: 1,
+                    registrations: 1,
+                    opaque: 0,
+                    isolation_failure: None,
+                },
+                declarations,
+            })
+        })
+        .unwrap();
+        assert_eq!(batch.failures.len(), 1, "{:?}", batch.failures);
+        assert_eq!(batch.failures[0].jar, paths[0]);
+        assert!(
+            batch.failures[0].reason.contains("execution budget"),
+            "{}",
+            batch.failures[0].reason
+        );
+        assert_eq!(batch.content.len(), 1, "the second jar still started");
+        assert_eq!(batch.content[0].id, "fine");
+        assert_eq!(batch.reports.len(), 1);
+        assert_eq!(batch.reports[0].jar, paths[1]);
     }
 
     /// A server role's declarations ask for one content rebuild; with none,
