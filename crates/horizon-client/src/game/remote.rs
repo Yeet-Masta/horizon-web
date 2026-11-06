@@ -7,7 +7,7 @@
 //! client predicts its own movement; the server stays authoritative for
 //! everything else.
 use super::remote_chunks::{ChunkDecoder, ChunkFormat, Next};
-use super::{Dim, Game, Mining, Screen, java_payloads};
+use super::{Dim, Game, Mining, Screen, java_content, java_payloads};
 use horizon_client::actions::Action;
 use horizon_client::first_person::{Hand, SwingAnimation};
 use horizon_client::{
@@ -3232,6 +3232,21 @@ impl Game<'_> {
             // The server's recipes its native mods asked to send.
             C::CustomPayload(p) if p.channel == horizon_client::lan::recipes::CONTENT_CHANNEL => {
                 self.remote_recipe_content(&p.data);
+            }
+            // The host's declared Java content, right after the channel
+            // registration, so declared ids resolve before the first chunk.
+            C::CustomPayload(p) if p.channel == java_content::CHANNEL => {
+                if self.remote.is_some() {
+                    match java_content::apply(&p.data) {
+                        Ok(java_content::Outcome::Applied(count)) => {
+                            log::info!("Horizon: server declared {count} Java content id(s)")
+                        }
+                        Ok(java_content::Outcome::Refused(reason)) => {
+                            java_content::warn_refused_once(&reason)
+                        }
+                        Err(error) => java_content::warn_once(&error),
+                    }
+                }
             }
             // A declared Java payload channel's list, then its frames.
             C::CustomPayload(p) if p.channel == java_payloads::REGISTER_CHANNEL => {

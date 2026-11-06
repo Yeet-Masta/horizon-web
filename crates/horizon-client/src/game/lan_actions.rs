@@ -3869,9 +3869,10 @@ impl Game<'_> {
 
     /// Per tick, for every guest: dig, use items, pick up drops, die.
     pub(super) fn tick_guests(&mut self, host: &mut LanHost) {
-        // The channels the host declared, then the frames its guests sent
-        // since the last tick, to the Java mods that registered for them.
+        // The channels and declared content the host has, then the frames its
+        // guests sent since the last tick, to the Java mods that registered.
         self.tick_java_payloads(host);
+        super::java_content::tick_java_content(host);
         self.tick_guest_cameras(host);
         self.lan_merchant_tick(host);
         self.lan_stations_tick(host);

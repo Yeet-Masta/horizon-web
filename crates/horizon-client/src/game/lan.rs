@@ -2826,6 +2826,9 @@ impl Game<'_> {
             border: &self.border,
             streaming: Some(&self.streaming),
         };
+        // The declared Java content travels in the login burst, ahead of the
+        // Login packet and the first chunks.
+        super::java_content::send_login_manifest(host, conn);
         host.hub.place_new_player(conn, &mut ctx);
         if elsewhere && let Err(e) = self.enter_level(Some(host), back) {
             log::error!("could not reopen {}: {e}", back.id());
