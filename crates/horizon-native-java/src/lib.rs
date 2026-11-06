@@ -779,6 +779,36 @@ pub struct GameHookRun {
     pub results: Vec<Value>,
 }
 
+/// Which generated member a Mixin class declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixinAccessorKind {
+    /// `@Accessor` with no arguments: read the target field.
+    Getter,
+    /// `@Accessor` with one argument and a `void` return: write the target field.
+    Setter,
+    /// `@Invoker`: call the target method.
+    Invoker,
+}
+
+/// One `@Accessor`/`@Invoker` member a Mixin class declares.
+///
+/// Unlike an injection plan these members have no woven body: real Mixin
+/// generates a getter, setter or forwarding call. The native interpreter runs
+/// the same contract when the member is invoked on an object, reading or
+/// writing the bounded field table or dispatching the named target. A target
+/// class outside the jar (every Minecraft class) still works because the host
+/// answers the field read or the call through its own modelled surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MixinAccessorPlan {
+    /// The field or method the generated member reads, writes or calls.
+    pub target: MethodRef,
+    /// The `@Accessor`/`@Invoker` member as the jar declares it.
+    pub accessor: MethodRef,
+    pub kind: MixinAccessorKind,
+    /// Whether the target member is static (and therefore has no receiver).
+    pub static_target: bool,
+}
+
 /// What [`NativeJar::plan_load_time_weave`] decided for one jar.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadTimeMixinWeave {
@@ -797,6 +827,8 @@ pub struct LoadTimeMixinWeave {
     /// weave. Only [`NativeJar::plan_load_time_weave_with_game_hooks`] fills
     /// this; the default weave refuses those plans as `target-outside-jar`.
     pub game_hooks: Vec<GameHookPlan>,
+    /// The `@Accessor`/`@Invoker` members the interpreter runs natively.
+    pub accessors: Vec<MixinAccessorPlan>,
     /// Everything else the jar's Mixin classes declare.
     pub skipped: Vec<SkippedMixinPlan>,
 }
@@ -4657,66 +4689,10 @@ impl Host for StdHost {
             };
         }
         let receiver_marker = expect_ref(receiver).cloned();
-        if let Some(marker) = receiver_marker.as_deref() {
-            let callback_result = match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
-                (
-                    "java/util/function/Predicate",
-                    "and",
-                    "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:predicate.and:{marker}|{}",
-                        expect_ref(other).map_or("@fn:predicate.false", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Predicate",
-                    "or",
-                    "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:predicate.or:{marker}|{}",
-                        expect_ref(other).map_or("@fn:predicate.false", String::as_str)
-                    )))
-                }),
-                ("java/util/function/Predicate", "negate", "()Ljava/util/function/Predicate;") => {
-                    Some(Value::Ref(Some(format!("@fn:predicate.not:{marker}"))))
-                }
-                (
-                    "java/util/function/Consumer",
-                    "andThen",
-                    "(Ljava/util/function/Consumer;)Ljava/util/function/Consumer;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:consumer.then:{marker}|{}",
-                        expect_ref(other).map_or("@fn:consumer.empty", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Function",
-                    "compose",
-                    "(Ljava/util/function/Function;)Ljava/util/function/Function;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:function.compose:{marker}|{}",
-                        expect_ref(other).map_or("@fn:function.empty", String::as_str)
-                    )))
-                }),
-                (
-                    "java/util/function/Function",
-                    "andThen",
-                    "(Ljava/util/function/Function;)Ljava/util/function/Function;",
-                ) => args.first().map(|other| {
-                    Value::Ref(Some(format!(
-                        "@fn:function.then:{marker}|{}",
-                        expect_ref(other).map_or("@fn:function.empty", String::as_str)
-                    )))
-                }),
-                _ => None,
-            };
-            if let Some(value) = callback_result {
-                return Ok(value);
-            }
+        if let Some(marker) = receiver_marker.as_deref()
+            && let Some(value) = functional_composition_marker(r, marker, args)
+        {
+            return Ok(value);
         }
         if r.owner == "java/lang/reflect/Field"
             && matches!(
@@ -11713,6 +11689,108 @@ pub struct MixinConfig {
     pub refmap: Option<String>,
 }
 
+/// Descriptor of Mixin's generated-field accessor annotation.
+const MIXIN_ACCESSOR_DESCRIPTOR: &str = "Lorg/spongepowered/asm/mixin/gen/Accessor;";
+/// Descriptor of Mixin's generated-method invoker annotation.
+const MIXIN_INVOKER_DESCRIPTOR: &str = "Lorg/spongepowered/asm/mixin/gen/Invoker;";
+
+/// The first string an annotation element declares.
+fn annotation_element_string(annotation: &Annotation, key: &str) -> Option<String> {
+    annotation
+        .values
+        .get(key)
+        .and_then(|value| annotation_strings(value).into_iter().next())
+        .filter(|value| !value.is_empty())
+}
+
+/// The field name Mixin infers for an accessor whose annotation omits `value`.
+///
+/// `getFoo`/`setFoo`/`isFoo` name `foo`, with the first character lowercased,
+/// exactly as Mixin's own name inference does.
+fn inferred_accessor_name(method: &Method) -> Option<String> {
+    for prefix in ["get", "set", "is"] {
+        if let Some(rest) = method.name.strip_prefix(prefix)
+            && let Some(first) = rest.chars().next()
+        {
+            return Some(format!(
+                "{}{}",
+                first.to_lowercase(),
+                rest.chars().skip(1).collect::<String>()
+            ));
+        }
+    }
+    None
+}
+
+/// Resolve one declared member to the `@Accessor`/`@Invoker` contract it
+/// generates, if any.
+fn resolve_mixin_accessor(class: &ClassFile, method: &Method) -> Option<MixinAccessorPlan> {
+    let mixin = class
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)?;
+    let target_owner = mixin_target_owners(mixin).into_iter().next()?;
+    let accessor = method
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_ACCESSOR_DESCRIPTOR);
+    if let Some(annotation) = accessor {
+        let name = annotation_element_string(annotation, "value")
+            .or_else(|| inferred_accessor_name(method))?;
+        let arguments = descriptor_arguments(&method.descriptor);
+        let result = return_desc(&method.descriptor);
+        let (descriptor, kind) = match (arguments.as_slice(), result) {
+            ([], result) if result != "V" => (result.to_owned(), MixinAccessorKind::Getter),
+            ([argument], "V") => (argument.clone(), MixinAccessorKind::Setter),
+            // A property of any other shape (`(II)V`, `()V`) is not an
+            // accessor Mixin can generate; leave it unresolved rather than
+            // guessing a field descriptor.
+            _ => return None,
+        };
+        return Some(MixinAccessorPlan {
+            target: MethodRef {
+                owner: target_owner,
+                name,
+                descriptor,
+            },
+            accessor: MethodRef {
+                owner: class.name.clone(),
+                name: method.name.clone(),
+                descriptor: method.descriptor.clone(),
+            },
+            kind,
+            static_target: method.is_static(),
+        });
+    }
+    let invoker = method
+        .annotations
+        .iter()
+        .find(|annotation| annotation.descriptor == MIXIN_INVOKER_DESCRIPTOR)?;
+    let name = annotation_element_string(invoker, "value").unwrap_or_else(|| method.name.clone());
+    Some(MixinAccessorPlan {
+        target: MethodRef {
+            owner: target_owner,
+            name,
+            descriptor: method.descriptor.clone(),
+        },
+        accessor: MethodRef {
+            owner: class.name.clone(),
+            name: method.name.clone(),
+            descriptor: method.descriptor.clone(),
+        },
+        kind: MixinAccessorKind::Invoker,
+        static_target: method.is_static(),
+    })
+}
+
+/// The report word for one accessor kind.
+fn mixin_accessor_label(kind: MixinAccessorKind) -> &'static str {
+    match kind {
+        MixinAccessorKind::Getter | MixinAccessorKind::Setter => "@Accessor",
+        MixinAccessorKind::Invoker => "@Invoker",
+    }
+}
+
 impl NativeJar {
     pub fn from_classes(classes: impl IntoIterator<Item = ClassFile>) -> Self {
         let classes = classes.into_iter().collect::<Vec<_>>();
@@ -11765,6 +11843,44 @@ impl NativeJar {
     /// `@Slice` lands here too.  Sorted like [`Self::mixin_injection_plans`].
     pub fn unresolved_invoke_plans(&self) -> Vec<MixinInjectionPlan> {
         self.mixin_plan_scan().1
+    }
+
+    /// Every `@Accessor`/`@Invoker` member the jar's `@Mixin` classes declare,
+    /// in deterministic (class, method) order.
+    ///
+    /// A member whose contract cannot be named (an accessor with no `value`
+    /// and no `get`/`set`/`is` prefix, or a descriptor that is neither a getter
+    /// nor a setter) stays out: there is nothing a weaver or interpreter could
+    /// run for it.
+    pub fn mixin_accessor_plans(&self) -> Vec<MixinAccessorPlan> {
+        let mut plans = Vec::new();
+        for class in self.classes.values() {
+            if !class
+                .annotations
+                .iter()
+                .any(|annotation| annotation.descriptor == MIXIN_ANNOTATION_DESCRIPTOR)
+            {
+                continue;
+            }
+            for method in &class.methods {
+                if let Some(plan) = resolve_mixin_accessor(class, method) {
+                    plans.push(plan);
+                }
+            }
+        }
+        plans.sort_by(|left, right| {
+            (
+                &left.accessor.owner,
+                &left.accessor.name,
+                &left.accessor.descriptor,
+            )
+                .cmp(&(
+                    &right.accessor.owner,
+                    &right.accessor.name,
+                    &right.accessor.descriptor,
+                ))
+        });
+        plans
     }
 
     fn mixin_plan_scan(&self) -> (Vec<MixinInjectionPlan>, Vec<MixinInjectionPlan>) {
@@ -13090,6 +13206,21 @@ impl NativeJar {
                     }),
             );
         self.unwoven_mixin_members(&mut weave.skipped);
+        // `@Accessor`/`@Invoker` members have no injected body. The
+        // interpreter runs their contract directly, so a member a readable
+        // config claims is applied rather than skipped; the gate's reason is
+        // kept for a class the config does not apply on this side.
+        for plan in self.mixin_accessor_plans() {
+            match mixin_config_gate(&configs, &config_sides, &plan.accessor.owner, side) {
+                Ok(()) => weave.accessors.push(plan),
+                Err(reason) => weave.skipped.push(SkippedMixinPlan {
+                    target: plan.target,
+                    callback: plan.accessor,
+                    at: mixin_accessor_label(plan.kind).to_owned(),
+                    reason,
+                }),
+            }
+        }
         let mut injection_by_owner: BTreeMap<String, Vec<MixinInjectionPlan>> = BTreeMap::new();
         let mut anchor_by_owner: BTreeMap<String, Vec<MixinAnchorPlan>> = BTreeMap::new();
         let mut modify_arg_by_owner: BTreeMap<String, Vec<MixinModifyArgPlan>> = BTreeMap::new();
@@ -13764,6 +13895,11 @@ impl NativeJar {
                             .annotations
                             .iter()
                             .any(|annotation| PLANNED.contains(&annotation.descriptor.as_str()))
+                        // A resolvable `@Accessor`/`@Invoker` is applied by
+                        // the interpreter, not a generic merged member. One
+                        // whose contract cannot be named stays in the report
+                        // through this row.
+                        && resolve_mixin_accessor(class, method).is_none()
                 })
                 .map(|method| (&method.name, &method.descriptor));
             // One row per class: the first member says the class is not plain.
@@ -13814,6 +13950,11 @@ impl NativeJar {
                             .annotations
                             .iter()
                             .any(|annotation| PLANNED.contains(&annotation.descriptor.as_str()))
+                        // A resolvable `@Accessor`/`@Invoker` is applied by
+                        // the interpreter, not a generic merged member. One
+                        // whose contract cannot be named stays in the report
+                        // through this row.
+                        && resolve_mixin_accessor(class, method).is_none()
                 })
                 .map(|method| (&method.name, &method.descriptor));
             if let Some((name, descriptor)) = field.or(method) {
@@ -16336,6 +16477,67 @@ fn predicate_marker_value(marker: &str) -> bool {
     marker.starts_with("@indy:")
 }
 
+/// The marker a `Predicate`/`Consumer`/`Function` combinator answers.
+///
+/// Java's default combinators close over both sides instead of producing an
+/// object. The interpreter represents that closure as an `@fn:` marker, and
+/// both the host surface and a jar callback's own combinator call read it the
+/// same way: composing two callbacks must not execute the receiver as if it
+/// were the argument (which is what a callback marker otherwise means).
+fn functional_composition_marker(
+    r: &MethodRef,
+    receiver_marker: &str,
+    args: &[Value],
+) -> Option<Value> {
+    let other = || args.first().and_then(expect_ref).map(String::as_str);
+    match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+        (
+            "java/util/function/Predicate",
+            "and",
+            "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:predicate.and:{receiver_marker}|{}",
+            other().unwrap_or("@fn:predicate.false")
+        )))),
+        (
+            "java/util/function/Predicate",
+            "or",
+            "(Ljava/util/function/Predicate;)Ljava/util/function/Predicate;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:predicate.or:{receiver_marker}|{}",
+            other().unwrap_or("@fn:predicate.false")
+        )))),
+        ("java/util/function/Predicate", "negate", "()Ljava/util/function/Predicate;") => Some(
+            Value::Ref(Some(format!("@fn:predicate.not:{receiver_marker}"))),
+        ),
+        (
+            "java/util/function/Consumer",
+            "andThen",
+            "(Ljava/util/function/Consumer;)Ljava/util/function/Consumer;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:consumer.then:{receiver_marker}|{}",
+            other().unwrap_or("@fn:consumer.empty")
+        )))),
+        (
+            "java/util/function/Function",
+            "compose",
+            "(Ljava/util/function/Function;)Ljava/util/function/Function;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:function.compose:{receiver_marker}|{}",
+            other().unwrap_or("@fn:function.empty")
+        )))),
+        (
+            "java/util/function/Function",
+            "andThen",
+            "(Ljava/util/function/Function;)Ljava/util/function/Function;",
+        ) => Some(Value::Ref(Some(format!(
+            "@fn:function.then:{receiver_marker}|{}",
+            other().unwrap_or("@fn:function.empty")
+        )))),
+        _ => None,
+    }
+}
+
 fn split_capture_markers(value: &str) -> Result<Vec<String>, NativeError> {
     let mut captures = Vec::new();
     let mut current = String::new();
@@ -17560,6 +17762,103 @@ impl<H: Host> Runtime<'_, H> {
     /// Resolve a captured invokedynamic marker when its target is in this
     /// jar. Unknown or malformed markers stay on the host path, preserving
     /// the bounded runtime's neutral fallback for unsupported lambdas.
+    /// Run one `@Accessor`/`@Invoker` member the way real Mixin's generated
+    /// body would.
+    ///
+    /// The member class is in the jar and its method has no code, so the
+    /// annotation is the whole contract. A getter reads the field named by the
+    /// annotation (or inferred from the method name), a setter writes it, and
+    /// an invoker dispatches the named target with the member's own arguments.
+    /// The field table is receiver-keyed, so a game object marker works exactly
+    /// like a jar object; a game target the host models answers the call
+    /// through the host, and an unmodelled one keeps the neutral answer it
+    /// always had.
+    fn invoke_mixin_accessor(
+        &mut self,
+        receiver: Option<&Value>,
+        class: &str,
+        method: &str,
+        desc: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        let plan = {
+            let Some(file) = self.classes.get(class) else {
+                return Ok(None);
+            };
+            let Some(declared) = file.method(method, desc) else {
+                return Ok(None);
+            };
+            if declared.code.is_some() {
+                return Ok(None);
+            }
+            let Some(plan) = resolve_mixin_accessor(file, declared) else {
+                return Ok(None);
+            };
+            plan
+        };
+        if self.has_class(&plan.target.owner) {
+            self.ensure_initialized(&plan.target.owner)?;
+        }
+        let target = MethodRef {
+            owner: plan.target.owner.clone(),
+            name: plan.target.name.clone(),
+            descriptor: plan.target.descriptor.clone(),
+        };
+        match plan.kind {
+            MixinAccessorKind::Getter => {
+                let value = if plan.static_target {
+                    self.static_fields
+                        .get(&Self::static_field_key(&target))
+                        .cloned()
+                } else {
+                    receiver
+                        .and_then(|receiver| instance_field_key(receiver, &target))
+                        .and_then(|key| self.fields.get(&key).cloned())
+                };
+                Ok(Some(
+                    value.unwrap_or_else(|| Value::default_for(&target.descriptor)),
+                ))
+            }
+            MixinAccessorKind::Setter => {
+                let value = args.first().cloned().unwrap_or(Value::Void);
+                if plan.static_target {
+                    self.static_fields
+                        .insert(Self::static_field_key(&target), value);
+                } else if let Some(key) =
+                    receiver.and_then(|receiver| instance_field_key(receiver, &target))
+                {
+                    self.fields.insert(key, value);
+                }
+                Ok(Some(Value::Void))
+            }
+            MixinAccessorKind::Invoker => {
+                if plan.static_target {
+                    if self.has_class(&plan.target.owner) {
+                        return self
+                            .invoke(&target.owner, &target.name, &target.descriptor, None, args)
+                            .map(Some);
+                    }
+                    return self.host.invoke(&target, args).map(Some);
+                }
+                let Some(receiver) = receiver else {
+                    return Ok(None);
+                };
+                if self.has_class(&plan.target.owner) {
+                    return self
+                        .invoke(
+                            &target.owner,
+                            &target.name,
+                            &target.descriptor,
+                            Some(receiver.clone()),
+                            args,
+                        )
+                        .map(Some);
+                }
+                self.host.invoke_instance(&target, receiver, args).map(Some)
+            }
+        }
+    }
+
     fn invoke_callback(
         &mut self,
         marker: &Value,
@@ -17568,6 +17867,33 @@ impl<H: Host> Runtime<'_, H> {
         let Some(marker) = expect_ref(marker) else {
             return Ok(None);
         };
+        // A composition marker closes over the two callbacks it joined. Running
+        // it means running both, in the order the combinator defines — not
+        // answering the marker itself.
+        if let Some(rest) = marker.strip_prefix("@fn:consumer.then:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            self.invoke_callback(&Value::Ref(Some(left.to_owned())), args)?;
+            self.invoke_callback(&Value::Ref(Some(right.to_owned())), args)?;
+            return Ok(Some(Value::Void));
+        }
+        if let Some(rest) = marker.strip_prefix("@fn:function.then:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            let value = self
+                .invoke_callback(&Value::Ref(Some(left.to_owned())), args)?
+                .unwrap_or(Value::Ref(None));
+            return self.invoke_callback(&Value::Ref(Some(right.to_owned())), &[value]);
+        }
+        if let Some(rest) = marker.strip_prefix("@fn:function.compose:")
+            && let Some((left, right)) = rest.split_once('|')
+        {
+            // `f.compose(g)` applies `g` first, then `f`.
+            let value = self
+                .invoke_callback(&Value::Ref(Some(right.to_owned())), args)?
+                .unwrap_or(Value::Ref(None));
+            return self.invoke_callback(&Value::Ref(Some(left.to_owned())), &[value]);
+        }
         let Ok(callback) = parse_callback_marker(marker) else {
             return Ok(None);
         };
@@ -17590,6 +17916,13 @@ impl<H: Host> Runtime<'_, H> {
             } else {
                 return Ok(None);
             };
+            // A constructor reference (`GameClass::new`) is a factory whose
+            // effective result is the constructed object, even though `<init>`
+            // itself returns void. The class is outside the jar, so there is no
+            // body to run: answer the object marker the host models for it.
+            if callback.target.name == "<init>" {
+                return Ok(Some(self.new_object(&callback.target.owner)));
+            }
             if callback.target.name == "stream"
                 && callback.target.descriptor == "()Ljava/util/stream/Stream;"
                 && is_collection_owner(&callback.target.owner)
@@ -18728,8 +19061,48 @@ impl<H: Host> Runtime<'_, H> {
     fn invoke_game_helpers(
         &mut self,
         r: &MethodRef,
+        receiver: Option<&Value>,
         args: &[Value],
+        class: &str,
+        method: &str,
     ) -> Result<Option<Value>, NativeError> {
+        // A value-component builder is a fluent game object. Bootstrap code
+        // only needs the builder to exist (`Objects.requireNonNull` refuses a
+        // null one) and every setter to answer itself; the component value is
+        // recorded by the registry declaration table, not by this marker.
+        if r.owner == "net/minecraft/core/component/DataComponentType"
+            && r.name == "builder"
+            && r.descriptor == "()Lnet/minecraft/core/component/DataComponentType$Builder;"
+        {
+            return Ok(Some(self.new_object(
+                "net/minecraft/core/component/DataComponentType$Builder",
+            )));
+        }
+        if r.owner == "net/minecraft/core/component/DataComponentType$Builder"
+            && let Some(receiver) = receiver.and_then(expect_ref)
+        {
+            if r.name == "build"
+                && r.descriptor == "()Lnet/minecraft/core/component/DataComponentType;"
+            {
+                return Ok(Some(
+                    self.new_object("net/minecraft/core/component/DataComponentType"),
+                ));
+            }
+            if return_desc(&r.descriptor)
+                == "Lnet/minecraft/core/component/DataComponentType$Builder;"
+            {
+                return Ok(Some(Value::Ref(Some(receiver.to_owned()))));
+            }
+        }
+        // `BlockPos.betweenClosedStream` is the game's own bounding-box stream.
+        // A mod filters and maps it for a shape offset table; the bounded host
+        // models the stream shape, not every position in a crafted box.
+        if r.owner == "net/minecraft/core/BlockPos"
+            && r.name == "betweenClosedStream"
+            && r.descriptor.ends_with(")Ljava/util/stream/Stream;")
+        {
+            return Ok(Some(self.new_stream(class, method, Vec::new())));
+        }
         if r.owner != "net/minecraft/util/Util" {
             return Ok(None);
         }
@@ -19860,6 +20233,22 @@ impl<H: Host> Runtime<'_, H> {
                 ("newBuilder", "()Lcom/google/gson/GsonBuilder;") => {
                     Ok(Some(self.new_object("com/google/gson/GsonBuilder")))
                 }
+                // `getAdapter(Class)` names the adapter a codec's own method
+                // references later use. Bootstrap code only checks that the
+                // adapter exists (`Objects.requireNonNull`), so answer the
+                // adapter marker rather than a null the check refuses.
+                (name, descriptor)
+                    if name == "getAdapter"
+                        && descriptor.ends_with(")Lcom/google/gson/TypeAdapter;") =>
+                {
+                    Ok(Some(self.new_object("com/google/gson/TypeAdapter")))
+                }
+                (name, descriptor)
+                    if name == "getDelegateAdapter"
+                        && descriptor.ends_with(")Lcom/google/gson/TypeAdapter;") =>
+                {
+                    Ok(Some(self.new_object("com/google/gson/TypeAdapter")))
+                }
                 // Gson declares one `toJson` overload per element type
                 // (`JsonElement`, `Object`, and the `Type` variants). They
                 // all write the same value, so the descriptor only has to
@@ -20760,6 +21149,16 @@ impl<H: Host> Runtime<'_, H> {
             .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         let Some(ref code) = target.code else {
+            // An `@Accessor`/`@Invoker` member also has no body of its own:
+            // real Mixin generates the getter, setter or forwarding call. The
+            // interpreter runs that contract here, before the functional
+            // callback path, so the member reads or writes the bounded field
+            // table or dispatches the named target.
+            if let Some(value) =
+                self.invoke_mixin_accessor(receiver.as_ref(), class, method, desc, args)?
+            {
+                return Ok(value);
+            }
             // An abstract method is the functional-interface contract a lambda
             // implements. When the receiver is the callback the invokedynamic
             // site bound, the body is that method, not the interface's own
@@ -21835,7 +22234,9 @@ impl<H: Host> Runtime<'_, H> {
                         value
                     } else if let Some(value) = self.invoke_game_enum_values(&r, class, method) {
                         value
-                    } else if let Some(value) = self.invoke_game_helpers(&r, &args)? {
+                    } else if let Some(value) =
+                        self.invoke_game_helpers(&r, receiver.as_ref(), &args, class, method)?
+                    {
                         value
                     } else if let Some((owner, jar_owned)) =
                         self.dispatch_owner(&r, op, receiver.as_ref())
@@ -21883,7 +22284,20 @@ impl<H: Host> Runtime<'_, H> {
                                     | "java/util/function/Supplier"
                             ) {
                                 if let Some(receiver) = receiver.as_ref() {
-                                    if let Some(value) =
+                                    // A default combinator (`Consumer.andThen`,
+                                    // `Function.compose`, `Predicate.and`) closes
+                                    // over both callbacks. Running the receiver
+                                    // as a callback would pass the second
+                                    // callback as its argument and answer the
+                                    // callback's void, which loses the value the
+                                    // combinator returns.
+                                    if let Some(value) = functional_composition_marker(
+                                        &resolved,
+                                        expect_ref(receiver).map(String::as_str).unwrap_or(""),
+                                        &args,
+                                    ) {
+                                        value
+                                    } else if let Some(value) =
                                         invoke_or_catch!(at, self.invoke_callback(receiver, &args))
                                     {
                                         value
