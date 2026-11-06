@@ -1,15 +1,24 @@
-//! Client-side native Java mod bootstrap.
+//! Native Java mod bootstrap, in both execution roles.
 //!
 //! A jar's entrypoints run in the bounded native interpreter; the typed
 //! declarations they record are converted into the current content model
 //! (`horizon_mods::native`), validated like a content mod's, and handed to
 //! `mods::content_root_with_java` before the resources load.
+//!
+//! The window's client role runs before its root is built. The integrated
+//! server role runs on the server thread, after that root exists, so its rows
+//! are published here instead ([`publish_server_declarations`]) and every
+//! later content build carries them ([`server_content`]) until a reload puts
+//! them in the root ([`mark_server_content_in_root`]).
 use super::execution_role::ExecutionRole;
 use horizon_client::mod_content::ContentMod;
 use horizon_mods::native::NativeDeclarations;
 use std::{
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[allow(dead_code)]
@@ -63,6 +72,96 @@ static RUNTIMES: OnceLock<
 fn runtimes() -> &'static Mutex<Vec<(horizon_native_java::NativeJar, horizon_native_java::StdHost)>>
 {
     RUNTIMES.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// The declarations a server role (the integrated server's thread, in
+/// practice) recorded after the window built its content root, one set per
+/// jar. They stay for every later build: a reload must not drop what the
+/// server is playing with.
+static SERVER_DECLARATIONS: Mutex<Vec<NativeDeclarations>> = Mutex::new(Vec::new());
+/// Bumped when [`SERVER_DECLARATIONS`] gains rows: 0 means no server row ever
+/// arrived, which is a run without `--java-mod`.
+static SERVER_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// The last [`SERVER_EPOCH`] a content root was built with.
+static ROOT_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Whether one jar recorded any registration at all.
+fn has_rows(declarations: &NativeDeclarations) -> bool {
+    !declarations.blocks.is_empty()
+        || !declarations.items.is_empty()
+        || !declarations.effects.is_empty()
+        || !declarations.entities.is_empty()
+        || !declarations.menus.is_empty()
+        || !declarations.block_entities.is_empty()
+        || !declarations.recipes.is_empty()
+        || !declarations.ingredients.is_empty()
+        || !declarations.custom.is_empty()
+}
+
+/// Publishes the declarations a server role recorded for the window's
+/// content root.
+///
+/// Empty declarations (no `--java-mod`, or every jar refused) publish nothing
+/// and bump no epoch, so a run without server Java rows never rebuilds a
+/// resource root.
+pub(super) fn publish_server_declarations(declarations: Vec<NativeDeclarations>) {
+    if !declarations.iter().any(has_rows) {
+        return;
+    }
+    let mut stored = SERVER_DECLARATIONS.lock().unwrap();
+    if *stored == declarations {
+        return;
+    }
+    *stored = declarations;
+    SERVER_EPOCH.fetch_add(1, Ordering::Release);
+}
+
+/// The server-role content every content build layers, in load order.
+pub(super) fn server_content() -> Vec<ContentMod> {
+    let stored = SERVER_DECLARATIONS.lock().unwrap();
+    let mut rows = Vec::new();
+    for declarations in stored.iter() {
+        match declarations.content_mods() {
+            Ok(mods) => rows.extend(
+                mods.into_iter()
+                    .map(|(id, content)| ContentMod { id, content }),
+            ),
+            // The same conversion already ran per jar; a set that cannot be
+            // rebuilt is left out with a line rather than stopping a reload.
+            Err(e) => log::warn!("Horizon: integrated-server Java content skipped: {e}"),
+        }
+    }
+    rows
+}
+
+/// A server role published rows after the window built its root: one rebuild
+/// through the pack pipeline is owed.
+pub(super) fn server_content_needs_root() -> bool {
+    let epoch = SERVER_EPOCH.load(Ordering::Acquire);
+    epoch != 0
+        && epoch != ROOT_EPOCH.load(Ordering::Acquire)
+        && !SERVER_DECLARATIONS.lock().unwrap().is_empty()
+}
+
+/// A content root was built with the published server rows: the rebuild the
+/// next window frame asks for is no longer owed.
+pub(super) fn mark_server_content_in_root() {
+    ROOT_EPOCH.store(SERVER_EPOCH.load(Ordering::Acquire), Ordering::Release);
+}
+
+/// The Java tests of the several modules share these cells: they take turns.
+#[cfg(test)]
+pub(super) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Forgets the server rows and both epochs between tests.
+#[cfg(test)]
+pub(super) fn reset_server_content() {
+    *SERVER_DECLARATIONS.lock().unwrap() = Vec::new();
+    SERVER_EPOCH.store(0, Ordering::Release);
+    ROOT_EPOCH.store(0, Ordering::Release);
 }
 
 fn loader(jar: &horizon_native_java::NativeJar) -> Option<JavaLoader> {
@@ -285,6 +384,24 @@ pub(super) fn run_java_mods(
     paths: &[PathBuf],
     role: ExecutionRole,
 ) -> Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String> {
+    let (content, reports, _) = run_java_mods_with_declarations(paths, role)?;
+    Ok((content, reports))
+}
+
+/// [`run_java_mods`], also returning each jar's typed declarations: the
+/// integrated server keeps them for the content reload the window runs after
+/// this thread started (`publish_server_declarations`).
+pub(super) fn run_java_mods_with_declarations(
+    paths: &[PathBuf],
+    role: ExecutionRole,
+) -> Result<
+    (
+        Vec<ContentMod>,
+        Vec<JavaCompatibilityReport>,
+        Vec<NativeDeclarations>,
+    ),
+    String,
+> {
     runtimes().lock().unwrap().clear();
     super::java_payloads::clear_handler_jars_as(handler_role(role));
     let mut content = Vec::new();
@@ -337,7 +454,7 @@ pub(super) fn run_java_mods(
             },
         );
     }
-    Ok((content, reports))
+    Ok((content, reports, declarations))
 }
 
 #[cfg(test)]
@@ -397,5 +514,31 @@ mod tests {
         assert_eq!(mods[0].content.blocks.len(), 1);
         assert_eq!(mods[0].content.items.len(), 1);
         assert_eq!(mods[0].content.items[0].id, "fixture:ruby_gem");
+    }
+
+    /// A server role's declarations ask for one content rebuild; with none,
+    /// or the same batch again, the window owes none.
+    #[test]
+    fn server_declarations_ask_for_one_content_rebuild() {
+        let _guard = test_lock();
+        reset_server_content();
+        assert!(!server_content_needs_root());
+        let declarations =
+            declarations_from_entries(&[block_entry("srvfix:bolt", "minecraft:stone")]).unwrap();
+        publish_server_declarations(vec![declarations.clone()]);
+        assert!(server_content_needs_root());
+        assert_eq!(server_content()[0].id, "srvfix");
+        publish_server_declarations(vec![declarations]);
+        assert!(
+            server_content_needs_root(),
+            "a republish before the build owes the same one"
+        );
+        mark_server_content_in_root();
+        assert!(!server_content_needs_root());
+        let more =
+            declarations_from_entries(&[block_entry("other:gem", "minecraft:stone")]).unwrap();
+        publish_server_declarations(vec![more]);
+        assert!(server_content_needs_root(), "a changed batch asks again");
+        reset_server_content();
     }
 }

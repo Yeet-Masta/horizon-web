@@ -25,6 +25,7 @@ use horizon_client::{
     settings::Settings,
     title::WorldOptions,
 };
+use horizon_mods::native::NativeDeclarations;
 use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
@@ -572,6 +573,9 @@ impl Game<'_> {
             last_attempt: None,
         });
         self.integrated = Some(handle);
+        // The server role's Java rows landed after this window built its
+        // content root: one rebuild through the pack pipeline carries them.
+        self.apply_server_java_content();
         Ok(())
     }
 
@@ -1200,20 +1204,10 @@ impl Game<'_> {
     }
 }
 
-/// The Java rows the integrated server role loaded, in load order.
-///
-/// The window builds its content root and loads the resources before this
-/// thread starts, so a server-role row cannot move into the root it already
-/// has. They wait here for the next resource reload; the registry and the
-/// declaration stores are the server's own views in the meantime.
-static SERVER_JAVA_CONTENT: Mutex<Vec<ContentMod>> = Mutex::new(Vec::new());
-
 /// The mod ids the server role kept, for tests of the hand-over.
 #[cfg(test)]
 fn server_java_rows() -> Vec<String> {
-    SERVER_JAVA_CONTENT
-        .lock()
-        .unwrap()
+    super::java_mods::server_content()
         .iter()
         .map(|row| row.id.clone())
         .collect()
@@ -1228,13 +1222,22 @@ fn server_java_rows() -> Vec<String> {
 /// the native loader's payload registry is process-global and is reset per
 /// call.
 fn run_server_java_mods(options: &Options) -> Result<()> {
-    run_server_java_mods_with(&options.java_mods, super::java_mods::run_java_mods)
+    run_server_java_mods_with(
+        &options.java_mods,
+        super::java_mods::run_java_mods_with_declarations,
+    )
 }
 
-/// What one Java batch run returns: the rows it produced and one report per
-/// jar it started.
-type JavaBatch =
-    std::result::Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String>;
+/// What one Java batch run returns: the rows it produced, one report per jar
+/// it started, and each jar's typed declarations (kept for the reload).
+type JavaBatch = std::result::Result<
+    (
+        Vec<ContentMod>,
+        Vec<JavaCompatibilityReport>,
+        Vec<NativeDeclarations>,
+    ),
+    String,
+>;
 
 fn run_server_java_mods_with<F>(paths: &[PathBuf], run: F) -> Result<()>
 where
@@ -1243,10 +1246,11 @@ where
     if paths.is_empty() {
         return Ok(());
     }
-    let (content, reports) = run(paths, ExecutionRole::IntegratedServer)
-        .map_err(|error| -> Box<dyn std::error::Error> {
+    let (content, reports, declarations) = run(paths, ExecutionRole::IntegratedServer).map_err(
+        |error| -> Box<dyn std::error::Error> {
             format!("native Java integrated-server startup failed: {error}").into()
-        })?;
+        },
+    )?;
     for report in &reports {
         log::info!(
             "Horizon: integrated-server Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}",
@@ -1264,7 +1268,9 @@ where
             content.len()
         );
     }
-    *SERVER_JAVA_CONTENT.lock().unwrap() = content;
+    // The window built its root before this thread: the declarations wait in
+    // the content store for the reload `poll_integrated_start` asks for.
+    super::java_mods::publish_server_declarations(declarations);
     Ok(())
 }
 
@@ -1386,10 +1392,10 @@ fn refused(owner: bool, published: bool, split_seat: bool, memory: bool) -> bool
 mod tests {
     use super::*;
 
-    /// The kept rows are one process-wide cell; the Java tests here take turns.
+    /// The server rows and the Java tests of every module are process-wide
+    /// cells: they take turns.
     fn java_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+        super::super::java_mods::test_lock()
     }
 
     /// The server thread runs the jars once, as one batch, in its own role: the
@@ -1397,6 +1403,7 @@ mod tests {
     #[test]
     fn the_integrated_server_runs_the_java_batch_once_in_its_role() {
         let _guard = java_test_lock();
+        super::super::java_mods::reset_server_content();
         let calls = std::cell::Cell::new(0);
         let role: std::cell::Cell<Option<ExecutionRole>> = std::cell::Cell::new(None);
         let paths = [PathBuf::from("one.jar"), PathBuf::from("two.jar")];
@@ -1404,24 +1411,27 @@ mod tests {
             calls.set(calls.get() + 1);
             role.set(Some(kind));
             assert_eq!(seen.len(), 2, "one batch, not one call per jar");
-            Ok((Vec::new(), Vec::new()))
+            Ok((Vec::new(), Vec::new(), Vec::new()))
         })
         .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(role.get(), Some(ExecutionRole::IntegratedServer));
     }
 
-    /// No `--java-mod`: the server thread starts no Java runtime at all.
+    /// No `--java-mod`: the server thread starts no Java runtime at all, and
+    /// owes the window no content reload.
     #[test]
     fn the_integrated_server_without_java_mods_runs_nothing() {
         let _guard = java_test_lock();
+        super::super::java_mods::reset_server_content();
         let calls = std::cell::Cell::new(0);
         run_server_java_mods_with(&[], |_, _| {
             calls.set(calls.get() + 1);
-            Ok((Vec::new(), Vec::new()))
+            Ok((Vec::new(), Vec::new(), Vec::new()))
         })
         .unwrap();
         assert_eq!(calls.get(), 0);
+        assert!(!super::super::java_mods::server_content_needs_root());
     }
 
     /// A failed batch stops the server thread with an error that names the side.
@@ -1440,7 +1450,20 @@ mod tests {
     /// The rows the server role declared stay for the next resource reload.
     #[test]
     fn the_integrated_server_keeps_its_java_rows() {
+        use horizon_native_java::{RegistryDeclaration, RegistryEntry};
         let _guard = java_test_lock();
+        super::super::java_mods::reset_server_content();
+        assert!(!super::super::java_mods::server_content_needs_root());
+        let declarations =
+            super::super::java_mods::declarations_from_entries(&[RegistryEntry::typed(
+                "minecraft:item",
+                "demo:ruby",
+                RegistryDeclaration::Item {
+                    template: "minecraft:diamond".into(),
+                    properties: std::collections::BTreeMap::new(),
+                },
+            )])
+            .unwrap();
         run_server_java_mods_with(&[PathBuf::from("demo.jar")], |_, _| {
             Ok((
                 vec![ContentMod {
@@ -1448,10 +1471,16 @@ mod tests {
                     content: horizon_mods::Content::declared("demo"),
                 }],
                 Vec::new(),
+                vec![declarations],
             ))
         })
         .unwrap();
         assert_eq!(server_java_rows(), vec!["demo".to_owned()]);
+        assert!(
+            super::super::java_mods::server_content_needs_root(),
+            "the window owes one content rebuild for the server's rows"
+        );
+        super::super::java_mods::reset_server_content();
     }
 
     #[test]

@@ -23,6 +23,9 @@ pub(super) struct ModsState {
     /// A live switch's resource reload is running: when it applied, the server
     /// reloads its data from the new root. Its start, for the log.
     pub(super) live: Option<std::time::Instant>,
+    /// The integrated server role's Java rows landed after the window built
+    /// its root: one reload puts them in it. Its start, for the log.
+    server_java: Option<std::time::Instant>,
     /// The content mods installed, and those of them with only assets and
     /// data (`mod_content::live_switch`): they switch with a world open.
     content_ids: std::collections::BTreeSet<String>,
@@ -92,6 +95,103 @@ pub(super) fn content_root(
     content_root_with_java(root, enabled, dev, Vec::new())
 }
 
+/// The Java content one build layers: the bootstrap's own rows first, then
+/// any the integrated server role published after the window built its first
+/// root, merged into the matching namespace or appended as a new mod. The
+/// flag says server rows were layered, so the build marks them carried.
+fn layered_java(
+    java: Vec<horizon_client::mod_content::ContentMod>,
+) -> (Vec<horizon_client::mod_content::ContentMod>, bool) {
+    let server_java = super::java_mods::server_content();
+    let has_server_java = !server_java.is_empty();
+    let mut java = java;
+    for row in server_java {
+        match java.iter_mut().find(|known| known.id == row.id) {
+            // The jar's client entrypoints already declared this namespace:
+            // the server role's own rows join them, not replace them.
+            Some(existing) => merge_java_content(existing, row),
+            None => java.push(row),
+        }
+    }
+    (java, has_server_java)
+}
+
+/// Joins a namespace's server-role rows to the client-role content already
+/// layered for it: one jar's two entrypoint sets register into one mod, so a
+/// row either role already declared is not a clash.
+fn merge_java_content(
+    target: &mut horizon_client::mod_content::ContentMod,
+    source: horizon_client::mod_content::ContentMod,
+) {
+    let id = source.id.clone();
+    let horizon_client::mod_content::ContentMod { content, .. } = source;
+    let blocks: Vec<_> = content
+        .blocks
+        .into_iter()
+        .filter(|block| {
+            !target
+                .content
+                .blocks
+                .iter()
+                .any(|known| known.id == block.id)
+        })
+        .collect();
+    let items: Vec<_> = content
+        .items
+        .into_iter()
+        .filter(|item| !target.content.items.iter().any(|known| known.id == item.id))
+        .collect();
+    if let Err(e) = target.content.declare(&blocks, &items) {
+        log::warn!("Horizon: Java mod {id} server declarations not merged: {e}");
+        return;
+    }
+    for effect in content.effects {
+        if !target
+            .content
+            .effects
+            .iter()
+            .any(|known| known.id == effect.id)
+        {
+            target.content.effects.push(effect);
+        }
+    }
+    for entity in content.entity_types {
+        if !target
+            .content
+            .entity_types
+            .iter()
+            .any(|known| known.id == entity.id)
+        {
+            target.content.entity_types.push(entity);
+        }
+    }
+    for menu in content.menu_types {
+        if !target
+            .content
+            .menu_types
+            .iter()
+            .any(|known| known.id == menu.id)
+        {
+            target.content.menu_types.push(menu);
+        }
+    }
+    for tab in content.creative_tabs {
+        if !target
+            .content
+            .creative_tabs
+            .iter()
+            .any(|known| known.id == tab.id)
+        {
+            target.content.creative_tabs.push(tab);
+        }
+    }
+    for file in content.files {
+        if !target.content.files.contains(&file) {
+            target.content.files.push(file);
+        }
+    }
+}
+
 pub(super) fn content_root_with_java(
     root: &std::path::Path,
     enabled: &std::collections::BTreeSet<String>,
@@ -100,6 +200,7 @@ pub(super) fn content_root_with_java(
 ) -> std::path::PathBuf {
     use horizon_client::mod_content::{self, ContentMod};
     use horizon_mods::{Capability, Content, Package};
+    let (java, has_server_java) = layered_java(java);
     let here = std::env::current_dir().unwrap_or_default();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
@@ -174,7 +275,7 @@ pub(super) fn content_root_with_java(
             }
         }
     }
-    match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
+    let out = match mod_content::resource_root(root, &mods, &here.join(".horizon-cache")) {
         Ok(out) => {
             if announce {
                 horizon_protocol::mod_list::set_local(announced);
@@ -198,7 +299,13 @@ pub(super) fn content_root_with_java(
             register_menu_types(&[]);
             root.to_owned()
         }
+    };
+    if has_server_java {
+        // Built with the server's rows or refused them: either way a further
+        // rebuild would decide the same, so the window stops asking.
+        super::java_mods::mark_server_content_in_root();
     }
+    out
 }
 
 /// The component types the base root's item table knows, read at most once
@@ -533,6 +640,19 @@ impl Game<'_> {
             .clone()
             .unwrap_or_else(|| self.settings.mods.enabled.clone())
     }
+    /// The integrated server role ran its Java jars after this window built
+    /// its content root (`game/integrated.rs`). Once those rows are published,
+    /// one rebuild through the pack pipeline puts them in the root, and the
+    /// server reloads its data from it (`mods_reloaded`). A run without
+    /// server rows never asks, so its resources stay byte-identical.
+    pub(super) fn apply_server_java_content(&mut self) {
+        if !super::java_mods::server_content_needs_root() {
+            return;
+        }
+        log::info!("Horizon: integrated-server Java content: reloading the window's resources");
+        self.mods.server_java = Some(std::time::Instant::now());
+        self.reload_packs();
+    }
     /// The player turned content mods on or off (Options > Mods, or an
     /// install from Browse Mods): those with only assets and data apply now
     /// (docs/design/mod-hotload.md), through the resource reload and then the
@@ -582,14 +702,16 @@ impl Game<'_> {
         self.mods.live = Some(std::time::Instant::now());
         self.reload_packs();
     }
-    /// A live switch's resources applied: the server reloads its data packs
-    /// from the new root, as `/reload` does (recipes, tags, loot tables,
-    /// advancements, functions), and sends them to its players.
+    /// A live switch's resources applied, or the integrated server's Java rows
+    /// reached the root: the server reloads its data packs from the new root,
+    /// as `/reload` does (recipes, tags, loot tables, advancements,
+    /// functions), and sends them to its players.
     pub(super) fn mods_reloaded(&mut self, applied: bool) {
-        let Some(started) = self.mods.live.take() else {
+        let switched = self.mods.live.take();
+        let server_java = self.mods.server_java.take();
+        if switched.is_none() && server_java.is_none() {
             return;
-        };
-        let resources_ms = started.elapsed().as_millis();
+        }
         if !applied {
             return;
         }
@@ -606,11 +728,22 @@ impl Game<'_> {
             }
             g.reload_datapacks(true);
             log::info!(
-                "Horizon: content mods switched live: server data reloaded in {} ms",
+                "Horizon: the server's data reloaded from the content root in {} ms",
                 at.elapsed().as_millis()
             );
         };
-        log::info!("Horizon: content mods switched live: resources reloaded in {resources_ms} ms");
+        if let Some(started) = switched {
+            log::info!(
+                "Horizon: content mods switched live: resources reloaded in {} ms",
+                started.elapsed().as_millis()
+            );
+        }
+        if let Some(started) = server_java {
+            log::info!(
+                "Horizon: integrated-server Java content: resources reloaded in {} ms",
+                started.elapsed().as_millis()
+            );
+        }
         if let Some(server) = &self.integrated {
             server.post(reload);
         } else if self.remote.is_none() {
@@ -767,6 +900,65 @@ mod tests {
                 .is_none()
         );
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The integrated server role's rows are published after the window built
+    /// its first root; the next build layers them, once, and a run with no
+    /// server rows keeps the bootstrap's list and asks for no reload.
+    #[test]
+    fn integrated_server_java_rows_join_the_next_content_build() {
+        use horizon_native_java::{RegistryDeclaration, RegistryEntry};
+        let _guard = super::super::java_mods::test_lock();
+        super::super::java_mods::reset_server_content();
+        assert!(!super::super::java_mods::server_content_needs_root());
+        let (java, server) = layered_java(Vec::new());
+        assert!(java.is_empty() && !server, "no rows: nothing to layer");
+        let entries = [RegistryEntry::typed(
+            "minecraft:item",
+            "srvfix:serverside_bolt",
+            RegistryDeclaration::Item {
+                template: "minecraft:arrow".into(),
+                properties: std::collections::BTreeMap::new(),
+            },
+        )];
+        super::super::java_mods::publish_server_declarations(vec![
+            super::super::java_mods::declarations_from_entries(&entries).unwrap(),
+        ]);
+        assert!(
+            super::super::java_mods::server_content_needs_root(),
+            "the window owes the rows one rebuild"
+        );
+        let (java, server) = layered_java(Vec::new());
+        assert!(server);
+        assert_eq!(java.len(), 1);
+        assert_eq!(java[0].id, "srvfix");
+        assert_eq!(java[0].content.items[0].id, "srvfix:serverside_bolt");
+        // A namespace the client role already layered keeps its rows and
+        // gains the server's, rather than becoming a second mod under the id.
+        let client = super::super::java_mods::content_mods(
+            &[RegistryEntry::typed(
+                "minecraft:item",
+                "srvfix:client_gem",
+                RegistryDeclaration::Item {
+                    template: "minecraft:diamond".into(),
+                    properties: std::collections::BTreeMap::new(),
+                },
+            )],
+            &[],
+        )
+        .unwrap();
+        let (merged, _) = layered_java(client);
+        assert_eq!(merged.len(), 1);
+        let items: Vec<&str> = merged[0]
+            .content
+            .items
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(items, ["srvfix:client_gem", "srvfix:serverside_bolt"]);
+        super::super::java_mods::mark_server_content_in_root();
+        assert!(!super::super::java_mods::server_content_needs_root());
+        super::super::java_mods::reset_server_content();
     }
 
     /// A content mod's living type is a mob of its template's species under
