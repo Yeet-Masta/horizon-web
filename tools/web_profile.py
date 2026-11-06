@@ -431,6 +431,16 @@ def main():
             if not args.still:
                 page.keyboard.up("w")
                 page.keyboard.up("Control")
+            # What the page holds, wasm memory included (Chromium, cross-origin isolated pages).
+            memory = page.evaluate("""async () => {
+              // The module's memory (web/horizon.js keeps its exports), else what Chromium measures.
+              const wasm = globalThis.horizonWasm?.memory?.buffer?.byteLength;
+              if (wasm) return wasm;
+              if (!performance.measureUserAgentSpecificMemory) return null;
+              const timeout = new Promise(r => setTimeout(() => r(null), 30000));
+              const m = await Promise.race([performance.measureUserAgentSpecificMemory(), timeout]);
+              return m ? m.bytes : null;
+            }""")
             report = {
                 "build": json.loads((dist / "build.json").read_text(encoding="utf-8")),
                 "browser": args.channel or (args.browser and args.browser.stem)
@@ -449,6 +459,7 @@ def main():
                 "slow_frames": spike_report(log[mark:]),
                 "slow_ticks": spike_report(log[mark:], SLOW_TICK, "slow tick"),
                 "page_thread": cpu_report(profile, args.top),
+                "memory_mb": round(memory / (1 << 20)) if memory else None,
                 "trace": trace,
                 "errors": errors,
             }
@@ -492,6 +503,8 @@ def print_report(r):
     print(f"\n## Frames ({r['browser']}, {r['build'].get('profile')} build, "
           f"{'flying' if r['moving'] else 'still'})")
     print_frames(f)
+    if r.get("memory_mb"):
+        print(f"memory at the end: {r['memory_mb']} MB (the module's, or what the page holds)")
     g = r["game"]
     if g and g.get("frames"):
         cpu, gpu = g.get("cpu") or {}, g.get("gpu") or {}

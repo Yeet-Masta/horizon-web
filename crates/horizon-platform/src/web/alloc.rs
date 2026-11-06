@@ -3,31 +3,48 @@
 //! every allocation of every thread: the workers' allocations held the
 //! page's frames up and their spinning took the cores. Here each thread
 //! keeps the blocks up to 64 KiB it frees, by size class, and hands them out
-//! again without the lock; only a miss, a larger or over-aligned block, or a
-//! full class goes to std's allocator. A class keeps at most 512 blocks and,
-//! past 1 KiB, 256 KiB of them. (Up to 1 KiB only, a frame's lists growing
-//! past it took the lock at each doubling, and a Chromium profile of a laptop
-//! had the page's thread spinning on it for half of its slowest frames.)
+//! again without a lock; a miss, a larger or over-aligned block, or a full
+//! class goes to a heap of its own ([`Heap`]). A class keeps at most 512
+//! blocks and, past 1 KiB, 256 KiB of them.
 //!
-//! A thread's lists live in its thread-local storage, which wasm-bindgen
-//! sets up by allocating it (and the thread's stack): until then this
-//! allocator passes straight through to std's.
+//! The heaps are dlmalloc's, each behind its own lock: the page's thread has
+//! one to itself, and the workers share the others, a worker taking the next
+//! one round. Blocks of 1 MiB and more come from one heap all threads share
+//! ([`BIG`]): what a heap takes it keeps, and with every heap keeping the big
+//! blocks it ever held (chunk arrays, far terrain, region files) the memory
+//! grew by 600 MB in a minute's flight. A block goes back to the heap whose
+//! memory it is in: each heap takes the browser's memory a page (64 KiB) at a
+//! time, by the MiB, and marks the pages its own ([`OWNER`]). What a heap
+//! frees at its top, and segments it no longer uses, go to a pool every heap
+//! takes from before the memory grows ([`POOL`]): kept by each heap, what a
+//! worker generating terrain had held at its peak stayed out of every other
+//! thread's reach. (With one heap for every thread, a
+//! Chromium profile of a laptop had the page's thread waiting on its lock
+//! for a third of its time while chunks loaded, the chunk workers for 40%,
+//! and the save workers for half; and std's dlmalloc grows the memory 64 KiB
+//! at a time, holding its lock.)
 //!
-//! What does go to std's goes through a lock of ours first ([`Lock`]), so
-//! std's never sees contention: everyone waiting on std's spins, and with a
-//! worker loading the world's generation data while the page and the other
-//! workers allocated, the spinners kept the holder from running (Chromium
-//! took 143 s over what Firefox did in 2). On ours the workers sleep until
-//! the holder wakes them; only the page's thread, which may not, spins.
+//! A thread's lists and heap live in its thread-local storage, which
+//! wasm-bindgen sets up by allocating it (and the thread's stack): until
+//! then this allocator passes straight through to std's, and frees of what
+//! std's gave go back to it.
+//!
+//! Every lock here is [`Lock`]: workers sleep until the holder wakes them;
+//! only the page's thread, which may not, spins. (On std's own, everyone
+//! spins, and with a worker loading the world's generation data while the
+//! page and the other workers allocated, the spinners kept the holder from
+//! running: Chromium took 143 s over what Firefox did in 2.)
 #[cfg(target_arch = "wasm32")]
-use core::arch::wasm32::{memory_atomic_notify, memory_atomic_wait32};
+use core::arch::wasm32::{memory_atomic_notify, memory_atomic_wait32, memory_grow};
 #[cfg(target_arch = "wasm64")]
-use core::arch::wasm64::{memory_atomic_notify, memory_atomic_wait32};
+use core::arch::wasm64::{memory_atomic_notify, memory_atomic_wait32, memory_grow};
+use dlmalloc::Dlmalloc;
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::{Cell, UnsafeCell},
+    mem::MaybeUninit,
     ptr,
-    sync::atomic::{AtomicI32, Ordering},
+    sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering},
 };
 
 /// Size classes, in bytes: a block up to the largest comes from a class.
@@ -60,6 +77,288 @@ const ALIGN: usize = 16;
 /// block: the thread's storage isn't set up yet (its base is 0).
 const SET_UP: usize = 64 << 10;
 
+/// Heaps: the page's thread's (0), the workers', and the big blocks' (the last).
+const HEAPS: usize = 5;
+/// The heap of the blocks of [`BIG`] bytes or more, every thread's.
+const SHARED: usize = HEAPS - 1;
+/// From this size a block is the shared heap's.
+const BIG: usize = 1 << 20;
+/// What a heap takes of the browser's memory at a time.
+const GRANULARITY: usize = 1 << 20;
+/// A page of wasm memory.
+const PAGE: usize = 64 << 10;
+/// Pages the memory can have: 4 GiB on wasm32, the 8 GiB web/threads.toml
+/// declares on wasm64.
+#[cfg(target_arch = "wasm32")]
+const MAX_PAGES: usize = 1 << 16;
+#[cfg(target_arch = "wasm64")]
+const MAX_PAGES: usize = 1 << 17;
+
+/// The heap each page of memory is in, plus one; 0 for memory no heap gave
+/// out (std's allocator's, the module's data, the stacks).
+static OWNER: [AtomicU8; MAX_PAGES] = [const { AtomicU8::new(0) }; MAX_PAGES];
+
+/// The heap `block` is in, if a heap gave it out.
+fn owner(block: *mut u8) -> Option<usize> {
+    let page = block as usize / PAGE;
+    let owner = OWNER.get(page)?.load(Ordering::Acquire);
+    (owner != 0).then(|| usize::from(owner) - 1)
+}
+
+/// A free region of the pool, written at its start.
+#[repr(C)]
+struct Region {
+    size: usize,
+    /// The next region's address (higher), 0 for none.
+    next: usize,
+}
+
+/// Pages the heaps gave back, whole: free regions in address order, a list
+/// through the regions themselves, neighbours merged.
+struct Pool {
+    lock: Lock,
+    head: UnsafeCell<usize>,
+}
+// SAFETY: the list is only touched with the lock held.
+unsafe impl Sync for Pool {}
+static POOL: Pool = Pool {
+    lock: Lock(AtomicI32::new(0)),
+    head: UnsafeCell::new(0),
+};
+impl Pool {
+    /// Takes back `[base, base + size)`, whole pages no heap uses any more.
+    fn give(&self, base: usize, size: usize) {
+        for page in base / PAGE..((base + size) / PAGE).min(MAX_PAGES) {
+            OWNER[page].store(0, Ordering::Release);
+        }
+        self.lock.lock();
+        // SAFETY: the lock is held; every region on the list is free memory
+        // only the pool touches, as is the one given.
+        unsafe {
+            let head = &mut *self.head.get();
+            let (mut prev, mut next) = (0, *head);
+            while next != 0 && next < base {
+                prev = next;
+                next = (*(next as *const Region)).next;
+            }
+            let mut size = size;
+            if next == base + size {
+                let after = &*(next as *const Region);
+                size += after.size;
+                next = after.next;
+            }
+            if prev != 0 && prev + (*(prev as *const Region)).size == base {
+                let before = &mut *(prev as *mut Region);
+                before.size += size;
+                before.next = next;
+            } else {
+                (base as *mut Region).write(Region { size, next });
+                if prev == 0 {
+                    *head = base;
+                } else {
+                    (*(prev as *mut Region)).next = base;
+                }
+            }
+        }
+        self.lock.unlock();
+    }
+    /// `size` bytes (whole pages) from the lowest region that has them.
+    fn take(&self, size: usize) -> Option<usize> {
+        self.lock.lock();
+        // SAFETY: as in `give`.
+        let taken = unsafe {
+            let head = &mut *self.head.get();
+            let (mut prev, mut at) = (0, *head);
+            while at != 0 && (*(at as *const Region)).size < size {
+                prev = at;
+                at = (*(at as *const Region)).next;
+            }
+            if at != 0 {
+                let Region { size: has, next } = (at as *const Region).read();
+                let rest = if has > size {
+                    let rest = at + size;
+                    (rest as *mut Region).write(Region {
+                        size: has - size,
+                        next,
+                    });
+                    rest
+                } else {
+                    next
+                };
+                if prev == 0 {
+                    *head = rest;
+                } else {
+                    (*(prev as *mut Region)).next = rest;
+                }
+            }
+            (at != 0).then_some(at)
+        };
+        self.lock.unlock();
+        taken
+    }
+}
+
+/// A heap's memory: pages from the pool or `memory.grow`, marked as the
+/// heap's; what it gives back goes to the pool (wasm memory never shrinks).
+struct Pages {
+    heap: u8,
+}
+// SAFETY: the regions handed out are whole pages of the memory, of the size
+// given, which nothing else uses until the heap gives them back.
+unsafe impl dlmalloc::Allocator for Pages {
+    fn alloc(&self, size: usize) -> (*mut u8, usize, u32) {
+        let size = size.div_ceil(PAGE) * PAGE;
+        let base = match POOL.take(size) {
+            Some(base) => base,
+            None => {
+                let first = memory_grow::<0>(size / PAGE);
+                if first == usize::MAX {
+                    return (ptr::null_mut(), 0, 0);
+                }
+                first * PAGE
+            }
+        };
+        for page in base / PAGE..((base + size) / PAGE).min(MAX_PAGES) {
+            OWNER[page].store(self.heap + 1, Ordering::Release);
+        }
+        (base as *mut u8, size, 0)
+    }
+    fn remap(&self, _: *mut u8, _: usize, _: usize, _: bool) -> *mut u8 {
+        ptr::null_mut()
+    }
+    fn free_part(&self, base: *mut u8, old: usize, new: usize) -> bool {
+        // The tail of a segment: whole pages, as segments and the trims are.
+        let (start, end) = (
+            (base as usize + new).next_multiple_of(PAGE),
+            base as usize + old,
+        );
+        if end > start {
+            POOL.give(start, (end - start) / PAGE * PAGE);
+        }
+        true
+    }
+    fn free(&self, base: *mut u8, size: usize) -> bool {
+        POOL.give(base as usize, size / PAGE * PAGE);
+        true
+    }
+    fn can_release_part(&self, _: u32) -> bool {
+        true
+    }
+    /// Pages from the pool hold what they held.
+    fn allocates_zeros(&self) -> bool {
+        false
+    }
+    fn page_size(&self) -> usize {
+        PAGE
+    }
+}
+
+/// One of the heaps: dlmalloc, behind a lock of its own.
+struct Heap {
+    lock: Lock,
+    dl: UnsafeCell<Dlmalloc<Pages>>,
+}
+// SAFETY: the dlmalloc is only touched with the lock held (`Heap::with`).
+unsafe impl Sync for Heap {}
+impl Heap {
+    const fn new(heap: u8) -> Self {
+        let mut dl = Dlmalloc::new_with_allocator(Pages { heap });
+        let _ = dl.set_granularity(GRANULARITY);
+        Self {
+            lock: Lock(AtomicI32::new(0)),
+            dl: UnsafeCell::new(dl),
+        }
+    }
+    /// `f` on the dlmalloc with the lock held. Nothing in it allocates, so
+    /// no thread holds two heaps' locks.
+    fn with<R>(&self, f: impl FnOnce(&mut Dlmalloc<Pages>) -> R) -> R {
+        self.lock.lock();
+        // SAFETY: the lock is held.
+        let out = f(unsafe { &mut *self.dl.get() });
+        self.lock.unlock();
+        out
+    }
+}
+static HEAP: [Heap; HEAPS] = heaps();
+const fn heaps() -> [Heap; HEAPS] {
+    let mut heaps = [const { MaybeUninit::<Heap>::uninit() }; HEAPS];
+    let mut i = 0;
+    while i < HEAPS {
+        heaps[i] = MaybeUninit::new(Heap::new(i as u8));
+        i += 1;
+    }
+    // SAFETY: every element was written above.
+    unsafe { std::mem::transmute::<[MaybeUninit<Heap>; HEAPS], [Heap; HEAPS]>(heaps) }
+}
+/// The workers' next heap.
+static NEXT_HEAP: AtomicUsize = AtomicUsize::new(0);
+
+/// This thread's heap, once its storage is set up: the page's thread's own
+/// (and a worker's until it has started), or the one a worker took.
+fn my_heap() -> Option<usize> {
+    MY_HEAP
+        .try_with(|mine| {
+            if (mine as *const Cell<u8> as usize) < SET_UP {
+                return None;
+            }
+            if !may_sleep() {
+                return Some(0);
+            }
+            let mut heap = mine.get();
+            if heap == 0 {
+                heap = 1 + (NEXT_HEAP.fetch_add(1, Ordering::Relaxed) % (SHARED - 1)) as u8;
+                mine.set(heap);
+            }
+            Some(usize::from(heap))
+        })
+        .ok()
+        .flatten()
+}
+
+/// The heap a block of `layout` comes from: the shared one for a big block,
+/// else this thread's (none before its storage: std's).
+fn heap_for(layout: Layout) -> Option<usize> {
+    if layout.size() >= BIG {
+        Some(SHARED)
+    } else {
+        my_heap()
+    }
+}
+
+/// A block of `layout` from its heap ([`heap_for`]).
+fn heap_alloc(layout: Layout, zeroed: bool) -> *mut u8 {
+    match heap_for(layout) {
+        // SAFETY: GlobalAlloc's contract on `layout`, passed on.
+        Some(h) => HEAP[h].with(|dl| unsafe {
+            if zeroed {
+                dl.calloc(layout.size(), layout.align())
+            } else {
+                dl.malloc(layout.size(), layout.align())
+            }
+        }),
+        // SAFETY: as above.
+        None => locked(|| unsafe {
+            if zeroed {
+                System.alloc_zeroed(layout)
+            } else {
+                System.alloc(layout)
+            }
+        }),
+    }
+}
+/// Frees `block`, of `layout`, into the heap it came from.
+///
+/// # Safety
+/// `block` was allocated with `layout` (by `heap_alloc`, or std's).
+unsafe fn heap_dealloc(block: *mut u8, layout: Layout) {
+    match owner(block) {
+        // SAFETY: the heap gave it out, with this layout.
+        Some(h) => HEAP[h].with(|dl| unsafe { dl.free(block, layout.size(), layout.align()) }),
+        // SAFETY: std's gave it out, with this layout.
+        None => locked(|| unsafe { System.dealloc(block, layout) }),
+    }
+}
+
 /// One thread's free blocks of each class: a list through the blocks' first
 /// word, and its length.
 struct Lists {
@@ -73,6 +372,8 @@ thread_local! {
     };
     /// This thread is a worker, which may sleep ([`worker_started`]).
     static SLEEPS: Cell<bool> = const { Cell::new(false) };
+    /// The heap this worker took, 0 before ([`my_heap`]).
+    static MY_HEAP: Cell<u8> = const { Cell::new(0) };
 }
 
 /// Called on a worker once its thread-local storage is set up: from then
@@ -173,14 +474,13 @@ fn with_lists<R>(f: impl FnOnce(&mut Lists) -> R) -> Option<R> {
 
 pub struct Cached;
 
-// SAFETY: every block handed out is one std's allocator gave for its
-// class's layout (or the caller's, for the rest), and goes back to it with
-// that same layout.
+// SAFETY: every block handed out is one a heap (or std's allocator) gave for
+// its class's layout (or the caller's, for the rest), and goes back to the
+// one that gave it with that same layout.
 unsafe impl GlobalAlloc for Cached {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let Some(c) = class(layout) else {
-            // SAFETY: the caller's layout, as GlobalAlloc requires.
-            return locked(|| unsafe { System.alloc(layout) });
+            return heap_alloc(layout, false);
         };
         let kept = with_lists(|lists| {
             let head = lists.head[c];
@@ -193,15 +493,14 @@ unsafe impl GlobalAlloc for Cached {
         });
         match kept {
             Some(block) if !block.is_null() => block,
-            // SAFETY: a class's layout is nonzero.
-            _ => locked(|| unsafe { System.alloc(block(c)) }),
+            _ => heap_alloc(block(c), false),
         }
     }
 
     unsafe fn dealloc(&self, block_ptr: *mut u8, layout: Layout) {
         let Some(c) = class(layout) else {
-            // SAFETY: allocated by std's with this layout.
-            return locked(|| unsafe { System.dealloc(block_ptr, layout) });
+            // SAFETY: allocated with this layout.
+            return unsafe { heap_dealloc(block_ptr, layout) };
         };
         let kept = with_lists(|lists| {
             if lists.len[c] >= keep(c) {
@@ -214,15 +513,14 @@ unsafe impl GlobalAlloc for Cached {
             true
         });
         if kept != Some(true) {
-            // SAFETY: the class's blocks come from std's with its layout.
-            locked(|| unsafe { System.dealloc(block_ptr, block(c)) });
+            // SAFETY: the class's blocks are allocated with its layout.
+            unsafe { heap_dealloc(block_ptr, block(c)) };
         }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         if class(layout).is_none() {
-            // SAFETY: the caller's layout.
-            return locked(|| unsafe { System.alloc_zeroed(layout) });
+            return heap_alloc(layout, true);
         }
         // A kept block holds what it last held.
         // SAFETY: as `alloc`; the block has at least `layout.size()` bytes.
@@ -240,22 +538,32 @@ unsafe impl GlobalAlloc for Cached {
         // with this alignment.
         let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
         match (class(layout), class(new)) {
-            // Shrinking stays where it is, in std's allocator.
-            // SAFETY: std's block, with its layout.
-            (None, None) if new_size <= layout.size() => {
-                locked(|| unsafe { System.realloc(block_ptr, layout, new_size) })
-            }
-            // Growing moves the bytes outside the lock: through std's realloc the copy of a
-            // large block (a mesh, a chunk's packet) held every other thread's allocation.
-            // SAFETY: a fresh block of std's for the new layout, the old bytes copied into it
-            // and the old block given back with its layout.
-            (None, None) => unsafe {
-                let moved = locked(|| System.alloc(new));
-                if !moved.is_null() {
-                    ptr::copy_nonoverlapping(block_ptr, moved, layout.size());
-                    locked(|| System.dealloc(block_ptr, layout));
+            (None, None) => match (owner(block_ptr), heap_for(layout), heap_for(new)) {
+                // This thread's own heap's block, staying there: dlmalloc grows or shrinks it
+                // in place where it can, the other threads' frees into the heap waiting
+                // meanwhile.
+                // SAFETY: the heap gave it out, with this layout.
+                (Some(h), Some(from), Some(to)) if h == from && from == to && h != SHARED => {
+                    HEAP[h].with(|dl| unsafe {
+                        dl.realloc(block_ptr, layout.size(), layout.align(), new_size)
+                    })
                 }
-                moved
+                // SAFETY: std's block, with its layout.
+                (None, None, None) => {
+                    locked(|| unsafe { System.realloc(block_ptr, layout, new_size) })
+                }
+                // Another heap's, or a big block (whose copy would hold every thread's big
+                // blocks up): moved into its new heap, the bytes copied outside the locks.
+                // SAFETY: a fresh block for the new layout, the old bytes copied into it and
+                // the old block given back with its layout.
+                _ => unsafe {
+                    let moved = heap_alloc(new, false);
+                    if !moved.is_null() {
+                        ptr::copy_nonoverlapping(block_ptr, moved, layout.size().min(new_size));
+                        heap_dealloc(block_ptr, layout);
+                    }
+                    moved
+                },
             },
             // The class's block has room for it already.
             (Some(a), Some(b)) if a == b => block_ptr,

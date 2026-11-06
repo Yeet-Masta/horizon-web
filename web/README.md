@@ -335,9 +335,12 @@ The web build is the native game with the operating system swapped out
   are half as many as cores, at most 3 (Horizon's graphics settings, Worker
   Threads, or `?env=HORIZON_WEB_WORKERS=2`, set it). A frame spends at most
   4 ms on finished jobs, and uploads at most 4 MiB of section meshes (the
-  Upload Budget setting). Each thread keeps the small blocks it
-  frees for its next allocations (std's wasm allocator is one spinning lock
-  for every thread). Sounds decode on two more workers (effects, and
+  Upload Budget setting). Each thread keeps the blocks up to 64 KiB it
+  frees for its next allocations, and the rest comes from dlmalloc heaps
+  behind locks of their own: the page's thread's, three the workers share,
+  and one for blocks of 1 MiB and more; pages a heap frees go to a pool any
+  heap takes from (`horizon-platform`'s `web/alloc.rs`; std's wasm allocator
+  is one spinning lock for every thread). Sounds decode on two more workers (effects, and
   streamed music and ambience), and region files are written on another, as
   natively. Single player runs on the integrated server's thread, a worker
   too, as natively, so a world tick never holds a frame up; a worker starts

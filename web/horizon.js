@@ -821,7 +821,10 @@ try {
     $("sign-in").disabled = false;
   };
   try {
-    await glue.default({ module_or_path: new URL("pkg/horizon-client_bg.wasm", import.meta.url) });
+    // The module's exports, its memory among them (tools/web_profile.py reads its size).
+    globalThis.horizonWasm = await glue.default({
+      module_or_path: new URL("pkg/horizon-client_bg.wasm", import.meta.url),
+    });
   } finally {
     ready();
   }
