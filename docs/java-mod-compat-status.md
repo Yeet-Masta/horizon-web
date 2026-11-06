@@ -68,9 +68,9 @@ of skipping it. A jar that panics in its entrypoint is isolated; the remaining j
 A standalone JVM runner for the same jars: real Fabric Loader discovery/freeze/entrypoints, an opt-in Knot class
 loader (classpath unlock, transformer chain, `--launch-game` against a real 26.3 server), a real
 FancyModLoader/NeoForge lifecycle (`--real-loader`, `--list-fml-mods`, `--fml-report`), datagen entrypoints, bounded
-mixin-config registration and `--measure`. It is development/reference tooling: no game path executes mod code
-through it (the only in-game use is the opt-in FML preflight child above), so `backends.jvm` in `server-status` is
-always zero and a refused jar is skipped rather than handed to it.
+mixin-config registration and `--measure`. It is development/reference tooling: no game path runs a world or a jar's
+gameplay through it (the only in-game use is the opt-in FML preflight child above), so `backends.jvm` in
+`server-status` is always zero and a refused jar is skipped rather than handed to it.
 
 ### Tools and tests
 
