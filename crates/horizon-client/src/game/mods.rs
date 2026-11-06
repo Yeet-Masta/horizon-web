@@ -89,6 +89,15 @@ pub(super) fn content_root(
     enabled: &std::collections::BTreeSet<String>,
     dev: &[std::path::PathBuf],
 ) -> std::path::PathBuf {
+    content_root_with_java(root, enabled, dev, Vec::new())
+}
+
+pub(super) fn content_root_with_java(
+    root: &std::path::Path,
+    enabled: &std::collections::BTreeSet<String>,
+    dev: &[std::path::PathBuf],
+    java: Vec<horizon_client::mod_content::ContentMod>,
+) -> std::path::PathBuf {
     use horizon_client::mod_content::{self, ContentMod};
     use horizon_mods::{Capability, Content, Package};
     let here = std::env::current_dir().unwrap_or_default();
@@ -96,7 +105,7 @@ pub(super) fn content_root(
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());
     let mut known = None;
-    let mut mods: Vec<ContentMod> = Vec::new();
+    let mut mods: Vec<ContentMod> = java;
     // The first load's list stays (`set_local`): a reload does not hash the files again.
     let announce = !horizon_protocol::mod_list::is_set();
     let mut announced = Vec::new();

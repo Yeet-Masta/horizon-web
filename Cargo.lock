@@ -1373,6 +1373,7 @@ dependencies = [
  "horizon-mod-api-gen",
  "horizon-mods",
  "horizon-narrator",
+ "horizon-native-java",
  "horizon-optifine",
  "horizon-protocol",
  "horizon-server-files",
