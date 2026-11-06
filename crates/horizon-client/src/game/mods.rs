@@ -105,7 +105,9 @@ pub(super) fn content_root_with_java(
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());
     let mut known = None;
-    let mut mods: Vec<ContentMod> = java;
+    // Java-sourced content is a validated source like a `.hmod`: a row refused
+    // here never reaches the resource root.
+    let mut mods: Vec<ContentMod> = accept_java(root, java, &mut known);
     // The first load's list stays (`set_local`): a reload does not hash the files again.
     let announce = !horizon_protocol::mod_list::is_set();
     let mut announced = Vec::new();
@@ -135,16 +137,13 @@ pub(super) fn content_root_with_java(
                 continue;
             }
         };
-        let known = match &mut known {
-            Some(types) => types,
-            None => match mod_content::known_components(root) {
-                Ok(types) => known.insert(types),
-                Err(e) => {
-                    log::warn!("Horizon: content mods not loaded: {e}");
-                    register_mob_effects(&[]);
-                    return root.to_owned();
-                }
-            },
+        let known = match known_types(root, &mut known) {
+            Ok(types) => types,
+            Err(e) => {
+                log::warn!("Horizon: content mods not loaded: {e}");
+                register_mob_effects(&[]);
+                return root.to_owned();
+            }
         };
         let candidate = ContentMod {
             id: m.id.clone(),
@@ -200,6 +199,47 @@ pub(super) fn content_root_with_java(
             root.to_owned()
         }
     }
+}
+
+/// The component types the base root's item table knows, read at most once
+/// per content build.
+fn known_types<'a>(
+    root: &std::path::Path,
+    known: &'a mut Option<std::collections::BTreeSet<String>>,
+) -> horizon_client::Result<&'a std::collections::BTreeSet<String>> {
+    if known.is_none() {
+        *known = Some(horizon_client::mod_content::known_components(root)?);
+    }
+    Ok(known.as_ref().expect("set above"))
+}
+
+/// Validates the content mods a Java run declared, one per namespace, as a
+/// `.hmod` is: a namespace clash or an unknown component type refuses that
+/// mod and leaves the others in place.
+fn accept_java(
+    root: &std::path::Path,
+    java: Vec<horizon_client::mod_content::ContentMod>,
+    known: &mut Option<std::collections::BTreeSet<String>>,
+) -> Vec<horizon_client::mod_content::ContentMod> {
+    let mut mods = Vec::new();
+    if java.is_empty() {
+        return mods;
+    }
+    let known = match known_types(root, known) {
+        Ok(known) => known,
+        Err(e) => {
+            log::warn!("Horizon: Java mods not loaded: {e}");
+            return mods;
+        }
+    };
+    for candidate in java {
+        let id = candidate.id.clone();
+        match horizon_client::mod_content::accept_mod(&mut mods, candidate, known) {
+            Ok(()) => {}
+            Err(e) => log::warn!("Horizon: Java mod {id} content not loaded: {e}"),
+        }
+    }
+    mods
 }
 
 /// A loaded mod as a server tells joining clients (`horizon_protocol::mod_list`): its manifest's
@@ -648,6 +688,86 @@ pub(super) fn living_mod_types()
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The vanilla tables a content root is built over, when this checkout has
+    /// prepared them (`docs/parity-workflow.md`); CI without them skips the
+    /// build-side check and keeps the declaration-side one.
+    fn prepared_resources() -> Option<std::path::PathBuf> {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        [
+            manifest.join("../../.local/horizon-client/26.3"),
+            manifest.join("../../../../.local/horizon-client/26.3"),
+        ]
+        .into_iter()
+        .find(|root| root.join("gameplay-facts.json").exists())
+    }
+
+    /// A block and an item a Java host declared as typed registrations reach
+    /// the root the game loads: they pass the same validation as a `.hmod`,
+    /// and the built tables carry their ids while vanilla's own stay put.
+    #[test]
+    fn a_java_block_and_item_reach_the_content_root() {
+        use horizon_native_java::{RegistryDeclaration, RegistryEntry};
+        let Some(base) = prepared_resources() else {
+            return;
+        };
+        let entries = [
+            RegistryEntry::typed(
+                "minecraft:block",
+                "fixture:ruby_block",
+                RegistryDeclaration::Block {
+                    template: "minecraft:iron_block".into(),
+                    properties: std::collections::BTreeMap::from([(
+                        "hardness".into(),
+                        "4.0".into(),
+                    )]),
+                    item: true,
+                },
+            ),
+            RegistryEntry::typed(
+                "minecraft:item",
+                "fixture:ruby_gem",
+                RegistryDeclaration::Item {
+                    template: "minecraft:diamond".into(),
+                    properties: std::collections::BTreeMap::new(),
+                },
+            ),
+        ];
+        let java = super::super::java_mods::content_mods(&entries, &[]).unwrap();
+        assert_eq!(java.len(), 1);
+        let mods = accept_java(&base, java, &mut None);
+        assert_eq!(
+            mods.len(),
+            1,
+            "the Java content must pass the same validation as a .hmod"
+        );
+        assert_eq!(mods[0].content.blocks[0].id, "fixture:ruby_block");
+
+        let scratch =
+            std::env::temp_dir().join(format!("horizon-java-content-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let root = horizon_client::mod_content::resource_root(&base, &mods, &scratch).unwrap();
+        assert_ne!(root, base);
+        let ids = horizon_protocol::registry::Builtin::load(&root.join("registries.json")).unwrap();
+        let item = |name: &str| ids.get("minecraft:item").and_then(|r| r.id(name));
+        assert!(item("fixture:ruby_gem").is_some());
+        assert!(item("fixture:ruby_block").is_some());
+        assert!(
+            ids.get("minecraft:block")
+                .and_then(|r| r.id("fixture:ruby_block"))
+                .is_some()
+        );
+        // The ids are the mod's, not vanilla's.
+        let vanilla =
+            horizon_protocol::registry::Builtin::load(&base.join("registries.json")).unwrap();
+        assert!(
+            vanilla
+                .get("minecraft:item")
+                .and_then(|r| r.id("fixture:ruby_gem"))
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
 
     /// A content mod's living type is a mob of its template's species under
     /// its own id, with its own attributes: it saves its id with every field

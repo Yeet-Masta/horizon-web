@@ -1,6 +1,12 @@
 //! Client-side native Java mod bootstrap.
+//!
+//! A jar's entrypoints run in the bounded native interpreter; the typed
+//! declarations they record are converted into the current content model
+//! (`horizon_mods::native`), validated like a content mod's, and handed to
+//! `mods::content_root_with_java` before the resources load.
 use super::execution_role::ExecutionRole;
 use horizon_client::mod_content::ContentMod;
+use horizon_mods::native::NativeDeclarations;
 use std::{
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -87,10 +93,81 @@ fn mod_id(jar: &horizon_native_java::NativeJar, path: &std::path::Path) -> Optio
         .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))
 }
 
+fn mod_version(jar: &horizon_native_java::NativeJar) -> &str {
+    jar.fabric_version
+        .as_deref()
+        .or(jar.neoforge_version.as_deref())
+        .unwrap_or("unknown")
+}
+
+/// Converts typed Java registrations into the declaration vocabulary the
+/// content loader understands. Opaque registrations carry no declaration and
+/// never enter content; the caller counts them for diagnostics.
+pub(super) fn declarations_from_entries(
+    entries: &[horizon_native_java::RegistryEntry],
+) -> Result<NativeDeclarations, String> {
+    use horizon_native_java::RegistryDeclaration;
+    let mut declarations = NativeDeclarations::default();
+    for entry in entries {
+        let Some(declaration) = &entry.declaration else {
+            continue;
+        };
+        match declaration {
+            RegistryDeclaration::Block {
+                template,
+                properties,
+                item,
+            } => declarations.add_block(&entry.id, template, properties, *item)?,
+            RegistryDeclaration::Item {
+                template,
+                properties,
+            } => declarations.add_item(&entry.id, template, properties)?,
+            RegistryDeclaration::MobEffect { category, color } => {
+                declarations.add_effect(&entry.id, category, *color)?
+            }
+            RegistryDeclaration::Recipe { json } => declarations.add_recipe(&entry.id, json)?,
+            RegistryDeclaration::Ingredient { json } => {
+                declarations.add_ingredient(&entry.id, json)?
+            }
+            RegistryDeclaration::Custom { kind, properties } => {
+                match kind.to_ascii_lowercase().as_str() {
+                    "entity" | "entity_type" | "entity-type" => {
+                        declarations.add_entity(&entry.id, properties)?
+                    }
+                    "menu" | "menus" => declarations.add_menu(&entry.id, properties)?,
+                    "block_entity" | "block-entity" | "blockentity" => {
+                        declarations.add_block_entity(&entry.id, properties)?
+                    }
+                    _ => declarations.add_custom(&entry.registry, &entry.id, kind, properties)?,
+                }
+            }
+        }
+    }
+    Ok(declarations)
+}
+
+/// The content mods one jar declares, sorted by namespace. Each group is
+/// checked by [`NativeDeclarations::content_mods`]; a jar whose declarations
+/// name two namespaces yields one content mod per namespace, as the native
+/// code path does.
+#[cfg(test)]
+pub(super) fn content_mods(
+    entries: &[horizon_native_java::RegistryEntry],
+    metadata: &[horizon_native_java::RegistryEntry],
+) -> Result<Vec<ContentMod>, String> {
+    let mut declarations = declarations_from_entries(entries)?;
+    declarations.merge(declarations_from_entries(metadata)?)?;
+    Ok(declarations
+        .content_mods()?
+        .into_iter()
+        .map(|(id, content)| ContentMod { id, content })
+        .collect())
+}
+
 fn run_one(
-    path: &PathBuf,
+    path: &std::path::Path,
     role: ExecutionRole,
-) -> Result<(Option<ContentMod>, JavaCompatibilityReport), String> {
+) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String> {
     let jar = horizon_native_java::NativeJar::from_path(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if jar.client_side_only && !role.is_client() {
@@ -125,26 +202,54 @@ fn run_one(
     let jar = jar
         .with_woven_classes(&weave.classes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut host = jar.seed_host(
-        horizon_native_java::StdHost::new().with_environment_type(if role.is_client() {
-            "CLIENT"
-        } else {
-            "SERVER"
-        }),
-    );
+    let mut host = horizon_native_java::StdHost::new().with_environment_type(if role.is_client() {
+        "CLIENT"
+    } else {
+        "SERVER"
+    });
+    if let Some(id) = mod_id(&jar, path) {
+        host = host.with_mod(id, mod_version(&jar));
+    }
+    for dependency in &jar.required_mods {
+        host = host.with_mod(dependency, "unknown");
+    }
+    let mut host = jar.seed_host(host);
     for entry in &entries {
         jar.execute(&entry.class, entry.method.as_deref(), kind, &mut host)
             .map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    // Current main has no native declaration-to-Content adapter yet. Preserve
-    // the Java namespace in the content list; the registry adapter is the next
-    // integration wave and can replace this empty declaration.
-    let content = mod_id(&jar, path).map(|id| ContentMod {
-        content: horizon_mods::Content::declared(&id),
-        id,
-    });
+    let typed: Vec<horizon_native_java::RegistryEntry> = host
+        .registrations()
+        .iter()
+        .filter(|entry| entry.declaration.is_some())
+        .cloned()
+        .collect();
+    // The jar's own `META-INF/horizon-native.json` rows are the explicit
+    // adapter for a callback the interpreter could not type; merge them
+    // transactionally so a conflicting id stops this jar, not the game.
+    let mut declarations = declarations_from_entries(&typed)?;
+    declarations.merge(declarations_from_entries(&jar.native_declarations)?)?;
+    // The current content model has no table for these yet; name them so a
+    // mod's rows are not silently dropped.
+    if !declarations.block_entities.is_empty()
+        || !declarations.recipes.is_empty()
+        || !declarations.ingredients.is_empty()
+    {
+        log::warn!(
+            "Horizon: Java mod {} declares {} block entity, {} recipe and {} ingredient row(s) the content model does not express yet",
+            path.display(),
+            declarations.block_entities.len(),
+            declarations.recipes.len(),
+            declarations.ingredients.len()
+        );
+    }
+    let content: Vec<ContentMod> = declarations
+        .content_mods()?
+        .into_iter()
+        .map(|(id, content)| ContentMod { id, content })
+        .collect();
     let report = JavaCompatibilityReport {
-        jar: path.clone(),
+        jar: path.to_path_buf(),
         loader: loader(&jar),
         engine: if weave.skipped.is_empty() {
             JavaEngine::Native
@@ -161,7 +266,7 @@ fn run_one(
         isolation_failure: None,
     };
     runtimes().lock().unwrap().push((jar, host));
-    Ok((content, report))
+    Ok((content, report, declarations))
 }
 
 pub(super) fn run_java_mods(
@@ -171,13 +276,13 @@ pub(super) fn run_java_mods(
     runtimes().lock().unwrap().clear();
     let mut content = Vec::new();
     let mut reports = Vec::new();
+    let mut declarations = Vec::new();
     for path in paths {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(path, role))) {
-            Ok(Ok((c, r))) => {
-                if let Some(c) = c {
-                    content.push(c);
-                }
+            Ok(Ok((c, r, d))) => {
+                content.extend(c);
                 reports.push(r);
+                declarations.push(d);
             }
             Ok(Err(e)) => log::warn!("Horizon: Java mod {e} skipped"),
             Err(_) => log::warn!(
@@ -185,6 +290,9 @@ pub(super) fn run_java_mods(
                 path.display()
             ),
         }
+    }
+    if let Err(e) = super::java_registry::publish(&declarations) {
+        log::warn!("Horizon: Java registry snapshot not published: {e}");
     }
     if let Some(home) = std::env::var_os("HORIZON_HOME") {
         let jars = reports
@@ -214,4 +322,64 @@ pub(super) fn run_java_mods(
         );
     }
     Ok((content, reports))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_native_java::{RegistryDeclaration, RegistryEntry};
+    use std::collections::BTreeMap;
+
+    fn block_entry(id: &str, template: &str) -> RegistryEntry {
+        RegistryEntry::typed(
+            "minecraft:block",
+            id,
+            RegistryDeclaration::Block {
+                template: template.into(),
+                properties: BTreeMap::from([("hardness".into(), "1.5".into())]),
+                item: true,
+            },
+        )
+    }
+
+    #[test]
+    fn a_java_block_declaration_becomes_a_content_mod() {
+        let entries = [block_entry("fixture:ruby_block", "minecraft:stone")];
+        let mods = content_mods(&entries, &[]).unwrap();
+        assert_eq!(mods.len(), 1);
+        assert_eq!(mods[0].id, "fixture");
+        assert_eq!(mods[0].content.blocks.len(), 1);
+        assert_eq!(mods[0].content.blocks[0].id, "fixture:ruby_block");
+        assert_eq!(mods[0].content.blocks[0].template, "minecraft:stone");
+        assert_eq!(mods[0].content.blocks[0].properties.hardness, Some(1.5));
+        assert!(mods[0].content.blocks[0].item);
+    }
+
+    #[test]
+    fn opaque_registrations_do_not_become_content() {
+        let opaque = RegistryEntry {
+            registry: "minecraft:block".into(),
+            id: "fixture:opaque".into(),
+            value: horizon_native_java::Value::Ref(Some("registered/opaque".into())),
+            declaration: None,
+        };
+        assert!(content_mods(&[opaque], &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn metadata_declarations_merge_with_registered_ones() {
+        let registered = [block_entry("fixture:ruby_block", "minecraft:stone")];
+        let metadata = [RegistryEntry::typed(
+            "minecraft:item",
+            "fixture:ruby_gem",
+            RegistryDeclaration::Item {
+                template: "minecraft:diamond".into(),
+                properties: BTreeMap::new(),
+            },
+        )];
+        let mods = content_mods(&registered, &metadata).unwrap();
+        assert_eq!(mods[0].content.blocks.len(), 1);
+        assert_eq!(mods[0].content.items.len(), 1);
+        assert_eq!(mods[0].content.items[0].id, "fixture:ruby_gem");
+    }
 }
