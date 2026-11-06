@@ -254,7 +254,6 @@ fn no_such(vm: &mut Vm, class: &str, what: String) -> Exc {
 
 fn find(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
     let refc = vm.mirror_class(arg(a, 1).r()).ok_or_else(|| Exc::Internal("lookup without a class".into()))?;
-    vm.ensure_init(refc).ok();
     let cname = vm.class(refc).java_name();
     match op {
         "findStatic" | "findVirtual" | "findSpecial" => {
@@ -279,7 +278,11 @@ fn find(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             let private = vm.method(m).access & crate::vm::class::ACC_PRIVATE != 0;
             let (target, hdesc) = match op {
                 "findStatic" => (Target::Static(m), desc.clone()),
-                "findSpecial" => (Target::Special(m), receiver_desc(vm, refc, &desc)),
+                "findSpecial" => {
+                    // The handle's receiver is the special caller.
+                    let caller = vm.mirror_class(arg(a, 4).r()).unwrap_or(refc);
+                    (Target::Special(m), receiver_desc(vm, caller, &desc))
+                }
                 _ if private => (Target::Special(m), receiver_desc(vm, refc, &desc)),
                 _ => (Target::Virtual(m), receiver_desc(vm, refc, &desc)),
             };
@@ -309,9 +312,6 @@ fn find(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             if is_static != want_static {
                 let msg = format!("{} field: {cname}.{name}/{}", if is_static { "expected instance not static" } else { "expected static not instance" }, desc_simple(vm, &fdesc)?);
                 return Err(vm.throw_new("java/lang/IllegalAccessException", Some(&msg)));
-            }
-            if want_static {
-                vm.ensure_init(owner)?;
             }
             let recv = if is_static { String::new() } else { vm.descriptor_of(refc) };
             let (target, desc) = match op {
@@ -477,6 +477,9 @@ pub fn call_handle(vm: &mut Vm, h: ObjId, args: &[Value]) -> Res<Value> {
             Ok(Value::Ref(r))
         }
         Target::Getter { owner, slot, is_static } => {
+            if is_static {
+                vm.ensure_init(owner)?;
+            }
             let obj = if is_static { 0 } else { all.first().map_or(0, |v| v.r()) };
             if !is_static && obj == 0 {
                 return Err(vm.npe(None));
@@ -484,6 +487,9 @@ pub fn call_handle(vm: &mut Vm, h: ObjId, args: &[Value]) -> Res<Value> {
             Ok(field(vm, owner, slot, is_static, obj).unwrap_or_default())
         }
         Target::Setter { owner, slot, is_static } => {
+            if is_static {
+                vm.ensure_init(owner)?;
+            }
             let (obj, v) = if is_static { (0, all.first().copied().unwrap_or_default()) } else { (all.first().map_or(0, |v| v.r()), all.get(1).copied().unwrap_or_default()) };
             set_field(vm, owner, slot, is_static, obj, v)?;
             let _ = ret;

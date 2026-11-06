@@ -18,6 +18,11 @@ pub fn double_to_long_bits(d: f64) -> i64 {
     if d.is_nan() { 0x7ff8_0000_0000_0000 } else { d.to_bits() as i64 }
 }
 
+/// The wrapper class of a primitive descriptor.
+pub fn wrapper_name(kind: u8) -> &'static str {
+    wrapper_class(kind)
+}
+
 fn wrapper_class(kind: u8) -> &'static str {
     match kind {
         b'Z' => "java/lang/Boolean",

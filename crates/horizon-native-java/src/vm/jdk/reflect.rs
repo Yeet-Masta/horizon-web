@@ -788,6 +788,16 @@ fn executable_text(vm: &Vm, m: MethodId) -> String {
 
 fn exception_names(vm: &Vm, m: MethodId) -> Vec<String> {
     let method = vm.method(m);
+    if method.info.is_none() {
+        // A JDK method the VM has natively: the exceptions Java declares.
+        let declared: &[&str] = match (vm.class_name(method.class), &*method.name) {
+            ("java/lang/Object", "wait") | ("java/lang/Thread", "sleep" | "join") => &["java.lang.InterruptedException"],
+            ("java/lang/Object", "clone") => &["java.lang.CloneNotSupportedException"],
+            ("java/lang/Object", "finalize") => &["java.lang.Throwable"],
+            _ => &[],
+        };
+        return declared.iter().map(|s| s.to_string()).collect();
+    }
     let (Some(info), Some(cf)) = (&method.info, vm.class(method.class).class_file()) else { return Vec::new() };
     info.exceptions.iter().filter_map(|&i| cf.class_name(i).ok()).map(|n| n.replace('/', ".")).collect()
 }

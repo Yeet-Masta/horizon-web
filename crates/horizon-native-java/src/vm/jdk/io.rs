@@ -1,7 +1,7 @@
 //! `java.io` and charsets: print streams, byte and char streams in memory,
 //! readers and writers. Standard output and error go to the VM's buffers;
 //! nothing reaches a host file (docs/java-interpreter.md, "The sandbox").
-use super::{A, INTERFACE, M, NativeClass, NativeMethod, PUBLIC, S, State, arg, class, ret_bool, ret_ref, ret_str, state, state_mut, this, void};
+use super::{A, FINAL, INTERFACE, M, NativeClass, NativeMethod, PUBLIC, S, State, arg, class, ret_bool, ret_ref, ret_str, state, state_mut, this, void};
 use crate::natives;
 use crate::vm::interp::Vm;
 use crate::vm::{Array, Data, Exc, ObjId, Res, Value};
@@ -165,14 +165,14 @@ impl Out {
     }
 }
 
-fn out(vm: &Vm, r: ObjId) -> Option<&Out> {
+pub(crate) fn out(vm: &Vm, r: ObjId) -> Option<&Out> {
     match state(vm, r) {
         Some(State::Out(o)) => Some(o),
         _ => None,
     }
 }
 
-fn out_mut(vm: &mut Vm, r: ObjId) -> Option<&mut Out> {
+pub(crate) fn out_mut(vm: &mut Vm, r: ObjId) -> Option<&mut Out> {
     match state_mut(vm, r) {
         Some(State::Out(o)) => Some(o),
         _ => None,
@@ -194,7 +194,7 @@ pub fn new_print_stream(vm: &mut Vm, sink: Sink) -> Res<ObjId> {
 }
 
 /// Bytes written to an output stream object.
-fn write_bytes(vm: &mut Vm, r: ObjId, bytes: &[u8]) -> Res<()> {
+pub(crate) fn write_bytes(vm: &mut Vm, r: ObjId, bytes: &[u8]) -> Res<()> {
     let Some(o) = out(vm, r) else {
         // A program's own OutputStream: its write(byte[], int, int).
         let arr = byte_array(vm, bytes)?;
@@ -219,7 +219,7 @@ fn write_bytes(vm: &mut Vm, r: ObjId, bytes: &[u8]) -> Res<()> {
 }
 
 /// Chars written to a print stream or a writer object.
-fn write_chars(vm: &mut Vm, r: ObjId, units: &[u16]) -> Res<()> {
+pub(crate) fn write_chars(vm: &mut Vm, r: ObjId, units: &[u16]) -> Res<()> {
     let Some(o) = out(vm, r) else {
         let arr = char_array(vm, units)?;
         vm.invoke_virtual(r, "write", "([CII)V", &[Value::Ref(arr), Value::Int(0), Value::Int(units.len() as i32)])?;
@@ -569,14 +569,14 @@ impl Source {
     }
 }
 
-fn source(vm: &Vm, r: ObjId) -> Option<&Source> {
+pub(crate) fn source(vm: &Vm, r: ObjId) -> Option<&Source> {
     match state(vm, r) {
         Some(State::In(s)) => Some(s),
         _ => None,
     }
 }
 
-fn source_mut(vm: &mut Vm, r: ObjId) -> Option<&mut Source> {
+pub(crate) fn source_mut(vm: &mut Vm, r: ObjId) -> Option<&mut Source> {
     match state_mut(vm, r) {
         Some(State::In(s)) => Some(s),
         _ => None,
@@ -598,7 +598,7 @@ pub fn new_input_stream(vm: &mut Vm, bytes: Vec<u8>) -> Res<ObjId> {
 }
 
 /// Every byte left in an input stream object.
-fn read_all_bytes(vm: &mut Vm, r: ObjId) -> Res<Vec<u8>> {
+pub(crate) fn read_all_bytes(vm: &mut Vm, r: ObjId) -> Res<Vec<u8>> {
     if source(vm, r).is_some() {
         load_bytes(vm, r)?;
         let Some(s) = source_mut(vm, r) else { return Ok(Vec::new()) };
@@ -620,7 +620,7 @@ fn read_all_bytes(vm: &mut Vm, r: ObjId) -> Res<Vec<u8>> {
     Ok(out)
 }
 
-fn load_bytes(vm: &mut Vm, r: ObjId) -> Res<()> {
+pub(crate) fn load_bytes(vm: &mut Vm, r: ObjId) -> Res<()> {
     let Some(s) = source(vm, r) else { return Ok(()) };
     if s.loaded {
         return Ok(());
@@ -636,7 +636,7 @@ fn load_bytes(vm: &mut Vm, r: ObjId) -> Res<()> {
 
 /// Every char a reader has left (a native reader's buffer, or a program's
 /// reader read to its end).
-fn load_chars(vm: &mut Vm, r: ObjId) -> Res<()> {
+pub(crate) fn load_chars(vm: &mut Vm, r: ObjId) -> Res<()> {
     let Some(s) = source(vm, r) else { return Ok(()) };
     if s.loaded {
         return Ok(());
@@ -657,7 +657,7 @@ fn load_chars(vm: &mut Vm, r: ObjId) -> Res<()> {
     Ok(())
 }
 
-fn reader_rest(vm: &mut Vm, r: ObjId) -> Res<Vec<u16>> {
+pub(crate) fn reader_rest(vm: &mut Vm, r: ObjId) -> Res<Vec<u16>> {
     if source(vm, r).is_some() {
         load_chars(vm, r)?;
         let Some(s) = source_mut(vm, r) else { return Ok(Vec::new()) };
@@ -1127,6 +1127,167 @@ const STANDARD_CHARSETS: &[(&str, &str)] = &[
     ("UTF_16LE", "UTF-16LE"),
 ];
 
+// ------------------------------------------------------------------ data streams
+
+/// `DataOutputStream`: big-endian primitives and modified UTF-8 to a stream.
+fn data_out_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    let t = this(vm, a)?;
+    let v = arg(a, 1);
+    let bytes: Vec<u8> = match op {
+        "init" => {
+            let target = v.r();
+            if target == 0 {
+                return Err(vm.npe(None));
+            }
+            set_out(vm, t, Out::new(Sink::Stream(target)));
+            return void();
+        }
+        "writeBoolean" | "writeByte" => vec![v.i() as u8],
+        "writeShort" | "writeChar" => (v.i() as u16).to_be_bytes().to_vec(),
+        "writeInt" => v.i().to_be_bytes().to_vec(),
+        "writeLong" => v.j().to_be_bytes().to_vec(),
+        "writeFloat" => super::boxes::float_to_int_bits(v.f()).to_be_bytes().to_vec(),
+        "writeDouble" => super::boxes::double_to_long_bits(v.d()).to_be_bytes().to_vec(),
+        "writeBytes" => super::string::units(vm, v.r())?.iter().map(|&u| u as u8).collect(),
+        "writeChars" => super::string::units(vm, v.r())?.iter().flat_map(|u| u.to_be_bytes()).collect(),
+        "writeUTF" => {
+            let units = super::string::units(vm, v.r())?;
+            let body = modified_utf8(&units);
+            if body.len() > 65535 {
+                let msg = format!("encoded string ({}...{}) too long: {} bytes", String::from_utf16_lossy(&units[..8.min(units.len())]), String::from_utf16_lossy(&units[units.len().saturating_sub(8)..]), body.len());
+                return Err(vm.throw_new("java/io/UTFDataFormatException", Some(&msg)));
+            }
+            let mut out = (body.len() as u16).to_be_bytes().to_vec();
+            out.extend(body);
+            out
+        }
+        "size" => return Ok(Value::Int(out(vm, t).map_or(0, |o| o.bytes.len().min(i32::MAX as usize)) as i32)),
+        _ => return Err(Exc::Unsupported(format!("DataOutputStream.{op}"))),
+    };
+    let target = match out(vm, t).map(|o| o.sink.clone()) {
+        Some(Sink::Stream(target)) => target,
+        _ => return Err(Exc::Internal("data output without a stream".into())),
+    };
+    write_bytes(vm, target, &bytes)?;
+    // `written` counts what went out (size()); the bytes themselves are not kept.
+    if let Some(o) = out_mut(vm, t) {
+        o.bytes.resize(o.bytes.len() + bytes.len(), 0);
+    }
+    void()
+}
+
+/// Java's modified UTF-8: NUL as two bytes, surrogates encoded one by one.
+pub fn modified_utf8(units: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(units.len());
+    for &u in units {
+        match u {
+            1..=0x7F => out.push(u as u8),
+            0 | 0x80..=0x7FF => {
+                out.push(0xC0 | (u >> 6) as u8);
+                out.push(0x80 | (u & 0x3F) as u8);
+            }
+            _ => {
+                out.push(0xE0 | (u >> 12) as u8);
+                out.push(0x80 | ((u >> 6) & 0x3F) as u8);
+                out.push(0x80 | (u & 0x3F) as u8);
+            }
+        }
+    }
+    out
+}
+
+/// `DataInputStream`: the same, read back; `EOFException` at the end.
+fn data_in_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    let t = this(vm, a)?;
+    load_bytes(vm, t)?;
+    let need = match op {
+        "readBoolean" | "readByte" | "readUnsignedByte" => 1,
+        "readShort" | "readUnsignedShort" | "readChar" => 2,
+        "readInt" | "readFloat" => 4,
+        "readLong" | "readDouble" => 8,
+        _ => 0,
+    };
+    let take = |vm: &mut Vm, n: usize| -> Res<Vec<u8>> {
+        let Some(s) = source_mut(vm, t) else { return Err(Exc::Internal("data input".into())) };
+        if s.pos + n > s.bytes.len() {
+            s.pos = s.bytes.len();
+            return Err(vm.throw_new("java/io/EOFException", None));
+        }
+        let b = s.bytes[s.pos..s.pos + n].to_vec();
+        s.pos += n;
+        Ok(b)
+    };
+    if need > 0 {
+        let b = take(vm, need)?;
+        let be = |n: usize| b.iter().take(n).fold(0u64, |acc, &x| (acc << 8) | x as u64);
+        return Ok(match op {
+            "readBoolean" => Value::Int((b[0] != 0) as i32),
+            "readByte" => Value::Int(b[0] as i8 as i32),
+            "readUnsignedByte" => Value::Int(b[0] as i32),
+            "readShort" => Value::Int(be(2) as u16 as i16 as i32),
+            "readUnsignedShort" | "readChar" => Value::Int(be(2) as i32),
+            "readInt" => Value::Int(be(4) as u32 as i32),
+            "readFloat" => Value::Float(f32::from_bits(be(4) as u32)),
+            "readLong" => Value::Long(be(8) as i64),
+            _ => Value::Double(f64::from_bits(be(8))),
+        });
+    }
+    match op {
+        "readFully" => {
+            let arr = arg(a, 1).r();
+            let len = vm.array(arr).map_or(0, Array::len);
+            let (off, n) = if a.len() > 2 { (arg(a, 2).i(), arg(a, 3).i()) } else { (0, len as i32) };
+            let (s, e) = range(vm, len, off, n)?;
+            let b = take(vm, e - s)?;
+            if let Some(Array::B(dst)) = vm.array_mut(arr) {
+                for (i, x) in b.into_iter().enumerate() {
+                    dst[s + i] = x as i8;
+                }
+            }
+            void()
+        }
+        "skipBytes" => {
+            let n = arg(a, 1).i().max(0) as usize;
+            let Some(s) = source_mut(vm, t) else { return Ok(Value::Int(0)) };
+            let k = n.min(s.bytes.len().saturating_sub(s.pos));
+            s.pos += k;
+            Ok(Value::Int(k as i32))
+        }
+        "readUTF" => {
+            let n = take(vm, 2)?;
+            let len = u16::from_be_bytes([n[0], n[1]]) as usize;
+            let body = take(vm, len)?;
+            match crate::vm::classfile::decode_modified_utf8(&body) {
+                Ok(units) => ret_ref(vm.new_string_units(units)?),
+                Err(_) => Err(vm.throw_new("java/io/UTFDataFormatException", Some("malformed input"))),
+            }
+        }
+        "readLine" => {
+            let Some(s) = source_mut(vm, t) else { return ret_ref(0) };
+            if s.pos >= s.bytes.len() {
+                return ret_ref(0);
+            }
+            let mut line = Vec::new();
+            while s.pos < s.bytes.len() {
+                let c = s.bytes[s.pos];
+                s.pos += 1;
+                if c == b'\n' {
+                    break;
+                }
+                if c == b'\r' {
+                    if s.bytes.get(s.pos) == Some(&b'\n') {
+                        s.pos += 1;
+                    }
+                    break;
+                }
+                line.push(c as u16);
+            }
+            ret_ref(vm.new_string_units(line)?)
+        }
+        _ => input_op(vm, a, op),
+    }
+}
+
 static CLASSES: &[NativeClass] = &[
     class("java/io/Flushable", None, &[], INTERFACE, natives!["flush" "()V" A => None]),
     NativeClass { name: "java/io/OutputStream", super_name: Some("java/lang/Object"), interfaces: &["java/io/Closeable", "java/io/Flushable"], access: PUBLIC | 0x0400, methods: natives![
@@ -1238,6 +1399,43 @@ static CLASSES: &[NativeClass] = &[
         "<init>" "(Ljava/io/Reader;)V" M => Some(|vm, a| input_op(vm, a, "initFrom")),
         "<init>" "(Ljava/io/Reader;I)V" M => Some(|vm, a| input_op(vm, &a[..2], "initFrom")),
     ]),
+    class("java/io/DataOutput", None, &[], INTERFACE, &[]),
+    class("java/io/DataInput", None, &[], INTERFACE, &[]),
+    NativeClass { name: "java/io/DataOutputStream", super_name: Some("java/io/FilterOutputStream"), interfaces: &["java/io/DataOutput"], access: PUBLIC, methods: natives![
+        "<init>" "(Ljava/io/OutputStream;)V" M => Some(|vm, a| data_out_op(vm, a, "init")),
+        "writeBoolean" "(Z)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeBoolean")),
+        "writeByte" "(I)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeByte")),
+        "write" "(I)V" M => Some(|vm, a| data_out_op(vm, a, "writeByte")),
+        "writeShort" "(I)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeShort")),
+        "writeChar" "(I)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeChar")),
+        "writeInt" "(I)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeInt")),
+        "writeLong" "(J)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeLong")),
+        "writeFloat" "(F)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeFloat")),
+        "writeDouble" "(D)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeDouble")),
+        "writeBytes" "(Ljava/lang/String;)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeBytes")),
+        "writeChars" "(Ljava/lang/String;)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeChars")),
+        "writeUTF" "(Ljava/lang/String;)V" M | FINAL => Some(|vm, a| data_out_op(vm, a, "writeUTF")),
+        "write" "([BII)V" M => Some(|vm, a| { let t = this(vm, a)?; let b = super::string::bytes_of(vm, arg(a, 1).r())?; let (s, e) = range(vm, b.len(), arg(a, 2).i(), arg(a, 3).i())?; let target = match out(vm, t).map(|o| o.sink.clone()) { Some(Sink::Stream(x)) => x, _ => return void() }; write_bytes(vm, target, &b[s..e])?; if let Some(o) = out_mut(vm, t) { o.bytes.resize(o.bytes.len() + (e - s), 0); } void() }),
+        "size" "()I" M | FINAL => Some(|vm, a| data_out_op(vm, a, "size")),
+    ], statics: &[], clinit: None, data: None },
+    NativeClass { name: "java/io/DataInputStream", super_name: Some("java/io/FilterInputStream"), interfaces: &["java/io/DataInput"], access: PUBLIC, methods: natives![
+        "<init>" "(Ljava/io/InputStream;)V" M => Some(|vm, a| input_op(vm, a, "initFrom")),
+        "readBoolean" "()Z" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readBoolean")),
+        "readByte" "()B" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readByte")),
+        "readUnsignedByte" "()I" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readUnsignedByte")),
+        "readShort" "()S" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readShort")),
+        "readUnsignedShort" "()I" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readUnsignedShort")),
+        "readChar" "()C" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readChar")),
+        "readInt" "()I" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readInt")),
+        "readLong" "()J" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readLong")),
+        "readFloat" "()F" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readFloat")),
+        "readDouble" "()D" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readDouble")),
+        "readFully" "([B)V" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readFully")),
+        "readFully" "([BII)V" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readFully")),
+        "skipBytes" "(I)I" M | FINAL => Some(|vm, a| data_in_op(vm, a, "skipBytes")),
+        "readUTF" "()Ljava/lang/String;" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readUTF")),
+        "readLine" "()Ljava/lang/String;" M | FINAL => Some(|vm, a| data_in_op(vm, a, "readLine")),
+    ], statics: &[], clinit: None, data: None },
     NativeClass { name: "java/nio/charset/Charset", super_name: Some("java/lang/Object"), interfaces: &["java/lang/Comparable"], access: PUBLIC | 0x0400, methods: natives![
         "forName" "(Ljava/lang/String;)Ljava/nio/charset/Charset;" S => Some(|vm, a| { let r = arg(a, 0).r(); if r == 0 { return Err(vm.throw_new("java/lang/IllegalArgumentException", Some("Null charset name"))); } let name = vm.string(r).unwrap_or_default(); match canonical(&name) { Some(c) => ret_ref(charset_object(vm, c)?), None => Err(vm.throw_new("java/nio/charset/UnsupportedCharsetException", Some(&name))) } }),
         "defaultCharset" "()Ljava/nio/charset/Charset;" S => Some(|vm, _| ret_ref(charset_object(vm, "UTF-8")?)),

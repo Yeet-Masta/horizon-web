@@ -4,8 +4,7 @@
 //! launcher's stack trace, JEP 358's messages).
 use super::{
     A, ABSTRACT, FINAL, INTERFACE, M, NativeClass, PUBLIC, S, State, arg, class, ret_bool, ret_ref,
-    ret_str, state, this, void,
-};
+    ret_str, state, this, void, NATIVE};
 use crate::natives;
 use crate::vm::class::{ACC_ENUM, ClassKind};
 use crate::vm::heap::{Obj, ThrowableData};
@@ -23,18 +22,19 @@ static CLASSES: &[NativeClass] = &[
         interfaces: &[],
         access: PUBLIC,
         methods: natives![
+            // In HotSpot's order, and with Java's modifiers (reflection shows both).
             "<init>" "()V" M => Some(|_, _| void()),
-            "hashCode" "()I" M => Some(object_hash_code),
             "equals" "(Ljava/lang/Object;)Z" M => Some(|_, a| ret_bool(arg(a, 0).r() == arg(a, 1).r())),
-            "toString" "()Ljava/lang/String;" M => Some(object_to_string),
-            "getClass" "()Ljava/lang/Class;" M | FINAL => Some(object_get_class),
-            "clone" "()Ljava/lang/Object;" 0x0004 => Some(object_clone),
-            "finalize" "()V" 0x0004 => Some(|_, _| void()),
-            "notify" "()V" M | FINAL => Some(super::thread::object_notify),
-            "notifyAll" "()V" M | FINAL => Some(super::thread::object_notify_all),
+            "getClass" "()Ljava/lang/Class;" M | FINAL | NATIVE => Some(object_get_class),
+            "notify" "()V" M | FINAL | NATIVE => Some(super::thread::object_notify),
+            "notifyAll" "()V" M | FINAL | NATIVE => Some(super::thread::object_notify_all),
             "wait" "()V" M | FINAL => Some(super::thread::object_wait),
             "wait" "(J)V" M | FINAL => Some(super::thread::object_wait),
             "wait" "(JI)V" M | FINAL => Some(super::thread::object_wait),
+            "toString" "()Ljava/lang/String;" M => Some(object_to_string),
+            "hashCode" "()I" M | NATIVE => Some(object_hash_code),
+            "clone" "()Ljava/lang/Object;" 0x0004 | NATIVE => Some(object_clone),
+            "finalize" "()V" 0x0004 => Some(|_, _| void()),
         ],
         statics: &[],
         clinit: None,
@@ -535,7 +535,10 @@ fn system_arraycopy(vm: &mut Vm, a: &[Value]) -> Res<Value> {
         for (i, &r) in items.iter().enumerate() {
             if r != 0 && !vm.instance_of(r, comp) {
                 let msg = format!("arraycopy: element type mismatch: can not cast one of the elements of {}[] to the type of the destination array, {}", vm.class(vm.class_of(src).unwrap()).java_name().trim_start_matches("[L").trim_end_matches(';'), vm.class(comp).java_name());
-                let _ = i;
+                // The elements before the one that fails are copied, as HotSpot's are.
+                if let Some(Array::L(d)) = vm.array_mut(dst) {
+                    d[dp..dp + i].copy_from_slice(&items[..i]);
+                }
                 return Err(vm.throw_new("java/lang/ArrayStoreException", Some(&msg)));
             }
         }
@@ -1152,7 +1155,7 @@ fn array_kind(n: u8) -> &'static str {
 
 fn method_text(class: &str, name: &str, desc: &str) -> String {
     let params = crate::vm::classfile::parse_method_desc(desc)
-        .map(|(p, _)| p.iter().map(|d| crate::vm::class::desc_to_java(d)).collect::<Vec<_>>().join(", "))
+        .map(|(p, _)| p.iter().map(|d| short_class(&crate::vm::class::desc_to_java(d))).collect::<Vec<_>>().join(", "))
         .unwrap_or_default();
     format!("{}.{name}({params})", short_class(class))
 }

@@ -12,6 +12,7 @@ pub mod invoke;
 pub mod io;
 pub mod lang;
 pub mod math;
+pub mod misc;
 pub mod reflect;
 pub mod stream;
 pub mod string;
@@ -48,6 +49,8 @@ pub const STATIC: u16 = 0x0008;
 pub const FINAL: u16 = 0x0010;
 pub const INTERFACE: u16 = 0x0200 | 0x0400;
 pub const ABSTRACT: u16 = 0x0400;
+/// A JDK method Java declares `native` (reflection shows it).
+pub const NATIVE: u16 = 0x0100;
 /// Access of a public instance method.
 pub const M: u16 = PUBLIC;
 /// Access of a public static method.
@@ -99,6 +102,7 @@ fn registry() -> &'static HashMap<&'static str, &'static NativeClass> {
             thread::classes(),
             stream::classes(),
             math::classes(),
+            misc::classes(),
         ] {
             for c in group {
                 map.insert(c.name, c);
@@ -235,6 +239,10 @@ pub struct VmState {
     /// `ClassLoader.set*AssertionStatus`: by class name, by package (a
     /// trailing `.`), and the default.
     pub assertion_status: HashMap<String, bool>,
+    /// `new Properties(defaults)`: each Properties' defaults.
+    pub property_defaults: HashMap<ObjId, ObjId>,
+    /// `ScopedValue` bindings in force, innermost last.
+    pub scoped: Vec<(ObjId, Value)>,
     pub default_assertions: Option<bool>,
     pub proxies: Vec<reflect::ProxyClass>,
 }

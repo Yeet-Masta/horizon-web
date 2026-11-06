@@ -142,7 +142,10 @@ impl Vm {
                             let v = self.resolve_condy(&cf, i)?;
                             match self.jdk.enum_descs.get(&v.r()).cloned() {
                                 Some((c, name)) => Label::Enum(c, name),
-                                None => return Err(Exc::Unsupported("switch label constant".into())),
+                                None => match self.mirror_class(v.r()) {
+                                    Some(c) => Label::Class(c),
+                                    None => return Err(Exc::Unsupported("switch label constant".into())),
+                                },
                             }
                         }
                         other => return Err(Exc::Unsupported(format!("switch label {other:?}"))),
@@ -470,7 +473,11 @@ impl Vm {
         let _ = enum_switch;
         for (i, label) in labels.iter().enumerate().skip(restart.max(0) as usize) {
             let hit = match label {
-                Label::Class(c) => self.instance_of(target, *c),
+                Label::Class(c) => match self.class(*c).kind {
+                    // A primitive label matches its wrapper (primitive patterns).
+                    ClassKind::Primitive(p) => self.class_of(target).is_some_and(|k| self.class_name(k) == super::jdk::boxes::wrapper_name(p)),
+                    _ => self.instance_of(target, *c),
+                },
                 Label::Str(units) => self.string_units(target).is_some_and(|u| u == &units[..]),
                 Label::Int(v) => match self.obj(target).map(|o| &o.data) {
                     Some(Data::Boxed(b)) => b.i() == *v,
@@ -622,7 +629,8 @@ impl Vm {
                 let Some(class) = self.class_of(receiver) else {
                     return Err(self.npe(None));
                 };
-                let m = self.select(class, method.nd)?;
+                // A private method (an interface's own lambda body) is not selected.
+                let m = if method.access & super::class::ACC_PRIVATE != 0 { target.method } else { self.select(class, method.nd)? };
                 self.invoke(m, &call)?
             }
             6 => {
