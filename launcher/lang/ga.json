@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Am rith: tuairiscíodh {count} comhad jar",
   "Clear compatibility cache": "Glan an taisce comhoiriúnachta",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Glanadh taisce comhoiriúnachta {name}. Déanfar é a sheiceáil arís ag an gcéad suiteáil, nuashonrú nó cuardach eile.",
-  "(+{count} more)": "(+{count} eile)"
+  "(+{count} more)": "(+{count} eile)",
+  "Hybrid: native + loader": "Hibrideach: dúchasach + luchtóir"
 }

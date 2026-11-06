@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Ish vaqti: {count} jar fayli haqida xabar berildi",
   "Clear compatibility cache": "Moslik keshini tozalash",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} uchun moslik keshi tozalandi. Keyingi o’rnatish, yangilash yoki qidiruvda qayta tekshiriladi.",
-  "(+{count} more)": "(+{count} ta)"
+  "(+{count} more)": "(+{count} ta)",
+  "Hybrid: native + loader": "Gibrid: mahalliy + yuklovchi"
 }

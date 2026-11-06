@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Ажиллагаа: {count} jar файл мэдээлэгдсэн",
   "Clear compatibility cache": "Тохицлын кэшийг цэвэрлэх",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}-ийн тохицлын кэш цэвэрлэгдлээ. Дараагийн суулгац, шинэчлэл эсвэл хайлтад дахин шалгагдана.",
-  "(+{count} more)": "(+{count} нэмэлт)"
+  "(+{count} more)": "(+{count} нэмэлт)",
+  "Hybrid: native + loader": "Хибрид: уугуул + ачаалагч"
 }

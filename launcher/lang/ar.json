@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "التشغيل: تم الإبلاغ عن {count} ملف jar",
   "Clear compatibility cache": "مسح ذاكرة التوافق المؤقتة",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "تم مسح ذاكرة التوافق المؤقتة لـ {name}. سيتم فحصه مجددًا عند التثبيت أو التحديث أو الظهور في البحث التالي.",
-  "(+{count} more)": "(+{count} المزيد)"
+  "(+{count} more)": "(+{count} المزيد)",
+  "Hybrid: native + loader": "هجين: أصلي + محمّل"
 }

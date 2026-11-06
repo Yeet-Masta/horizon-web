@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtime: {count} file jar segnalati",
   "Clear compatibility cache": "Cancella la cache di compatibilità",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "La cache di compatibilità di {name} è stata cancellata. Verrà controllata di nuovo al prossimo aggiornamento, installazione o ricerca.",
-  "(+{count} more)": "(+{count} altri)"
+  "(+{count} more)": "(+{count} altri)",
+  "Hybrid: native + loader": "Ibrido: nativo + loader"
 }

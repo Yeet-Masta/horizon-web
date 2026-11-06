@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Среда: отчетени {count} jar файла",
   "Clear compatibility cache": "Изчисти кеша за съвместимост",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кешът за съвместимост на {name} беше изчистен. Ще бъде проверен отново при следващо инсталиране, актуализация или показване в търсене.",
-  "(+{count} more)": "(+{count} още)"
+  "(+{count} more)": "(+{count} още)",
+  "Hybrid: native + loader": "Хибрид: собствен + зареждащ"
 }

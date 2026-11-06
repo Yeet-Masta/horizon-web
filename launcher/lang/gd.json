@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Àm ruith: chaidh {count} faidhle jar aithris",
   "Clear compatibility cache": "Falamhaich tasgadan co-fhreagarrachd",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Chaidh tasgadan co-fhreagarrachd {name} fhalamhachadh. Thèid a sgrùdadh a-rithist aig an ath shuiteadh, ùrachadh no rannsachadh.",
-  "(+{count} more)": "(+{count} eile)"
+  "(+{count} more)": "(+{count} eile)",
+  "Hybrid: native + loader": "Co-mheasgaichte: dùthchasach + luchdaiche"
 }

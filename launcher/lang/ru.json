@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Среда выполнения: сообщено о {count} jar-файл(ах)",
   "Clear compatibility cache": "Очистить кэш совместимости",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кэш совместимости для {name} очищен. Мод будет проверен снова при следующей установке, обновлении или появлении в поиске.",
-  "(+{count} more)": "(+{count} ещё)"
+  "(+{count} more)": "(+{count} ещё)",
+  "Hybrid: native + loader": "Гибрид: нативный + загрузчик"
 }

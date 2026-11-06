@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "런타임: jar {count}개 보고됨",
   "Clear compatibility cache": "호환성 캐시 지우기",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}의 호환성 캐시를 지웠습니다. 다음 설치, 업데이트 또는 검색 시 다시 확인됩니다.",
-  "(+{count} more)": "(+{count}개 더)"
+  "(+{count} more)": "(+{count}개 더)",
+  "Hybrid: native + loader": "하이브리드: 네이티브 + 로더"
 }

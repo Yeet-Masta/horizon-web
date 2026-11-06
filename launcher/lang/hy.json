@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Կատարում: հաղորդվել է {count} jar ֆայլ",
   "Clear compatibility cache": "Մաքրել համատեղելիության քեշը",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}-ի համատեղելիության քեշը մաքրվել է։ Այն կրկին կստուգվի հաջորդ տեղադրման, թարմացման կամ որոնման ժամանակ։",
-  "(+{count} more)": "(+{count} ավելի)"
+  "(+{count} more)": "(+{count} ավելի)",
+  "Hybrid: native + loader": "Հիբրիդ՝ բնիկ + բեռնիչ"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Середовище: повідомлено про {count} jar-файл(ів)",
   "Clear compatibility cache": "Очистити кеш сумісності",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кеш сумісності для {name} очищено. Його буде перевірено знову під час наступного встановлення, оновлення або появи в пошуку.",
-  "(+{count} more)": "(+{count} ще)"
+  "(+{count} more)": "(+{count} ще)",
+  "Hybrid: native + loader": "Гібрид: нативний + завантажувач"
 }

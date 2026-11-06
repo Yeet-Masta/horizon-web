@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Izpildlaiks: ziņots par {count} jar failiem",
   "Clear compatibility cache": "Notīrīt saderības kešatmiņu",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} saderības kešatmiņa tika notīrīta. Tā tiks pārbaudīta vēlreiz nākamajā instalēšanā, atjaunināšanā vai meklēšanā.",
-  "(+{count} more)": "(+{count} vairāk)"
+  "(+{count} more)": "(+{count} vairāk)",
+  "Hybrid: native + loader": "Hibrīds: vietējais + ielādētājs"
 }

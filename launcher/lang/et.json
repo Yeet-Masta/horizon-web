@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Käitusaeg: teatati {count} jar-failist",
   "Clear compatibility cache": "Tühjenda ühilduvusvahemälu",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Ühilduvusvahemälu üksusele {name} tühjendati. Seda kontrollitakse uuesti järgmisel paigaldamisel, värskendamisel või otsingus.",
-  "(+{count} more)": "(+{count} veel)"
+  "(+{count} more)": "(+{count} veel)",
+  "Hybrid: native + loader": "Hübriid: natiivne + laadija"
 }

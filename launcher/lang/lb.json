@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Laufzäit: {count} Jar-Dateie gemellt",
   "Clear compatibility cache": "Kompatibilitéitscache läschen",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De Kompatibilitéitscache fir {name} gouf geläscht. Et gëtt bei der nächster Installatioun, Aktualiséierung oder Sich erëm gepréift.",
-  "(+{count} more)": "(+{count} méi)"
+  "(+{count} more)": "(+{count} méi)",
+  "Hybrid: native + loader": "Hybrid: nativ + Lueder"
 }

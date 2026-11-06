@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Ӗҫлев: {count} jar файл ҫинчен пӗлтернӗ",
   "Clear compatibility cache": "Ҫыхӑну кэшне тасат",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} валли ҫыхӑну кэшӗ тасатрӗ. Вӑл тепӗр вырнаҫтарнӑ чух, ҫӗнетнӗ чух е шыравра каллех тӗрӗсленӗ.",
-  "(+{count} more)": "(+{count} тата)"
+  "(+{count} more)": "(+{count} тата)",
+  "Hybrid: native + loader": "Гибрид: тăван + тиевçĕ"
 }

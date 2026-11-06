@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "รันไทม์: รายงาน {count} ไฟล์ jar",
   "Clear compatibility cache": "ล้างแคชความเข้ากันได้",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "ล้างแคชความเข้ากันได้ของ {name} แล้ว จะตรวจสอบอีกครั้งในการติดตั้ง อัปเดต หรือแสดงในการค้นหาครั้งถัดไป",
-  "(+{count} more)": "(+{count} เพิ่มเติม)"
+  "(+{count} more)": "(+{count} เพิ่มเติม)",
+  "Hybrid: native + loader": "ไฮบริด: เนทีฟ + ตัวโหลด"
 }

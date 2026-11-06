@@ -10,6 +10,7 @@
 use super::{installed::Entry, pick, FileRef, Kind, Project, Source, Support, Version};
 use crate::i18n::{self, Language};
 use horizon_port_pack::check::{self, Check, Verdict};
+use horizon_port_pack::classes::Feature;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,6 +73,30 @@ struct RuntimeJar {
     isolation_failure: Option<String>,
 }
 
+/// Where a jar's code runs in Horizon's hybrid path, in the vocabulary of the server ledger
+/// (`tools/java_mod_server_ledger.py`) and `tools/hybrid_pack.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// The native half runs it, and every plan it skipped stayed inside the jar.
+    Native,
+    /// It runs natively, but the plans it skipped target game classes: only a real loader
+    /// applies those.
+    Loader,
+    /// Native execution refuses it.
+    Gap,
+}
+
+impl Route {
+    /// The label the ledger and the `hybrid_pack` tool print.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native-ok",
+            Self::Loader => "needs-loader",
+            Self::Gap => "native-gap",
+        }
+    }
+}
+
 /// One installed jar's runtime lines, and how relevant they are to the panel: whether the
 /// runtime failed to isolate it, and how many classes it skipped.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -79,6 +104,8 @@ pub struct RuntimeLines {
     pub lines: Vec<String>,
     pub failed: bool,
     pub skipped: usize,
+    /// The ledger label the report alone supports (`None` for a defaulted row with no report).
+    pub route: Option<Route>,
 }
 
 /// Reads the game's bounded runtime report, if one was written for this game folder. A file
@@ -92,6 +119,18 @@ pub fn runtime_report(home: &Path) -> Option<RuntimeReport> {
     (report.schema_version == RUNTIME_SCHEMA).then_some(report)
 }
 
+/// The report's row for `file_name`. An installed Java mod is a folder named for its mod id,
+/// while the runtime reports the jar's file name: match the file name, the whole path, or the
+/// name without `.jar`.
+fn jar_in<'a>(report: &'a RuntimeReport, file_name: &str) -> Option<&'a RuntimeJar> {
+    report.jars.iter().find(|jar| {
+        let path = Path::new(&jar.file);
+        path.file_name().is_some_and(|name| name == file_name)
+            || path.file_stem().is_some_and(|stem| stem == file_name)
+            || jar.file == file_name
+    })
+}
+
 /// Bounded runtime lines for one installed jar, matched by its file name. Every reported
 /// string is cut to [`bounded`], so a hostile report can't grow the panel.
 pub fn runtime_lines_in(
@@ -99,14 +138,7 @@ pub fn runtime_lines_in(
     report: &RuntimeReport,
     file_name: &str,
 ) -> Option<RuntimeLines> {
-    // An installed Java mod is a folder named for its mod id, while the runtime reports the
-    // jar's file name: match the file name, the whole path, or the name without `.jar`.
-    let jar = report.jars.iter().find(|jar| {
-        let path = Path::new(&jar.file);
-        path.file_name().is_some_and(|name| name == file_name)
-            || path.file_stem().is_some_and(|stem| stem == file_name)
-            || jar.file == file_name
-    })?;
+    let jar = jar_in(report, file_name)?;
     let woven = jar.woven.to_string();
     let skipped = jar.skipped.to_string();
     let registrations = jar.registrations.to_string();
@@ -143,7 +175,53 @@ pub fn runtime_lines_in(
         lines,
         failed: jar.isolation_failure.is_some(),
         skipped: jar.skipped,
+        route: Some(route_of_jar(jar)),
     })
+}
+
+/// Skip reasons that name a plan whose target is a game class (`net/minecraft`): the weaver
+/// only rewrites classes inside the jar, so such a plan needs the real loader to apply.
+const GAME_TARGET_SKIPS: [&str; 3] = ["target-outside-jar", "game-class", "net/minecraft/"];
+
+/// The ledger label for one reported jar: a refused engine or a failed isolation is a gap;
+/// a game-class plan in the first skip reason needs the loader; anything else runs natively.
+fn route_of_jar(jar: &RuntimeJar) -> Route {
+    if jar.engine.eq_ignore_ascii_case("refused") || jar.isolation_failure.is_some() {
+        return Route::Gap;
+    }
+    match jar.first_skip_reason.as_deref() {
+        Some(reason) if GAME_TARGET_SKIPS.iter().any(|mark| reason.contains(mark)) => Route::Loader,
+        _ => Route::Native,
+    }
+}
+
+/// One installed jar's ledger label from `report`, when it has a row.
+pub fn runtime_route_in(report: &RuntimeReport, file_name: &str) -> Option<Route> {
+    jar_in(report, file_name).map(route_of_jar)
+}
+
+/// The label a cached port check alone supports, when no runtime report says more: a jar with
+/// nothing to carry can't run natively; one whose classes patch the game (Mixins) needs the
+/// loader for those plans; content the native path carries is `native-ok`.
+pub fn route_of_check(check: &Check) -> Route {
+    if check.verdict == Verdict::No {
+        return Route::Gap;
+    }
+    match check.code.features.get(&Feature::Mixin) {
+        Some(n) if *n > 0 => Route::Loader,
+        _ => Route::Native,
+    }
+}
+
+/// Whether a pack's routes use both halves: at least one jar runs natively and at least one
+/// needs the loader. It then runs as a hybrid (docs/java-mod-compat.md).
+pub fn hybrid(routes: impl IntoIterator<Item = Option<Route>>) -> bool {
+    let (mut native, mut loader) = (false, false);
+    for route in routes.into_iter().flatten() {
+        native |= route == Route::Native;
+        loader |= route == Route::Loader;
+    }
+    native && loader
 }
 
 /// One summary line when the report has no jar the page listed.
@@ -548,6 +626,32 @@ mod tests {
         }
     }
 
+    /// A cached port check alone routes a jar: nothing to carry is a gap, Mixins patch the game
+    /// so they need the loader, and content the native path carries is `native-ok`.
+    #[test]
+    fn a_cached_check_gives_the_label_it_can() {
+        let mut check = demo_check();
+        assert_eq!(route_of_check(&check), Route::Native);
+        check.verdict = Verdict::No;
+        assert_eq!(route_of_check(&check), Route::Gap);
+        let mut check = demo_check();
+        check.code.features.insert(Feature::Mixin, 2);
+        assert_eq!(route_of_check(&check), Route::Loader);
+        check.code.features.insert(Feature::BlockBehaviour, 1);
+        assert_eq!(route_of_check(&check), Route::Loader);
+    }
+
+    /// A pack is a hybrid only when it has both halves: a jar that runs natively and a jar that
+    /// needs the loader. A gap, or only one side, doesn't make one.
+    #[test]
+    fn a_pack_is_hybrid_only_with_both_halves() {
+        assert!(hybrid([Some(Route::Native), Some(Route::Loader)]));
+        assert!(!hybrid([Some(Route::Native), Some(Route::Native)]));
+        assert!(!hybrid([Some(Route::Loader), Some(Route::Gap)]));
+        assert!(!hybrid([Some(Route::Loader), None]));
+        assert!(!hybrid([]));
+    }
+
     /// The runtime report is read from the game folder, matched by a jar's file name, and its
     /// strings are cut to one bounded line. A newer schema or an oversized file is ignored.
     #[test]
@@ -567,6 +671,17 @@ mod tests {
                 "woven": 0, "skipped": 0, "first_skip_reason": null,
                 "registrations": 0, "opaque": 0, "payload_channels": [],
                 "isolation_failure": "class loader\nescaped"
+            }, {
+                "file": "game.jar", "loader": "fabric", "engine": "native",
+                "woven": 0, "skipped": 12,
+                "first_skip_reason": "target-outside-jar HEAD net/minecraft/world/level/Level#tick",
+                "registrations": 3, "opaque": 0, "payload_channels": [],
+                "isolation_failure": null
+            }, {
+                "file": "refused.jar", "loader": "forge", "engine": "refused",
+                "woven": 0, "skipped": 0, "first_skip_reason": null,
+                "registrations": 0, "opaque": 0, "payload_channels": [],
+                "isolation_failure": null
             }]
         });
         fs::write(
@@ -580,16 +695,33 @@ mod tests {
         assert!(lines.lines[0].contains("payloads: 1"));
         assert!(lines.lines[1].contains("bad target"));
         assert_eq!((lines.failed, lines.skipped), (false, 1));
+        // A skip that names no game class leaves the jar on the native path.
+        assert_eq!(lines.route, Some(Route::Native));
         // An installed mod's entry names its folder, not the jar inside it.
         assert!(runtime_lines_in(Language::English, &read, "demo").is_some());
         assert!(runtime_lines_in(Language::English, &read, "missing.jar").is_none());
+        assert_eq!(
+            runtime_route_in(&read, "demo"),
+            Some(Route::Native),
+            "the entry's folder name matches the report's jar"
+        );
 
         let failed = runtime_lines_in(Language::English, &read, "other.jar").unwrap();
         assert!(failed.failed);
         assert!(!failed.lines.last().unwrap().contains('\n'));
+        assert_eq!(failed.route, Some(Route::Gap));
+        // A game-class plan needs the loader; a refused engine is a native gap.
+        assert_eq!(runtime_route_in(&read, "game.jar"), Some(Route::Loader));
+        assert_eq!(
+            runtime_lines_in(Language::English, &read, "game.jar")
+                .unwrap()
+                .route,
+            Some(Route::Loader)
+        );
+        assert_eq!(runtime_route_in(&read, "refused.jar"), Some(Route::Gap));
         assert_eq!(
             runtime_summary_in(Language::English, &read),
-            "Runtime: 2 jar(s) reported"
+            "Runtime: 4 jar(s) reported"
         );
 
         fs::write(

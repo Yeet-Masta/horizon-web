@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "رن ٹائم: {count} jar فائلیں رپورٹ ہوئیں",
   "Clear compatibility cache": "مطابقت کا کیش صاف کریں",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} کا مطابقت کا کیش صاف کر دیا گیا۔ اگلی بار انسٹال، اپ ڈیٹ یا تلاش میں دکھائی دینے پر دوبارہ جانچا جائے گا۔",
-  "(+{count} more)": "(+{count} مزید)"
+  "(+{count} more)": "(+{count} مزید)",
+  "Hybrid: native + loader": "ہائبرڈ: مقامی + لوڈر"
 }

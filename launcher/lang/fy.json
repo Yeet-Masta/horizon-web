@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Rintyd: {count} jar-bestannen rapportearre",
   "Clear compatibility cache": "Kompatibiliteitscache wiskje",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De kompatibiliteitscache foar {name} is wiske. It wurdt by de folgjende ynstallaasje, bywurking of syktocht wer kontrolearre.",
-  "(+{count} more)": "(+{count} mear)"
+  "(+{count} more)": "(+{count} mear)",
+  "Hybrid: native + loader": "Hybride: native + lader"
 }

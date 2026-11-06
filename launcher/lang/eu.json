@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Exekuzioa: {count} jar fitxategi jakinarazi dira",
   "Clear compatibility cache": "Garbitu bateragarritasun-cachea",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}(e)n bateragarritasun-cachea garbitu da. Hurrengo instalazioan, eguneratzean edo bilaketan berriro egiaztatuko da.",
-  "(+{count} more)": "(+{count} gehiago)"
+  "(+{count} more)": "(+{count} gehiago)",
+  "Hybrid: native + loader": "Hibridoa: natiboa + kargatzailea"
 }

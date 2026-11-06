@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Извршување: пријавени {count} jar датотеки",
   "Clear compatibility cache": "Исчисти го кешот за компатибилност",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Кешот за компатибилност за {name} е исчистен. Ќе биде повторно проверен при следното инсталирање, ажурирање или пребарување.",
-  "(+{count} more)": "(+{count} повеќе)"
+  "(+{count} more)": "(+{count} повеќе)",
+  "Hybrid: native + loader": "Хибрид: нативно + вчитувач"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Czas rozwiniyńcio: zgłoszůno {count} plikůw jar",
   "Clear compatibility cache": "Wyczyść pamjyńć podrynczno zgodności",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Pamjyńć podrynczno zgodności lo {name} wyczyszczůno. Bydźe sprowjůnzo nazod przi nastympnyj instalacyji, aktualizacyji abo szukaniu.",
-  "(+{count} more)": "(+{count} wjyncyj)"
+  "(+{count} more)": "(+{count} wjyncyj)",
+  "Hybrid: native + loader": "Hybrydowy: natwny + loader"
 }

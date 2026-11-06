@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Amzer redek: {count} restr jar kemennet",
   "Clear compatibility cache": "Skarzhañ ar c’has kempoell",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Skarzhet eo bet ar c’has kempoell evit {name}. Gwiriet e vo en-dro d’an ensavidigezh, hizivadenn pe c’hlask da-heul.",
-  "(+{count} more)": "(+{count} ouzhpenn)"
+  "(+{count} more)": "(+{count} ouzhpenn)",
+  "Hybrid: native + loader": "Hanterblen: henvel + karger"
 }

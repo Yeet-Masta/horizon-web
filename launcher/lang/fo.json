@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Koyritíð: {count} jar-fílur fráboðaðar",
   "Clear compatibility cache": "Strika samsvarandi fyrimynd",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Samsvarandi fyrimyndin fyri {name} varð strikað. Hon verður kannað aftur næsta innlegging, dagføring ella leiting.",
-  "(+{count} more)": "(+{count} fleiri)"
+  "(+{count} more)": "(+{count} fleiri)",
+  "Hybrid: native + loader": "Hybrid: innbygdur + innlesari"
 }

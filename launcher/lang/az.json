@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "İşləmə: {count} jar faylı bildirildi",
   "Clear compatibility cache": "Uyğunluq keşini təmizlə",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} üçün uyğunluq keşi təmizləndi. Növbəti quraşdırma, yeniləmə və ya axtarışda yenidən yoxlanılacaq.",
-  "(+{count} more)": "(+{count} daha)"
+  "(+{count} more)": "(+{count} daha)",
+  "Hybrid: native + loader": "Hibrid: yerli + yükləyici"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Keyrsla: tilkynnt um {count} jar-skrá",
   "Clear compatibility cache": "Hreinsa samhæfnisbiðminni",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Samhæfnisbiðminni fyrir {name} var hreinsað. Það verður athugað aftur við næstu uppsetningu, uppfærslu eða leit.",
-  "(+{count} more)": "(+{count} fleiri)"
+  "(+{count} more)": "(+{count} fleiri)",
+  "Hybrid: native + loader": "Blendingur: innfæddur + hleðslutæki"
 }

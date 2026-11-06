@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "ランタイム: {count} 個の jar が報告されました",
   "Clear compatibility cache": "互換性キャッシュを消去",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} の互換性キャッシュを消去しました。次回のインストール、更新、または検索での表示時に再確認されます。",
-  "(+{count} more)": "(+{count} 件)"
+  "(+{count} more)": "(+{count} 件)",
+  "Hybrid: native + loader": "ハイブリッド：ネイティブ + ローダー"
 }

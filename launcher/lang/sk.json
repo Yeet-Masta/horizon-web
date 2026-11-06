@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Beh: nahlásených {count} súborov jar",
   "Clear compatibility cache": "Vymazať vyrovnávaciu pamäť kompatibility",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Vyrovnávacia pamäť kompatibility pre {name} bola vymazaná. Znova sa skontroluje pri ďalšej inštalácii, aktualizácii alebo zobrazení vo vyhľadávaní.",
-  "(+{count} more)": "(+{count} ďalších)"
+  "(+{count} more)": "(+{count} ďalších)",
+  "Hybrid: native + loader": "Hybridný: natívny + zavádzač"
 }

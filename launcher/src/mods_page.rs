@@ -1364,10 +1364,43 @@ impl Launcher {
         self.mods.installed_list.reset();
     }
 
+    /// The ledger label an installed Java mod has, when the game's runtime report or its cached
+    /// port check says: the report wins (it saw the jar run), the check fills in when it has
+    /// none. None when neither says anything, so the page claims nothing.
+    fn mods_route(
+        &self,
+        e: &installed::Entry,
+        report: Option<&java::RuntimeReport>,
+    ) -> Option<java::Route> {
+        // A carried Java mod only: a native mod or one of Horizon's own is neither.
+        if e.kind != PackKind::Mod
+            || e.source == SourceId::Horizon
+            || native_status::is_native_file(&e.file)
+        {
+            return None;
+        }
+        let name = std::path::Path::new(&e.file).file_name()?.to_str()?;
+        let check = self
+            .mods
+            .diagnostics
+            .get(&e.checksum)
+            .and_then(|c| c.as_deref());
+        pick_route(
+            report.and_then(|report| java::runtime_route_in(report, name)),
+            check,
+        )
+    }
+
     /// The runtime panel for installed Java mods, from the game's `java-runtime.json`: the
-    /// [`DIAGNOSED`] most relevant rows, each with a button that clears its compatibility cache,
-    /// then "(+N more)`. A game that wrote no report says so.
-    fn mods_runtime(&self, entries: &[&installed::Entry], cx: &mut Context<Self>) -> Option<Div> {
+    /// [`DIAGNOSED`] most relevant rows, each with its ledger label and a button that clears its
+    /// compatibility cache, then "(+N more)`. A game that wrote no report says so, and a pack
+    /// with both halves says it runs as a hybrid.
+    fn mods_runtime(
+        &self,
+        entries: &[&installed::Entry],
+        report: Option<&java::RuntimeReport>,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let candidates: Vec<&installed::Entry> = entries
             .iter()
             .copied()
@@ -1386,7 +1419,6 @@ impl Launcher {
             .flex_col()
             .gap(px(8.))
             .child(caps(tr("Java runtime")).text_color(t.muted));
-        let report = java::runtime_report(&self.mods.home());
         let cached = |e: &installed::Entry| {
             self.mods
                 .diagnostics
@@ -1398,18 +1430,29 @@ impl Launcher {
             .into_iter()
             .filter_map(|e| {
                 let name = std::path::Path::new(&e.file).file_name()?.to_str()?;
-                let runtime = report
-                    .as_ref()
-                    .and_then(|report| java::runtime_lines_in(i18n::current(), report, name));
+                let runtime =
+                    report.and_then(|report| java::runtime_lines_in(i18n::current(), report, name));
                 (runtime.is_some() || cached(e)).then_some((e, runtime.unwrap_or_default()))
             })
             .collect();
         if found.is_empty() {
-            let line = match &report {
+            let line = match report {
                 Some(report) => java::runtime_summary_in(i18n::current(), report),
                 None => tr("No runtime report").to_string(),
             };
             return Some(panel.child(text(theme::CAPTION).text_color(t.ink_soft).child(line)));
+        }
+        // The hint is about the whole pack, not only the rows the panel bounds itself to.
+        if java::hybrid(
+            found
+                .iter()
+                .map(|(e, runtime)| runtime.route.or_else(|| self.mods_route(e, report))),
+        ) {
+            panel = panel.child(
+                text(theme::CAPTION)
+                    .text_color(t.success)
+                    .child(tr("Hybrid: native + loader")),
+            );
         }
         if report.is_none() {
             panel = panel.child(
@@ -1423,14 +1466,23 @@ impl Launcher {
             let entry = e.clone();
             let failed = runtime.failed;
             // The report names the first plan it skipped; a game-class target is exactly what the
-            // in-game weaver cannot rewrite, so the row says the jar needs the real loader.
-            let loader = needs_loader(&runtime);
+            // in-game weaver cannot rewrite, so the row says the jar needs the real loader. A
+            // cached check labels it when the game wrote no runtime row.
+            let route = runtime.route.or_else(|| self.mods_route(e, report));
+            let mut head = div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(e.title.clone());
+            if let Some(route) = route {
+                head = head.child(route_badge(route, &t));
+            }
             let mut row = div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(8.))
-                .child(e.title.clone());
+                .child(head);
             if self
                 .mods
                 .diagnostics
@@ -1458,7 +1510,7 @@ impl Launcher {
                 .flex_col()
                 .gap(px(4.))
                 .child(row);
-            if loader {
+            if route == Some(java::Route::Loader) {
                 card = card.child(
                     text(theme::CAPTION)
                         .text_color(t.warn)
@@ -1503,6 +1555,10 @@ impl Launcher {
         let t = self.theme;
         let kind = self.mods.kind;
         self.load_diagnostics();
+        // Read once for every row and the runtime panel below, not once per row.
+        let report = (self.mods.java.is_none() && kind == PackKind::Mod)
+            .then(|| java::runtime_report(&self.mods.home()))
+            .flatten();
         // Each project's own icon (Modrinth's, asked for once), at the row's size.
         let ids = self
             .mods
@@ -1548,6 +1604,10 @@ impl Launcher {
             let e = entries[i];
             let key = (e.source, e.project.clone());
             let is_native = self.mods.java.is_none() && native_status::is_native_file(&e.file);
+            // Only a carried Java mod has a route; a Java instance runs its files as they are.
+            let route = (self.mods.java.is_none() && kind == PackKind::Mod)
+                .then(|| self.mods_route(e, report.as_ref()))
+                .flatten();
             let mut right = div().flex().items_center().gap(px(8.));
             if let Some(number) = self.mods.updates.get(&key) {
                 let mut update = button(
@@ -1646,9 +1706,10 @@ impl Launcher {
                         .dependency
                         .then(|| tr("needed by another pack").to_string());
                     let origin: Vec<String> = from.into_iter().chain(needed).collect();
-                    e.verdict
-                        .iter()
-                        .map(|v| tr(v).to_string())
+                    route
+                        .map(|r| r.label().to_string())
+                        .into_iter()
+                        .chain(e.verdict.iter().map(|v| tr(v).to_string()))
                         .chain([e.number.clone()])
                         .chain((!origin.is_empty()).then(|| origin.join(", ")))
                         .chain([e.file.clone()])
@@ -1714,7 +1775,7 @@ impl Launcher {
             row,
         );
         let runtime = (self.mods.java.is_none() && kind == PackKind::Mod)
-            .then(|| self.mods_runtime(&entries, cx))
+            .then(|| self.mods_runtime(&entries, report.as_ref(), cx))
             .flatten();
         Some(
             div()
@@ -2205,16 +2266,32 @@ fn source_switch(
     segments("mods-source", &SOURCES, current, t, on_pick).child(soon)
 }
 
-/// Skip labels that name a plan whose target is a game class (`net/minecraft`): the weaver only
-/// rewrites classes inside the jar, so such a plan needs the real loader to apply.
-const GAME_TARGET_SKIPS: [&str; 3] = ["target-outside-jar", "game-class", "net/minecraft/"];
+/// An installed Java mod's label from the two signals the page has: the runtime report saw the
+/// jar run, so its answer wins; the cached port check fills in when the report has no row.
+fn pick_route(runtime: Option<java::Route>, check: Option<&Check>) -> Option<java::Route> {
+    runtime.or_else(|| check.map(java::route_of_check))
+}
 
-/// Whether a runtime row's skip reason says the jar's plans target the game.
-fn needs_loader(runtime: &java::RuntimeLines) -> bool {
-    runtime
-        .lines
-        .iter()
-        .any(|line| GAME_TARGET_SKIPS.iter().any(|marker| line.contains(marker)))
+/// A route's ledger label as the panel shows it: a small mono badge, coloured by where the jar
+/// runs. The label is the ledger's own token (`native-ok`, `needs-loader`, `native-gap`), so it
+/// reads the same in a report, a terminal and here.
+fn route_badge(route: java::Route, t: &Theme) -> Div {
+    let color = match route {
+        java::Route::Native => t.success,
+        java::Route::Loader => t.warn,
+        java::Route::Gap => t.muted,
+    };
+    div()
+        .flex_none()
+        .px(px(6.))
+        .rounded(px(4.))
+        .bg(t.well)
+        .child(
+            text(theme::CAPTION)
+                .font_family(theme::MONO)
+                .text_color(color)
+                .child(route.label()),
+        )
 }
 
 /// The runtime panel's rows: the [`DIAGNOSED`] most relevant of `found` (a failed isolation
@@ -2272,32 +2349,41 @@ mod tests {
             lines: vec!["Runtime: native".into()],
             failed,
             skipped,
+            route: Some(java::Route::Native),
         }
     }
 
-    /// A plan that targets a game class makes its row say the loader is needed; one skipped for a
-    /// reason that does not name the game (a family the weaver does not model) does not.
+    fn demo_check(verdict: horizon_port_pack::check::Verdict) -> Check {
+        Check {
+            mod_id: "demo".into(),
+            name: "Demo".into(),
+            version: "1".into(),
+            loader: "fabric".into(),
+            license: "MIT".into(),
+            verdict,
+            summary: String::new(),
+            ports: Vec::new(),
+            skipped: Vec::new(),
+            depends: Vec::new(),
+            namespaces: Vec::new(),
+            code: Default::default(),
+        }
+    }
+
+    /// The runtime report's row wins (it saw the jar run), the cached check fills in when there
+    /// is none, and neither answering leaves the row unlabelled rather than guessing.
     #[test]
-    fn runtime_rows_say_when_their_plans_need_the_loader() {
-        let game = java::RuntimeLines {
-            lines: vec![
-                "Runtime: native-qualified · loader: fabric · woven: 0 · skipped: 12 · registrations: 3 · opaque: 0 · payloads: 0".into(),
-                "Runtime skipped: target-outside-jar HEAD net/minecraft/world/level/Level#tick".into(),
-            ],
-            failed: false,
-            skipped: 12,
-        };
-        let elsewhere = java::RuntimeLines {
-            lines: vec![
-                "Runtime: native · loader: fabric · woven: 2 · skipped: 1 · registrations: 0 · opaque: 0 · payloads: 0".into(),
-                "Runtime skipped: unsupported-family INVOKE demo/Target#run".into(),
-            ],
-            failed: false,
-            skipped: 1,
-        };
-        assert!(needs_loader(&game));
-        assert!(!needs_loader(&elsewhere));
-        assert!(!needs_loader(&java::RuntimeLines::default()));
+    fn the_runtime_report_wins_over_a_cached_check() {
+        use horizon_port_pack::check::Verdict;
+        let works = demo_check(Verdict::Works);
+        let refused = demo_check(Verdict::No);
+        assert_eq!(
+            pick_route(Some(java::Route::Gap), Some(&works)),
+            Some(java::Route::Gap)
+        );
+        assert_eq!(pick_route(None, Some(&works)), Some(java::Route::Native));
+        assert_eq!(pick_route(None, Some(&refused)), Some(java::Route::Gap));
+        assert_eq!(pick_route(None, None), None);
     }
 
     /// The panel lists the five most relevant (a failed isolation first, then the most

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Amser rhedeg: adroddwyd am {count} ffeil jar",
   "Clear compatibility cache": "Clirio storfa gydnawsedd",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cliriwyd storfa gydnawsedd ar gyfer {name}. Bydd yn cael ei wirio eto yn ystod y gosodiad, diweddariad neu chwiliad nesaf.",
-  "(+{count} more)": "(+{count} yn rhagor)"
+  "(+{count} more)": "(+{count} yn rhagor)",
+  "Hybrid: native + loader": "Hybrid: brodorol + llwythydd"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Manawa holo: {count} waihona jar i hōʻike ʻia",
   "Clear compatibility cache": "Holoi i ka waihona kūlike",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Ua holoi ʻia ka waihona kūlike no {name}. E nānā hou ʻia i ka hoʻouka, hoʻonui, a i ʻole hulina aʻe.",
-  "(+{count} more)": "(+{count} hou aʻe)"
+  "(+{count} more)": "(+{count} hou aʻe)",
+  "Hybrid: native + loader": "Huila: kūloko + mea hoʻouka"
 }

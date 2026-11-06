@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Ajonaikainen: {count} jar-tiedostoa raportoitu",
   "Clear compatibility cache": "Tyhjennä yhteensopivuusvälimuisti",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kohteen {name} yhteensopivuusvälimuisti tyhjennettiin. Se tarkistetaan uudelleen seuraavan asennuksen, päivityksen tai haun yhteydessä.",
-  "(+{count} more)": "(+{count} lisää)"
+  "(+{count} more)": "(+{count} lisää)",
+  "Hybrid: native + loader": "Hybridi: natiivi + lataaja"
 }

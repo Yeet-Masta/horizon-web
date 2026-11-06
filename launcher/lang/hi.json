@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "रनटाइम: {count} jar रिपोर्ट किए गए",
   "Clear compatibility cache": "संगतता कैश साफ़ करें",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} के लिए संगतता कैश साफ़ कर दिया गया। अगली बार इंस्टॉल, अपडेट या खोज में सूचीबद्ध होने पर इसे फिर से जाँचा जाएगा।",
-  "(+{count} more)": "(+{count} और)"
+  "(+{count} more)": "(+{count} और)",
+  "Hybrid: native + loader": "हाइब्रिड: नेटिव + लोडर"
 }

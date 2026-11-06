@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "ເວລາແລ່ນ: ລາຍງານ {count} ໄຟລ໌ jar",
   "Clear compatibility cache": "ລຶບແຄຊຄວາມເຂົ້າກັນໄດ້",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "ລຶບແຄຊຄວາມເຂົ້າກັນໄດ້ຂອງ {name} ແລ້ວ. ຈະກວດສອບຄືນໃນການຕິດຕັ້ງ, ອັບເດດ ຫຼື ການຄົ້ນຫາຄັ້ງຕໍ່ໄປ.",
-  "(+{count} more)": "(+{count} ເພີ່ມເຕີມ)"
+  "(+{count} more)": "(+{count} ເພີ່ມເຕີມ)",
+  "Hybrid: native + loader": "ໄຮບຣິດ: ພື້ນເມືອງ + ຕົວໂຫຼດ"
 }

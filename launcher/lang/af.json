@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Looptyd: {count} jar-lêers gerapporteer",
   "Clear compatibility cache": "Vee verenigbaarheidskas uit",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Die verenigbaarheidskas vir {name} is uitgevee. Dit sal weer nagegaan word by die volgende installasie, opdatering of soektog.",
-  "(+{count} more)": "(+{count} meer)"
+  "(+{count} more)": "(+{count} meer)",
+  "Hybrid: native + loader": "Hibried: inheems + laaier"
 }

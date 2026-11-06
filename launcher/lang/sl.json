@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Izvajanje: prijavljenih {count} datotek jar",
   "Clear compatibility cache": "Počisti predpomnilnik združljivosti",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Predpomnilnik združljivosti za {name} je bil počiščen. Ponovno bo preverjen ob naslednji namestitvi, posodobitvi ali iskanju.",
-  "(+{count} more)": "(+{count} več)"
+  "(+{count} more)": "(+{count} več)",
+  "Hybrid: native + loader": "Hibridno: izvorno + nalagalnik"
 }

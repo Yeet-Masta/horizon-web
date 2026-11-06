@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Masa jalan: {count} fail jar dilaporkan",
   "Clear compatibility cache": "Kosongkan cache keserasian",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache keserasian untuk {name} telah dikosongkan. Ia akan disemak semula pada pemasangan, kemas kini atau carian seterusnya.",
-  "(+{count} more)": "(+{count} lagi)"
+  "(+{count} more)": "(+{count} lagi)",
+  "Hybrid: native + loader": "Hibrid: asli + pemuat"
 }

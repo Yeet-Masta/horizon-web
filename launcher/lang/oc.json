@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Execucion: {count} fichièrs jar senhalats",
   "Clear compatibility cache": "Escafar la cache de compatibilitat",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "La cache de compatibilitat per {name} es estada escafada. Serà tornada verificar a la prossima installacion, mesa a jorn o recèrca.",
-  "(+{count} more)": "(+{count} mai)"
+  "(+{count} more)": "(+{count} mai)",
+  "Hybrid: native + loader": "Ibrid : natiu + cargador"
 }

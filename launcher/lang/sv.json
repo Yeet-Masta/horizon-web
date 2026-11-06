@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Körtid: {count} jar-filer rapporterade",
   "Clear compatibility cache": "Rensa kompatibilitetscachen",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetscachen för {name} rensades. Den kontrolleras igen vid nästa installation, uppdatering eller sökning.",
-  "(+{count} more)": "(+{count} fler)"
+  "(+{count} more)": "(+{count} fler)",
+  "Hybrid: native + loader": "Hybrid: inbyggd + laddare"
 }

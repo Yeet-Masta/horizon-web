@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Kjøretid: {count} jar-filer rapportert",
   "Clear compatibility cache": "Tøm kompatibilitetsbufferen",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetsbufferen for {name} ble tømt. Den kontrolleres igjen ved neste installasjon, oppdatering eller søk.",
-  "(+{count} more)": "(+{count} flere)"
+  "(+{count} more)": "(+{count} flere)",
+  "Hybrid: native + loader": "Hybrid: innebygd + laster"
 }

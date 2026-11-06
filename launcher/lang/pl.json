@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Środowisko: zgłoszono {count} plik(ów) jar",
   "Clear compatibility cache": "Wyczyść pamięć podręczną zgodności",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Wyczyszczono pamięć podręczną zgodności dla {name}. Zostanie sprawdzony ponownie przy następnej instalacji, aktualizacji lub wyszukiwaniu.",
-  "(+{count} more)": "(+{count} więcej)"
+  "(+{count} more)": "(+{count} więcej)",
+  "Hybrid: native + loader": "Hybrydowy: natywny + loader"
 }

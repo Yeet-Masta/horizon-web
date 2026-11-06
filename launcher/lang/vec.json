@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Execusion: {count} file jar segnalai",
   "Clear compatibility cache": "Neta ła cache de conpatibilità",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Ła cache de conpatibilità par {name} ła ze sta netada. Ła sarà controłada da novo a ła prosima instalasion, agregamento o riserca.",
-  "(+{count} more)": "(+{count} altri)"
+  "(+{count} more)": "(+{count} altri)",
+  "Hybrid: native + loader": "Ibrido: nativo + caricador"
 }

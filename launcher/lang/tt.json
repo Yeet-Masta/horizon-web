@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Башкару: {count} jar файлы турында хәбәр ителде",
   "Clear compatibility cache": "Ярашлылык кэшын чистарту",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} өчен ярашлылык кэшы чистартылды. Ул киләсе урнаштыру, яңарту яки эзләү вакытында яңадан тикшереләчәк.",
-  "(+{count} more)": "(+{count} тагын)"
+  "(+{count} more)": "(+{count} тагын)",
+  "Hybrid: native + loader": "Гибрид: туган + йөкләүче"
 }

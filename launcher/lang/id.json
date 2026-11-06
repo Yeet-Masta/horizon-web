@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtime: {count} jar dilaporkan",
   "Clear compatibility cache": "Hapus cache kompatibilitas",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache kompatibilitas untuk {name} dihapus. Akan diperiksa lagi saat dipasang, diperbarui, atau muncul di pencarian berikutnya.",
-  "(+{count} more)": "(+{count} lagi)"
+  "(+{count} more)": "(+{count} lagi)",
+  "Hybrid: native + loader": "Hibrida: asli + pemuat"
 }

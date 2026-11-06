@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Oge ọsọ: akọpụtara faịlụ jar {count}",
   "Clear compatibility cache": "Hichapụ cache ndakọrịta",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Ehichapụrụ cache ndakọrịta maka {name}. A ga-elele ya ọzọ na nwụnye, mmelite ma ọ bụ ọchụchọ ọzọ.",
-  "(+{count} more)": "(+{count} ndị ọzọ)"
+  "(+{count} more)": "(+{count} ndị ọzọ)",
+  "Hybrid: native + loader": "Ngwakọta: nke ala + onye nbubata"
 }

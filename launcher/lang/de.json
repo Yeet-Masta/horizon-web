@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Laufzeit: {count} Jar(s) gemeldet",
   "Clear compatibility cache": "Kompatibilitätscache löschen",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Der Kompatibilitätscache für {name} wurde gelöscht. Es wird bei der nächsten Installation, Aktualisierung oder Suchauflistung erneut geprüft.",
-  "(+{count} more)": "(+{count} weitere)"
+  "(+{count} more)": "(+{count} weitere)",
+  "Hybrid: native + loader": "Hybrid: nativ + Loader"
 }

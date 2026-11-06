@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "இயக்கம்: {count} jar கோப்புகள் தெரிவிக்கப்பட்டன",
   "Clear compatibility cache": "இணக்கத் தற்காலிக சேமையை அழி",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} இன் இணக்கத் தற்காலிக சேமை அழிக்கப்பட்டது. அடுத்த நிறுவல், புதுப்பிப்பு அல்லது தேடலில் மீண்டும் சரிபார்க்கப்படும்.",
-  "(+{count} more)": "(+{count} மேலும்)"
+  "(+{count} more)": "(+{count} மேலும்)",
+  "Hybrid: native + loader": "கலப்பினம்: சொந்த + ஏற்றி"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtime: {count} fișiere jar raportate",
   "Clear compatibility cache": "Șterge cache-ul de compatibilitate",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache-ul de compatibilitate pentru {name} a fost șters. Va fi verificat din nou la următoarea instalare, actualizare sau listare în căutare.",
-  "(+{count} more)": "(+{count} mai multe)"
+  "(+{count} more)": "(+{count} mai multe)",
+  "Hybrid: native + loader": "Hibrid: nativ + încărcător"
 }

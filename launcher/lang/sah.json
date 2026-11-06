@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Үлэлиир кэм: {count} jar файл туһунан биллэриллибит",
   "Clear compatibility cache": "Сөптөөх кэһи таһаар",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} сөптөөх кэһэ таһаарылынна. Кэлэр туруоруу, саҥардыы эбэтэр көрдөөһүн кэмигэр хаттаан бэрэбиэркэлэнэр.",
-  "(+{count} more)": "(+{count} эбии)"
+  "(+{count} more)": "(+{count} эбии)",
+  "Hybrid: native + loader": "Гибрид: төрүт + аҕааччы"
 }

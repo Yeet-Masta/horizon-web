@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Çalışma zamanı: {count} jar bildirildi",
   "Clear compatibility cache": "Uyumluluk önbelleğini temizle",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} için uyumluluk önbelleği temizlendi. Bir sonraki kurulum, güncelleme veya aramada yeniden denetlenecek.",
-  "(+{count} more)": "(+{count} daha)"
+  "(+{count} more)": "(+{count} daha)",
+  "Hybrid: native + loader": "Hibrit: yerel + yükleyici"
 }

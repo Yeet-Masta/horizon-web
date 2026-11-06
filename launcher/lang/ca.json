@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Execució: {count} fitxers jar informats",
   "Clear compatibility cache": "Esborra la memòria cau de compatibilitat",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "S’ha esborrat la memòria cau de compatibilitat de {name}. Es tornarà a comprovar la propera vegada que s’instal·li, s’actualitzi o aparegui en una cerca.",
-  "(+{count} more)": "(+{count} més)"
+  "(+{count} more)": "(+{count} més)",
+  "Hybrid: native + loader": "Híbrid: natiu + carregador"
 }

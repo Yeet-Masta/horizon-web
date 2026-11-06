@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Tempus currendi: {count} fasciculi jar nuntiati",
   "Clear compatibility cache": "Purgare cache congruentiae",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache congruentiae pro {name} purgata est. Iterum inspicietur in proxima institutione, renovatione aut investigatione.",
-  "(+{count} more)": "(+{count} plures)"
+  "(+{count} more)": "(+{count} plures)",
+  "Hybrid: native + loader": "Hybridum: nativum + onerator"
 }

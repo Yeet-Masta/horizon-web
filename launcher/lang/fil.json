@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtime: {count} jar ang iniulat",
   "Clear compatibility cache": "I-clear ang cache ng compatibility",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Na-clear ang cache ng compatibility para sa {name}. Susuriin itong muli sa susunod na pag-install, pag-update o paghahanap.",
-  "(+{count} more)": "(+{count} pa)"
+  "(+{count} more)": "(+{count} pa)",
+  "Hybrid: native + loader": "Hybrid: native + loader"
 }

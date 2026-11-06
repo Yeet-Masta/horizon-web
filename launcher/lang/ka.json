@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "გაშვება: მოხსენებულია {count} jar ფაილი",
   "Clear compatibility cache": "თავსებადობის ქეშის გასუფთავება",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name}-ის თავსებადობის ქეში გასუფთავდა. ის ხელახლა შემოწმდება შემდეგი ინსტალაციის, განახლების ან ძიების დროს.",
-  "(+{count} more)": "(+{count} მეტი)"
+  "(+{count} more)": "(+{count} მეტი)",
+  "Hybrid: native + loader": "ჰიბრიდული: ბუნებრივი + ჩამტვირთავი"
 }

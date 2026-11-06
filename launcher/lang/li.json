@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtied: {count} jar-bestenj gemeld",
   "Clear compatibility cache": "Compatibiliteitscache wösje",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De compatibiliteitscache veur {name} is gewösj. ’t Weurt bie de volgende installatie, update of zeukactie opnuuj gecontroleerd.",
-  "(+{count} more)": "(+{count} mieë)"
+  "(+{count} more)": "(+{count} mieë)",
+  "Hybrid: native + loader": "Hybride: native + lajer"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "זמן ריצה: {count} קובצי jar דווחו",
   "Clear compatibility cache": "נקה מטמון תאימות",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "מטמון התאימות של {name} נוקה. הוא ייבדק שוב בהתקנה, בעדכון או בחיפוש הבא.",
-  "(+{count} more)": "(+{count} נוספים)"
+  "(+{count} more)": "(+{count} נוספים)",
+  "Hybrid: native + loader": "היברידי: מקורי + טוען"
 }

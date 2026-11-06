@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Môi trường chạy: đã báo cáo {count} tệp jar",
   "Clear compatibility cache": "Xóa bộ nhớ đệm tương thích",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Đã xóa bộ nhớ đệm tương thích cho {name}. Nó sẽ được kiểm tra lại trong lần cài đặt, cập nhật hoặc tìm kiếm tiếp theo.",
-  "(+{count} more)": "(+{count} nữa)"
+  "(+{count} more)": "(+{count} nữa)",
+  "Hybrid: native + loader": "Lai: gốc + trình tải"
 }

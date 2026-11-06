@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Futtatókörnyezet: {count} jar jelentve",
   "Clear compatibility cache": "Kompatibilitási gyorsítótár törlése",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "A(z) {name} kompatibilitási gyorsítótára törölve. A következő telepítéskor, frissítéskor vagy keresésben való megjelenéskor újra ellenőrzésre kerül.",
-  "(+{count} more)": "(+{count} további)"
+  "(+{count} more)": "(+{count} további)",
+  "Hybrid: native + loader": "Hibrid: natív + betöltő"
 }

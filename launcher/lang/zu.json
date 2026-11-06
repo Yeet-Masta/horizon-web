@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Isikhathi sokusebenza: kubikwe amafayela e-jar angu-{count}",
   "Clear compatibility cache": "Sula inqolobane yokuhambisana",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Inqolobane yokuhambisana ye-{name} isuliwe. Izophinde ihlolwe ekufakweni, ekubuyekezweni noma ekusesheni okulandelayo.",
-  "(+{count} more)": "(+{count} okunye)"
+  "(+{count} more)": "(+{count} okunye)",
+  "Hybrid: native + loader": "Ingxubevange: yendabuko + umlayishi"
 }

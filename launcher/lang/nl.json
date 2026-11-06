@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Runtime: {count} jar-bestanden gemeld",
   "Clear compatibility cache": "Compatibiliteitscache wissen",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "De compatibiliteitscache voor {name} is gewist. Het wordt opnieuw gecontroleerd bij de volgende installatie, update of zoekopdracht.",
-  "(+{count} more)": "(+{count} meer)"
+  "(+{count} more)": "(+{count} meer)",
+  "Hybrid: native + loader": "Hybride: native + lader"
 }

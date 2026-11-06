@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Běh: nahlášeno {count} souborů jar",
   "Clear compatibility cache": "Vymazat mezipaměť kompatibility",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Mezipaměť kompatibility pro {name} byla vymazána. Znovu se zkontroluje při příští instalaci, aktualizaci nebo zobrazení ve vyhledávání.",
-  "(+{count} more)": "(+{count} dalších)"
+  "(+{count} more)": "(+{count} dalších)",
+  "Hybrid: native + loader": "Hybridní: nativní + zavaděč"
 }

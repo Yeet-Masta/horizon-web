@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Àkókò ìṣiṣẹ́: a ti ìròyìn fáìlì jar {count}",
   "Clear compatibility cache": "Pa káṣì ìbámu rẹ́",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "A ti pa káṣì ìbámu fún {name} rẹ́. Yóò tún jẹ́ àyẹ̀wò ní ìgbà ìfiṣe, ìmúdójúìwọnlọ tàbí ìwádìí tó ń bọ̀.",
-  "(+{count} more)": "(+{count} mìíràn)"
+  "(+{count} more)": "(+{count} mìíràn)",
+  "Hybrid: native + loader": "Àpapọ̀: ìbílẹ̀ + ẹlẹ́rù"
 }

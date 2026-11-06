@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Орындау: {count} jar файлы туралы хабарланды",
   "Clear compatibility cache": "Үйлесімділік кэшін тазалау",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "{name} үшін үйлесімділік кэші тазаланды. Келесі орнату, жаңарту немесе іздеу кезінде қайта тексеріледі.",
-  "(+{count} more)": "(+{count} тағы)"
+  "(+{count} more)": "(+{count} тағы)",
+  "Hybrid: native + loader": "Гибрид: жергілікті + жүктеуші"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Čuolmmaáigi: {count} jar-fiilla almmuhuvvon",
   "Clear compatibility cache": "Sihkke kompatibilitetsgárddi",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetsgárddi {name}-várás sihkkojuvvui. Dat geahčaduvvo fas boahtte ásahusas, ođastusas dahje ohcanas.",
-  "(+{count} more)": "(+{count} lasi)"
+  "(+{count} more)": "(+{count} lasi)",
+  "Hybrid: native + loader": "Hybrida: álgoálbmot + lohkki"
 }

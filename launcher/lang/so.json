@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Waqtiga socodka: {count} faylal jar ayaa la soo sheegay",
   "Clear compatibility cache": "Nadiifi kaydka iswaafajinta",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kaydka iswaafajinta ee {name} waa la nadiifiyay. Waa la hubin doonaa marka xigta ee la rakibo, la cusboonaysiiyo ama la baadho.",
-  "(+{count} more)": "(+{count} dheeraad)"
+  "(+{count} more)": "(+{count} dheeraad)",
+  "Hybrid: native + loader": "Isku-dhafan: asli + rarid"
 }

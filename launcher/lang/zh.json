@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "运行时：报告了 {count} 个 jar",
   "Clear compatibility cache": "清除兼容性缓存",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "已清除 {name} 的兼容性缓存。下次安装、更新或在搜索中列出时会重新检查。",
-  "(+{count} more)": "（另有 {count} 个）"
+  "(+{count} more)": "（另有 {count} 个）",
+  "Hybrid: native + loader": "混合：原生 + 加载器"
 }

@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Kørselstid: {count} jar-filer rapporteret",
   "Clear compatibility cache": "Ryd kompatibilitetscache",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Kompatibilitetscachen for {name} blev ryddet. Det kontrolleres igen ved næste installation, opdatering eller søgning.",
-  "(+{count} more)": "(+{count} flere)"
+  "(+{count} more)": "(+{count} flere)",
+  "Hybrid: native + loader": "Hybrid: indbygget + indlæser"
 }

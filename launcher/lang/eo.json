@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Rultempo: {count} jar-dosieroj raportitaj",
   "Clear compatibility cache": "Forigi la kongruecan kaŝmemoron",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "La kongrueca kaŝmemoro por {name} estis forigita. Ĝi estos rekontrolita ĉe la sekva instalo, ĝisdatigo aŭ serĉo.",
-  "(+{count} more)": "(+{count} pli)"
+  "(+{count} more)": "(+{count} pli)",
+  "Hybrid: native + loader": "Hibrida: denaska + ŝargilo"
 }

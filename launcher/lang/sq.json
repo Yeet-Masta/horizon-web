@@ -1232,5 +1232,6 @@
   "Runtime: {count} jar(s) reported": "Ekzekutimi: u raportuan {count} skedarë jar",
   "Clear compatibility cache": "Pastro cache-in e përputhshmërisë",
   "Cleared the compatibility cache for {name}. It is checked again the next time it is installed, updated or listed in a search.": "Cache-i i përputhshmërisë për {name} u pastrua. Ai do të kontrollohet përsëri në instalimin, përditësimin ose kërkimin tjetër.",
-  "(+{count} more)": "(+{count} më shumë)"
+  "(+{count} more)": "(+{count} më shumë)",
+  "Hybrid: native + loader": "Hibride: vendas + ngarkues"
 }
