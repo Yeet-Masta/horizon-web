@@ -38,9 +38,12 @@ import sys
 import time
 import zipfile
 
+try:  # imported as tools.java_conformance (tests/), or run as a script
+    from . import lab
+except ImportError:
+    import lab
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tools"))
-import lab  # noqa: E402
 
 CORPUS = ROOT / "mods/horizon/src/conformance/java/dev/horizonlab/conformance"
 MANIFEST = ROOT / "tools/java_conformance.json"
