@@ -11,6 +11,96 @@ role, its server thread in the integrated-server role, and `--dedicated` runs th
 A jar the runtime refuses is logged and skipped, and `HORIZON_JAVA_STRICT=1` makes the dedicated server stop instead
 of skipping it. A jar that panics in its entrypoint is isolated; the remaining jars still run.
 
+## The goal: two phases to native-only
+
+The project has one destination and one checkpoint on the way. Both phases are gated on the measured corpus, not on a
+date:
+
+| Phase | Goal | Exit criteria |
+|---|---|---|
+| **1. Every corpus jar works on a tier** | no measured jar is left without a path: it runs natively, or through the loader tier, and its label says why | **0 `native-gap`** rows in both committed ledgers; **every `needs-loader` jar proven on the loader tier** — a real Fabric-loader run reaches `Done (`, lists the jar's mod id and names no exception against it; and a hybrid pack session completes both halves inside its work bound |
+| **2. Native-only** | the same corpus runs on `horizon-native-java` alone; the loader tier is retired and no game path starts a JVM | 0 `needs-loader` and 0 `native-gap`; every exercised mixin plan is applied by the native weaver or bound to a named host hook; `backends.jvm` stays zero because nothing has a JVM to fall back to |
+
+Phase 1 is a checkpoint, not the product: a `needs-loader` jar is proven, not ported. Skipped client-only jars and
+libraries stay `native-ok` throughout — the server role has nothing of theirs to run, so they are not failures.
+Phase 2 starts from phase 1's zero-refusal baseline and adds what the loader was carrying: game-class mixins, event
+callbacks and the client surface. The design and tier model are
+[java-mod-compat.md](java-mod-compat.md#native-first-strategy-and-tiers).
+
+### Coverage of the two gates (6 November 2026)
+
+| Corpus | Jars | `native-ok` | `needs-loader` | of those proven on the loader | `native-gap` | Phase 1 met? |
+|---|---:|---:|---:|---:|---:|---|
+| wide (`corpus-xl`) | 223 | 151 (68%) | 45 (20%) | 25/45 (56%) | 27 (12%) | no |
+| mega (500 unique) | 500 | 346 (69%) | 86 (17%) | 25/86 (29%) | 68 (14%) | no |
+
+"Proven" counts a `needs-loader` jar only when one of the three committed loader ledgers
+(`LAST_LOADER_LEDGER.txt`, `LAST_LOADER_LEDGER_XPLUS.txt`, `LAST_LOADER_LEDGER_HELIX.txt`) has a row with
+`status=listed`, no `first_exception`, matched by file name or mod id. A row with `status=unlisted` (or `error`) is
+seen but not proven: 6 wide / 13 mega. A jar with no loader row at all is unmeasured: 14 wide / 48 mega. The loader
+ledgers cover other corpus slices (corpus-xl, corpus-xplus, Helix), not one run over both corpora, so these are
+evidence of the loader tier, not full proof of it.
+
+The same runs show the distance to phase 2: 0 mixins were woven in either corpus, with 2,944 (wide) and 7,742 (mega)
+plans skipped, overwhelmingly `target-outside-jar`. Of the 121 wide and 265 mega jars that declare a server
+entrypoint, 94 and 197 reached `Done`; the refusals are the `native-gap` rows above.
+
+### Blockers
+
+**Phase 1:**
+
+1. **Native refusals (27 wide, 68 mega).** 9 wide / 29 mega fail decoding class metadata; 18 / 34 fail with an
+   uncaught exception in the entrypoint; mega adds one verifier refusal, two nested-jar-frame cases, one duplicate
+   declaration and one unreadable metadata file. The gate is 0, so every row needs either a fix or a reclassification
+   backed by a loader proof.
+2. **Loader proof is partial.** 25 of 45 wide and 25 of 86 mega `needs-loader` jars have a `listed` loader row; the
+   rest were seen but not listed, or never ran under the loader. Each needs a loader run that reaches `Done (`,
+   lists it and records no exception against it.
+3. **The hybrid session does not finish.** The 112-jar Helix pack splits into 75 native and 33 loader jars; the
+   loader half loads 67 mods and applies 346 mixins with 0 failures, but times out at 180 s while transforming
+   `NaturalSpawner`, and the static check reports 5 cross-partition dependency conflicts. A jar proven alone is not
+   yet proven in the pack a player runs.
+4. **NeoForge is outside the measured corpus.** Both corpora are Fabric 26.3. If a NeoForge corpus joins phase 1,
+   the dedicated role still lacks the FML preflight and there is no automatic intermediary-to-official remapping.
+
+**Phase 2:**
+
+1. **Game-class mixins do not apply.** The load-time weaver only rewrites same-jar targets, and the two opt-in hook
+   points (`player_tick`, `item_picked_up`) are not fired by game code. Closing this is the whole distance for the
+   45 / 86 `needs-loader` jars.
+2. **Callbacks and the client surface.** Only entrypoints and received-payload handlers execute; event listeners are
+   recorded but never dispatched, and there is no compiled HUD, key-binding, tooltip, screen, renderer or model
+   façade, so client jars register content but do not draw.
+3. **Content consumption.** Block entities, recipes and ingredients are recorded but not expressible; data components
+   and attachments have no declaration table; a guest stores the login manifest but local lookups do not consume it;
+   there is no mod hot reload.
+4. **No fallback by definition.** Phase 2 keeps phase 1's zero-refusal baseline and moves the 45 / 86
+   `needs-loader` jars onto the native engine; the opt-in FML preflight and `horizon-jvm` remain development tools,
+   never a quiet fallback, and the NeoForge lifecycle needs native coverage if the corpus widens.
+
+### Measuring the gates
+
+```sh
+# the label gates, from the committed ledgers (no jars, no servers)
+python3 tools/java_mod_server_ledger.py --from tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt | tail -1
+python3 tools/java_mod_server_ledger.py --from tools/real_mod_fixtures/LAST_SERVER_LEDGER_500.txt | tail -1
+
+# a fresh corpus through the real dedicated server (one fresh server per jar, 60 s bound)
+scratch=$(mktemp -d)
+TMPDIR=$scratch HORIZON_NO_AUDIO=1 python3 tools/java_mod_server_ledger.py ~/horizon-corpus/corpus-xl \
+  --binary target/fast/horizon-client --native-binary target/fast/horizon-native-java \
+  --resources .local/horizon-client/26.3 --timeout 60 --json --output ledger.txt > ledger.json
+
+# loader-tier proof (needs the pinned game jar, loader and libraries)
+python3 tools/java_mod_loader_ledger.py --mods-dir ~/horizon-corpus/corpus-xl \
+  --binary target/fast/horizon-jvm --output tools/real_mod_fixtures/LAST_LOADER_LEDGER.txt
+
+# the hybrid session, both halves, on the measured pack
+python3 tools/hybrid_pack.py ~/horizon-corpus/corpus-helix \
+  --ledger tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt \
+  --ledger tools/real_mod_fixtures/LAST_SERVER_LEDGER_500.txt --match-by-hash --measure
+```
+
 ## What is ported
 
 ### `horizon-native-java` (the runtime)

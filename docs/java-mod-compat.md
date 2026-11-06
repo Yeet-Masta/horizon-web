@@ -79,6 +79,29 @@ kept separate from those tiers because it executes Java in `horizon-jvm` and the
 Native probe success proves only the bounded native surface exercised by its fixture; it does not claim that the
 whole jar has become Rust or that optional fallback coverage is complete.
 
+## The goal: two phases to native-only
+
+Compatibility is delivered in two phases, each with a measured exit gate rather than a date:
+
+| Phase | Goal | Exit criteria |
+|---|---|---|
+| **1. Every corpus jar works on a tier** | no measured jar is left without a path: it runs natively, or through the loader tier, and its label says why | **0 `native-gap`** rows in both committed ledgers; **every `needs-loader` jar proven on the loader tier** — a real Fabric-loader run reaches `Done (`, lists the jar's mod id and names no exception against it; and a hybrid pack session completes both halves inside its work bound |
+| **2. Native-only** | the same corpus runs on `horizon-native-java` alone; the loader tier is retired and no game path starts a JVM | 0 `needs-loader` and 0 `native-gap`; every exercised mixin plan is applied by the native weaver or bound to a named host hook; `backends.jvm` stays zero because nothing has a JVM to fall back to |
+
+Phase 1 proves the loader tier can carry what native cannot; it does not move a jar to native. Phase 2 is the native
+policy at the top of this page made true for the corpus, starting from phase 1's zero-refusal baseline and adding what
+the loader was hiding: game-class mixins, event callbacks and the client surface.
+
+Progress against each gate, the current per-corpus counts, the blockers that keep a phase open and the full rerun
+recipe are maintained in
+[java-mod-compat-status.md](java-mod-compat-status.md#the-goal-two-phases-to-native-only). The two commands behind the
+numbers are:
+
+```sh
+python3 tools/java_mod_server_ledger.py --from tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt | tail -1
+python3 tools/java_mod_loader_ledger.py --mods-dir ~/horizon-corpus/corpus-xl --binary target/fast/horizon-jvm
+```
+
 ## Why an optional JVM fallback exists, and why it is not native support
 
 A jar is bytecode for the JVM. Two ways to make it run here:
