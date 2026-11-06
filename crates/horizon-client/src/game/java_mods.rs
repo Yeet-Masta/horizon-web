@@ -332,6 +332,15 @@ fn handler_role(role: ExecutionRole) -> super::java_payloads::HandlerRole {
     }
 }
 
+/// Wall-clock time one jar's entrypoints may consume before the runner treats
+/// the jar as failed.
+///
+/// A normal bootstrap registers its content in milliseconds, even on a loaded
+/// machine, so the bound only catches a jar that loops or recurses without
+/// returning. The batch's tolerant policy then skips that jar, naming it and
+/// its budget in the failure line, while every later jar still runs.
+const JAR_EXECUTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn run_one(
     path: &std::path::Path,
     role: ExecutionRole,
@@ -404,9 +413,18 @@ fn run_one(
         host = host.with_mod(dependency, "unknown");
     }
     let mut host = jar.seed_host(host);
+    // One budget for the jar, not one per entrypoint: several Fabric entrypoints
+    // of one jar share the time the batch allows the jar as a whole.
+    let budget = horizon_native_java::ExecutionBudget::within(JAR_EXECUTION_BUDGET);
     for entry in &entries {
-        jar.execute(&entry.class, entry.method.as_deref(), kind, &mut host)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        jar.execute_with_budget(
+            &entry.class,
+            entry.method.as_deref(),
+            kind,
+            &mut host,
+            &budget,
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     let typed: Vec<horizon_native_java::RegistryEntry> = host
         .registrations()
