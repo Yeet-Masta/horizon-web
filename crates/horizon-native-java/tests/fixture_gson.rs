@@ -41,7 +41,16 @@ const PROBE: &str = r#"package demo;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.io.StringReader;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
@@ -63,6 +72,69 @@ public final class Probe {
         Gson gson = new GsonBuilder().create();
         List<?> values = gson.fromJson(json, List.class);
         return String.valueOf(values.size());
+    }
+
+    // A config bootstrap that writes defaults through `FileWriter` and reads
+    // them back through `FileReader`, exactly the shape of a JSON config file.
+    public static String fileRoundTrip() {
+        Gson gson = new GsonBuilder().create();
+        Path path = Path.of("cfg.json");
+        File file = path.toFile();
+        String before = String.valueOf(file.exists());
+        try {
+            FileWriter writer = new FileWriter(file);
+            gson.toJson(gson.fromJson("{\"a\":7}", Map.class), writer);
+            writer.close();
+        } catch (IOException error) {
+            return "write-failed:" + error;
+        }
+        String after = String.valueOf(file.exists());
+        try {
+            FileReader reader = new FileReader(file);
+            Map<?, ?> back = gson.fromJson(reader, Map.class);
+            reader.close();
+            return before + "|" + after + "|" + back.get("a");
+        } catch (IOException error) {
+            return "read-failed:" + error;
+        }
+    }
+
+    // `OutputStreamWriter` over a `FileOutputStream` is the other writer a
+    // config loader builds; the bytes must land in the same virtual file.
+    public static String streamRoundTrip() {
+        Gson gson = new GsonBuilder().create();
+        Path path = Path.of("stream.json");
+        try {
+            OutputStreamWriter writer =
+                new OutputStreamWriter(Files.newOutputStream(path), StandardCharsets.UTF_8);
+            gson.toJson(gson.fromJson("{\"b\":2}", Map.class), writer);
+            writer.close();
+            java.io.BufferedReader reader = Files.newBufferedReader(path);
+            Map<?, ?> back = gson.fromJson(reader, Map.class);
+            reader.close();
+            return String.valueOf(back.get("b"));
+        } catch (IOException error) {
+            return "failed:" + error;
+        }
+    }
+
+    public static String stringWriter() {
+        Gson gson = new GsonBuilder().create();
+        StringWriter writer = new StringWriter();
+        gson.toJson(gson.fromJson("[1,2]", List.class), writer);
+        return writer.toString();
+    }
+
+    // A file the invocation never wrote raises the exception Java raises, and
+    // a Java catch block sees it as an `IOException`.
+    public static String missingFile() {
+        try {
+            FileReader reader = new FileReader(new File("absent.json"));
+            reader.close();
+            return "read";
+        } catch (IOException error) {
+            return "caught";
+        }
     }
 }
 "#;
@@ -214,4 +286,28 @@ fn deeply_nested_json_is_refused_by_the_depth_bound() {
         message.contains("nests") && message.contains("at most 32"),
         "unexpected error: {message}"
     );
+}
+
+#[test]
+fn file_writer_and_file_reader_round_trip_through_the_virtual_file() {
+    let fixture = Fixture::build("file-round-trip");
+    assert_eq!(fixture.text("fileRoundTrip"), "false|true|7");
+}
+
+#[test]
+fn output_stream_writer_and_files_reader_share_the_same_file() {
+    let fixture = Fixture::build("stream-round-trip");
+    assert_eq!(fixture.text("streamRoundTrip"), "2");
+}
+
+#[test]
+fn string_writer_is_an_appendable_gson_can_write_to() {
+    let fixture = Fixture::build("string-writer");
+    assert_eq!(fixture.text("stringWriter"), "[1,2]");
+}
+
+#[test]
+fn a_missing_file_raises_an_ioexception_a_java_catch_sees() {
+    let fixture = Fixture::build("missing-file");
+    assert_eq!(fixture.text("missingFile"), "caught");
 }

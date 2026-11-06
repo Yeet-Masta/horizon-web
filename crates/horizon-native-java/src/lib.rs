@@ -7750,6 +7750,18 @@ fn stable_hash(value: &str) -> i32 {
     })
 }
 
+/// The UTF-16 slice `Writer#write(String, int, int)` appends. Java counts code
+/// units, so a surrogate pair contributes two.
+fn slice_utf16(text: &str, start: i32, length: i32) -> String {
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    let start = start.max(0) as usize;
+    if start >= units.len() || length <= 0 {
+        return String::new();
+    }
+    let end = (start + length as usize).min(units.len());
+    String::from_utf16_lossy(&units[start..end])
+}
+
 /// How a record's generated `toString` prints one component value.
 ///
 /// Java prints a `boolean` as `true`/`false` and a `char` as the character,
@@ -8427,6 +8439,9 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
         | "java/lang/IllegalAccessException"
         | "java/lang/InstantiationException"
         | "java/lang/reflect/InvocationTargetException" => "java/lang/ReflectiveOperationException",
+        "java/io/FileNotFoundException"
+        | "java/nio/file/NoSuchFileException"
+        | "java/nio/file/FileSystemException" => "java/io/IOException",
         "java/lang/ReflectiveOperationException"
         | "java/io/IOException"
         | "java/lang/InterruptedException"
@@ -13559,6 +13574,9 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -13778,6 +13796,9 @@ impl NativeJar {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos,
@@ -14110,6 +14131,9 @@ impl NativeJar {
                 enum_constants: BTreeMap::new(),
                 string_builders: BTreeMap::new(),
                 string_readers: BTreeMap::new(),
+                io_writers: BTreeMap::new(),
+                io_paths: BTreeMap::new(),
+                io_files: BTreeMap::new(),
                 annotations: BTreeMap::new(),
                 next_annotation: 0,
                 callback_infos: &mut callback_infos,
@@ -16225,9 +16249,23 @@ struct Runtime<'a, H> {
     /// so a later `toString` sees every earlier append — the JDK's contract,
     /// and what a value-chain marker would lose.
     string_builders: BTreeMap<String, String>,
-    /// Text each `java.io.StringReader` this invocation built exposes to
+    /// Text each `java.io.StringReader` (and each modelled file or stream
+    /// reader) this invocation built exposes to `Reader#read` and to
     /// `Gson.fromJson(Reader, Class)`, keyed by the reader's marker.
     string_readers: BTreeMap<String, String>,
+    /// Text each `java.io` writer this invocation built holds, keyed by its
+    /// sink: `file:<path>` for a writer over a virtual file, `mem:<marker>` for
+    /// one that only exists in memory. A wrapper (`BufferedWriter`,
+    /// `OutputStreamWriter`) opens the same sink as the writer it wraps, so the
+    /// text is committed once and a later close cannot truncate it.
+    io_writers: BTreeMap<String, String>,
+    /// The virtual file each `java.io.File`, stream, reader or writer marker
+    /// names, keyed by the marker.
+    io_paths: BTreeMap<String, String>,
+    /// Files this invocation wrote, keyed by their path text. The native path
+    /// never touches the host filesystem: a bootstrap that saves defaults and
+    /// reads them back sees these bytes and nothing else.
+    io_files: BTreeMap<String, String>,
     /// Annotation values `Class#getAnnotation`/`Method#getAnnotation` handed
     /// out, keyed by the proxy marker a member query answers from.
     annotations: BTreeMap<String, Annotation>,
@@ -18001,6 +18039,744 @@ impl<H: Host> Runtime<'_, H> {
         }
     }
 
+    /// The path text a `File`, `Path`, string or stream marker names.
+    ///
+    /// A `File`/`FileInputStream`/`FileWriter` marker resolves through
+    /// [`Runtime::io_paths`]; a `Path` marker carries its text after
+    /// `path:`; anything else is a plain string path.
+    fn io_path_of(&self, value: &Value) -> Option<String> {
+        let text = expect_ref(value)?;
+        if let Some(path) = self.io_paths.get(text) {
+            return Some(path.clone());
+        }
+        if let Some(path) = text.strip_prefix("path:") {
+            return Some(path.to_owned());
+        }
+        Some(text.to_owned())
+    }
+
+    /// The sink a modelled writer marker appends into.
+    fn io_sink_key(&self, marker: &str) -> Option<String> {
+        if let Some(path) = self.io_paths.get(marker) {
+            return Some(format!("file:{path}"));
+        }
+        let key = format!("mem:{marker}");
+        self.io_writers.contains_key(&key).then_some(key)
+    }
+
+    /// Open a writer marker over `path`, or in memory when the writer wraps a
+    /// stream that names no file. `truncate` is what Java does when the
+    /// constructor opens the file itself; a wrapper keeps the bytes written so
+    /// far.
+    fn io_open_writer(&mut self, marker: &str, path: Option<String>, truncate: bool) {
+        let key = match path {
+            Some(path) => {
+                self.io_paths.insert(marker.to_owned(), path.clone());
+                format!("file:{path}")
+            }
+            None => format!("mem:{marker}"),
+        };
+        if truncate {
+            self.io_writers.insert(key, String::new());
+        } else {
+            self.io_writers.entry(key).or_default();
+        }
+    }
+
+    /// Append text to a modelled writer's sink.
+    fn io_write(&mut self, marker: &str, text: &str) {
+        let Some(key) = self.io_sink_key(marker) else {
+            return;
+        };
+        self.io_writers.entry(key).or_default().push_str(text);
+    }
+
+    /// Copy a writer's sink into the virtual file it names. A close or flush
+    /// repeats harmlessly because every wrapper shares one sink per file.
+    fn io_commit(&mut self, marker: &str) {
+        let Some(path) = self.io_paths.get(marker).cloned() else {
+            return;
+        };
+        if let Some(text) = self.io_writers.get(&format!("file:{path}")) {
+            self.io_files.insert(path, text.clone());
+        }
+    }
+
+    /// Open a reader marker over a virtual file, or report the exception Java
+    /// raises for a file that does not exist. A config loader guards its read
+    /// with `exists` or catches the `IOException` and writes defaults.
+    fn io_open_reader(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        path: &str,
+        required: bool,
+    ) -> Result<(), NativeError> {
+        let Some(text) = self.io_files.get(path).cloned() else {
+            if !required {
+                // `Files.newBufferedReader` over a path the invocation never
+                // wrote answers an empty stream: a jar resource the host
+                // resolves elsewhere still reaches its own reader, and a
+                // bootstrap that checks `exists` first writes defaults.
+                self.string_readers.insert(marker.to_owned(), String::new());
+                return Ok(());
+            }
+            let class = if r.owner == "java/nio/file/Files" {
+                "java/nio/file/NoSuchFileException"
+            } else {
+                "java/io/FileNotFoundException"
+            };
+            return Err(NativeError::UncaughtException {
+                class: class.into(),
+                message: Some(format!("{path}")),
+                frame: None,
+            });
+        };
+        self.string_readers.insert(marker.to_owned(), text);
+        Ok(())
+    }
+
+    /// Answer the bounded `java.io` and `java.nio.file` surface config code
+    /// reaches.
+    ///
+    /// The native path never touches the host filesystem: files a jar writes
+    /// live in [`Runtime::io_files`] for the length of one invocation, so a
+    /// bootstrap that saves defaults and reads them back sees its own bytes and
+    /// nothing else. A read of a path the invocation never wrote reports the
+    /// exception Java would raise. Readers keep their text in
+    /// [`Runtime::string_readers`], which is also what `Gson.fromJson(Reader,
+    /// Class)` reads; writers append into [`Runtime::io_writers`], which is
+    /// what `Gson.toJson(value, Appendable)` writes.
+    fn invoke_io(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let receiver_marker = receiver.and_then(expect_ref).cloned();
+        match r.owner.as_str() {
+            "java/io/File" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if r.name == "<init>" {
+                    let path = match r.descriptor.as_str() {
+                        "(Ljava/lang/String;)V" => args
+                            .first()
+                            .and_then(expect_ref)
+                            .map(|text| text.to_owned()),
+                        "(Ljava/lang/String;Ljava/lang/String;)V" => {
+                            let parent = args.first().and_then(expect_ref).cloned();
+                            let child = args.get(1).and_then(expect_ref).cloned();
+                            parent
+                                .zip(child)
+                                .map(|(parent, child)| path_join(&parent, &child))
+                        }
+                        "(Ljava/io/File;Ljava/lang/String;)V" => {
+                            let parent = args.first().and_then(|value| self.io_path_of(value));
+                            let child = args.get(1).and_then(expect_ref).cloned();
+                            parent
+                                .zip(child)
+                                .map(|(parent, child)| path_join(&parent, &child))
+                        }
+                        _ => return Ok(None),
+                    };
+                    if let Some(path) = path {
+                        self.io_paths.insert(marker, path);
+                    }
+                    return Ok(Some(Value::Void));
+                }
+                let Some(path) = self.io_paths.get(&marker).cloned() else {
+                    return Ok(None);
+                };
+                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("exists", "()Z") | ("isFile", "()Z") => {
+                        Value::Int(i32::from(self.io_files.contains_key(&path)))
+                    }
+                    ("isDirectory", "()Z") => Value::Int(0),
+                    ("length", "()J") => {
+                        Value::Long(self.io_files.get(&path).map_or(0, |text| text.len() as i64))
+                    }
+                    ("getName", "()Ljava/lang/String;") => {
+                        Value::Ref(Some(path.rsplit('/').next().unwrap_or(&path).to_owned()))
+                    }
+                    ("getParent", "()Ljava/lang/String;") => Value::Ref(
+                        path.rsplit_once('/')
+                            .map(|(parent, _)| parent.to_owned())
+                            .filter(|parent| !parent.is_empty()),
+                    ),
+                    ("getParentFile", "()Ljava/io/File;") => {
+                        match path.rsplit_once('/').map(|(parent, _)| parent) {
+                            Some(parent) if !parent.is_empty() => {
+                                let value = self.new_object("java/io/File");
+                                if let Some(marker) = expect_ref(&value) {
+                                    self.io_paths.insert(marker.to_owned(), parent.to_owned());
+                                }
+                                value
+                            }
+                            _ => Value::Ref(None),
+                        }
+                    }
+                    ("toPath", "()Ljava/nio/file/Path;") => path_value(&path),
+                    ("mkdir", "()Z") | ("mkdirs", "()Z") | ("createNewFile", "()Z") => {
+                        self.io_files.entry(path).or_default();
+                        Value::Int(1)
+                    }
+                    ("delete", "()Z") => {
+                        self.io_files.remove(&path);
+                        Value::Int(1)
+                    }
+                    (
+                        "getPath" | "getAbsolutePath" | "getCanonicalPath" | "toString",
+                        "()Ljava/lang/String;",
+                    ) => Value::Ref(Some(path)),
+                    _ => return Ok(None),
+                }));
+            }
+            "java/nio/file/Path" if r.name == "toFile" => {
+                let Some(path) = receiver.map(path_text).map(str::to_owned) else {
+                    return Ok(None);
+                };
+                let value = self.new_object("java/io/File");
+                if let Some(marker) = expect_ref(&value) {
+                    self.io_paths.insert(marker.to_owned(), path);
+                }
+                return Ok(Some(value));
+            }
+            "java/nio/file/Files" => {
+                let Some(path) = args.first().map(path_text).map(str::to_owned) else {
+                    return Ok(None);
+                };
+                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("exists", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
+                        if !self.io_files.contains_key(&path) {
+                            // A resource the jar ships still answers through the
+                            // host's table.
+                            return Ok(None);
+                        }
+                        Value::Int(1)
+                    }
+                    ("notExists", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        if !self.io_files.contains_key(&path) {
+                            return Ok(None);
+                        }
+                        Value::Int(0)
+                    }
+                    ("readString", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        match self.io_files.get(&path) {
+                            Some(text) => Value::Ref(Some(text.clone())),
+                            None => return Ok(None),
+                        }
+                    }
+                    ("writeString", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let text = args
+                            .get(1)
+                            .map(|value| expect_string(value).to_owned())
+                            .unwrap_or_default();
+                        self.io_files.insert(path, text);
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("write", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
+                        let text = args
+                            .get(1)
+                            .and_then(|value| expect_ref(value))
+                            .and_then(|marker| self.arrays.get(marker))
+                            .map(|bytes| {
+                                let bytes = bytes
+                                    .iter()
+                                    .map(|value| match value {
+                                        Value::Int(byte) => *byte as u8,
+                                        _ => 0,
+                                    })
+                                    .collect::<Vec<_>>();
+                                String::from_utf8_lossy(&bytes).into_owned()
+                            })
+                            .unwrap_or_default();
+                        self.io_files.insert(path, text);
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("createFile", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        self.io_files.entry(path).or_default();
+                        args.first().cloned().unwrap_or(Value::Ref(None))
+                    }
+                    ("delete" | "deleteIfExists", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        self.io_files.remove(&path);
+                        Value::Int(1)
+                    }
+                    ("newBufferedReader", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/BufferedReader");
+                        if let Some(reader) = expect_ref(&value) {
+                            self.io_open_reader(r, reader, &path, false)?;
+                        }
+                        value
+                    }
+                    ("newBufferedWriter", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/BufferedWriter");
+                        if let Some(writer) = expect_ref(&value) {
+                            self.io_open_writer(writer, Some(path), true);
+                        }
+                        value
+                    }
+                    ("newInputStream", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/FileInputStream");
+                        if let Some(stream) = expect_ref(&value) {
+                            self.io_open_reader(r, stream, &path, false)?;
+                        }
+                        value
+                    }
+                    ("newOutputStream", descriptor)
+                        if descriptor.starts_with("(Ljava/nio/file/Path;") =>
+                    {
+                        let value = self.new_object("java/io/FileOutputStream");
+                        if let Some(stream) = expect_ref(&value) {
+                            self.io_open_writer(stream, Some(path), true);
+                        }
+                        value
+                    }
+                    _ => return Ok(None),
+                }));
+            }
+            "java/io/FileWriter" | "java/io/PrintWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let appending = r.descriptor.ends_with("Z)V")
+                    && args
+                        .get(1)
+                        .is_some_and(|value| expect_int(r, value).unwrap_or(0) != 0);
+                // `PrintWriter(Writer)` and `PrintWriter(OutputStream)` wrap one
+                // of ours; a `File`/`String` argument is a file the constructor
+                // itself opens.
+                if let Some(wrapped) = args.first().filter(|value| {
+                    expect_ref(value).is_some_and(|marker| self.io_paths.contains_key(marker))
+                }) {
+                    let path = self.io_path_of(wrapped);
+                    self.io_open_writer(&marker, path, false);
+                } else {
+                    let path = args.first().and_then(|value| self.io_path_of(value));
+                    self.io_open_writer(&marker, path, !appending);
+                }
+                return Ok(Some(Value::Void));
+            }
+            "java/io/OutputStreamWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let path = args.first().and_then(|value| self.io_path_of(value));
+                self.io_open_writer(&marker, path, false);
+                return Ok(Some(Value::Void));
+            }
+            "java/io/BufferedWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let path = args.first().and_then(|value| self.io_path_of(value));
+                self.io_open_writer(&marker, path, false);
+                return Ok(Some(Value::Void));
+            }
+            "java/io/StringWriter" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                self.io_open_writer(&marker, None, true);
+                return Ok(Some(Value::Void));
+            }
+            "java/io/FileOutputStream" | "java/io/FileInputStream" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(path) = args.first().and_then(|value| self.io_path_of(value)) else {
+                    return Ok(None);
+                };
+                if r.owner == "java/io/FileInputStream" {
+                    self.io_open_reader(r, &marker, &path, true)?;
+                } else {
+                    let appending = r.descriptor.ends_with("Z)V")
+                        && args
+                            .get(1)
+                            .is_some_and(|value| expect_int(r, value).unwrap_or(0) != 0);
+                    self.io_open_writer(&marker, Some(path), !appending);
+                }
+                return Ok(Some(Value::Void));
+            }
+            "java/io/FileReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(path) = args.first().and_then(|value| self.io_path_of(value)) else {
+                    return Ok(None);
+                };
+                self.io_open_reader(r, &marker, &path, true)?;
+                return Ok(Some(Value::Void));
+            }
+            "java/io/InputStreamReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let text = args
+                    .first()
+                    .and_then(expect_ref)
+                    .and_then(|stream| self.string_readers.get(stream).cloned())
+                    .unwrap_or_default();
+                self.string_readers.insert(marker, text);
+                return Ok(Some(Value::Void));
+            }
+            "java/io/BufferedReader" if r.name == "<init>" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let text = args
+                    .first()
+                    .and_then(expect_ref)
+                    .and_then(|reader| self.string_readers.remove(reader))
+                    .unwrap_or_default();
+                self.string_readers.insert(marker, text);
+                return Ok(Some(Value::Void));
+            }
+            "java/io/Writer"
+            | "java/io/BufferedWriter"
+            | "java/io/FileWriter"
+            | "java/io/OutputStreamWriter"
+            | "java/io/StringWriter"
+            | "java/io/PrintWriter" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                let Some(_) = self.io_sink_key(&marker) else {
+                    return Ok(None);
+                };
+                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("write", "(Ljava/lang/String;)V") => {
+                        let text = args.first().map(expect_string).unwrap_or_default();
+                        self.io_write(&marker, text);
+                        Value::Void
+                    }
+                    ("write", "(Ljava/lang/String;II)V") => {
+                        let text = args.first().map(expect_string).unwrap_or_default();
+                        let start = args
+                            .get(1)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let length = args
+                            .get(2)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let slice = slice_utf16(text, start, length);
+                        self.io_write(&marker, &slice);
+                        Value::Void
+                    }
+                    ("write", "(I)V") => {
+                        let code = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let text = char::from_u32(code as u32).unwrap_or('\u{fffd}');
+                        self.io_write(&marker, &text.to_string());
+                        Value::Void
+                    }
+                    ("write", "(CC)V") => {
+                        let high = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let low = args
+                            .get(1)
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let text = char::from_u32(high as u32)
+                            .into_iter()
+                            .chain(char::from_u32(low as u32))
+                            .collect::<String>();
+                        self.io_write(&marker, &text);
+                        Value::Void
+                    }
+                    ("append", descriptor)
+                        if descriptor.ends_with(")Ljava/io/Writer;")
+                            || descriptor.ends_with(")Ljava/io/PrintWriter;")
+                            || descriptor.ends_with(")Ljava/io/FileWriter;")
+                            || descriptor.ends_with(")Ljava/io/OutputStreamWriter;")
+                            || descriptor.ends_with(")Ljava/io/BufferedWriter;")
+                            || descriptor.ends_with(")Ljava/io/StringWriter;") =>
+                    {
+                        let text = args
+                            .first()
+                            .map(|value| java_value_text(value, &descriptor))
+                            .unwrap_or_default();
+                        self.io_write(&marker, &text);
+                        Value::Ref(Some(marker))
+                    }
+                    ("newLine", "()V") => {
+                        self.io_write(&marker, "\n");
+                        Value::Void
+                    }
+                    ("print", _) | ("println", _) => {
+                        let mut text = match args.first() {
+                            Some(value) => {
+                                let argument = descriptor_arguments(&r.descriptor)
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| "Ljava/lang/Object;".into());
+                                java_value_text(value, &argument)
+                            }
+                            None => String::new(),
+                        };
+                        if r.name == "println" {
+                            text.push('\n');
+                        }
+                        self.io_write(&marker, &text);
+                        Value::Void
+                    }
+                    ("printf", _) | ("format", _) => {
+                        let formatted = format_java_string_call(
+                            self,
+                            &MethodRef {
+                                owner: "java/lang/String".into(),
+                                name: "format".into(),
+                                descriptor:
+                                    "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;"
+                                        .into(),
+                            },
+                            args,
+                        )
+                        .map(|value| expect_string(&value).to_owned())
+                        .unwrap_or_default();
+                        self.io_write(&marker, &formatted);
+                        Value::Void
+                    }
+                    ("flush", "()V") | ("close", "()V") => {
+                        self.io_commit(&marker);
+                        Value::Void
+                    }
+                    ("checkError", "()Z") => Value::Int(0),
+                    ("toString", "()Ljava/lang/String;") => {
+                        Value::Ref(Some(self.io_sink_text(&marker)))
+                    }
+                    ("getBuffer", "()Ljava/lang/StringBuffer;") => {
+                        Value::Ref(Some(self.io_sink_text(&marker)))
+                    }
+                    _ => return Ok(None),
+                }));
+            }
+            "java/io/InputStream" | "java/io/FileInputStream" | "java/io/ByteArrayInputStream" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if !self.string_readers.contains_key(&marker) {
+                    return Ok(None);
+                }
+                // A stream this invocation opened carries its bytes as UTF-8
+                // text: reading drains from the front, exactly the way the
+                // bounded reader surface consumes a file.
+                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("readAllBytes", "()[B") | ("readNBytes", "()[B") => {
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        self.string_readers.insert(marker.clone(), String::new());
+                        self.io_bytes_array(text.into_bytes(), class, method)
+                    }
+                    ("read", "()I") => {
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let mut bytes = text.into_bytes();
+                        if bytes.is_empty() {
+                            self.string_readers.insert(marker.clone(), String::new());
+                            Value::Int(-1)
+                        } else {
+                            let rest = bytes.split_off(1);
+                            let byte = bytes[0];
+                            self.string_readers.insert(
+                                marker.clone(),
+                                String::from_utf8_lossy(&rest).into_owned(),
+                            );
+                            Value::Int(i32::from(byte as i8))
+                        }
+                    }
+                    ("read", "([B)I") | ("read", "([BII)I") => {
+                        let Some(array) = args.first().and_then(expect_ref).cloned() else {
+                            return Ok(None);
+                        };
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let bytes = text.into_bytes();
+                        let offset = if r.descriptor == "([BII)I" {
+                            args.get(1)
+                                .map(|value| expect_int(r, value))
+                                .transpose()?
+                                .unwrap_or(0)
+                                .max(0) as usize
+                        } else {
+                            0
+                        };
+                        let length = if r.descriptor == "([BII)I" {
+                            args.get(2)
+                                .map(|value| expect_int(r, value))
+                                .transpose()?
+                                .unwrap_or(0)
+                                .max(0) as usize
+                        } else {
+                            bytes.len()
+                        };
+                        let count = length.min(bytes.len());
+                        if let Some(values) = self.arrays.get_mut(&array) {
+                            for index in 0..count {
+                                if let Some(slot) = values.get_mut(offset + index) {
+                                    *slot = Value::Int(i32::from(bytes[index] as i8));
+                                }
+                            }
+                        }
+                        self.string_readers.insert(
+                            marker.clone(),
+                            String::from_utf8_lossy(&bytes[count..]).into_owned(),
+                        );
+                        if count == 0 {
+                            Value::Int(-1)
+                        } else {
+                            Value::Int(count as i32)
+                        }
+                    }
+                    ("available", "()I") => Value::Int(
+                        self.string_readers
+                            .get(&marker)
+                            .map_or(0, |text| text.len() as i32),
+                    ),
+                    ("skip", "(J)J") => {
+                        let requested = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let requested = requested.max(0) as usize;
+                        let text = self.string_readers.remove(&marker).unwrap_or_default();
+                        let mut bytes = text.into_bytes();
+                        let skipped = requested.min(bytes.len());
+                        bytes.drain(..skipped);
+                        self.string_readers
+                            .insert(marker.clone(), String::from_utf8_lossy(&bytes).into_owned());
+                        Value::Long(skipped as i64)
+                    }
+                    ("close", "()V") => Value::Void,
+                    _ => return Ok(None),
+                }));
+            }
+            "java/io/Reader"
+            | "java/io/BufferedReader"
+            | "java/io/FileReader"
+            | "java/io/InputStreamReader"
+            | "java/io/StringReader"
+            | "java/io/LineNumberReader" => {
+                let Some(marker) = receiver_marker else {
+                    return Ok(None);
+                };
+                if !self.string_readers.contains_key(&marker) {
+                    return Ok(None);
+                }
+                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                    ("read", "()I") => match self.string_readers.get_mut(&marker) {
+                        Some(text) if !text.is_empty() => {
+                            let mut units = text.encode_utf16();
+                            let first = units.next().unwrap_or(0);
+                            let consumed = if (0xd800..0xdc00).contains(&first) {
+                                2
+                            } else {
+                                1
+                            };
+                            let mut remaining = text.encode_utf16().collect::<Vec<_>>();
+                            remaining.drain(..consumed.min(remaining.len()));
+                            *text = String::from_utf16_lossy(&remaining);
+                            Value::Int(first as i32)
+                        }
+                        _ => Value::Int(-1),
+                    },
+                    ("read", "(I)I") => Value::Int(-1),
+                    ("readLine", "()Ljava/lang/String;") => {
+                        let text = self
+                            .string_readers
+                            .get_mut(&marker)
+                            .cloned()
+                            .unwrap_or_default();
+                        let (line, rest) = match text.split_once('\n') {
+                            Some((line, rest)) => (line.strip_suffix('\r').unwrap_or(line), rest),
+                            None => (text.as_str(), ""),
+                        };
+                        let line = if line.is_empty() && text.is_empty() {
+                            Value::Ref(None)
+                        } else {
+                            Value::Ref(Some(line.to_owned()))
+                        };
+                        self.string_readers.insert(marker.clone(), rest.to_owned());
+                        line
+                    }
+                    ("ready", "()Z") => Value::Int(i32::from(
+                        self.string_readers
+                            .get(&marker)
+                            .is_some_and(|text| !text.is_empty()),
+                    )),
+                    ("skip", "(J)J") => {
+                        let requested = args
+                            .first()
+                            .map(|v| expect_int(r, v))
+                            .transpose()?
+                            .unwrap_or(0);
+                        let requested = requested.max(0) as usize;
+                        let text = self
+                            .string_readers
+                            .get_mut(&marker)
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut units = text.encode_utf16().collect::<Vec<_>>();
+                        let skipped = requested.min(units.len());
+                        units.drain(..skipped);
+                        self.string_readers
+                            .insert(marker.clone(), String::from_utf16_lossy(&units));
+                        Value::Long(skipped as i64)
+                    }
+                    ("close", "()V") => Value::Void,
+                    _ => return Ok(None),
+                }));
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// A `byte[]` marker holding `bytes`, as `InputStream#readAllBytes`
+    /// answers.
+    fn io_bytes_array(&mut self, bytes: Vec<u8>, class: &str, method: &str) -> Value {
+        let marker = self.new_array(class, method);
+        let values = bytes
+            .into_iter()
+            .map(|byte| Value::Int(i32::from(byte as i8)))
+            .collect();
+        self.arrays.insert(marker.clone(), values);
+        Value::Ref(Some(marker))
+    }
+
+    /// The text a modelled in-memory writer currently holds.
+    fn io_sink_text(&self, marker: &str) -> String {
+        self.io_sink_key(marker)
+            .and_then(|key| self.io_writers.get(&key).cloned())
+            .unwrap_or_default()
+    }
+
     /// Answer the bounded `com.google.gson` surface config code reaches.
     ///
     /// The adapter models the two calls that make a config bootstrap work:
@@ -18089,9 +18865,14 @@ impl<H: Host> Runtime<'_, H> {
                     let target = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.toJson needs an Appendable receiver".into())
                     })?;
+                    if let Some(key) = self.io_sink_key(target) {
+                        self.io_writers.entry(key).or_default().push_str(&text);
+                        return Ok(Some(Value::Void));
+                    }
                     let builder = self.string_builders.get_mut(target).ok_or_else(|| {
                         NativeError::Metadata(format!(
-                            "Gson.toJson Appendable {target} is not a modelled StringBuilder"
+                            "Gson.toJson Appendable {target} is not a modelled StringBuilder, \
+                             StringWriter or file writer"
                         ))
                     })?;
                     builder.push_str(&text);
@@ -18112,7 +18893,8 @@ impl<H: Host> Runtime<'_, H> {
                     })?;
                     let text = self.string_readers.get(reader).ok_or_else(|| {
                         NativeError::Metadata(format!(
-                            "Gson.fromJson Reader {reader} is not a modelled StringReader"
+                            "Gson.fromJson Reader {reader} is not a modelled StringReader, \
+                             file or stream reader"
                         ))
                     })?;
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
@@ -19889,6 +20671,11 @@ impl<H: Host> Runtime<'_, H> {
                     } else if let Some(value) =
                         self.invoke_stream(&r, receiver.as_ref(), &args, class, method)?
                     {
+                        value
+                    } else if let Some(value) = invoke_or_catch!(
+                        at,
+                        self.invoke_io(&r, receiver.as_ref(), &args, class, method)
+                    ) {
                         value
                     } else if let Some(value) = self.invoke_gson(&r, receiver.as_ref(), &args)? {
                         value
@@ -24100,6 +24887,9 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -24146,6 +24936,9 @@ mod tests {
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -30882,6 +31675,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -31033,6 +31829,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -31237,6 +32036,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -31545,6 +32347,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -31773,6 +32578,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -36728,6 +37536,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
@@ -36771,6 +37582,9 @@ mandatory = true
             enum_constants: BTreeMap::new(),
             string_builders: BTreeMap::new(),
             string_readers: BTreeMap::new(),
+            io_writers: BTreeMap::new(),
+            io_paths: BTreeMap::new(),
+            io_files: BTreeMap::new(),
             annotations: BTreeMap::new(),
             next_annotation: 0,
             callback_infos: &mut CallbackInfos::new(),
