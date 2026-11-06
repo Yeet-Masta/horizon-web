@@ -2171,10 +2171,11 @@ mod tests {
         let mut considered = 0usize;
         let mut needs_loader = 0usize;
         let mut still_needs_loader = 0usize;
-        let mut bound_callbacks = 0usize;
         let mut newly_runs = 0usize;
         let mut still_refused = 0usize;
         let mut lost = 0usize;
+        let mut bound_jars = 0usize;
+        let mut bound_runs = 0usize;
         for path in &jars {
             let Ok(jar) = NativeJar::from_path(path) else {
                 continue;
@@ -2188,7 +2189,6 @@ mod tests {
             considered += 1;
             let before = jar.plan_load_time_weave(side);
             let after = jar.plan_load_time_weave_with_game_hooks(side);
-            bound_callbacks += after.game_hooks.len();
             let was = first_game_skip_reason(&before.skipped).is_some();
             let now = first_game_skip_reason(&after.skipped).is_some();
             if was {
@@ -2197,10 +2197,17 @@ mod tests {
             if now {
                 still_needs_loader += 1;
             }
-            // A jar the loader had to carry because its entrypoint named a
-            // sibling library's class starts on the pack class path instead.
+            // The linked arm enables both halves of this wiring: the pack's
+            // class path and the game-class hook tier.
             let unlinked = bootstrap_jar(path, role, &empty, false);
-            match (unlinked, bootstrap_jar(path, role, &table, false)) {
+            let linked = bootstrap_jar(path, role, &table, true);
+            if let Ok(run) = &linked
+                && let Some(hooks) = &run.game_hooks
+            {
+                bound_jars += 1;
+                bound_runs += hooks.len();
+            }
+            match (unlinked, linked) {
                 (Err(_), Ok(_)) => newly_runs += 1,
                 (Ok(_), Ok(_)) => {}
                 (Ok(_), Err(error)) => {
@@ -2217,7 +2224,8 @@ mod tests {
             "{considered} jar(s) with a {kind} entrypoint; {} of {considered} now start on the pack \
              class path that did not alone, {still_refused} still refuse, {lost} regressed; \
              {needs_loader} needed the loader by weave before, {still_needs_loader} still do, \
-             {bound_callbacks} callback(s) bound to a host site; {} moved off the weave set",
+             {bound_jars} jar(s) bound {bound_runs} callback(s) at a host site; {} moved off the \
+             weave set",
             newly_runs,
             needs_loader.saturating_sub(still_needs_loader)
         );
