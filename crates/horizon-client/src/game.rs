@@ -655,6 +655,14 @@ impl Options {
                 .and_then(|()| horizon_platform::env::set_current_dir(&dir))
                 .map_err(|e| format!("game folder {}: {e}", dir.display()))?;
         }
+        // The web build has no command line a player keeps: the jars dropped on the
+        // page (web_files.rs) wait in the game folder's java-mods/, and run as if
+        // each were named with --java-mod.
+        #[cfg(target_family = "wasm")]
+        o.java_mods.extend(java_mods::dropped_jars(
+            &horizon_platform::env::current_dir()?,
+            &o.java_mods,
+        ));
         // Vanilla's quick play (Main, QuickPlay.joinSingleplayerWorld): only a
         // world that exists opens; else the title screen. --world also creates one.
         if let Some(world) = o.quick_play.take() {
@@ -824,7 +832,11 @@ impl Options {
                             // ...and this player's own folder (logging::set_player_dir).
                             "--player-dir" => {}
                             "--dev-mod" => o.dev_mods.push(std::path::absolute(&value)?),
-                            "--java-mod" => o.java_mods.push(std::path::absolute(&value)?),
+                            // Joined to horizon_platform's working directory first: std's
+                            // can't be read on the web, where the page's Args name OPFS paths.
+                            "--java-mod" => o.java_mods.push(std::path::absolute(
+                                horizon_platform::env::current_dir()?.join(&value),
+                            )?),
                             "--benchmark" => {
                                 if horizon_client::benchmark::scenes(&value).is_none() {
                                     return Err(format!(

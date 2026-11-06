@@ -1,7 +1,9 @@
 //! Files dropped on the web build's page while the game runs (`web/horizon.js`):
 //! a browser's game folder is out of the player's reach, so a world's zip goes
 //! into `saves` and a resource pack into `resourcepacks`, where the native game's
-//! folders would take them.
+//! folders would take them, and a Fabric or NeoForge jar into `java-mods`, whose
+//! jars run at the next start as if named with `--java-mod`
+//! (`game/java_mods.rs`, `dropped_jars`).
 use horizon_platform::fs;
 use std::{
     io::{Cursor, Read},
@@ -16,8 +18,15 @@ pub fn horizon_import(name: String, bytes: Vec<u8>) -> Result<String, JsValue> {
     import(&name, bytes).map_err(|e| JsValue::from_str(&e))
 }
 
+/// The game folder's folder of dropped Java mods (`game/java_mods.rs`'s `DROPPED_DIR`).
+const JAVA_MODS: &str = "java-mods";
+
 fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
-    let not_zip = || format!("{name}: drop the .zip of a world or of a resource pack.");
+    let not_zip =
+        || format!("{name}: drop the .zip of a world or of a resource pack, or a mod's .jar.");
+    if name.to_ascii_lowercase().ends_with(".jar") {
+        return import_jar(name, &bytes);
+    }
     if !name.to_ascii_lowercase().ends_with(".zip") {
         return Err(not_zip());
     }
@@ -27,7 +36,10 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
         .flatten()
         .map(|n| n.replace('\\', "/"))
         .collect();
-    let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
+    let stem = Path::new(name)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
     let folder = |root: &str| {
         let last = root.trim_end_matches('/').rsplit('/').next().unwrap_or("");
         sanitize(if last.is_empty() { &stem } else { last })
@@ -42,7 +54,11 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
         ));
     }
     if let Some(root) = shortest_root(&names, "pack.mcmeta") {
-        let has = |dir: &str| names.iter().any(|n| n.starts_with(&format!("{root}{dir}/")));
+        let has = |dir: &str| {
+            names
+                .iter()
+                .any(|n| n.starts_with(&format!("{root}{dir}/")))
+        };
         if has("data") && !has("assets") {
             return Err(format!(
                 "{name} is a data pack: add it to a world from Create World's Data Packs."
@@ -67,6 +83,33 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
     }
     Err(format!(
         "{name} holds no world (level.dat) and no resource pack (pack.mcmeta)."
+    ))
+}
+
+/// A Fabric or NeoForge jar, kept as it is in `java-mods`.
+fn import_jar(name: &str, bytes: &[u8]) -> Result<String, String> {
+    let zip =
+        ::zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| format!("{name} is not a jar."))?;
+    let loader = zip.file_names().flatten().any(|n| {
+        matches!(
+            n.as_ref(),
+            "fabric.mod.json" | "META-INF/neoforge.mods.toml" | "META-INF/mods.toml"
+        )
+    });
+    if !loader {
+        return Err(format!(
+            "{name} is not a Fabric or NeoForge mod (no fabric.mod.json or mods.toml)."
+        ));
+    }
+    let dir = horizon_platform::env::current_dir()
+        .unwrap_or_default()
+        .join(JAVA_MODS);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = available(&dir, &sanitize(name));
+    fs::write(&dest, bytes).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Added the Java mod “{}”: it runs the next time the game starts.",
+        file_name(&dest)
     ))
 }
 
@@ -117,8 +160,8 @@ fn sanitize(name: &str) -> String {
     let name: String = name
         .chars()
         .map(|c| match c {
-            '/' | '\n' | '\r' | '\t' | '\0' | '\x0c' | '`' | '?' | '*' | '\\' | '<' | '>'
-            | '|' | '"' | ':' => '_',
+            '/' | '\n' | '\r' | '\t' | '\0' | '\x0c' | '`' | '?' | '*' | '\\' | '<' | '>' | '|'
+            | '"' | ':' => '_',
             c => c,
         })
         .collect();
@@ -133,7 +176,9 @@ fn sanitize(name: &str) -> String {
 /// extension of a file name).
 fn available(dir: &Path, name: &str) -> PathBuf {
     let (base, extension) = match name.rsplit_once('.') {
-        Some((base, extension)) if !base.is_empty() && name.ends_with(".zip") => {
+        Some((base, extension))
+            if !base.is_empty() && (name.ends_with(".zip") || name.ends_with(".jar")) =>
+        {
             (base, format!(".{extension}"))
         }
         _ => (name, String::new()),

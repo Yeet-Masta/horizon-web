@@ -8,8 +8,6 @@ use std::{
     borrow::Cow,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    path::Path,
 };
 
 pub mod weaver;
@@ -11343,17 +11341,40 @@ impl NativeJar {
     /// never build a class model. A jar without Fabric metadata keeps the full
     /// read because its NeoForge/Forge entrypoint is only in a class
     /// annotation.
-    pub fn from_path_metadata(path: &Path) -> Result<Self, NativeError> {
-        Self::read(path, false)
+    ///
+    /// Opens the file itself, so it is not in the browser build, which has no
+    /// file system here: read the bytes there and use
+    /// [`Self::from_bytes_metadata`].
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    pub fn from_path_metadata(path: &std::path::Path) -> Result<Self, NativeError> {
+        let file = std::fs::File::open(path).map_err(|e| NativeError::Zip(e.to_string()))?;
+        Self::read(file, false)
     }
 
-    pub fn from_path(path: &Path) -> Result<Self, NativeError> {
-        Self::read(path, true)
+    /// Reads a jar from a file. Not in the browser build: see
+    /// [`Self::from_bytes`].
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+    pub fn from_path(path: &std::path::Path) -> Result<Self, NativeError> {
+        let file = std::fs::File::open(path).map_err(|e| NativeError::Zip(e.to_string()))?;
+        Self::read(file, true)
     }
 
-    fn read(path: &Path, parse_classes: bool) -> Result<Self, NativeError> {
-        let file = File::open(path).map_err(|e| NativeError::Zip(e.to_string()))?;
-        let mut zip = zip::ZipArchive::new(file).map_err(|e| NativeError::Zip(e.to_string()))?;
+    /// [`Self::from_path_metadata`] over a jar already in memory.
+    pub fn from_bytes_metadata(bytes: &[u8]) -> Result<Self, NativeError> {
+        Self::read(std::io::Cursor::new(bytes), false)
+    }
+
+    /// [`Self::from_path`] over a jar already in memory: what the browser
+    /// build reads from its file store, and a nested jar from its parent.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, NativeError> {
+        Self::read(std::io::Cursor::new(bytes), true)
+    }
+
+    fn read<R: std::io::Read + std::io::Seek>(
+        source: R,
+        parse_classes: bool,
+    ) -> Result<Self, NativeError> {
+        let mut zip = zip::ZipArchive::new(source).map_err(|e| NativeError::Zip(e.to_string()))?;
         let mut classes = Vec::new();
         let mut resources = BTreeMap::new();
         let mut resource_bytes = BTreeMap::new();
@@ -22047,6 +22068,7 @@ fn split_dynamic_captures(captures: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
     use std::path::PathBuf;
     use std::process::Command;

@@ -397,6 +397,13 @@ The web build is the native game with the operating system swapped out
   the game folder, and its link in chat downloads it again. Web links open in
   a new tab. A world's zip (with its `level.dat`) or a resource pack's zip
   dropped on the game goes into `saves` or `resourcepacks`.
-- **Off**: controllers, mods with code (content-only mods still load), LAN discovery
+- **Java mods**: a Fabric or NeoForge jar dropped on the game goes into the
+  game folder's `java-mods`, and every jar there runs at the next start in the
+  bytecode interpreter (`crates/horizon-native-java`), as `--java-mod` runs one
+  natively; `--java-mod` in the page's Options takes a path in the game folder
+  too. The interpreter reads the jar from the browser's file store, and a
+  received mod payload runs its handler with no lock the page's thread could
+  wait on (`game/java_payloads.rs`).
+- **Off**: controllers, native code mods (content-only mods and Java mods still load), LAN discovery
   and Open to LAN (no ports to open), chat signing (as natively), skin
   downloads and telemetry.

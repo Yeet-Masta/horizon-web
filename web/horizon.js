@@ -726,7 +726,8 @@ document.addEventListener("paste", (e) => {
   pasting(e.clipboardData?.getData("text/plain") ?? "");
 });
 
-// A world's or a resource pack's zip dropped on the game goes into its folder (web_files.rs).
+// A world's or a resource pack's zip dropped on the game goes into its folder, and a mod's jar
+// into java-mods/, which runs it at the next start (web_files.rs).
 window.addEventListener("dragover", (e) => {
   if (!shell.hidden || !game) return;
   e.preventDefault();

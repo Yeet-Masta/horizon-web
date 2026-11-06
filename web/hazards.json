@@ -163,7 +163,7 @@
  },
  "crates/horizon-client/src/game.rs": {
   "std::path::Path::is_file": 2,
-  "std::path::absolute": 5
+  "std::path::absolute": 6
  },
  "crates/horizon-client/src/game/chat.rs": {
   "std::path::Path::is_dir": 1

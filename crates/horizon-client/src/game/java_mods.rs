@@ -342,7 +342,10 @@ fn run_one(
     // all. Most jars in a real pack are client-only and never start on a
     // server; parsing their classes first was 6.5 s of an 11.2 s batch. Only
     // a jar whose entrypoints match the role is read again for execution.
-    let metadata = horizon_native_java::NativeJar::from_path_metadata(path)
+    // Read through horizon_platform's file system: the browser's file store
+    // on the web build, where the interpreter cannot open files itself.
+    let bytes = horizon_platform::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let metadata = horizon_native_java::NativeJar::from_bytes_metadata(&bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if metadata.client_side_only && !role.is_client() {
         return Err(format!(
@@ -370,7 +373,7 @@ fn run_one(
     if !fabric_entrypoint && !needs_class_discovery {
         return Err(format!("{}: no native entrypoint", path.display()));
     }
-    let jar = horizon_native_java::NativeJar::from_path(path)
+    let jar = horizon_native_java::NativeJar::from_bytes(&bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let (kind, entries) = kinds
         .iter()
@@ -595,6 +598,32 @@ pub(super) fn run_java_mods(
     Ok((batch.content, batch.reports))
 }
 
+/// The folder of the game folder that holds the jars dropped on the web build's
+/// page (`horizon-client-render`'s `web_files.rs` writes them there).
+pub(super) const DROPPED_DIR: &str = "java-mods";
+
+/// The `.jar` files in `game_dir`'s [`DROPPED_DIR`], by name, less those
+/// `named` already lists: on the web build they run as if each were named with
+/// `--java-mod`. A missing folder is no jar.
+#[cfg_attr(not(any(test, target_family = "wasm")), allow(dead_code))]
+pub(super) fn dropped_jars(game_dir: &std::path::Path, named: &[PathBuf]) -> Vec<PathBuf> {
+    let Ok(entries) = horizon_platform::fs::read_dir(game_dir.join(DROPPED_DIR)) else {
+        return Vec::new();
+    };
+    let mut jars: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+                && horizon_platform::fs::metadata(path).is_ok_and(|m| m.is_file())
+                && !named.contains(path)
+        })
+        .collect();
+    jars.sort();
+    jars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +653,27 @@ mod tests {
         assert_eq!(mods[0].content.blocks[0].template, "minecraft:stone");
         assert_eq!(mods[0].content.blocks[0].properties.hardness, Some(1.5));
         assert!(mods[0].content.blocks[0].item);
+    }
+
+    #[test]
+    fn dropped_jars_are_the_folders_jars_by_name_less_those_named() {
+        let game =
+            std::env::temp_dir().join(format!("horizon-dropped-jars-{}", std::process::id()));
+        let dir = game.join(DROPPED_DIR);
+        std::fs::create_dir_all(dir.join("nested.jar")).unwrap();
+        for name in ["zeta.jar", "Alpha.JAR", "notes.txt", "beta.jar"] {
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        let named = [dir.join("beta.jar")];
+        let found = dropped_jars(&game, &named);
+        let names: Vec<_> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["Alpha.JAR", "zeta.jar"]);
+        assert!(found.iter().all(|p| p.starts_with(&dir)));
+        std::fs::remove_dir_all(&game).unwrap();
+        assert!(dropped_jars(&game, &[]).is_empty());
     }
 
     #[test]

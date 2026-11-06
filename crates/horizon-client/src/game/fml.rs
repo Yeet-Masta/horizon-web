@@ -286,7 +286,7 @@ pub(crate) fn preflight(role: ExecutionRole, jars: &[PathBuf]) -> Option<FmlOutc
 /// One configured preflight, kept for `server-status` whatever it found: a
 /// missing `libraries` folder is a report too, never a silent skip.
 fn preflight_with(config: FmlConfig) -> FmlOutcome {
-    let report = if config.libraries().is_dir() {
+    let report = if horizon_platform::fs::PathExt::fs_is_dir(config.libraries().as_path()) {
         run(&config)
     } else {
         FmlReport::failed(

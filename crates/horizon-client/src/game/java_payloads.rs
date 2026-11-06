@@ -870,7 +870,12 @@ pub(super) enum HandlerRole {
     DedicatedServer,
 }
 
-static HANDLER_JARS: Mutex<BTreeMap<HandlerRole, Vec<HandlerJar>>> = Mutex::new(BTreeMap::new());
+/// Each role's handler jars, shared: dispatch copies a role's list out and runs
+/// the interpreter with the lock released. The page thread (a single-player
+/// client) and the server worker both dispatch, and the page thread may not
+/// wait on a lock while the other runs Java.
+static HANDLER_JARS: Mutex<BTreeMap<HandlerRole, Vec<std::sync::Arc<HandlerJar>>>> =
+    Mutex::new(BTreeMap::new());
 
 /// Remember the jars and registrations of one execution role's bootstrap, and
 /// the host each ran on so a received frame's channel id resolves to the
@@ -889,11 +894,11 @@ pub(super) fn store_handler_host_as(role: HandlerRole, jar: NativeJar, host: &St
         .unwrap_or_else(|e| e.into_inner())
         .entry(role)
         .or_default()
-        .push(HandlerJar {
+        .push(std::sync::Arc::new(HandlerJar {
             jar,
             registrations,
             host: template,
-        });
+        }));
 }
 
 /// Forget the jars of a previous bootstrap.
@@ -960,8 +965,13 @@ fn dispatch_matching(
     let declarations = declared();
     let declaration = declarations.get(frame.id());
     let (payload, context) = payload_values(declaration, frame);
-    let handlers = HANDLER_JARS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(handlers) = handlers.get(&role) else {
+    // A snapshot of the role's jars: the lock is held only to copy the list.
+    let handlers = HANDLER_JARS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&role)
+        .cloned();
+    let Some(handlers) = handlers else {
         return Ok(false);
     };
     for handler in handlers.iter() {
