@@ -39,6 +39,12 @@ on:
       timeout:
         description: Seconds per jar, for both tools
         default: '60'
+      fuzz_fixtures:
+        description: Differential fixtures the native interpreter and a JVM both run
+        default: '10'
+      fuzz_seed:
+        description: Deterministic seed for the differential fuzz
+        default: '20261106'
       cache_restore_key:
         description: Restore .local/java-corpus from the Actions cache as java-corpus-<key>
         default: ''
@@ -161,11 +167,13 @@ jobs:
             echo "::notice::No prepared install in .local/horizon-client/$version: no game files on this machine, so the corpus run skips."
           fi
       - name: Harness self-tests, with no jars and no game files
-        # The synthetic corpus and the fixture metadata: cheap, and they still say the harness works on a runner
+        # The synthetic corpus, the fixture metadata and the differential
+        # generator: cheap, and they still say the harness works on a runner
         # that cannot run a real jar.
         run: |
           python3 tools/real_mod_corpus.py --self-test
-          python3 -m unittest tests.test_real_mod_corpus tests.test_real_mod_fixtures
+          python3 tools/java_differential_fuzz.py --self-test
+          python3 -m unittest tests.test_real_mod_corpus tests.test_real_mod_fixtures tests.test_java_differential_fuzz
       - name: Build the probe and the dedicated server
         if: steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
         run: cargo build --locked --profile fast -p horizon-client -p horizon-native-java -p horizon-jvm
@@ -203,6 +211,62 @@ jobs:
             --limit "$LIMIT" --timeout "$TIMEOUT" \
             --json --output .local/java-corpus-reports/ledger.txt \
             > .local/java-corpus-reports/ledger.json
+      - name: Differential fuzz against a JVM
+        id: fuzz
+        # Needs no jar set and no game files: javac sends real classfiles
+        # through the native interpreter and a JVM, and the two registration
+        # row lists are diffed. A native gap is the report, not a job failure.
+        if: always()
+        timeout-minutes: 30
+        env:
+          FUZZ_FIXTURES: ${{ inputs.fuzz_fixtures || '10' }}
+          FUZZ_SEED: ${{ inputs.fuzz_seed || '20261106' }}
+        run: |
+          set -uo pipefail
+          mkdir -p .local/java-corpus-reports
+          args=(--fixtures "$FUZZ_FIXTURES" --seed "$FUZZ_SEED" --timeout 60 --json
+                --output .local/java-corpus-reports/fuzz.json)
+          # No --bin-dir: the harness builds the probe from this checkout, so a
+          # stale binary left in target/ by an earlier run cannot decide the
+          # result. A runner without cargo or a JDK exits 2 and the score says
+          # the fuzz was skipped.
+          status=0
+          python3 tools/java_differential_fuzz.py "${args[@]}" \
+            > .local/java-corpus-reports/fuzz.stdout || status=$?
+          # 2 is "no JDK or cargo on this runner": the score records the skip.
+          if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+            exit "$status"
+          fi
+      - name: Yesterday's compatibility score
+        if: always()
+        uses: actions/cache/restore@v4
+        with:
+          path: .local/java-corpus-reports/previous-score.json
+          key: java-compat-score-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            java-compat-score-
+      - name: Compatibility score, ran/refused/skipped/needs-loader
+        if: always()
+        run: |
+          set -euo pipefail
+          reports=.local/java-corpus-reports
+          mkdir -p "$reports"
+          args=(--score-only --label "$(date -u +%F)" --output "$reports/compatibility-score.json")
+          if [ -f "$reports/probe.json" ]; then args+=(--probe "$reports/probe.json"); fi
+          if [ -f "$reports/ledger.json" ]; then args+=(--ledger "$reports/ledger.json"); fi
+          if [ -f "$reports/fuzz.json" ]; then args+=(--fuzz "$reports/fuzz.json"); fi
+          if [ -f "$reports/previous-score.json" ]; then args+=(--previous "$reports/previous-score.json"); fi
+          echo "## Java compatibility score" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/java_differential_fuzz.py "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+          # Tomorrow's trend compares against tonight's numbers.
+          cp "$reports/compatibility-score.json" "$reports/previous-score.json"
+      - name: Keep tonight's score for tomorrow's trend
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .local/java-corpus-reports/previous-score.json
+          key: java-compat-score-${{ github.run_id }}-${{ github.run_attempt }}
       - name: The run in this job's summary
         if: always() && steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
         run: |
@@ -250,7 +314,9 @@ jobs:
           path: .local/java-corpus
           key: java-corpus-${{ inputs.cache_save_key }}
       - uses: actions/upload-artifact@v7
-        if: always() && steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        # The score and the fuzz report exist even when no jar set is on the
+        # runner, so the artifact is not gated on a corpus run.
+        if: always()
         with:
           name: java-corpus-reports
           path: .local/java-corpus-reports/
