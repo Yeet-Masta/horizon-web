@@ -1557,6 +1557,7 @@ mod tests {
             registrations: 3,
             opaque: 1,
             isolation_failure: None,
+            mixin: Default::default(),
         };
         run_server_java_mods_with(
             &[PathBuf::from("integrated.jar")],

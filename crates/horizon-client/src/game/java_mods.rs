@@ -73,6 +73,16 @@ pub(super) struct JavaCompatibilityReport {
     pub(super) registrations: usize,
     pub(super) opaque: usize,
     pub(super) isolation_failure: Option<String>,
+    pub(super) mixin: JavaMixinSummary,
+}
+
+/// The load-time weave's counts for one jar, and the first skip a real loader would have applied.
+/// The launcher reads the reason to say a jar needs the loader instead of running natively.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct JavaMixinSummary {
+    pub(super) woven: usize,
+    pub(super) skipped: usize,
+    pub(super) first_skip_reason: Option<String>,
 }
 
 /// Why one jar never started: the path, and the runner's reason without the
@@ -352,6 +362,32 @@ struct JavaJarRun {
 /// its budget in the failure line, while every later jar still runs.
 const JAR_EXECUTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Longest skip reason the runtime report carries, so a jar's own names cannot
+/// flood the launcher's panel (which cuts every string it reads to 240).
+const MAX_SKIP_REASON_CHARS: usize = 240;
+
+/// The first skipped plan a real loader would apply: one whose family the
+/// bounded weave does not run, or whose target is a game class. The launcher's
+/// runtime row reads "target-outside-jar"/"net/minecraft/" and says the jar
+/// needs the loader; a skip inside the jar's own classes says nothing.
+fn first_game_skip_reason(skipped: &[horizon_native_java::SkippedMixinPlan]) -> Option<String> {
+    skipped
+        .iter()
+        .find(|plan| {
+            plan.reason == horizon_native_java::MixinSkipReason::UnsupportedFamily
+                || plan.reason == horizon_native_java::MixinSkipReason::TargetOutsideJar
+                || plan.target.owner.starts_with("net/minecraft/")
+        })
+        .map(|plan| {
+            let mut reason = plan.to_string().replace(['\n', '\r'], " ");
+            if reason.chars().count() > MAX_SKIP_REASON_CHARS {
+                reason = reason.chars().take(MAX_SKIP_REASON_CHARS - 1).collect();
+                reason.push('…');
+            }
+            reason
+        })
+}
+
 fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, String> {
     // Decide from loader metadata whether this jar can run in this role at
     // all. Most jars in a real pack are client-only and never start on a
@@ -479,6 +515,14 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
             .filter(|e| e.declaration.is_none())
             .count(),
         isolation_failure: None,
+        mixin: JavaMixinSummary {
+            woven: weave.woven.len()
+                + weave.woven_anchors.len()
+                + weave.woven_modify_args.len()
+                + weave.woven_modify_variables.len(),
+            skipped: weave.skipped.len(),
+            first_skip_reason: first_game_skip_reason(&weave.skipped),
+        },
     };
     // The jar and its host go back to the batch's serial adoption step, which
     // publishes its payload channels and keeps the host only if it declared
@@ -782,9 +826,9 @@ where
                     .unwrap_or_default(),
                 loader: r.loader.map_or("unknown", JavaLoader::name).to_owned(),
                 engine: r.engine.name().to_owned(),
-                woven: 0,
-                skipped: 0,
-                first_skip_reason: None,
+                woven: r.mixin.woven,
+                skipped: r.mixin.skipped,
+                first_skip_reason: r.mixin.first_skip_reason.clone(),
                 registrations: r.registrations,
                 opaque: r.opaque,
                 isolation_failure: r.isolation_failure.clone(),
@@ -916,6 +960,7 @@ mod tests {
                         registrations: 1,
                         opaque: 0,
                         isolation_failure: None,
+                        mixin: Default::default(),
                     },
                     declarations,
                 })
@@ -977,6 +1022,7 @@ mod tests {
                     registrations: 1,
                     opaque: 0,
                     isolation_failure: None,
+                    mixin: Default::default(),
                 },
                 declarations,
             })
@@ -1065,5 +1111,61 @@ mod tests {
     #[test]
     fn the_fml_preflight_never_runs_for_a_client() {
         assert!(fml_preflight(ExecutionRole::Client, &[]).unwrap().is_none());
+    }
+
+    fn method_ref(owner: &str, name: &str) -> horizon_native_java::MethodRef {
+        horizon_native_java::MethodRef {
+            owner: owner.into(),
+            name: name.into(),
+            descriptor: "(I)V".into(),
+        }
+    }
+
+    fn skipped_plan(
+        owner: &str,
+        reason: horizon_native_java::MixinSkipReason,
+        at: &str,
+    ) -> horizon_native_java::SkippedMixinPlan {
+        horizon_native_java::SkippedMixinPlan {
+            target: method_ref(owner, "tick"),
+            callback: method_ref("demo/Mixin", "hook"),
+            at: at.into(),
+            reason,
+        }
+    }
+
+    /// The runtime row names the first plan a real loader would apply: a game-class target or an
+    /// unsupported family, never a skip inside the jar itself, and one bounded line.
+    #[test]
+    fn the_first_game_skip_reason_names_the_loader_work() {
+        use horizon_native_java::MixinSkipReason;
+        let own = skipped_plan("demo/Target", MixinSkipReason::Cancellable, "TAIL");
+        let game = skipped_plan(
+            "net/minecraft/world/level/Level",
+            MixinSkipReason::TargetOutsideJar,
+            "HEAD",
+        );
+        let text = first_game_skip_reason(&[own.clone(), game.clone()]).unwrap();
+        assert!(text.starts_with("target-outside-jar HEAD net/minecraft/world/level/Level#tick"));
+        assert!(text.contains("demo/Mixin#hook"), "{text}");
+        assert!(
+            first_game_skip_reason(&[own]).is_none(),
+            "an in-jar skip needs no loader"
+        );
+        let unsupported = skipped_plan("demo/Target", MixinSkipReason::UnsupportedFamily, "INVOKE");
+        assert_eq!(
+            first_game_skip_reason(&[unsupported])
+                .as_deref()
+                .map(|r| r.split(' ').next().unwrap()),
+            Some("unsupported-family")
+        );
+        let long = skipped_plan(
+            "net/minecraft/A",
+            MixinSkipReason::Weaver("x".repeat(1000)),
+            "HEAD",
+        );
+        let bounded = first_game_skip_reason(&[long]).unwrap();
+        assert_eq!(bounded.chars().count(), MAX_SKIP_REASON_CHARS);
+        assert!(!bounded.contains(['\n', '\r']));
     }
 }

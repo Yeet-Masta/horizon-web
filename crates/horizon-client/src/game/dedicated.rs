@@ -2525,6 +2525,7 @@ mod tests {
             registrations: 0,
             opaque: 0,
             isolation_failure: None,
+            mixin: Default::default(),
         }
     }
 

@@ -427,6 +427,7 @@ mod tests {
             registrations,
             opaque,
             isolation_failure: isolation_failure.map(str::to_owned),
+            mixin: Default::default(),
         }
     }
 
