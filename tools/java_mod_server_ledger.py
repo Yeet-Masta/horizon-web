@@ -8,6 +8,12 @@ execution refuses it yet). `--table` prints the label table, and `--docs PATH`
 rewrites the generated block of `docs/java-mod-compat-status.md` between its
 `java-mod-ledger` markers. `--from PATH` reads an earlier text ledger instead of
 starting servers, so a table can be regenerated without a jar set.
+
+The game's dedicated log names a started jar's engine but no identity or plan counts,
+so a run also reads the `java-runtime.json` that role writes under the scratch home,
+and asks `horizon-native-java --mixin-plans` how many of the jar's plans name a class
+the jar does not hold (the `target-outside-jar` count the label needs). A jar the log
+names after `skipping` did not start, whatever else the process reached.
 """
 
 from __future__ import annotations
@@ -91,6 +97,9 @@ class Row:
     reason: str = ""
     seconds: float = 0.0
     skip_reasons: tuple[str, ...] = ()
+    # Plans whose target class is outside the jar, from the plan report. The
+    # `target-outside-jar` share, used by `recommendation`; not serialized.
+    game_plans: int = 0
     # One of LABELS; empty until `parse_log` classifies the row.
     recommend: str = ""
 
@@ -104,7 +113,10 @@ def metadata(path: Path) -> tuple[str, str]:
     try:
         with zipfile.ZipFile(path) as jar:
             try:
-                obj = json.loads(jar.read("fabric.mod.json"))
+                raw = jar.read("fabric.mod.json").decode("utf-8", errors="replace")
+                obj = json.loads(lenient_json_text(raw))
+                if not isinstance(obj, dict):
+                    return "?", "?"
                 return str(obj.get("id", "?")), str(obj.get("version", "?"))
             except KeyError:
                 for name in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
@@ -188,7 +200,7 @@ def read_jar_entrypoints(path: Path | None) -> JarEntrypoints | None:
                 if name in names:
                     text = jar.read(name).decode("utf-8", errors="replace")
                     client_side_only = bool(
-                        re.search(r"(?im)^\s*clientSideOnly\s*=\s*true\b", text)
+                        re.search(r"(?im)^\s*clientSideOnly\s*=\s*[\"']?true[\"']?\s*$", text)
                     )
                     break
             if client_side_only or any(kind in SERVER_ENTRYPOINT_KINDS for kind in kinds):
@@ -226,9 +238,92 @@ def skip_subtype(entrypoints: JarEntrypoints | None) -> str | None:
     return "library"
 
 
+def runtime_row(report: dict, jar: Path) -> dict | None:
+    """The `java-runtime.json` row a started jar published, if it published one."""
+    rows = report.get("jars") if isinstance(report, dict) else None
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if isinstance(row, dict) and row.get("file") == jar.name:
+            return row
+    return None
+
+
+def read_runtime_report(home: Path) -> dict:
+    """The role's runtime report, or an empty report when it wrote none."""
+    try:
+        report = json.loads((home / "java-runtime.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return report if isinstance(report, dict) else {}
+
+
+def server_side_mixins(report: dict) -> dict[str, str]:
+    """Each mixin class's physical side, from the jar's own configs.
+
+    A class in a common `mixins` list applies on both sides; a class only in a
+    `client` or `server` list applies there. The first config that names a class
+    decides, matching the load-time gate's "first config that lists it" rule.
+    """
+    sides: dict[str, str] = {}
+    configs = report.get("configs") if isinstance(report, dict) else None
+    for config in configs if isinstance(configs, list) else ():
+        if not isinstance(config, dict):
+            continue
+        common = {str(item) for item in config.get("mixins") or ()}
+        server = common | {str(item) for item in config.get("server") or ()}
+        client = common | {str(item) for item in config.get("client") or ()}
+        for name in server:
+            sides[name] = "both" if sides.get(name) == "client" else "server"
+        for name in client:
+            sides[name] = "both" if sides.get(name) == "server" else "client"
+    return sides
+
+
+def outside_plans(probe: Path | None, jar: Path, report: dict) -> int:
+    """Plans on the server side whose target class the jar does not hold.
+
+    That is the `target-outside-jar` share of the weave's skips. The game's log
+    no longer lists each skip, so the plan report is the only place the count
+    survives; a missing probe, an unreadable jar or unparseable JSON answers 0,
+    and the label then falls back to whatever the runtime report did say.
+    """
+    if probe is None or not probe.is_file():
+        return 0
+    try:
+        result = subprocess.run(
+            [str(probe), "--json", "--mixin-plans", str(jar)],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        plans = json.loads(result.stdout).get("plans")
+        names = set(zipfile.ZipFile(jar).namelist())
+    except (OSError, ValueError, subprocess.SubprocessError, zipfile.BadZipFile):
+        return 0
+    if not isinstance(plans, list):
+        return 0
+    sides = server_side_mixins(report)
+    count = 0
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        callback = str(plan.get("callback", "")).split("#", 1)[0].replace("/", ".")
+        target = str(plan.get("target", ""))
+        if not target or sides.get(callback, "both") == "client":
+            continue
+        if f"{target}.class" not in names:
+            count += 1
+    return count
+
+
 def parse_log(text: str, filename: str, *, seconds: float = 0.0, timed_out: bool = False,
-              exit_code: int | None = None, jar: Path | None = None) -> Row:
-    """Extract the stable fields emitted by the dedicated Java compatibility logger."""
+              exit_code: int | None = None, jar: Path | None = None,
+              runtime: dict | None = None, game_plans: int = 0) -> Row:
+    """Extract the stable fields the dedicated role's log and runtime report carry.
+
+    `runtime` is the jar's `java-runtime.json` row when it started; it carries the
+    engine and the weave's woven/skipped counts, which the log no longer prints.
+    `game_plans` is the plan report's `target-outside-jar` count.
+    """
     ident, version = "?", "?"
     engine = "?"
     match = re.search(r"engine=([^\s]+).*?\bid=([^\s]+)\s+version=([^\s]+)", text)
@@ -238,31 +333,58 @@ def parse_log(text: str, filename: str, *, seconds: float = 0.0, timed_out: bool
         match = re.search(r"\bid=([^\s]+)\s+version=([^\s]+).*?engine=([^\s]+)", text)
         if match:
             ident, version, engine = match.groups()
+    if runtime is not None:
+        engine = str(runtime.get("engine") or engine)
 
     woven = skipped = 0
-    counts = re.search(r"mixin weave:\s*(\d+)\s+woven,\s*(\d+)\s+skipped", text)
-    if counts:
-        woven, skipped = map(int, counts.groups())
+    if runtime is not None:
+        try:
+            woven = int(runtime.get("woven") or 0)
+            skipped = int(runtime.get("skipped") or 0)
+        except (TypeError, ValueError):
+            woven = skipped = 0
     else:
-        counts = re.search(r"(?:^|\s)mixin:\s*(\d+)\s+woven,\s*(\d+)\s+skipped", text, re.M)
+        counts = re.search(r"mixin weave:\s*(\d+)\s+woven,\s*(\d+)\s+skipped", text)
         if counts:
             woven, skipped = map(int, counts.groups())
+        else:
+            counts = re.search(r"(?:^|\s)mixin:\s*(\d+)\s+woven,\s*(\d+)\s+skipped", text, re.M)
+            if counts:
+                woven, skipped = map(int, counts.groups())
 
     skip_reasons = tuple(re.findall(
         r"\b(target-outside-jar|target-missing|game-class)\b", text, re.I
     ))
+    if runtime is not None and not skip_reasons:
+        # The runtime report keeps only the first game-class skip, not the list.
+        first = str(runtime.get("first_skip_reason") or "")
+        label = first.split(" ", 1)[0] if first else ""
+        if label in {"target-outside-jar", "target-missing", "game-class",
+                     "unsupported-family", "game-hook-mismatch"}:
+            skip_reasons = (label,)
+    if jar is not None and ident == "?" and version == "?":
+        # The started line names the engine only; the jar's metadata has the id.
+        ident, version = metadata(jar)
 
     done = bool(re.search(r"Done \(", text))
+    # A jar the batch did not start is named after `skipping`, and the vanilla
+    # server can still reach Done: that line, not Done, is the row's outcome.
+    refused_line = next((line for line in text.splitlines()
+                         if "skipping " in line and filename in line), None)
     reason = ""
-    for pattern in (r"skipping .*?\.jar:\s*([^\n]+)", r"startup failed:\s*([^\n]+)", r"refused:\s*([^\n]+)",
-                    r"Metadata\([^\n]+", r"expected a [^\n]+"):
-        failure = re.search(pattern, text, re.I)
-        if failure:
-            reason = bounded(failure.group(1) if failure.lastindex else failure.group(0))
-            break
-    if not re.search(r"no native Fabric or NeoForge entrypoint", reason, re.I):
+    if refused_line:
+        reason = bounded(refused_line.rsplit(f"{filename}:", 1)[-1].strip())
+    if not reason:
+        for pattern in (r"skipping .*?\.jar:\s*([^\n]+)", r"startup failed:\s*([^\n]+)",
+                        r"refused:\s*([^\n]+)", r"Metadata\([^\n]+", r"expected a [^\n]+"):
+            failure = re.search(pattern, text, re.I)
+            if failure:
+                reason = bounded(failure.group(1) if failure.lastindex else failure.group(0))
+                break
+    if not re.search(r"no native Fabric or NeoForge entrypoint|no native entrypoint", reason, re.I):
         entrypoint_line = next((line for line in text.splitlines()
-                                if re.search(r"no native Fabric or NeoForge entrypoint", line, re.I)), None)
+                                if re.search(r"no native Fabric or NeoForge entrypoint"
+                                             r"|no native entrypoint", line, re.I)), None)
         if entrypoint_line:
             reason = bounded(entrypoint_line.split("ERROR", 1)[-1].lstrip(" :"))
     if not reason:
@@ -270,10 +392,7 @@ def parse_log(text: str, filename: str, *, seconds: float = 0.0, timed_out: bool
         if errors:
             reason = bounded(errors[-1].split("ERROR", 1)[-1].lstrip(" :"))
     subtype = ""
-    # A refused engine can still let the dedicated server reach Done: the mod
-    # was skipped while the vanilla server continued, so Done is not success
-    # for that row.
-    if done and engine != "refused":
+    if done and not refused_line and engine != "refused":
         verdict = "ran"
         reason = ""
     else:
@@ -284,7 +403,9 @@ def parse_log(text: str, filename: str, *, seconds: float = 0.0, timed_out: bool
                                 else ("engine refused" if engine == "refused"
                                       else "server stopped before Done"))
         entrypoint_phrase = re.search(
-            r"no native Fabric or NeoForge entrypoint", reason + "\n" + text, re.I
+            r"no native Fabric or NeoForge entrypoint|no native entrypoint"
+            r"|clientSideOnly mod cannot run",
+            reason + "\n" + text, re.I
         )
         entrypoint = re.search(
             r"no native Fabric or NeoForge entrypoint for server execution\s*"
@@ -307,10 +428,17 @@ def parse_log(text: str, filename: str, *, seconds: float = 0.0, timed_out: bool
                 verdict = "refused"
         else:
             verdict = "refused"
+        subtype = subtype or ""
+        if verdict == "refused" and engine == "?":
+            engine = "refused"
+        if verdict == "skipped" and engine == "?":
+            # The engine never saw a server-role entrypoint, so say so rather
+            # than leaving the row's engine unknown.
+            engine = "refused"
     row = Row(filename, ident, version, verdict, subtype, engine, woven, skipped,
-              reason, round(seconds, 3), skip_reasons)
+              reason, round(seconds, 3), skip_reasons, game_plans)
     return Row(filename, ident, version, verdict, subtype, engine, woven, skipped,
-               reason, round(seconds, 3), skip_reasons, recommendation(row))
+               reason, round(seconds, 3), skip_reasons, game_plans, recommendation(row))
 
 
 LOADER_SKIP_REASONS = {"target-outside-jar", "target-missing", "game-class"}
@@ -323,7 +451,8 @@ def recommendation(row: Row) -> str:
     if row.verdict == "skipped" and row.subtype in {"client-only", "library"}:
         return NATIVE_OK
     if row.verdict == "ran":
-        loader_skips = sum(reason.lower() in LOADER_SKIP_REASONS for reason in row.skip_reasons)
+        loader_skips = row.game_plans or sum(
+            reason.lower() in LOADER_SKIP_REASONS for reason in row.skip_reasons)
         if row.skipped and loader_skips * 2 >= row.skipped and loader_skips:
             return NEEDS_LOADER
         return NATIVE_OK
@@ -339,15 +468,22 @@ def label(row: Row) -> str:
 def reason_category(row: Row) -> str:
     if row.verdict == "ran":
         return "none"
+    if row.verdict == "skipped":
+        # The server role had no entrypoint to execute.
+        return "no-entrypoint"
     reason = row.reason.lower()
-    if "no native fabric or neoforge entrypoint" in reason:
+    if "no native fabric or neoforge entrypoint" in reason or "no native entrypoint" in reason:
         return "no-entrypoint"
     if "timeout" in reason:
         return "timeout"
     if "metad" in reason:
         return "metadata"
-    if "invalidclass" in reason:
+    if "uncaught exception" in reason:
+        return "uncaught"
+    if "invalidclass" in reason or "unsupportedopcode" in reason or "stackunderflow" in reason:
         return "invalid-class"
+    if "missingmethod" in reason or "nosuchmethod" in reason or "missing member" in reason:
+        return "missing-member"
     if "startup failed" in reason:
         return "startup-failed"
     if "exit code" in reason:
@@ -387,7 +523,9 @@ CAUSE_TEXT = {
     (NEEDS_LOADER, "loader-engine"): "ran through the reference loader",
     (NATIVE_GAP, "metadata"): "refused while decoding metadata",
     (NATIVE_GAP, "no-entrypoint"): "refused before a server entrypoint matched",
+    (NATIVE_GAP, "uncaught"): "refused by an uncaught exception in its entrypoint",
     (NATIVE_GAP, "invalid-class"): "refused by the verifier (opcode or stack)",
+    (NATIVE_GAP, "missing-member"): "refused on a member it could not resolve",
     (NATIVE_GAP, "startup-failed"): "refused in the entrypoint",
     (NATIVE_GAP, "timeout"): "did not reach `Done (` in the time bound",
     (NATIVE_GAP, "exit-code"): "exited before `Done (`",
@@ -399,7 +537,9 @@ CAUSE_TEXT = {
 GAP_TEXT = {
     "metadata": "refused while decoding metadata",
     "no-entrypoint": "refused before a server entrypoint matched",
+    "uncaught": "refused by an uncaught exception",
     "invalid-class": "refused by the verifier",
+    "missing-member": "refused on a missing member",
     "startup-failed": "refused in the entrypoint",
     "timeout": "no `Done (` before the time bound",
     "exit-code": "exited before `Done (`",
@@ -538,6 +678,7 @@ def read_ledger(path: Path) -> list[Row]:
                 values.get("reason", ""),
                 float(values.get("seconds", "0") or 0),
                 (),
+                0,
                 LEGACY_LABELS.get(stored, stored),
             ))
         except (ValueError, IndexError) as error:
@@ -558,8 +699,8 @@ def _kill_process(proc: subprocess.Popen[bytes]) -> None:
             pass
 
 
-def run_one(binary: Path, resources: Path, jar: Path, *, timeout: float, port: int) -> Row:
-    ident, version = metadata(jar)
+def run_one(binary: Path, resources: Path, jar: Path, *, timeout: float, port: int,
+            probe: Path | None = None) -> Row:
     with tempfile.TemporaryDirectory(prefix="horizon-ledger-") as scratch:
         root = Path(scratch)
         game_dir = root / "game"
@@ -607,8 +748,12 @@ def run_one(binary: Path, resources: Path, jar: Path, *, timeout: float, port: i
         except OSError:
             output = b""
         text = output.decode("utf-8", errors="replace")
+        report = read_runtime_report(home)
+        runtime = runtime_row(report, jar)
+        plans = outside_plans(probe, jar, report) if runtime is not None else 0
         return parse_log(text, jar.name, seconds=time.monotonic() - start,
-                         timed_out=timed_out, exit_code=proc.returncode, jar=jar)
+                         timed_out=timed_out, exit_code=proc.returncode, jar=jar,
+                         runtime=runtime, game_plans=plans)
 
 
 def format_row(row: Row) -> str:
@@ -625,6 +770,9 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mods", nargs="?", type=Path, help="directory containing mod jars")
     parser.add_argument("--binary", type=Path, default=Path("target/fast/horizon-client"))
+    parser.add_argument("--native-binary", type=Path,
+                        default=Path("target/fast/horizon-native-java"),
+                        help="plan probe used for the target-outside-jar count")
     parser.add_argument("--resources", type=Path, default=Path(".local/horizon-client/26.3"))
     parser.add_argument("--limit", type=int, default=0, help="maximum jars (0 means all)")
     parser.add_argument("--only", help="only filenames containing this substring")
@@ -656,6 +804,7 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("a mod directory, or --from PATH")
         args.binary = args.binary.resolve()
         args.resources = args.resources.resolve()
+        args.native_binary = args.native_binary.resolve()
         if not args.mods.is_dir():
             parser.error(f"mod directory does not exist: {args.mods}")
         jars = sorted((p for p in args.mods.iterdir() if p.suffix.lower() == ".jar"),
@@ -670,12 +819,17 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"binary does not exist: {args.binary}")
         if not args.resources.is_dir():
             parser.error(f"resources directory does not exist: {args.resources}")
+        if not args.native_binary.is_file():
+            print(f"warning: plan probe missing ({args.native_binary}); "
+                  "target-outside-jar counts fall back to the runtime report",
+                  file=sys.stderr, flush=True)
 
         rows = []
         for index, jar in enumerate(jars):
             print(f"[{index + 1}/{len(jars)}] {jar.name}", file=sys.stderr, flush=True)
             rows.append(run_one(args.binary, args.resources, jar, timeout=args.timeout,
-                                port=args.port_base + index))
+                                port=args.port_base + index,
+                                probe=args.native_binary if args.native_binary.is_file() else None))
         source = str(args.mods)
 
     rows.sort(key=lambda row: row.file)
