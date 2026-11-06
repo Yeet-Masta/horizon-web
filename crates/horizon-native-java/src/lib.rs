@@ -19,8 +19,8 @@ use weaver::{
 };
 
 pub use weaver::{
-    ReturnMode, WovenClasses, callback_info_class, callback_info_returnable_class, weave_class,
-    weave_class_with_extras, weave_classes, weave_classes_with_extras, weave_head,
+    ReturnMode, ShiftBy, WovenClasses, callback_info_class, callback_info_returnable_class,
+    weave_class, weave_class_with_extras, weave_classes, weave_classes_with_extras, weave_head,
     weave_head_cancellable, weave_invoke, weave_invoke_plan, weave_plans, weave_return,
 };
 
@@ -238,10 +238,10 @@ impl MixinInjectionPlan {
 /// This sits beside [`MixinInjectionPlan`] rather than extending it: the
 /// injection plan is the executable HEAD/RETURN/TAIL/INVOKE contract other
 /// callers already build, while an anchor plan additionally carries the raw
-/// `@At` site, ordinal and slice bounds a call-site hook needs.  Discovery
-/// keeps a plan out of [`NativeJar::mixin_anchor_plans`] when its selector or
-/// callback shape is outside the bounded forms; the reason is reported by
-/// [`NativeJar::unresolved_anchor_plans`].
+/// `@At` site, ordinal, slice bounds and resolved shift a call-site hook
+/// needs.  Discovery keeps a plan out of [`NativeJar::mixin_anchor_plans`]
+/// when its selector or callback shape is outside the bounded forms; the
+/// reason is reported by [`NativeJar::unresolved_anchor_plans`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MixinAnchorPlan {
     pub target: MethodRef,
@@ -261,6 +261,15 @@ pub struct MixinAnchorPlan {
     pub slice_from: Option<String>,
     /// `@Slice.to`'s anchor label, kept as written.
     pub slice_to: Option<String>,
+    /// `@At(shift = ..., by = ...)`, resolved to the signed instruction
+    /// distance the bounded weaver moves the insert.
+    ///
+    /// Mixin's `BEFORE by n` is `n` instruction boundaries before the site and
+    /// `AFTER by n` is `n + 1` after it, the distances an [`InvokeShift`]
+    /// names; `BY` keeps its signed amount.  A shift on a `@Redirect` is
+    /// impossible in this runtime and stays report-only: the replacement bytes
+    /// have to stay on the instruction they replace.
+    pub shift: Option<ShiftBy>,
     /// True when the plan came from `@Redirect` rather than `@Inject`.
     pub redirect: bool,
 }
@@ -299,6 +308,9 @@ pub struct MixinModifyArgPlan {
     pub index: usize,
     /// `@At.ordinal`: only the ordinal-th matching call site is modified.
     pub ordinal: Option<usize>,
+    /// `@Slice(from = ..., to = ...)`, the half-open instruction range the
+    /// matching call sites and [`Self::ordinal`] count inside.
+    pub slice: Option<SliceBounds>,
 }
 
 /// One bounded native translation for an `@ModifyVariable` callback.
@@ -10496,9 +10508,10 @@ impl NativeJar {
     /// the classes' annotations.
     ///
     /// The plans are a translation plan, not weaving: each carries the raw
-    /// `@At` site plus the bounded selector this runtime resolved from it.
-    /// A selector, callback shape or `@At` anchor outside the accepted forms
-    /// stays out of this executable set and is reported by
+    /// `@At` site, its bounded ordinal and `@Slice` bounds, and the resolved
+    /// `shift`/`by` distance the weaver moves the insert by.  A selector,
+    /// callback shape or `@At` anchor outside the accepted forms stays out of
+    /// this executable set and is reported by
     /// [`Self::unresolved_anchor_plans`].  Sorted and deduplicated like
     /// [`Self::mixin_injection_plans`].
     pub fn mixin_anchor_plans(&self) -> Vec<MixinAnchorPlan> {
@@ -10603,21 +10616,53 @@ impl NativeJar {
                                 } else {
                                     matches!(anchor.anchor.as_str(), "FIELD" | "NEW" | "JUMP")
                                 };
+                                // A malformed shift still gets a plan so the
+                                // report names the selector; the reason below
+                                // is the one that explains it.
+                                let raw_shift = anchor_shift(anchor).ok().flatten();
                                 if !supported {
                                     // An @Inject RETURN/TAIL belongs to the
                                     // injection plan set; another unsupported
                                     // anchor is reported precisely.
                                     if redirect {
                                         unresolved.push((
-                                            anchor_plan(&class.name, method, method_spec, target_owner, anchor, redirect, cancellable),
+                                            anchor_plan(
+                                                &class.name,
+                                                method,
+                                                method_spec,
+                                                target_owner,
+                                                anchor,
+                                                redirect,
+                                                cancellable,
+                                                raw_shift,
+                                            ),
                                             format!(
-                                                "@Redirect anchor {} is not executed natively; native redirects support HEAD, INVOKE and FIELD",
+                                                "@Redirect anchor {} is not a bounded redirect selector; native redirects replace HEAD, INVOKE and FIELD sites",
                                                 anchor.anchor
                                             ),
                                         ));
                                     }
                                     continue;
                                 }
+                                let shift = match resolve_anchor_modifiers(anchor, redirect) {
+                                    Ok(shift) => shift,
+                                    Err(reason) => {
+                                        unresolved.push((
+                                            anchor_plan(
+                                                &class.name,
+                                                method,
+                                                method_spec,
+                                                target_owner,
+                                                anchor,
+                                                redirect,
+                                                cancellable,
+                                                raw_shift,
+                                            ),
+                                            reason,
+                                        ));
+                                        continue;
+                                    }
+                                };
                                 let plan = anchor_plan(
                                     &class.name,
                                     method,
@@ -10626,11 +10671,8 @@ impl NativeJar {
                                     anchor,
                                     redirect,
                                     cancellable,
+                                    shift,
                                 );
-                                if let Some(reason) = unsupported_anchor_modifiers(anchor) {
-                                    unresolved.push((plan, reason));
-                                    continue;
-                                }
                                 match resolve_anchor_site(&plan)
                                     .and_then(|site| validate_anchor_plan(self, &plan, &site))
                                 {
@@ -10771,9 +10813,10 @@ impl NativeJar {
     /// Discover the `@ModifyArg` plans this jar declares.
     ///
     /// Each plan names one `@At("INVOKE")` site and the zero-based argument it
-    /// replaces.  The callback must return the argument's own type and either
-    /// take that argument alone or mirror the invoked method's whole argument
-    /// list, which is Mixin's bounded handler shape.  Cancellation, slices,
+    /// replaces, optionally counting the site inside an `@Slice` range with
+    /// `@At.ordinal`.  The callback must return the argument's own type and
+    /// either take that argument alone or mirror the invoked method's whole
+    /// argument list, which is Mixin's bounded handler shape.  Cancellation,
     /// shifts, a missing call descriptor and an out-of-range index stay out of
     /// this set and are reported by [`Self::unresolved_modify_arg_plans`].
     pub fn mixin_modify_arg_plans(&self) -> Vec<MixinModifyArgPlan> {
@@ -10824,7 +10867,11 @@ impl NativeJar {
                         .map(annotation_anchor_selectors)
                         .unwrap_or_default();
                     let cancellable = annotation_bool(annotation, "cancellable");
-                    let slices = annotation.values.contains_key("slice");
+                    let slices = annotation
+                        .values
+                        .get("slice")
+                        .map(annotation_slice_entries)
+                        .unwrap_or_default();
                     let index = annotation_int(annotation, "index").unwrap_or(0);
                     for owner in &targets {
                         for method_spec in &method_specs {
@@ -10848,13 +10895,21 @@ impl NativeJar {
                                     },
                                     index: 0,
                                     ordinal: None,
+                                    slice: None,
+                                };
+                                let slice = match resolve_modify_arg_slice(anchor, &slices) {
+                                    Ok(slice) => slice,
+                                    Err(reason) => {
+                                        unresolved.push((plan, reason));
+                                        continue;
+                                    }
                                 };
                                 let reason = modify_arg_plan_reason(
                                     anchor,
                                     &callback,
                                     index,
                                     cancellable,
-                                    slices,
+                                    slice,
                                     &mut plan,
                                 );
                                 match reason {
@@ -11543,20 +11598,41 @@ impl NativeJar {
 
     /// Decide what can be woven into this jar at load, and weave it.
     ///
-    /// The bounded subset is an `@Inject` at `HEAD` whose target method is in
-    /// this jar and whose `@Mixin` class a readable config applies on `side`.
-    /// A `cancellable` plan is woven too when the target is `void`; a `void`
-    /// callback may cancel it, and the woven method returns without running the
-    /// body. A static callback is called directly; an instance callback is
-    /// reached through the synthetic bridge class the weaver adds. Every other
-    /// plan family and shape is a [`SkippedMixinPlan`] with its reason, never an
-    /// approximation, and so is a config-listed class discovery found no plan
-    /// for.
+    /// The bounded subset is every Mixin family discovery models for a target
+    /// method in this jar whose `@Mixin` class a readable config applies on
+    /// `side`: `@Inject` at `HEAD`/`RETURN`/`TAIL`/`INVOKE`, the
+    /// `FIELD`/`NEW`/`JUMP` anchor families, `@Redirect` at
+    /// `HEAD`/`INVOKE`/`FIELD`, `@Overwrite`, `@ModifyArg` and
+    /// `@ModifyVariable`.  A `cancellable` plan is woven where the injected
+    /// shape can answer: a `void` `HEAD` can cancel the body, and a
+    /// value-returning `RETURN`/`TAIL` can override the result. A static
+    /// callback is called directly; an instance callback is reached through the
+    /// synthetic bridge class the weaver adds. Every other plan shape is a
+    /// [`SkippedMixinPlan`] with its reason, never an approximation, and so is
+    /// a config-listed class discovery found no plan for.
     ///
     /// Callbacks run in the order of [`Self::mixin_plans_in_apply_order`]. A
     /// rejected plan costs only itself: the rest of its class still weaves. This
     /// never touches `self`; pass the result's classes to
     /// [`Self::with_woven_classes`].
+    ///
+    /// # Cross-family order
+    ///
+    /// Every target class is rewritten family by family in a fixed order, each
+    /// pass re-parsing the previous pass's bytes:
+    ///
+    /// 1. `@ModifyVariable` (its `STORE`/`LOAD` ordinals count the original
+    ///    local accesses),
+    /// 2. `@ModifyArg` (its call-site ordinals count the original calls),
+    /// 3. `FIELD`/`NEW`/`JUMP`/`@Redirect` anchors,
+    /// 4. `@Inject`-family plans (`HEAD`/`RETURN`/`TAIL`/`INVOKE`), which last
+    ///    because their selectors name instructions the earlier passes may have
+    ///    moved rather than counting them.
+    ///
+    /// This is the count-sensitive order the bytecode weaver documents at
+    /// `weave_class_extended_with_instance_callbacks`; a plan family that
+    /// rewrites an instruction the next family counts would otherwise see an
+    /// insert as a site of its own.
     pub fn plan_load_time_weave(&self, side: MixinSide) -> LoadTimeMixinWeave {
         let (mut plans, unresolved) = self.mixin_plan_scan();
         let (anchors, unresolved_anchors) = self.mixin_anchor_scan();
@@ -13822,6 +13898,12 @@ impl NativeJar {
             ..ModifyHooks::default()
         };
         for plan in arg_plans {
+            if plan.slice.is_some() {
+                return Err(NativeError::Metadata(format!(
+                    "native @ModifyArg callback {}#{}{} declares @Slice; the bounded interpreter counts every call site in the method, so instruction ranges are applied by the load-time weave",
+                    plan.callback.owner, plan.callback.name, plan.callback.descriptor
+                )));
+            }
             let callback_class = self.classes.get(&plan.callback.owner).ok_or_else(|| {
                 NativeError::MissingMethod(format!(
                     "{}#{}{}",
@@ -14151,6 +14233,17 @@ impl NativeJar {
             ..AnchorHooks::default()
         };
         for plan in plans {
+            if plan.shift.is_some() || plan.slice_from.is_some() || plan.slice_to.is_some() {
+                let modifier = if plan.shift.is_some() {
+                    "@At.shift"
+                } else {
+                    "@Slice"
+                };
+                return Err(NativeError::Metadata(format!(
+                    "native Mixin anchor {}#{} at {} declares {modifier}; the bounded interpreter selects whole-method sites, so instruction ranges and shifts are applied by the load-time weave",
+                    plan.callback.owner, plan.callback.name, plan.at
+                )));
+            }
             let site = resolve_anchor_site(plan).map_err(NativeError::Metadata)?;
             let callback_class = self.classes.get(&plan.callback.owner).ok_or_else(|| {
                 NativeError::MissingMethod(format!(
@@ -20841,6 +20934,7 @@ fn mixin_anchor_sort_key(
     &str,
     Option<&str>,
     Option<u8>,
+    Option<i32>,
     &str,
     &str,
     &str,
@@ -20852,6 +20946,7 @@ fn mixin_anchor_sort_key(
         &plan.at,
         plan.site.as_deref(),
         plan.opcode,
+        plan.shift.map(|shift| shift.by),
         &plan.callback.owner,
         &plan.callback.name,
         &plan.callback.descriptor,
@@ -21033,6 +21128,7 @@ fn mixin_modify_arg_sort_key(
     &str,
     usize,
     Option<usize>,
+    bool,
 ) {
     (
         &plan.target.owner,
@@ -21046,6 +21142,7 @@ fn mixin_modify_arg_sort_key(
         &plan.callback.descriptor,
         plan.index,
         plan.ordinal,
+        plan.slice.is_some(),
     )
 }
 
@@ -21076,6 +21173,44 @@ fn mixin_modify_variable_sort_key(
     )
 }
 
+/// Resolve the bounded `@Slice` a `@ModifyArg` selector counts its call sites
+/// inside.
+///
+/// A nested `@At.slice` wins; otherwise a single `@ModifyArg.slice` applies,
+/// the same default-slice rule [`resolve_injection_modifiers`] uses for
+/// `@Inject`.  More than one annotation slice is ambiguous without the id
+/// vocabulary, so it is a reason instead of a guess.
+fn resolve_modify_arg_slice(
+    anchor: &AtSelector,
+    annotation_slices: &[(Option<String>, Option<String>)],
+) -> Result<Option<SliceBounds>, String> {
+    let inline = bounded_slice_bounds(
+        anchor.slice_from.as_deref(),
+        anchor.slice_to.as_deref(),
+        "@At.slice",
+    )?;
+    let bounds = match inline {
+        Some(bounds) => Some(bounds),
+        None => match annotation_slices {
+            [] => None,
+            [one] => bounded_slice_bounds(one.0.as_deref(), one.1.as_deref(), "@ModifyArg.slice")?,
+            many => {
+                return Err(format!(
+                    "@ModifyArg.slice declares {} slices; the bounded weaver models exactly one",
+                    many.len()
+                ));
+            }
+        },
+    };
+    match bounds {
+        None => Ok(None),
+        Some((from, to)) => Ok(Some(SliceBounds {
+            from: parse_slice_boundary(&from)?,
+            to: parse_slice_boundary(&to)?,
+        })),
+    }
+}
+
 /// Validate one `@ModifyArg` selector and callback, filling `plan` when it is
 /// executable.
 fn modify_arg_plan_reason(
@@ -21083,7 +21218,7 @@ fn modify_arg_plan_reason(
     callback: &MethodRef,
     index: i32,
     cancellable: bool,
-    slices: bool,
+    slice: Option<SliceBounds>,
     plan: &mut MixinModifyArgPlan,
 ) -> Option<String> {
     let label = format!(
@@ -21093,11 +21228,6 @@ fn modify_arg_plan_reason(
     if cancellable {
         return Some(format!(
             "@ModifyArg callback {label} is cancellable; argument modification is not a cancellable injector"
-        ));
-    }
-    if slices {
-        return Some(format!(
-            "@ModifyArg callback {label} declares @Slice; slices are not modeled for argument modification"
         ));
     }
     if anchor.anchor != "INVOKE" {
@@ -21123,6 +21253,7 @@ fn modify_arg_plan_reason(
         ));
     }
     plan.index = usize::try_from(index).unwrap_or_default();
+    plan.slice = slice;
     plan.ordinal = anchor
         .ordinal
         .and_then(|ordinal| usize::try_from(ordinal).ok());
@@ -21299,6 +21430,7 @@ fn anchor_plan(
     anchor: &AtSelector,
     redirect: bool,
     cancellable: bool,
+    shift: Option<ShiftBy>,
 ) -> MixinAnchorPlan {
     let (target_name, target_descriptor) =
         split_injection_method(method_spec).unwrap_or((method_spec, ""));
@@ -21320,6 +21452,7 @@ fn anchor_plan(
         ordinal: anchor.ordinal,
         slice_from: anchor.slice_from.clone(),
         slice_to: anchor.slice_to.clone(),
+        shift,
         redirect,
     }
 }
@@ -21451,13 +21584,10 @@ fn is_bounded_jump_opcode(opcode: u8) -> bool {
 }
 
 /// Resolve one anchor plan's raw selector to the bounded site it names.
+/// Resolve the site one anchor plan names, leaving `@At.ordinal`, `@Slice` and
+/// `shift` to the caller: the load-time weaver applies all three, while the
+/// bounded interpreter selects whole-method sites and refuses them explicitly.
 fn resolve_anchor_site(plan: &MixinAnchorPlan) -> Result<ResolvedAnchor, String> {
-    if plan.slice_from.is_some() || plan.slice_to.is_some() {
-        return Err(format!(
-            "native Mixin @At(\"{}\") anchor does not model @Slice; slices are supported only for HEAD/RETURN/TAIL/INVOKE injection plans",
-            plan.at
-        ));
-    }
     if plan.ordinal.is_some_and(|ordinal| ordinal < 0) {
         return Err(format!(
             "@At.ordinal {} is negative; native anchors use a non-negative site ordinal",
@@ -21544,31 +21674,89 @@ fn resolve_anchor_site(plan: &MixinAnchorPlan) -> Result<ResolvedAnchor, String>
     }
 }
 
-/// Return a stable report-only reason for modifiers that the call-site anchor
-/// runtime cannot apply without changing the selected bytecode operation.
+/// Resolve an `@At(shift = ..., by = ...)` pair to the signed instruction
+/// distance an anchor insert moves.
 ///
-/// `@At(shift = NONE)` is the default no-op and remains executable.  A
-/// non-trivial shift or `by` value is intentionally kept out of the native
-/// anchor set; the bounded weaver currently applies those modifiers only to
-/// `MixinInjectionPlan` INVOKE/HEAD/RETURN/TAIL selectors.
-fn unsupported_anchor_modifiers(anchor: &AtSelector) -> Option<String> {
-    if anchor.slice_from.is_some() || anchor.slice_to.is_some() {
-        return Some(format!(
-            "native Mixin @At(\"{}\") anchor does not model @Slice; slices are supported only for HEAD/RETURN/TAIL/INVOKE injection plans",
+/// `BEFORE by n` names `n` instruction boundaries before the site, `AFTER by n`
+/// `n + 1` after it, and `BY n` its signed amount, the same distances the
+/// bounded weaver already applies to `MixinInjectionPlan` selectors.  Mixin's
+/// default `NONE` is a no-op; an unknown direction, a `by` without a shift and
+/// a distance outside [`weaver::MAX_SHIFT_BY`] are reasons instead of guesses.
+fn anchor_shift(anchor: &AtSelector) -> Result<Option<ShiftBy>, String> {
+    let Some(value) = anchor.shift.as_deref() else {
+        if anchor.by.is_some() {
+            return Err(format!(
+                "@At.by is set without @At.shift on the {} anchor; the bounded weaver only moves an insert for shift = BEFORE, AFTER or BY",
+                anchor.anchor
+            ));
+        }
+        return Ok(None);
+    };
+    let name = value.rsplit('.').next().unwrap_or(value);
+    let bound = i32::from(weaver::MAX_SHIFT_BY);
+    let distance = match name {
+        "NONE" => {
+            if anchor.by.is_some() {
+                return Err(format!(
+                    "@At.shift NONE on the {} anchor ignores @At.by; the bounded weaver only moves an insert for shift = BEFORE, AFTER or BY",
+                    anchor.anchor
+                ));
+            }
+            return Ok(None);
+        }
+        "BEFORE" => -anchor.by.unwrap_or(1),
+        "AFTER" => anchor.by.unwrap_or(1) + 1,
+        "BY" => anchor.by.ok_or_else(|| {
+            format!(
+                "@At.shift BY on the {} anchor needs a @At.by distance",
+                anchor.anchor
+            )
+        })?,
+        other => {
+            return Err(format!(
+                "@At.shift {other:?} on the {} anchor is not a bounded shift; native weaving supports BEFORE, AFTER and BY",
+                anchor.anchor
+            ));
+        }
+    };
+    if !(-bound..=bound).contains(&distance) {
+        return Err(format!(
+            "@At.shift {name} on the {} anchor moves the insert {distance} instruction(s), outside the bounded shift of -{bound}..={bound}",
             anchor.anchor
         ));
     }
-    let shift = anchor
-        .shift
-        .as_deref()
-        .map(|value| value.rsplit('.').next().unwrap_or(value));
-    if anchor.by.is_some() || shift.is_some_and(|value| value != "NONE") {
-        return Some(format!(
-            "native Mixin @At(\"{}\") anchor does not model shift/by; call-site shifts are supported only for INVOKE injection plans",
+    Ok(Some(ShiftBy { by: distance }))
+}
+
+/// The executable modifiers of one anchor selector.
+///
+/// A nested `@Slice` is carried on the plan as written and validated here
+/// against the bounded boundary vocabulary (`HEAD`, `RETURN`, `TAIL`,
+/// `INVOKE:<call site>`) the weaver reads.  A shift is resolved to its signed
+/// distance; a `@Redirect` cannot be shifted, because its replacement bytes
+/// have to stay on the instruction they replace, so that shape stays
+/// report-only.
+fn resolve_anchor_modifiers(
+    anchor: &AtSelector,
+    redirect: bool,
+) -> Result<Option<ShiftBy>, String> {
+    let bounds = bounded_slice_bounds(
+        anchor.slice_from.as_deref(),
+        anchor.slice_to.as_deref(),
+        "@At.slice",
+    )?;
+    if let Some((from, to)) = &bounds {
+        parse_slice_boundary(from)?;
+        parse_slice_boundary(to)?;
+    }
+    let shift = anchor_shift(anchor)?;
+    if redirect && shift.is_some() {
+        return Err(format!(
+            "@Redirect at {} cannot be shifted; its replacement bytes have to stay on the instruction they replace",
             anchor.anchor
         ));
     }
-    None
+    Ok(shift)
 }
 
 /// Whether a callback's parameter list is `base`, or `base` plus one trailing
@@ -31430,6 +31618,7 @@ mandatory = true
             ordinal: None,
             slice_from: None,
             slice_to: None,
+            shift: None,
             redirect: false,
         };
 
@@ -31454,36 +31643,163 @@ mandatory = true
         assert!(resolve_anchor_site(&plan("JUMP", Some("not-an-offset"), None)).is_err());
         assert!(resolve_anchor_site(&plan("JUMP", None, Some(0x2a))).is_err());
 
+        // `@Slice` is a modifier, not part of the site: the load-time weaver
+        // applies it, and the interpreter refuses it where it executes.
         let mut sliced = plan("FIELD", Some("#count:I"), None);
         sliced.slice_from = Some("HEAD".into());
         sliced.slice_to = Some("RETURN".into());
-        let error = resolve_anchor_site(&sliced).expect_err("anchor slices stay report-only");
-        assert!(error.contains("does not model @Slice"));
+        assert_eq!(
+            resolve_anchor_site(&sliced).unwrap(),
+            ResolvedAnchor::Field(parse_field_selector("#count:I").unwrap())
+        );
     }
 
     #[test]
-    fn anchor_modifier_diagnostics_keep_noop_shift_executable() {
-        let selector = AtSelector {
-            anchor: "FIELD".into(),
+    fn anchor_modifiers_resolve_slice_and_shift_distances() {
+        let selector = |anchor: &str, shift: Option<&str>, by: Option<i32>| AtSelector {
+            anchor: anchor.into(),
             target: Some("#count:I".into()),
             opcode: None,
             ordinal: None,
-            shift: Some("NONE".into()),
-            by: None,
+            shift: shift.map(str::to_owned),
+            by,
             slice_from: None,
             slice_to: None,
         };
-        assert!(unsupported_anchor_modifiers(&selector).is_none());
+        let bounded = |shift| Some(ShiftBy { by: shift });
 
-        let mut shifted = selector.clone();
-        shifted.shift = Some("AFTER".into());
-        let error = unsupported_anchor_modifiers(&shifted).expect("shift must be reported");
-        assert!(error.contains("does not model shift/by"));
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", None, None), false),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("NONE"), None), false),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("BEFORE"), None), false),
+            Ok(bounded(-1))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), None), false),
+            Ok(bounded(2))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), Some(2)), false),
+            Ok(bounded(3))
+        );
+        assert_eq!(
+            resolve_anchor_modifiers(&selector("JUMP", Some("BY"), Some(-3)), false),
+            Ok(bounded(-3))
+        );
 
-        shifted.shift = None;
-        shifted.by = Some(2);
-        let error = unsupported_anchor_modifiers(&shifted).expect("by must be reported");
-        assert!(error.contains("does not model shift/by"));
+        // A shift outside the bounded distance, an unknown direction and a
+        // `by` without a shift are reasons, not silent no-ops.
+        assert!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("AFTER"), Some(8)), false).is_err()
+        );
+        assert!(resolve_anchor_modifiers(&selector("FIELD", Some("BY"), Some(99)), false).is_err());
+        assert!(
+            resolve_anchor_modifiers(&selector("FIELD", Some("SOMEWHERE"), None), false).is_err()
+        );
+        assert!(resolve_anchor_modifiers(&selector("FIELD", None, Some(2)), false).is_err());
+        // A redirect's replacement bytes have to stay on the instruction.
+        assert!(resolve_anchor_modifiers(&selector("FIELD", Some("BEFORE"), None), true).is_err());
+
+        // Anchors accept the same bounded `@Slice` vocabulary as injections.
+        let mut sliced = selector("FIELD", None, None);
+        sliced.slice_from = Some("HEAD".into());
+        sliced.slice_to = Some("RETURN".into());
+        assert_eq!(resolve_anchor_modifiers(&sliced, false), Ok(None));
+        sliced.slice_to = Some("INVOKE:Ldemo/Probe;mark(Ljava/lang/String;I)V".into());
+        assert_eq!(resolve_anchor_modifiers(&sliced, false), Ok(None));
+        sliced.slice_to = Some("STORE".into());
+        assert!(resolve_anchor_modifiers(&sliced, false).is_err());
+        sliced.slice_to = None;
+        assert!(resolve_anchor_modifiers(&sliced, false).is_err());
+    }
+
+    #[test]
+    fn anchor_plan_shift_reaches_the_anchor_request() {
+        let plan = MixinAnchorPlan {
+            target: MethodRef {
+                owner: "demo/Target".into(),
+                name: "run".into(),
+                descriptor: "()V".into(),
+            },
+            callback: MethodRef {
+                owner: "demo/Mixin".into(),
+                name: "hook".into(),
+                descriptor: "()V".into(),
+            },
+            at: "FIELD".into(),
+            site: Some("#count:I".into()),
+            opcode: None,
+            cancellable: false,
+            ordinal: None,
+            slice_from: Some("HEAD".into()),
+            slice_to: Some("RETURN".into()),
+            shift: Some(ShiftBy { by: 2 }),
+            redirect: false,
+        };
+        let request = weaver::AnchorRequest::from_plan(&plan).expect("a bounded plan");
+        assert_eq!(request.shift, Some(ShiftBy { by: 2 }));
+        assert_eq!(
+            request.slice,
+            Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Return,
+            })
+        );
+    }
+
+    #[test]
+    fn modify_arg_slices_resolve_from_the_inline_or_annotation_selector() {
+        let selector = |slice_from: Option<&str>, slice_to: Option<&str>| AtSelector {
+            anchor: "INVOKE".into(),
+            target: Some("Ldemo/Probe;mark(Ljava/lang/String;I)V".into()),
+            opcode: None,
+            ordinal: None,
+            shift: None,
+            by: None,
+            slice_from: slice_from.map(str::to_owned),
+            slice_to: slice_to.map(str::to_owned),
+        };
+
+        assert_eq!(
+            resolve_modify_arg_slice(&selector(None, None), &[]),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_modify_arg_slice(&selector(Some("HEAD"), Some("RETURN")), &[]),
+            Ok(Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Return,
+            }))
+        );
+        // An annotation-level `@ModifyArg.slice` applies when the `@At` has no
+        // nested one; more than one is ambiguous.
+        assert_eq!(
+            resolve_modify_arg_slice(
+                &selector(None, None),
+                &[(Some("HEAD".into()), Some("TAIL".into()))]
+            ),
+            Ok(Some(SliceBounds {
+                from: SiteSelector::Head,
+                to: SiteSelector::Tail,
+            }))
+        );
+        assert!(
+            resolve_modify_arg_slice(
+                &selector(None, None),
+                &[
+                    (Some("HEAD".into()), Some("TAIL".into())),
+                    (Some("HEAD".into()), Some("RETURN".into())),
+                ]
+            )
+            .is_err()
+        );
+        assert!(resolve_modify_arg_slice(&selector(Some("HEAD"), None), &[]).is_err());
     }
 
     #[test]

@@ -712,8 +712,9 @@ impl AnchorSite {
 /// (callback replaces the site).
 ///
 /// [`AnchorRequest::from_plan`] builds one from discovery's
-/// [`MixinAnchorPlan`].  The plan keeps `shift`/`by` out of its fields today, so
-/// a caller that has them sets [`Self::shift`] directly.
+/// [`MixinAnchorPlan`].  The plan keeps the resolved `shift`/`by` distance and
+/// the raw `@Slice` bounds, so a caller can build a request straight from
+/// discovery without re-reading the annotation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchorRequest {
     pub site: AnchorSite,
@@ -828,7 +829,7 @@ impl AnchorRequest {
             site,
             ordinal: plan.ordinal,
             slice,
-            shift: None,
+            shift: plan.shift,
             redirect: plan.redirect,
             cancellable: plan.cancellable,
         })
@@ -6709,6 +6710,16 @@ fn modify_arg_sites(
             plan.invoke_target.owner, plan.invoke_target.name
         ));
     }
+    if let Some(slice) = &plan.slice {
+        let (from, to) = resolve_slice(label, target, code, scan, slice)?;
+        sites.retain(|site| site.at >= from && site.at < to);
+        if sites.is_empty() {
+            return Err(format!(
+                "{label}: @ModifyArg has no {}{} call site inside the slice [{from}, {to})",
+                plan.invoke_target.owner, plan.invoke_target.name
+            ));
+        }
+    }
     if let Some(ordinal) = plan.ordinal {
         if ordinal >= sites.len() {
             return Err(ordinal_out_of_range(
@@ -10763,6 +10774,7 @@ public final class Driver {
             ordinal: None,
             slice_from: None,
             slice_to: None,
+            shift: None,
             redirect,
         }
     }
@@ -10968,6 +10980,7 @@ public class Cb {
                 invoke_target: method_ref("demo/Anchors", "twice", "(I)I"),
                 index: 0,
                 ordinal: None,
+                slice: None,
             },
             MixinModifyArgPlan {
                 target: method_ref("demo/Anchors", "join", "(II)I"),
@@ -10975,6 +10988,7 @@ public class Cb {
                 invoke_target: method_ref("demo/Anchors", "pair", "(II)I"),
                 index: 0,
                 ordinal: None,
+                slice: None,
             },
             MixinModifyArgPlan {
                 target: method_ref("demo/Anchors", "fullMod", "(II)I"),
@@ -10982,6 +10996,7 @@ public class Cb {
                 invoke_target: method_ref("demo/Anchors", "pair", "(II)I"),
                 index: 1,
                 ordinal: None,
+                slice: None,
             },
         ];
         let modify_variables = vec![
@@ -11276,6 +11291,7 @@ public class CtorCb {
             invoke_target: method_ref("demo/Box", "<init>", "(I)V"),
             index: 0,
             ordinal: None,
+            slice: None,
         }];
         let woven = weave_extended_classes(&set, &[], &[], &modify_args, &[]).unwrap();
         let runner = root.join("runner");
@@ -11387,6 +11403,7 @@ public class ArgMixin {
             invoke_target: method_ref("demo/ArgTarget", "twice", "(I)I"),
             index: 0,
             ordinal: None,
+            slice: None,
         }];
         let woven = weave_extended_classes(&set, &[], &[], &modify_args, &[]).unwrap();
         let bridge = woven

@@ -12,23 +12,21 @@
 //! `LoadTimeMixinWeave::woven`/`skipped` and the `Probe.mark` calls the run
 //! recorded at the host boundary (`demo/Probe` stays out of the jar).
 //!
-//! ## Ten applied families, one pinned failure
+//! ## Eleven applied families
 //!
-//! The load-time weave applies `HEAD`, cancellable `HEAD`, `RETURN`, `TAIL`,
-//! `INVOKE`, `FIELD`, `NEW`, `@Overwrite`, `@ModifyArg` and `@ModifyVariable`.
-//! Each callback runs with its own argument, at its own position: `HEAD`
-//! before the body, `RETURN`/`TAIL` after it, `INVOKE` before every matching
-//! call site, `FIELD` at every access, `NEW` at the construction,
-//! `@Overwrite` instead of the body, and the two modifiers before the argument
-//! store or call they rewrite.
+//! The load-time weave applies all eleven families: `HEAD`, cancellable
+//! `HEAD`, `RETURN`, `TAIL`, `INVOKE`, `FIELD`, `NEW`, `JUMP`, `@Overwrite`,
+//! `@ModifyArg` and `@ModifyVariable`.  Each callback runs with its own
+//! argument, at its own position: `HEAD` before the body, `RETURN`/`TAIL` after
+//! it, `INVOKE` before every matching call site, `FIELD` at every access, `NEW`
+//! at the construction, `JUMP` before the selected branch, `@Overwrite` instead
+//! of the body, and the two modifiers before the argument store or call they
+//! rewrite.
 //!
-//! `JUMP` is still an expected failure: the fixture asks for `ifeq` (153)
-//! while `Target.jumped` compiles its `value > 0` test to `ifle` (158), so the
-//! weaver rejects the selector with its bounded reason.
-//! [`jump_is_skipped_with_its_exact_weaver_reason`] pins that exact row, the
-//! callback marker's absence from the run, and the target's own unchanged
-//! marker.  If the family starts working, the matrix fails until its row is
-//! updated: the gap is visible in CI rather than silently skipped.
+//! `JUMP` used to be a pinned expected failure: the fixture asked for `ifeq`
+//! (153) while `Target.jumped` compiles its `value > 0` test to `ifle` (158).
+//! The fixture now names the opcode javac actually emits, so the matrix covers
+//! the whole family set and no row is an expected failure.
 
 use horizon_native_java::{
     LoadTimeMixinWeave, MixinSide, MixinSkipReason, NativeJar, StdHost, Value,
@@ -178,12 +176,6 @@ impl Family {
         }
     }
 
-    /// Whether the load-time weave applies this family, so its callback must
-    /// run and it must have no skip row.
-    fn is_applied(self) -> bool {
-        !matches!(self, Family::Jump)
-    }
-
     /// How many times the callback runs in the fixture's one call to its
     /// target, one per selected site.
     fn callback_runs(self) -> usize {
@@ -192,7 +184,6 @@ impl Family {
             Family::Invoke => 2,
             // `fielded` reads, writes and then reads `field` again.
             Family::Field => 3,
-            Family::Jump => 0,
             _ => 1,
         }
     }
@@ -219,30 +210,6 @@ impl Family {
             // `local = value + 1`, then `@ModifyVariable` returns `local + 2`.
             Family::ModifyVariable => Some(self.argument() + 3),
             _ => Some(self.argument()),
-        }
-    }
-
-    /// The `@At` label the skip row carries for this family.
-    fn skip_at(self) -> &'static str {
-        match self {
-            Family::Jump => "JUMP",
-            _ => unreachable!("only JUMP has a skip row"),
-        }
-    }
-
-    /// The fixed `MixinSkipReason` label for the one skipped family.
-    fn skip_reason(self) -> &'static str {
-        match self {
-            Family::Jump => "weaver-rejected",
-            _ => unreachable!("only JUMP has a skip row"),
-        }
-    }
-
-    /// The weaver's exact bounded reason for the one skipped family.
-    fn skip_detail(self) -> &'static str {
-        match self {
-            Family::Jump => "demo/Target.jumped(I)V: JUMP ifeq matches no instruction",
-            _ => unreachable!("only JUMP has a skip row"),
         }
     }
 }
@@ -581,7 +548,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 @Mixin(Target.class)
 public abstract class JumpMixin {
-    @Inject(method = "jumped(I)V", at = @At(value = "JUMP", opcode = 153))
+    @Inject(method = "jumped(I)V", at = @At(value = "JUMP", opcode = 158))
     private static void onJump(int value) { Probe.mark("jump-callback", value); }
 }
 "#,
@@ -849,57 +816,49 @@ impl MatrixReport {
     }
 
     /// A fixed-width table for failure messages and `--nocapture` runs:
-    /// `family pass/fail detail`.  An applied family passes when it weaves and
-    /// its callback runs the expected number of times; the skipped one records
-    /// the runtime's exact reason as a `fail (expected)` row, and the suite
-    /// fails if that row moves.
+    /// `family pass/fail detail`.  A family passes when it weaves, has no skip
+    /// row and its callback runs the expected number of times.
     fn render(&self) -> String {
         let mut out = String::from("family       result         detail\n");
-        let (mut passed, mut expected_failures) = (0, 0);
+        let mut passed = 0;
         for family in Family::ALL {
-            let (result, detail) = if family.is_applied() {
-                let runs = self
-                    .woven_marks
-                    .iter()
-                    .filter(|(marker, _)| marker == family.callback_marker())
-                    .count();
-                if self.family_is_woven(family) && runs == family.callback_runs() {
-                    passed += 1;
-                    (
-                        "pass",
-                        format!("{}#{} ran {runs}x", family.mixin_class(), family.callback()),
-                    )
-                } else {
-                    (
-                        "FAIL",
-                        format!(
-                            "woven {}, callback ran {runs}x, expected {}x",
-                            self.family_is_woven(family),
-                            family.callback_runs()
-                        ),
-                    )
-                }
+            let runs = self
+                .woven_marks
+                .iter()
+                .filter(|(marker, _)| marker == family.callback_marker())
+                .count();
+            let rows = self.family_rows(family);
+            let (result, detail) = if self.family_is_woven(family)
+                && rows.is_empty()
+                && runs == family.callback_runs()
+            {
+                passed += 1;
+                (
+                    "pass",
+                    format!("{}#{} ran {runs}x", family.mixin_class(), family.callback()),
+                )
             } else {
-                let rows = self.family_rows(family);
-                match rows.as_slice() {
-                    [row] => {
-                        expected_failures += 1;
-                        (
-                            "fail (expected)",
-                            format!(
-                                "{} at {}{}",
-                                row.reason,
+                (
+                    "FAIL",
+                    format!(
+                        "woven {}, callback ran {runs}x, expected {}x{}",
+                        self.family_is_woven(family),
+                        family.callback_runs(),
+                        rows.first()
+                            .map(|row| format!(
+                                "; {}#{} at {}: {}{}",
+                                row.owner,
+                                row.callback,
                                 row.at,
+                                row.reason,
                                 row.detail
                                     .as_deref()
                                     .map(|detail| format!(": {detail}"))
                                     .unwrap_or_default()
-                            ),
-                        )
-                    }
-                    [] => ("FAIL", "expected skip row is missing".to_owned()),
-                    _ => ("FAIL", format!("{} skip rows, expected 1", rows.len())),
-                }
+                            ))
+                            .unwrap_or_default()
+                    ),
+                )
             };
             out.push_str(&format!(
                 "{:<12} {:<14} {}\n",
@@ -908,9 +867,7 @@ impl MatrixReport {
                 detail
             ));
         }
-        out.push_str(&format!(
-            "{passed} pass, {expected_failures} expected failure(s)\n"
-        ));
+        out.push_str(&format!("{passed} pass, 0 expected failure(s)\n"));
         out
     }
 }
@@ -943,7 +900,7 @@ fn the_unwoven_jar_runs_each_target_but_no_callback() {
     );
 }
 
-/// Ten applied families weave and run with their own argument, in their own
+/// All eleven families weave and run with their own argument, in their own
 /// position.  The cancellable callback and `@Overwrite` suppress their target
 /// bodies; `@ModifyArg` and `@ModifyVariable` change the values their targets
 /// record; the rest keep the target body and add their callback.
@@ -953,13 +910,12 @@ fn applied_families_weave_and_execute_with_independent_values() {
 
     assert_eq!(
         report.woven_plan_count,
-        Family::ALL.len() - 1,
-        "every family but JUMP weaves:\n{}",
+        Family::ALL.len(),
+        "every family weaves:\n{}",
         report.render()
     );
     let mut expected_callbacks = Family::ALL
         .into_iter()
-        .filter(|family| family.is_applied())
         .map(|family| family.mixin_class().to_owned())
         .collect::<Vec<_>>();
     expected_callbacks.sort();
@@ -1000,7 +956,9 @@ fn applied_families_weave_and_execute_with_independent_values() {
             // NEW: callback at the construction.
             ("new-callback", 7),
             ("created-target", 7),
-            // JUMP: still skipped, so the target runs unmodified.
+            // JUMP: callback before the selected `ifle`, then the branch the
+            // value takes; `8 > 0` so the target marker still runs.
+            ("jump-callback", 8),
             ("jumped-target", 8),
             // @Overwrite: callback replaces the body, so its target marker is
             // absent.
@@ -1019,7 +977,7 @@ fn applied_families_weave_and_execute_with_independent_values() {
         report.render()
     );
 
-    for family in Family::ALL.into_iter().filter(|family| family.is_applied()) {
+    for family in Family::ALL {
         let callbacks = report
             .woven_marks
             .iter()
@@ -1056,87 +1014,8 @@ fn applied_families_weave_and_execute_with_independent_values() {
     }
 }
 
-/// `JUMP`'s selector names an opcode the target never executes: the fixture
-/// asks for `ifeq` (153), but `Target.jumped` compiles its `value > 0` test to
-/// `ifle` (158).  The weaver rejects the plan with its bounded reason, so the
-/// family stays a pinned expected failure rather than a silent skip: a JUMP
-/// that starts working fails this test until the row is updated.
-#[test]
-fn jump_is_skipped_with_its_exact_weaver_reason() {
-    let report = report();
-    let family = Family::Jump;
-
-    let rows = report.family_rows(family);
-    assert_eq!(
-        rows.len(),
-        1,
-        "{} must have exactly one skip row, got {:#?}\n{}",
-        family.name(),
-        rows,
-        report.render()
-    );
-    let row = rows[0];
-    assert_eq!(
-        row.callback,
-        family.callback(),
-        "{} row names the wrong callback:\n{}",
-        family.name(),
-        report.render()
-    );
-    assert_eq!(
-        row.at,
-        family.skip_at(),
-        "{} row names the wrong anchor:\n{}",
-        family.name(),
-        report.render()
-    );
-    assert_eq!(
-        row.reason,
-        family.skip_reason(),
-        "{} row has the wrong reason:\n{}",
-        family.name(),
-        report.render()
-    );
-    assert_eq!(
-        row.detail.as_deref(),
-        Some(family.skip_detail()),
-        "{} row has the wrong weaver detail:\n{}",
-        family.name(),
-        report.render()
-    );
-    assert!(
-        !report.family_is_woven(family),
-        "{} must not be woven:\n{}",
-        family.name(),
-        report.render()
-    );
-    assert!(
-        !report
-            .woven_marks
-            .iter()
-            .any(|(marker, _)| marker == family.callback_marker()),
-        "{} callback must not run:\n{}",
-        family.name(),
-        report.render()
-    );
-
-    // The target keeps its own unmodified marker with its own argument.
-    let target_value = report
-        .woven_marks
-        .iter()
-        .find(|(marker, _)| marker == family.target_marker())
-        .map(|(_, value)| *value);
-    assert_eq!(
-        target_value,
-        family.expected_target_value(),
-        "{} target did not run unmodified:\n{}",
-        family.name(),
-        report.render()
-    );
-}
-
-/// The matrix is complete: every family is either woven or skipped, and no
-/// unexpected row sneaks into the report.
+/// The matrix is complete: every family is woven exactly once and no skip row
+/// sneaks into the report.
 #[test]
 fn the_matrix_covers_every_family_exactly_once() {
     let report = report();
@@ -1147,8 +1026,8 @@ fn the_matrix_covers_every_family_exactly_once() {
         let woven = report.family_is_woven(family);
         let rows = report.family_rows(family);
         assert!(
-            woven ^ (rows.len() == 1),
-            "{} must be woven xor skipped exactly once (woven {}, rows {})\n{}",
+            woven && rows.is_empty(),
+            "{} must weave with no skip row (woven {}, rows {})\n{}",
             family.name(),
             woven,
             rows.len(),
