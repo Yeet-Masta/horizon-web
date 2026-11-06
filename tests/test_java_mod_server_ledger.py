@@ -1,7 +1,10 @@
 import importlib.util
+import json
 import os
 import sys
+import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 
@@ -11,10 +14,45 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 LEDGER = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = LEDGER
+# The tool imports `lab` by putting its own folder on sys.path; restore the
+# path afterwards so unittest discovery keeps resolving tests from `tests/`.
+_before = list(sys.path)
 _SPEC.loader.exec_module(LEDGER)
+sys.path[:] = _before
 
 
 class JavaModServerLedgerTests(unittest.TestCase):
+    @staticmethod
+    def _jar(directory, name, *, fabric=None, neoforge=None, mod_class=False,
+             fabric_raw=None, corrupt=False):
+        path = Path(directory) / name
+        if corrupt:
+            path.write_bytes(b"not a zip")
+            return path
+        with zipfile.ZipFile(path, "w") as jar:
+            if fabric_raw is not None:
+                jar.writestr("fabric.mod.json", fabric_raw)
+            elif fabric is not None:
+                jar.writestr("fabric.mod.json", json.dumps(fabric))
+            if neoforge is not None:
+                jar.writestr("META-INF/neoforge.mods.toml", neoforge)
+            if mod_class:
+                jar.writestr(
+                    "example/ExampleMod.class",
+                    b"\xca\xfe\xba\xbeLnet/neoforged/fml/common/Mod;",
+                )
+        return path
+
+    @staticmethod
+    def _clipped_log(name):
+        # The dedicated logger truncates at 160 characters, so the
+        # `(available: ...)` tail never reaches the ledger.
+        return (
+            f"engine=refused id={name} version=1\n"
+            f"Horizon: ERROR skipping /mods/{name}.jar: /mods/{name}.jar: "
+            "no native Fabric or NeoForge entrypoint for server executio...\n"
+        )
+
     def test_parse_success_and_counts(self):
         log = (
             "Horizon: dedicated Java compatibility: Horizon: Java compatibility /mods/apple.jar: "
@@ -98,6 +136,108 @@ class JavaModServerLedgerTests(unittest.TestCase):
     def test_recommendation_prefers_loader_engine(self):
         row = LEDGER.Row("knot.jar", verdict="refused", engine="knot")
         self.assertEqual(LEDGER.recommendation(row), "loader")
+
+    def test_clipped_client_only_jar_is_skipped_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = self._jar(
+                tmp, "visuality.jar",
+                fabric={
+                    "id": "visuality",
+                    "version": "1",
+                    "entrypoints": {"client": ["a.Client"], "modmenu": ["b.Menu"]},
+                },
+            )
+            row = LEDGER.parse_log(self._clipped_log("visuality"), "visuality.jar", jar=jar)
+        self.assertEqual((row.verdict, row.subtype), ("skipped", "client-only"))
+        self.assertIn("available: client, modmenu", row.reason)
+
+    def test_clipped_client_hook_kinds_are_client_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = self._jar(
+                tmp, "reeses.jar",
+                fabric={
+                    "id": "reeses-sodium-options",
+                    "version": "2",
+                    "entrypoints": {
+                        "controlify": ["a.Controlify"],
+                        "sodium:config_api_user": ["a.Sodium"],
+                    },
+                },
+            )
+            row = LEDGER.parse_log(self._clipped_log("reeses"), "reeses.jar", jar=jar)
+        self.assertEqual((row.verdict, row.subtype), ("skipped", "client-only"))
+
+    def test_clipped_library_jar_is_skipped_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = self._jar(
+                tmp, "ferritecore.jar",
+                fabric={"id": "ferritecore", "version": "1"},
+            )
+            row = LEDGER.parse_log(self._clipped_log("ferritecore"), "ferritecore.jar", jar=jar)
+        self.assertEqual((row.verdict, row.subtype), ("skipped", "library"))
+        self.assertIn("available: none", row.reason)
+
+    def test_server_entrypoint_that_failed_stays_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = self._jar(
+                tmp, "broken.jar",
+                fabric={"id": "broken", "version": "1", "entrypoints": {"main": ["a.Main"]}},
+            )
+            row = LEDGER.parse_log(
+                "engine=refused id=broken version=1\n"
+                "Horizon: ERROR skipping /mods/broken.jar: /mods/broken.jar: "
+                "uncaught exception java/lang/AssertionError (at a/Main.java)",
+                "broken.jar", jar=jar, exit_code=1,
+            )
+            # Even a clipped no-entrypoint line cannot override the jar's own
+            # server-side entrypoint.
+            contradicted = LEDGER.parse_log(
+                self._clipped_log("broken"), "broken.jar", jar=jar)
+        self.assertEqual(row.verdict, "refused")
+        self.assertEqual(contradicted.verdict, "refused")
+
+    def test_neoforge_metadata_classification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = self._jar(
+                tmp, "client.jar",
+                neoforge='modLoader = "javafml"\n[[mods]]\nmodId = "client"\nclientSideOnly = true\n',
+            )
+            server = self._jar(
+                tmp, "server.jar",
+                neoforge='modLoader = "javafml"\n[[mods]]\nmodId = "server"\n',
+                mod_class=True,
+            )
+            client_row = LEDGER.parse_log(self._clipped_log("client"), "client.jar", jar=client)
+            server_row = LEDGER.parse_log(self._clipped_log("server"), "server.jar", jar=server)
+        self.assertEqual((client_row.verdict, client_row.subtype), ("skipped", "client-only"))
+        self.assertEqual(server_row.verdict, "refused")
+
+    def test_unreadable_jar_keeps_log_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            corrupt = self._jar(tmp, "corrupt.jar", corrupt=True)
+            clipped = LEDGER.parse_log(
+                self._clipped_log("corrupt"), "corrupt.jar", jar=corrupt)
+            log_available = LEDGER.parse_log(
+                "refused: /mods/corrupt.jar: no native Fabric or NeoForge entrypoint "
+                "for server execution (available: client, modmenu)",
+                "corrupt.jar", jar=corrupt,
+            )
+        # No `(available: ...)` in the log and no readable metadata: the old
+        # refusal stands rather than guessing a skip.
+        self.assertEqual(clipped.verdict, "refused")
+        self.assertEqual((log_available.verdict, log_available.subtype),
+                         ("skipped", "client-only"))
+
+    def test_metadata_reader_tolerates_raw_control_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = (
+                '{\n  "id": "etf",\n  "version": "7",\n'
+                '  "description": "line one\nline two",\n'
+                '  "entrypoints": {"client": ["a.Client"], "modmenu": ["b.Menu"]}\n}'
+            )
+            jar = self._jar(tmp, "etf.jar", fabric_raw=raw)
+            row = LEDGER.parse_log(self._clipped_log("etf"), "etf.jar", jar=jar)
+        self.assertEqual((row.verdict, row.subtype), ("skipped", "client-only"))
 
     def test_integration_requires_prepared_resources(self):
         resources = ROOT / ".local/horizon-client/26.3"
