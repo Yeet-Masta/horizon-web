@@ -5,10 +5,9 @@
 //! The fixture is a three-class mod: `launchprobe.Target.value()` returns
 //! `MIXIN-RAW`, and `launchprobe.mixin.TargetMixin` injects at the method head
 //! and returns `MIXIN-OK!`. `@Mixin` is CLASS-retained (Mixin's own
-//! declaration), so the JVM cannot see it: the entrypoint reports both the
-//! value and `TargetMixin.class.isAnnotationPresent(Mixin.class)`, which is
-//! `false` exactly because the annotation is invisible to reflection. Only a
-//! transformer reading class bytes can make the call return the injected
+//! declaration), so reflection cannot see it: the entrypoint reports both the
+//! injected value and `Mixin.class`'s own `@Retention`, which is `CLASS`. Only
+//! a transformer reading class bytes can make the call return the injected
 //! value. The mod's `main` entrypoint logs the marker through the game's
 //! logger, and the test reads it out of the launched server's
 //! `logs/latest.log` — so a matching line proves the loader registered the
