@@ -132,6 +132,15 @@ public final class Probe {
         return config.name + "|" + config.size + "|" + config.enabled + "|" + config.nested.label;
     }
 
+    public static String arrayCopy() {
+        String[] source = new String[] {"a", "b"};
+        String[] grown = java.util.Arrays.copyOf(source, 3);
+        source[0] = "changed";
+        int[] numbers = java.util.Arrays.copyOf(new int[] {4, 5}, 4);
+        return grown.length + "|" + grown[0] + "|" + grown[2] + "|" + numbers[0] + "|"
+            + numbers[3];
+    }
+
     public static String utilMake() {
         StringBuilder builder = new StringBuilder();
         List<String> made = Util.make(() -> {
@@ -273,6 +282,12 @@ fn an_inherited_static_field_reads_the_declaring_class_value() {
 fn a_queue_drains_and_reports_empty() {
     let fixture = Fixture::build("queue");
     assert_eq!(fixture.text("queue"), "2|true|null");
+}
+
+#[test]
+fn arrays_copy_of_grows_the_copy_and_zeroes_the_tail() {
+    let fixture = Fixture::build("array-copy");
+    assert_eq!(fixture.text("arrayCopy"), "3|a|null|4|0");
 }
 
 #[test]

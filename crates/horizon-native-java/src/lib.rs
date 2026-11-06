@@ -2441,6 +2441,33 @@ impl StdHost {
         }
     }
 
+    /// One `custom` entry of the jar's own `fabric.mod.json`.
+    ///
+    /// Fabric exposes build metadata (a commit hash, a CI URL) through
+    /// `ModMetadata.getCustomValue`, and a bootstrap formats it into a version
+    /// string. The jar's metadata document is a resource the host already
+    /// holds, so the answer is read from it; a key the document does not
+    /// declare stays `null`, which is what Fabric answers.
+    fn fabric_custom_value(&self, key: &str) -> Value {
+        let Some(bytes) = self.resource_bytes.get("fabric.mod.json") else {
+            return Value::Ref(None);
+        };
+        let Ok(document) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+            return Value::Ref(None);
+        };
+        let Some(value) = document.get("custom").and_then(|custom| custom.get(key)) else {
+            return Value::Ref(None);
+        };
+        match value {
+            serde_json::Value::String(text) => Value::Ref(Some(format!("custom-value/{text}"))),
+            serde_json::Value::Bool(flag) => Value::Ref(Some(format!("custom-boolean/{flag}"))),
+            serde_json::Value::Number(number) => {
+                Value::Ref(Some(format!("custom-number/{number}")))
+            }
+            other => Value::Ref(Some(format!("custom-value/{other}"))),
+        }
+    }
+
     fn ensure_mutable_collection(&mut self, receiver: &Value) {
         if let Some(marker) = expect_ref(receiver)
             && is_collection_owner(
@@ -7294,6 +7321,40 @@ impl Host for StdHost {
                 "getDescription",
                 "()Ljava/lang/String;",
             ) => Ok(Value::Ref(Some(String::new()))),
+            (
+                "net/fabricmc/loader/api/metadata/ModMetadata",
+                "getCustomValue",
+                "(Ljava/lang/String;)Lnet/fabricmc/loader/api/metadata/CustomValue;",
+            ) => {
+                let key = expect_string(Self::argument(r, args, 0)?);
+                Ok(self.fabric_custom_value(key))
+            }
+            (
+                "net/fabricmc/loader/api/metadata/CustomValue",
+                "getAsString",
+                "()Ljava/lang/String;",
+            ) => Ok(Value::Ref(Some(
+                expect_string(receiver)
+                    .strip_prefix("custom-value/")
+                    .unwrap_or_else(|| expect_string(receiver))
+                    .to_owned(),
+            ))),
+            (
+                "net/fabricmc/loader/api/metadata/CustomValue",
+                "getAsNumber",
+                "()Ljava/lang/Number;",
+            ) => Ok(Value::Ref(Some(
+                expect_string(receiver)
+                    .strip_prefix("custom-number/")
+                    .unwrap_or_else(|| expect_string(receiver))
+                    .to_owned(),
+            ))),
+            ("net/fabricmc/loader/api/metadata/CustomValue", "getAsBoolean", "()Z") => {
+                Ok(Value::Int(i32::from(
+                    expect_string(receiver).starts_with("custom-boolean/true")
+                        || expect_string(receiver).ends_with(":true"),
+                )))
+            }
             (
                 "net/fabricmc/loader/api/metadata/ModMetadata",
                 "getProvides",
@@ -17740,6 +17801,71 @@ impl<H: Host> Runtime<'_, H> {
     /// Execute the small reflective-array surface used by Fabric API helpers.
     /// This operates on arrays owned by the current bounded invocation; it
     /// never loads classes or reaches the filesystem.
+    /// Answer `java.util.Arrays`' copy and fill helpers.
+    ///
+    /// An array stays a marker with its element list, so a copy is a new
+    /// marker with the same elements; the new tail takes the element type's
+    /// JVM zero, which the return descriptor names.
+    fn invoke_arrays(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+        class: &str,
+        method: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "java/util/Arrays" {
+            return Ok(None);
+        }
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("copyOf", _) | ("copyOfRange", _) => {
+                let source = self.array(StdHost::argument(r, args, 0)?)?.clone();
+                let (start, end) = if r.name == "copyOf" {
+                    let length = expect_int(r, StdHost::argument(r, args, 1)?)?;
+                    let length = usize::try_from(length).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOf length is negative".into())
+                    })?;
+                    (0, length)
+                } else {
+                    let from = expect_int(r, StdHost::argument(r, args, 1)?)?;
+                    let to = expect_int(r, StdHost::argument(r, args, 2)?)?;
+                    let from = usize::try_from(from).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOfRange start is negative".into())
+                    })?;
+                    let to = usize::try_from(to).map_err(|_| {
+                        NativeError::Metadata("Arrays.copyOfRange end is negative".into())
+                    })?;
+                    (from, to.max(from))
+                };
+                let element = return_desc(&r.descriptor)
+                    .trim_start_matches('[')
+                    .to_owned();
+                let mut values = Vec::with_capacity(end.saturating_sub(start));
+                for index in start..end {
+                    values.push(
+                        source
+                            .get(index)
+                            .cloned()
+                            .unwrap_or_else(|| Value::default_for(&element)),
+                    );
+                }
+                let marker = self.new_array(class, method);
+                self.arrays.insert(marker.clone(), values);
+                Ok(Some(Value::Ref(Some(marker))))
+            }
+            ("fill", descriptor) if descriptor.starts_with('[') => {
+                let Some(marker) = args.first().and_then(expect_ref).cloned() else {
+                    return Ok(None);
+                };
+                let value = args.get(1).cloned().unwrap_or(Value::Ref(None));
+                if let Some(values) = self.arrays.get_mut(&marker) {
+                    values.fill(value);
+                }
+                Ok(Some(Value::Void))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn invoke_reflect_array(
         &mut self,
         r: &MethodRef,
@@ -21443,6 +21569,8 @@ impl<H: Host> Runtime<'_, H> {
                     } else if let Some(value) =
                         self.invoke_reflect_array(&r, &args, class, method)?
                     {
+                        value
+                    } else if let Some(value) = self.invoke_arrays(&r, &args, class, method)? {
                         value
                     } else if let Some(value) =
                         self.invoke_stream(&r, receiver.as_ref(), &args, class, method)?
@@ -33290,6 +33418,43 @@ mandatory = true
             NativeError::UncaughtException { class, .. }
                 if class == "java/lang/ClassNotFoundException"
         ));
+    }
+
+    #[test]
+    fn fabric_custom_values_come_from_the_jars_own_metadata() {
+        let mut host = StdHost::new().with_resource_bytes(
+            "fabric.mod.json",
+            br#"{"id":"demo","version":"1.0","custom":{"commit":"abcdef0123456789","ci":true}}"#
+                .to_vec(),
+        );
+        let metadata = Value::Ref(Some("metadata/demo/1.0".into()));
+        let get = MethodRef {
+            owner: "net/fabricmc/loader/api/metadata/ModMetadata".into(),
+            name: "getCustomValue".into(),
+            descriptor: "(Ljava/lang/String;)Lnet/fabricmc/loader/api/metadata/CustomValue;".into(),
+        };
+        let commit = host
+            .invoke_instance(&get, &metadata, &[Value::Ref(Some("commit".into()))])
+            .unwrap();
+        assert_eq!(
+            commit,
+            Value::Ref(Some("custom-value/abcdef0123456789".into()))
+        );
+        let text = MethodRef {
+            owner: "net/fabricmc/loader/api/metadata/CustomValue".into(),
+            name: "getAsString".into(),
+            descriptor: "()Ljava/lang/String;".into(),
+        };
+        assert_eq!(
+            host.invoke_instance(&text, &commit, &[]).unwrap(),
+            Value::Ref(Some("abcdef0123456789".into()))
+        );
+        // A key the document does not declare stays null, as Fabric answers.
+        assert_eq!(
+            host.invoke_instance(&get, &metadata, &[Value::Ref(Some("absent".into()))])
+                .unwrap(),
+            Value::Ref(None)
+        );
     }
 
     #[test]
