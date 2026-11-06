@@ -411,12 +411,17 @@ where
     for report in &reports {
         log("INFO", &java_report_line(report));
     }
+    status::record_java_reports(&reports);
     // The runner leaves a jar it refused out of its reports, so the paths
     // missing from them are the ones that never started: naming them keeps a
     // strict run's answer specific.
     let refused: Vec<String> = paths
         .iter()
-        .filter(|path| !reports.iter().any(|report| report.jar.as_path() == path.as_path()))
+        .filter(|path| {
+            !reports
+                .iter()
+                .any(|report| report.jar.as_path() == path.as_path())
+        })
         .map(|path| bounded_java_failure(&path.display().to_string()))
         .collect();
     if !refused.is_empty() {
@@ -2442,13 +2447,13 @@ fn console_level(active: super::Dim) -> Option<super::Dim> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        JAVA_PREFIX, MAX_JAVA_FAILURE, bounded_java_failure, capture_log, java_report_line,
-        load_java_mods_with, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
-        strict_policy, take_java_content,
-    };
     use super::super::java_mods::{JavaCompatibilityReport, JavaEngine, JavaLoader};
     use super::ExecutionRole;
+    use super::{
+        JAVA_PREFIX, MAX_JAVA_FAILURE, bounded_java_failure, capture_log, java_report_line,
+        load_java_mods_with, log, log_from, overload_warning, panic_message,
+        parse_whitelist_bypass, strict_policy, take_java_content,
+    };
     use horizon_client::mod_content::ContentMod;
     use horizon_mods::Content;
     use std::{
