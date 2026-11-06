@@ -2336,6 +2336,111 @@ impl StdHost {
             .map(|values| values.iter().map(value_marker).collect::<Vec<_>>())
     }
 
+    /// Answer `java.util.Properties` members from the map a collection keeps.
+    ///
+    /// A loader bootstrap reads a jar's own `.properties` file through
+    /// `Class.getResourceAsStream` followed by `Properties.load`, then asks for
+    /// `mod.name`/`mod.version`. The stream is a host resource stream, so the
+    /// parse happens here; `getProperty` answers from the same table `get`
+    /// uses. The format's escapes and continuations are read as plain
+    /// assignments, which is what a metadata file declares.
+    fn properties_member(
+        &mut self,
+        r: &MethodRef,
+        marker: &str,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("load", "(Ljava/io/InputStream;)V") | ("load", "(Ljava/io/Reader;)V") => {
+                let Some(stream) = expect_ref(Self::argument(r, args, 0)?) else {
+                    return Ok(Some(Value::Void));
+                };
+                let Some((bytes, index)) = self.resource_streams.get_mut(stream) else {
+                    return Ok(Some(Value::Void));
+                };
+                let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
+                *index = bytes.len();
+                let additions = properties_entries(&text);
+                let values = self
+                    .mutable_collections
+                    .entry(marker.to_owned())
+                    .or_default();
+                for (key, value) in additions {
+                    let key = Value::Ref(Some(key));
+                    let value = Value::Ref(Some(value));
+                    match values.chunks_exact_mut(2).find(|pair| pair[0] == key) {
+                        Some(pair) => pair[1] = value,
+                        None => values.extend([key, value]),
+                    }
+                }
+                Ok(Some(Value::Void))
+            }
+            ("getProperty", "(Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let found = self
+                    .mutable_collections
+                    .get(marker)
+                    .and_then(|values| {
+                        values
+                            .chunks_exact(2)
+                            .find(|pair| pair[0] == key)
+                            .map(|pair| pair[1].clone())
+                    })
+                    .unwrap_or(Value::Ref(None));
+                Ok(Some(found))
+            }
+            ("getProperty", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let fallback = Self::argument(r, args, 1)?.clone();
+                let found = self
+                    .mutable_collections
+                    .get(marker)
+                    .and_then(|values| {
+                        values
+                            .chunks_exact(2)
+                            .find(|pair| pair[0] == key)
+                            .map(|pair| pair[1].clone())
+                    })
+                    .unwrap_or(fallback);
+                Ok(Some(found))
+            }
+            ("setProperty", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;") => {
+                let key = Self::argument(r, args, 0)?.clone();
+                let value = Self::argument(r, args, 1)?.clone();
+                let values = self
+                    .mutable_collections
+                    .entry(marker.to_owned())
+                    .or_default();
+                for pair in values.chunks_exact_mut(2) {
+                    if pair[0] == key {
+                        return Ok(Some(std::mem::replace(&mut pair[1], value)));
+                    }
+                }
+                values.extend([key, value]);
+                Ok(Some(Value::Ref(None)))
+            }
+            ("stringPropertyNames", "()Ljava/util/Set;") => {
+                let keys = self
+                    .mutable_collections
+                    .get(marker)
+                    .map(|values| {
+                        values
+                            .chunks_exact(2)
+                            .map(|pair| pair[0].clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let marker = self.empty_collection("set");
+                if let Some(marker) = expect_ref(&marker) {
+                    self.mutable_collections.insert(marker.to_owned(), keys);
+                }
+                Ok(Some(marker))
+            }
+            ("store", _) | ("storeToXML", _) | ("list", _) | ("save", _) => Ok(Some(Value::Void)),
+            _ => Ok(None),
+        }
+    }
+
     fn ensure_mutable_collection(&mut self, receiver: &Value) {
         if let Some(marker) = expect_ref(receiver)
             && is_collection_owner(
@@ -4874,7 +4979,32 @@ impl Host for StdHost {
                 }
                 return Ok(Value::Void);
             }
+            if r.owner == "java/util/Properties" {
+                if let Some(value) = self.properties_member(r, marker, args)? {
+                    return Ok(value);
+                }
+            }
             match (r.owner.as_str(), r.name.as_str(), r.descriptor.as_str()) {
+                (owner, "<init>", "(Ljava/util/Map;)V") if is_map_owner(owner) => {
+                    // `new HashMap<>(other)` copies the entries, and a config
+                    // validator that builds a modified copy relies on it.
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
+                        .into_iter()
+                        .map(|value| parse_collection_value(&value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.mutable_collections.insert(marker.to_owned(), source);
+                    return Ok(Value::Void);
+                }
+                (owner, "<init>", "(Ljava/util/Collection;)V")
+                    if is_collection_owner(owner) && !is_map_owner(owner) =>
+                {
+                    let source = host_collection_values(self, Self::argument(r, args, 0)?)?
+                        .into_iter()
+                        .map(|value| parse_collection_value(&value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.mutable_collections.insert(marker.to_owned(), source);
+                    return Ok(Value::Void);
+                }
                 (_, "<init>", _) => {
                     self.ensure_mutable_collection(receiver);
                     return Ok(Value::Void);
@@ -9457,6 +9587,61 @@ fn is_map_owner(owner: &str) -> bool {
             | "com/google/common/collect/ImmutableMap"
             | "com/google/common/collect/ImmutableBiMap"
     )
+}
+
+/// The `key=value` assignments one `.properties` document declares.
+///
+/// The parser keeps the format's three separators (`=`, `:`, whitespace),
+/// skips `#`/`!` comments and blank lines, and unescapes `\n`/`\t`/`\\`. A
+/// continuation line and a unicode escape are read literally: a metadata file
+/// built by the loader does not use them, and a bounded read must not turn a
+/// crafted file into host state.
+fn properties_entries(text: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let (key, value) = match line.split_once('=') {
+            Some((key, value)) => (key, value),
+            None => match line.split_once(':') {
+                Some((key, value)) => (key, value),
+                None => match line.split_once(char::is_whitespace) {
+                    Some((key, value)) => (key, value),
+                    None => (line, ""),
+                },
+            },
+        };
+        entries.push((
+            property_unescape(key.trim()),
+            property_unescape(value.trim()),
+        ));
+    }
+    entries
+}
+
+/// Undo the escapes a `.properties` value may carry.
+fn property_unescape(text: &str) -> String {
+    let mut value = String::with_capacity(text.len());
+    let mut escaped = false;
+    for character in text.chars() {
+        if escaped {
+            value.push(match character {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'f' => '\u{0c}',
+                other => other,
+            });
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            value.push(character);
+        }
+    }
+    value
 }
 
 fn collection_values(value: &Value) -> Result<Vec<String>, NativeError> {
@@ -16074,12 +16259,12 @@ const MAX_GSON_DEPTH: usize = 32;
 /// that nests past [`MAX_GSON_DEPTH`] or measures over
 /// [`MAX_GSON_JSON_BYTES`] is refused with a bounded reason, never replaced by
 /// an empty value.
-fn gson_from_json(text: &str, class: &str) -> Result<Value, NativeError> {
+fn gson_document(text: &str) -> Result<Option<serde_json::Value>, NativeError> {
     // Gson answers `null` for an empty document; a config file that does not
     // exist yet is read through `Files.newBufferedReader` as an empty stream,
     // and the caller's null check is the next step.
     if text.trim().is_empty() {
-        return Ok(Value::Ref(None));
+        return Ok(None);
     }
     if text.len() > MAX_GSON_JSON_BYTES {
         return Err(NativeError::Metadata(format!(
@@ -16096,7 +16281,7 @@ fn gson_from_json(text: &str, class: &str) -> Result<Value, NativeError> {
             "Gson.fromJson document nests {depth} levels; the bounded parser reads at most {MAX_GSON_DEPTH}"
         )));
     }
-    gson_json_value(&json, &class.replace('.', "/"))
+    Ok(Some(json))
 }
 
 fn gson_json_depth(json: &serde_json::Value, depth: usize) -> usize {
@@ -19083,6 +19268,213 @@ impl<H: Host> Runtime<'_, H> {
             .unwrap_or_default()
     }
 
+    /// `Gson.fromJson` for a document whose target is the jar's own class.
+    ///
+    /// Gson's reflective adapter allocates the object without running a
+    /// constructor and sets the declared instance fields, and a config class
+    /// then reads them back through ordinary field accesses. The interpreter
+    /// does the same: the field table is keyed by the declaring class, so the
+    /// accessors the mod generates find what the document declared. A document
+    /// that names no field this class declares, or a class the runtime does not
+    /// hold, keeps the previous JSON-shaped answer.
+    fn gson_from_json(&mut self, text: &str, class: &str) -> Result<Value, NativeError> {
+        let Some(json) = gson_document(text)? else {
+            return Ok(Value::Ref(None));
+        };
+        let class = class.replace('.', "/");
+        if let Some(value) = self.gson_materialize(&json, &class)? {
+            return Ok(value);
+        }
+        gson_json_value(&json, &class)
+    }
+
+    /// Allocate one instance of `class` and inject the document's fields.
+    fn gson_materialize(
+        &mut self,
+        json: &serde_json::Value,
+        class: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        let serde_json::Value::Object(document) = json else {
+            return Ok(None);
+        };
+        if class.starts_with("java/") || !self.has_class(class) {
+            return Ok(None);
+        }
+        let fields = self.instance_fields(class);
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        self.ensure_initialized(class)?;
+        let value = self.new_object(class);
+        for (declaring, name, descriptor) in fields {
+            let Some(raw) = document.get(&name) else {
+                continue;
+            };
+            let Some(field_value) = self.gson_field_value(raw, &descriptor)? else {
+                return Ok(None);
+            };
+            let field = MethodRef {
+                owner: declaring,
+                name,
+                descriptor,
+            };
+            if let Some(key) = instance_field_key(&value, &field) {
+                self.fields.insert(key, field_value);
+            }
+        }
+        Ok(Some(value))
+    }
+
+    /// The instance fields `class` declares, superclasses first-in-walk order.
+    fn instance_fields(&self, class: &str) -> Vec<(String, String, String)> {
+        let mut fields: Vec<(String, String, String)> = Vec::new();
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let Some(file) = self.class(&current) else {
+                break;
+            };
+            for field in &file.fields {
+                if field.is_static() || fields.iter().any(|(_, name, _)| name == &field.name) {
+                    continue;
+                }
+                fields.push((
+                    current.clone(),
+                    field.name.clone(),
+                    field.descriptor.clone(),
+                ));
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                break;
+            }
+            current = file.super_name.clone();
+        }
+        fields
+    }
+
+    /// Convert one JSON value to the field descriptor it must land in.
+    ///
+    /// A shape the runtime cannot represent answers `None`, and the caller
+    /// keeps the JSON-shaped value rather than an object with masked fields.
+    fn gson_field_value(
+        &mut self,
+        json: &serde_json::Value,
+        descriptor: &str,
+    ) -> Result<Option<Value>, NativeError> {
+        if json.is_null() {
+            return Ok(Some(Value::Ref(None)));
+        }
+        Ok(Some(match descriptor {
+            "Ljava/lang/String;" => match json {
+                serde_json::Value::String(text) => Value::Ref(Some(text.clone())),
+                serde_json::Value::Bool(flag) => Value::Ref(Some(flag.to_string())),
+                serde_json::Value::Number(number) => Value::Ref(Some(number.to_string())),
+                _ => return Ok(None),
+            },
+            "Z" => match json {
+                serde_json::Value::Bool(flag) => Value::Int(i32::from(*flag)),
+                _ => return Ok(None),
+            },
+            "B" | "S" | "I" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Int(number as i32),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "J" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Long(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "F" | "D" => match json {
+                serde_json::Value::Number(number) => match number.as_f64() {
+                    Some(number) => Value::Float(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Boolean;" => match json {
+                serde_json::Value::Bool(flag) => boolean_value(*flag),
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Byte;" | "Ljava/lang/Short;" | "Ljava/lang/Integer;" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Int(number as i32),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Long;" => match json {
+                serde_json::Value::Number(number) => match number.as_i64() {
+                    Some(number) => Value::Long(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/lang/Float;" | "Ljava/lang/Double;" => match json {
+                serde_json::Value::Number(number) => match number.as_f64() {
+                    Some(number) => Value::Float(number),
+                    None => return Ok(None),
+                },
+                _ => return Ok(None),
+            },
+            "Ljava/util/List;"
+            | "Ljava/util/Collection;"
+            | "Ljava/util/ArrayList;"
+            | "Ljava/util/LinkedList;" => match json {
+                serde_json::Value::Array(values) => {
+                    let mut materialized = Vec::with_capacity(values.len());
+                    for value in values {
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("list", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            "Ljava/util/Set;" | "Ljava/util/HashSet;" | "Ljava/util/LinkedHashSet;" => match json {
+                serde_json::Value::Array(values) => {
+                    let mut materialized = Vec::with_capacity(values.len());
+                    for value in values {
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("set", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            "Ljava/util/Map;" | "Ljava/util/HashMap;" | "Ljava/util/LinkedHashMap;" => match json {
+                serde_json::Value::Object(values) => {
+                    let mut materialized = Vec::with_capacity(values.len() * 2);
+                    for (key, value) in values {
+                        materialized.push(Value::Ref(Some(key.clone())));
+                        materialized.push(gson_json_value(value, "java/lang/Object")?);
+                    }
+                    collection_value("map", &materialized)
+                }
+                _ => return Ok(None),
+            },
+            descriptor if descriptor.starts_with("L") && descriptor.ends_with(';') => {
+                let class = &descriptor[1..descriptor.len() - 1];
+                if !self.has_class(class) {
+                    return Ok(None);
+                }
+                match json {
+                    serde_json::Value::Object(_) => match self.gson_materialize(json, class)? {
+                        Some(value) => value,
+                        None => return Ok(None),
+                    },
+                    // A JSON string for a jar class is its enum constant name.
+                    serde_json::Value::String(name) => {
+                        Value::Ref(Some(format!("enum/{class}/{name}")))
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     /// Answer the bounded `com.google.gson` surface config code reaches.
     ///
     /// The adapter models the two calls that make a config bootstrap work:
@@ -19191,13 +19583,13 @@ impl<H: Host> Runtime<'_, H> {
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
-                    Ok(Some(gson_from_json(text, class)?))
+                    Ok(Some(self.gson_from_json(&text, class)?))
                 }
                 ("fromJson", "(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;") => {
                     let reader = args.first().and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Reader".into())
                     })?;
-                    let text = self.string_readers.get(reader).ok_or_else(|| {
+                    let text = self.string_readers.get(reader).cloned().ok_or_else(|| {
                         NativeError::Metadata(format!(
                             "Gson.fromJson Reader {reader} is not a modelled StringReader, \
                              file or stream reader"
@@ -19206,7 +19598,7 @@ impl<H: Host> Runtime<'_, H> {
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
-                    Ok(Some(gson_from_json(text, class)?))
+                    Ok(Some(self.gson_from_json(&text, class)?))
                 }
                 ("fromJson", "(Ljava/lang/String;Ljava/lang/reflect/Type;)Ljava/lang/Object;") => {
                     let text = args.first().map(expect_string).ok_or_else(|| {
@@ -19221,7 +19613,7 @@ impl<H: Host> Runtime<'_, H> {
                             _ => None,
                         })
                         .unwrap_or_else(|| "java/lang/Object".into());
-                    Ok(Some(gson_from_json(text, &raw)?))
+                    Ok(Some(self.gson_from_json(&text, &raw)?))
                 }
                 _ => Ok(None),
             },
@@ -19966,6 +20358,16 @@ impl<H: Host> Runtime<'_, H> {
             .cloned()
             .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
         let Some(ref code) = target.code else {
+            // An abstract method is the functional-interface contract a lambda
+            // implements. When the receiver is the callback the invokedynamic
+            // site bound, the body is that method, not the interface's own
+            // (absent) code — a config validator or a custom `Supplier` shape
+            // would otherwise answer `null`.
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(value) = self.invoke_callback(receiver, args)?
+            {
+                return Ok(value);
+            }
             return Ok(Value::default_for(return_desc(desc)));
         };
         let mut locals = vec![Value::Ref(None); target.max_locals.max(1) as usize];

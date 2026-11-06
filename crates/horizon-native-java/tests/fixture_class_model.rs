@@ -37,11 +37,21 @@ public final class Util {
 }
 "#;
 
+const GSON_STUB: &str = r#"package com.google.gson;
+
+public class Gson {
+    public Gson() {}
+    public <T> T fromJson(String json, Class<T> type) { return null; }
+    public String toJson(Object src) { return null; }
+}
+"#;
+
 const PROBE: &str = r#"package demo;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.PriorityQueue;
+import com.google.gson.Gson;
 import net.minecraft.util.Util;
 
 public final class Probe {
@@ -83,6 +93,43 @@ public final class Probe {
             seen.add(queue.poll());
         }
         return seen.size() + "|" + queue.isEmpty() + "|" + String.valueOf(queue.peek());
+    }
+
+    public interface Validator<T> {
+        T validate(T value);
+    }
+
+    public static final Validator<java.util.Map<String, String>> VALIDATOR =
+        value -> {
+            java.util.Map<String, String> copy = new java.util.LinkedHashMap<>(value);
+            copy.put("validated", "yes");
+            return copy;
+        };
+
+    public static String customInterfaceLambda() {
+        java.util.Map<String, String> source = new java.util.LinkedHashMap<>();
+        source.put("key", "value");
+        java.util.Map<String, String> validated = VALIDATOR.validate(source);
+        return validated.get("key") + "|" + validated.get("validated");
+    }
+
+    public static class Config {
+        public String name;
+        public int size;
+        public Nested nested;
+        public boolean enabled;
+    }
+
+    public static class Nested {
+        public String label;
+    }
+
+    public static String gsonIntoOwnClass() {
+        com.google.gson.Gson gson = new com.google.gson.Gson();
+        Config config = gson.fromJson(
+            "{\"name\":\"server\",\"size\":7,\"enabled\":true,\"nested\":{\"label\":\"inner\"}}",
+            Config.class);
+        return config.name + "|" + config.size + "|" + config.enabled + "|" + config.nested.label;
     }
 
     public static String utilMake() {
@@ -145,6 +192,7 @@ impl Fixture {
         };
         let classes = fixture.root.join("classes");
         let sources = [
+            ("com/google/gson/Gson.java", GSON_STUB),
             ("net/minecraft/util/Util.java", UTIL_STUB),
             ("demo/Probe.java", PROBE),
         ];
@@ -231,4 +279,16 @@ fn a_queue_drains_and_reports_empty() {
 fn util_make_runs_its_supplier_and_consumer() {
     let fixture = Fixture::build("util-make");
     assert_eq!(fixture.text("utilMake"), "supplied-item|0|item");
+}
+
+#[test]
+fn a_jar_interface_lambda_runs_its_body() {
+    let fixture = Fixture::build("custom-interface");
+    assert_eq!(fixture.text("customInterfaceLambda"), "value|yes");
+}
+
+#[test]
+fn gson_materializes_the_jars_own_class_and_injects_fields() {
+    let fixture = Fixture::build("gson-class");
+    assert_eq!(fixture.text("gsonIntoOwnClass"), "server|7|true|inner");
 }
