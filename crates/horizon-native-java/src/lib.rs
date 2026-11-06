@@ -10197,6 +10197,32 @@ pub enum NativeError {
         /// raised it; a host call has no frame and leaves this `None`.
         frame: Option<String>,
     },
+    /// A jar nested more jar frames than [`MAX_JAR_CALL_DEPTH`] allows.
+    ///
+    /// The interpreter's frames are Rust frames, so an unbounded jar recursion
+    /// is a process abort, not an error a loader could isolate. This bound
+    /// turns that abort into one failed jar; the caller's tolerant policy keeps
+    /// the rest of the batch running.
+    CallDepthExceeded {
+        /// The frame that would have exceeded the bound.
+        class: String,
+        method: String,
+        /// The bound, in nested jar frames.
+        limit: usize,
+    },
+    /// A jar ran past the wall-clock budget its caller allowed.
+    ///
+    /// Checked as frames are entered and periodically inside a frame, so a jar
+    /// that loops without calling anything still stops. The caller decides the
+    /// budget; an unbounded one ([`ExecutionBudget::UNBOUNDED`]) never raises
+    /// this.
+    ExecutionBudgetExceeded {
+        /// The frame the check ran in.
+        class: String,
+        method: String,
+        /// How long the budget allowed.
+        budget: std::time::Duration,
+    },
     /// The fail-closed host mode rejected a call with no bounded model.
     UnknownHostCall(MethodRef),
     Zip(String),
@@ -10224,6 +10250,23 @@ impl std::fmt::Display for NativeError {
                 }
                 Ok(())
             }
+            Self::CallDepthExceeded {
+                class,
+                method,
+                limit,
+            } => write!(
+                f,
+                "native interpreter recursion exceeded {limit} nested jar frames at {class}#{method}"
+            ),
+            Self::ExecutionBudgetExceeded {
+                class,
+                method,
+                budget,
+            } => write!(
+                f,
+                "native interpreter exceeded its {:.1}s execution budget at {class}#{method}",
+                budget.as_secs_f64()
+            ),
             _ => write!(f, "{self:?}"),
         }
     }
@@ -10302,6 +10345,68 @@ pub struct ExecutionReport {
     pub method: String,
     pub calls: usize,
 }
+
+/// The wall-clock bound one jar's native execution may consume.
+///
+/// The bound is cooperative: [`NativeJar::execute_with_budget`] hands it to the
+/// interpreter, which checks it as each jar frame is entered and every
+/// [`BUDGET_CHECK_INSTRUCTIONS`] bytecode instructions inside a frame. A jar
+/// that runs past it fails with [`NativeError::ExecutionBudgetExceeded`] and its
+/// caller can skip that jar while the rest of the batch runs.
+///
+/// [`Self::UNBOUNDED`] is the library and probe default, so a caller that says
+/// nothing about time keeps the pre-budget behaviour.
+#[derive(Debug, Clone, Copy)]
+pub struct ExecutionBudget {
+    /// When the budget expires, and how long it allowed, so the diagnostic can
+    /// name the bound rather than only the frame.
+    deadline: Option<(std::time::Instant, std::time::Duration)>,
+}
+
+impl ExecutionBudget {
+    /// No wall-clock bound; only [`MAX_JAR_CALL_DEPTH`] applies.
+    pub const UNBOUNDED: Self = Self { deadline: None };
+
+    /// A budget that expires `limit` from now.
+    pub fn within(limit: std::time::Duration) -> Self {
+        Self {
+            deadline: std::time::Instant::now()
+                .checked_add(limit)
+                .map(|at| (at, limit)),
+        }
+    }
+
+    /// The bound the budget was built with; `None` for [`Self::UNBOUNDED`].
+    pub fn limit(&self) -> Option<std::time::Duration> {
+        self.deadline.map(|(_, limit)| limit)
+    }
+
+    /// Whether the wall-clock bound has passed. An unbounded budget never does.
+    pub fn expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|(deadline, _)| std::time::Instant::now() >= deadline)
+    }
+}
+
+/// The most jar frames one native execution may nest on a 2 MiB thread.
+///
+/// These frames are Rust frames, so an unbounded jar recursion is a stack
+/// overflow: the process aborts instead of unwinding to the loader that could
+/// skip just that jar. The safe count is a property of the compiled frame size.
+/// An unoptimised build reserves about 100 KiB per interpreter frame (every
+/// temporary of the instruction match gets its own slot); an optimised one
+/// reserves about 3 KiB. Both bounds keep more than a third of the 2 MiB
+/// default stack the game's server, render and worker threads run with, and
+/// both are far above what a normal entrypoint nests.
+#[cfg(debug_assertions)]
+const MAX_JAR_CALL_DEPTH: usize = 12;
+#[cfg(not(debug_assertions))]
+const MAX_JAR_CALL_DEPTH: usize = 128;
+
+/// Bytecode instructions between wall-clock budget checks inside one frame, so
+/// a loop that calls nothing cannot hold execution past its budget. A power of
+/// two so the check is a mask rather than a division.
+const BUDGET_CHECK_INSTRUCTIONS: usize = 4096;
 
 /// One Mixin JSON config a native jar declares.
 ///
@@ -12489,6 +12594,29 @@ impl NativeJar {
         kind: &str,
         host: &mut H,
     ) -> Result<ExecutionReport, NativeError> {
+        self.execute_with_budget(
+            class,
+            explicit_method,
+            kind,
+            host,
+            &ExecutionBudget::UNBOUNDED,
+        )
+    }
+
+    /// [`Self::execute`] under a wall-clock budget.
+    ///
+    /// One budget covers this call's entrypoint construction and invocation.
+    /// A caller that runs several entrypoints of one jar shares one budget
+    /// across them, so the jar as a whole is bounded rather than each
+    /// entrypoint separately.
+    pub fn execute_with_budget<H: Host>(
+        &self,
+        class: &str,
+        explicit_method: Option<&str>,
+        kind: &str,
+        host: &mut H,
+        budget: &ExecutionBudget,
+    ) -> Result<ExecutionReport, NativeError> {
         let class_name = class.replace('.', "/");
         let is_neoforge = self
             .neoforge_entrypoints
@@ -12533,6 +12661,8 @@ impl NativeJar {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget,
         };
         if !runtime.classes.contains_key(&class_name) {
             return Err(NativeError::MissingMethod(format!("class {class}")));
@@ -12740,6 +12870,8 @@ impl NativeJar {
             anchor_hooks,
             modify_hooks,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         runtime.invoke(&class_name, method, descriptor, receiver, args)
     }
@@ -14982,6 +15114,12 @@ struct Runtime<'a, H> {
     /// call.  LIFO, because a constructor argument may itself construct an
     /// object before the outer `<init>` runs.
     pending_skipped_new: Vec<String>,
+    /// Jar frames currently on this runtime's call chain. Bounded by
+    /// [`MAX_JAR_CALL_DEPTH`] in [`Runtime::invoke`] before a frame starts.
+    depth: usize,
+    /// The wall-clock budget this execution honours, checked with
+    /// [`BUDGET_CHECK_INSTRUCTIONS`] and in [`Runtime::invoke`].
+    budget: &'a ExecutionBudget,
 }
 impl<H: Host> Runtime<'_, H> {
     fn static_field_key(field: &MethodRef) -> String {
@@ -17481,7 +17619,47 @@ impl<H: Host> Runtime<'_, H> {
         Ok(Some(result))
     }
 
+    /// Enter one jar frame under the execution's recursion and time bounds.
+    ///
+    /// The bound is checked here rather than in [`Self::invoke_frame`] so every
+    /// nested jar call — direct, `super`, virtual, callback or `<clinit>` —
+    /// passes through it, and the depth is released on both the value and the
+    /// error path.
     fn invoke(
+        &mut self,
+        class: &str,
+        method: &str,
+        desc: &str,
+        receiver: Option<Value>,
+        args: &[Value],
+    ) -> Result<Value, NativeError> {
+        if self.depth >= MAX_JAR_CALL_DEPTH {
+            return Err(NativeError::CallDepthExceeded {
+                class: class.to_owned(),
+                method: method.to_owned(),
+                limit: MAX_JAR_CALL_DEPTH,
+            });
+        }
+        if self.budget.expired() {
+            return Err(self.budget_exceeded(class, method));
+        }
+        self.depth += 1;
+        let result = self.invoke_frame(class, method, desc, receiver, args);
+        self.depth -= 1;
+        result
+    }
+
+    /// The budget diagnostic for the frame the check ran in.
+    fn budget_exceeded(&self, class: &str, method: &str) -> NativeError {
+        NativeError::ExecutionBudgetExceeded {
+            class: class.to_owned(),
+            method: method.to_owned(),
+            budget: self.budget.limit().unwrap_or_default(),
+        }
+    }
+
+    /// One jar frame, executed instruction by instruction.
+    fn invoke_frame(
         &mut self,
         class: &str,
         method: &str,
@@ -17523,6 +17701,10 @@ impl<H: Host> Runtime<'_, H> {
         }
         let mut stack = Vec::new();
         let mut pc = 0;
+        // Bytecode instructions since the last wall-clock check. A loop that
+        // calls nothing (a `goto` on itself) would otherwise never reach the
+        // frame-entry check in `invoke`.
+        let mut budget_ticks = 0_usize;
         // A throw raised by a nested jar frame or by a host call lands in this
         // frame's own exception table before it leaves the invocation, exactly
         // as the JVM delivers it. Only a throw no row catches becomes
@@ -17557,6 +17739,10 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         while pc < code.len() {
+            budget_ticks = budget_ticks.wrapping_add(1);
+            if budget_ticks & (BUDGET_CHECK_INSTRUCTIONS - 1) == 0 && self.budget.expired() {
+                return Err(self.budget_exceeded(class, method));
+            }
             let at = pc;
             let op = code[pc];
             pc += 1;
@@ -22643,6 +22829,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
             owner: "java/lang/String".into(),
@@ -22686,6 +22874,8 @@ mod tests {
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let method = MethodRef {
             owner: "java/lang/String".into(),
@@ -23940,6 +24130,194 @@ modId="minecraft"
             .invoke_method("demo.BadBranch", "run", "()V", None, &mut NullHost)
             .unwrap_err();
         assert!(matches!(error, NativeError::InvalidBranch { .. }));
+    }
+
+    /// Runs `f` on a thread with the 2 MiB stack the game's server, render and
+    /// worker threads run with, so a bound proven here holds where jars run.
+    fn on_a_game_thread_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .name("recursion-bound".into())
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn the bounded thread")
+            .join()
+            .expect("the depth bound keeps the recursion on its own stack")
+    }
+
+    /// A jar that recurses without bound is one failed jar, not a process
+    /// abort: the interpreter's frames are Rust frames, and a stack overflow
+    /// cannot be caught by the batch's `catch_unwind`.
+    #[test]
+    fn unbounded_recursion_fails_with_the_depth_bound() {
+        // `static int f(int n) { return f(n); }`
+        let class = ClassFile {
+            name: "demo/Recurse".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::MethodRef { class: 2, nt: 3 },
+                Cp::Class(4),
+                Cp::NameType {
+                    name: 5,
+                    descriptor: 6,
+                },
+                Cp::Utf8("demo/Recurse".into()),
+                Cp::Utf8("f".into()),
+                Cp::Utf8("(I)I".into()),
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "f".into(),
+                descriptor: "(I)I".into(),
+                access: 9,
+                code: Some(vec![0x1a, 0xb8, 0x00, 0x01, 0xac]),
+                max_locals: 1,
+                max_stack: 1,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        on_a_game_thread_stack(move || {
+            let jar = NativeJar::from_classes([class]);
+            let error = jar
+                .invoke_method_with_args(
+                    "demo.Recurse",
+                    "f",
+                    "(I)I",
+                    None,
+                    &[Value::Int(1)],
+                    &mut NullHost,
+                )
+                .expect_err("an unbounded recursion must fail");
+            let text = error.to_string();
+            match error {
+                NativeError::CallDepthExceeded {
+                    class,
+                    method,
+                    limit,
+                } => {
+                    assert_eq!(class, "demo/Recurse");
+                    assert_eq!(method, "f");
+                    assert_eq!(limit, MAX_JAR_CALL_DEPTH);
+                }
+                other => panic!("expected the depth bound, got {other:?}"),
+            }
+            assert!(
+                text.contains(&format!(
+                    "{MAX_JAR_CALL_DEPTH} nested jar frames at demo/Recurse#f"
+                )),
+                "{text}"
+            );
+        });
+    }
+
+    /// The bound leaves a legitimate recursive method alone: a chain just
+    /// under it answers normally.
+    #[test]
+    fn recursion_below_the_bound_still_runs() {
+        // `static int down(int n) { if (n == 0) return 0; return down(n - 1); }`
+        let class = ClassFile {
+            name: "demo/Countdown".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::MethodRef { class: 2, nt: 3 },
+                Cp::Class(4),
+                Cp::NameType {
+                    name: 5,
+                    descriptor: 6,
+                },
+                Cp::Utf8("demo/Countdown".into()),
+                Cp::Utf8("down".into()),
+                Cp::Utf8("(I)I".into()),
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "down".into(),
+                descriptor: "(I)I".into(),
+                access: 9,
+                code: Some(vec![
+                    0x1a, 0x99, 0x00, 0x05, 0x03, 0xac, 0x1a, 0x04, 0x64, 0xb8, 0x00, 0x01, 0xac,
+                ]),
+                max_locals: 1,
+                max_stack: 1,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        let depth = (MAX_JAR_CALL_DEPTH - 4) as i32;
+        let result = on_a_game_thread_stack(move || {
+            NativeJar::from_classes([class])
+                .invoke_method_with_args(
+                    "demo.Countdown",
+                    "down",
+                    "(I)I",
+                    None,
+                    &[Value::Int(depth)],
+                    &mut NullHost,
+                )
+                .unwrap()
+        });
+        assert_eq!(result, Value::Int(0));
+    }
+
+    /// A jar that loops without calling anything still stops at its budget:
+    /// the check also runs inside a frame, not only when a frame is entered.
+    #[test]
+    fn a_jar_that_never_returns_stops_at_its_execution_budget() {
+        // `static void spin() { while (true) {} }`
+        let class = ClassFile {
+            name: "demo/Spin".into(),
+            super_name: "java/lang/Object".into(),
+            pool: vec![Cp::Empty],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![Method {
+                name: "spin".into(),
+                descriptor: "()V".into(),
+                access: 9,
+                code: Some(vec![0xa7, 0x00, 0x00]),
+                max_locals: 0,
+                max_stack: 0,
+
+                annotations: Vec::new(),
+            }],
+
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        };
+        let jar = NativeJar::from_classes([class]);
+        let limit = std::time::Duration::from_millis(5);
+        let budget = ExecutionBudget::within(limit);
+        let started = std::time::Instant::now();
+        let error = jar
+            .execute_with_budget("demo.Spin", Some("spin"), "main", &mut NullHost, &budget)
+            .expect_err("a loop past its budget must fail");
+        assert!(
+            started.elapsed() >= limit,
+            "the budget was honoured, not guessed: {:?}",
+            started.elapsed()
+        );
+        match error {
+            NativeError::ExecutionBudgetExceeded {
+                class,
+                method,
+                budget,
+            } => {
+                assert_eq!(class, "demo/Spin");
+                assert_eq!(method, "spin");
+                assert_eq!(budget, limit);
+            }
+            other => panic!("expected the execution budget, got {other:?}"),
+        }
     }
 
     #[test]
@@ -28913,6 +29291,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let first = runtime.new_object("demo/Fields");
         let second = runtime.new_object("demo/Fields");
@@ -29061,6 +29441,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let new_instance = MethodRef {
             owner: "java/lang/reflect/Array".into(),
@@ -29262,6 +29644,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let stream = runtime
             .invoke_stream(
@@ -29567,6 +29951,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let lookup = MethodRef {
             owner: "java/lang/Class".into(),
@@ -29792,6 +30178,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let class = Value::Ref(Some("demo/ReflectiveFields".into()));
         let declared_fields = runtime
@@ -34110,6 +34498,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let marker = runtime.new_multidim_array("[[I", "demo/M", "m", &[2, 3]);
         let outer = runtime.arrays.get(&marker).unwrap();
@@ -34150,6 +34540,8 @@ mandatory = true
             anchor_hooks: None,
             modify_hooks: None,
             pending_skipped_new: Vec::new(),
+            depth: 0,
+            budget: &ExecutionBudget::UNBOUNDED,
         };
         let error = runtime
             .invoke_string_split(
