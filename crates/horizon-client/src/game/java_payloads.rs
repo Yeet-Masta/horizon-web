@@ -15,12 +15,6 @@
 //! module, unchanged on the wire. Moving it back to `horizon_mods::payloads`
 //! is a mechanical import swap: nothing below the model touches it.
 
-// The bootstrap half below (a jar's declaration list, its handler host and the
-// queues its sends go through) is called by the Java mod loader once it has run
-// a jar and kept its host (`game/java_mods.rs::run_one`); until that call
-// lands, those entry points and their helpers are unused here.
-#![allow(dead_code)]
-
 use super::{Game, lan::LanHost};
 use horizon_native_java::{
     NativeJar, PayloadRegistration, StdHost, Value, dispatch_payload_frame_with,
@@ -804,10 +798,12 @@ impl PayloadLink {
         self.incoming.drain(..count).collect()
     }
 
+    #[cfg(test)]
     pub(super) fn incoming(&self) -> &[PayloadFrame] {
         &self.incoming
     }
 
+    #[cfg(test)]
     pub(super) fn outgoing(&self) -> &[Vec<u8>] {
         &self.outgoing
     }
@@ -860,10 +856,10 @@ impl Reader<'_> {
 struct HandlerJar {
     jar: NativeJar,
     registrations: Vec<PayloadRegistration>,
-    /// The host the jar bootstrapped on, when the caller kept it. Its
-    /// payload-type markers are what let a registration's marker resolve to
-    /// a channel id; a handler jar stored without one never matches a frame.
-    host: Option<StdHost>,
+    /// The host the jar bootstrapped on. Its payload-type markers are what let
+    /// a registration's marker resolve to a channel id, so a jar is only ever
+    /// stored with one.
+    host: StdHost,
 }
 
 /// The execution role whose Java payload handlers own a connection.
@@ -876,42 +872,10 @@ pub(super) enum HandlerRole {
 
 static HANDLER_JARS: Mutex<BTreeMap<HandlerRole, Vec<HandlerJar>>> = Mutex::new(BTreeMap::new());
 
-/// Remember one mod jar's payload registrations; called after its bootstrap.
-#[allow(dead_code)] // the bootstrap stores the host form below
-pub(super) fn store_handler_jar(jar: NativeJar, registrations: Vec<PayloadRegistration>) {
-    store_handler_jar_as(HandlerRole::Client, jar, registrations);
-}
-
-/// Remember one mod jar's payload registrations for a specific execution role.
-pub(super) fn store_handler_jar_as(
-    role: HandlerRole,
-    jar: NativeJar,
-    registrations: Vec<PayloadRegistration>,
-) {
-    if registrations.is_empty() {
-        return;
-    }
-    HANDLER_JARS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(role)
-        .or_default()
-        .push(HandlerJar {
-            jar,
-            registrations,
-            host: None,
-        });
-}
-
-/// [`store_handler_jar`] that also keeps the bootstrapped host, so a received
-/// frame's channel id resolves to the registration's payload-type marker.
-/// Registrations come from the host itself. Sends the host had queued are
-/// dropped from the kept copy (the caller already published them).
-pub(super) fn store_handler_host(jar: NativeJar, host: &StdHost) {
-    store_handler_host_as(HandlerRole::Client, jar, host);
-}
-
-/// [`store_handler_host`] for a specific execution role.
+/// Remember the jars and registrations of one execution role's bootstrap, and
+/// the host each ran on so a received frame's channel id resolves to the
+/// registration's payload-type marker. Sends the host had queued are dropped
+/// from the kept copy (the caller already published them).
 pub(super) fn store_handler_host_as(role: HandlerRole, jar: NativeJar, host: &StdHost) {
     let registrations = host.payload_registrations().to_vec();
     if registrations.is_empty() {
@@ -928,11 +892,12 @@ pub(super) fn store_handler_host_as(role: HandlerRole, jar: NativeJar, host: &St
         .push(HandlerJar {
             jar,
             registrations,
-            host: Some(template),
+            host: template,
         });
 }
 
 /// Forget the jars of a previous bootstrap.
+#[cfg(test)]
 pub(super) fn clear_handler_jars() {
     HANDLER_JARS
         .lock()
@@ -950,20 +915,10 @@ pub(super) fn clear_handler_jars_as(role: HandlerRole) {
 
 /// Dispatch one received frame to the first registered handler that names its
 /// channel. Returns whether a handler ran; sends it queues are published for
-/// the next server tick.
-#[allow(dead_code)] // the hub passes its execution role explicitly
-pub(super) fn dispatch_received(frame: &PayloadFrame) -> Result<bool, String> {
-    dispatch_received_as_role(
-        frame,
-        PayloadDirection::PlayToServer,
-        HandlerRole::IntegratedServer,
-    )
-}
-
-/// [`dispatch_received`] for the side that received the frame: only
-/// registrations that receive in `receiving` (their direction, or a
-/// bidirectional one) can handle it. A client window passes `PlayToClient`,
-/// so a server-side receiver of the same channel never answers its frames.
+/// the next server tick. Only registrations that receive in `receiving` (their
+/// direction, or a bidirectional one) can handle it: a client window passes
+/// `PlayToClient`, so a server-side receiver of the same channel never answers
+/// its frames.
 pub(super) fn dispatch_received_as(
     frame: &PayloadFrame,
     receiving: PayloadDirection,
@@ -1020,7 +975,7 @@ fn dispatch_matching(
             })
             .cloned()
             .collect();
-        let mut host = handler.host.clone().unwrap_or_else(StdHost::new);
+        let mut host = handler.host.clone();
         let matched = dispatch_payload_frame_with(
             &handler.jar,
             &mut host,
@@ -1136,7 +1091,7 @@ pub(super) fn publish_from_host(host: &mut StdHost) -> Result<usize, String> {
 }
 
 /// Frames Java mods asked to send, drained in order.
-#[allow(dead_code)] // the hub drains the client-bound half through `take_java_to_clients`
+#[cfg(test)]
 pub(super) fn take_java_outgoing() -> Vec<PayloadFrame> {
     std::mem::take(&mut JAVA_OUTGOING.lock().unwrap_or_else(|e| e.into_inner()))
 }
@@ -1179,6 +1134,7 @@ pub(super) fn take_java_to_clients(max: usize) -> Vec<PayloadFrame> {
 
 /// Hand received frames to a Java host for its bootstrap/bootstrap-time view.
 /// Returns how many were delivered.
+#[cfg(test)]
 pub(super) fn deliver_to_host(
     host: &mut StdHost,
     frames: impl IntoIterator<Item = PayloadFrame>,
@@ -1239,6 +1195,7 @@ pub(super) fn declared() -> PayloadRegistry {
 }
 
 /// The declared channels keyed by id, for diagnostics.
+#[cfg(test)]
 pub(super) fn declared_by_id() -> BTreeMap<String, PayloadDeclaration> {
     declared()
         .declarations()

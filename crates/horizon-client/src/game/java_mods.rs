@@ -21,7 +21,6 @@ use std::{
     },
 };
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JavaLoader {
     Fabric,
@@ -38,7 +37,6 @@ impl JavaLoader {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JavaEngine {
     Native,
