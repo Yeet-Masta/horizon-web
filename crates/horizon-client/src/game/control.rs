@@ -1,9 +1,11 @@
 //! Commands from the control socket (`horizon-ctl`), run on the game thread.
 use super::event_loop::EventLoopCtl;
+use super::java_payloads::{self, MAX_PAYLOAD_BYTES, MAX_PAYLOAD_ID, PayloadDirection};
 use super::{Game, Screen};
 use horizon_client::held::Source;
 use horizon_client::{Result, items::ItemStack};
 use horizon_core::geometry::Vec3;
+use horizon_protocol::packets::{configuration::CustomPayload, play::Clientbound as C};
 use serde_json::{Value, json};
 use std::{
     sync::mpsc::Sender,
@@ -65,6 +67,7 @@ const HELP: &[&str] = &[
     "save                           save the world",
     "save-all                       save the world, rewriting every resident chunk",
     "connect HOST[:PORT] [NAME]     join a multiplayer server (offline mode) from the title screen",
+    "payload send CHANNEL HEX|utf8:TEXT client|server  inject one bounded declared mod payload to the placed guests",
     "chat MESSAGE                   send chat or a /command to the server",
     "disconnect                     leave the server for the server list",
     "respawn                        respawn after death on a server",
@@ -373,6 +376,9 @@ impl Game<'_> {
             return Ok(Some(value));
         }
         if let Some(value) = self.lan_control(&words)? {
+            return Ok(Some(value));
+        }
+        if let Some(value) = self.payload_control(&words)? {
             return Ok(Some(value));
         }
         if let Some(value) = self.friends_control(&words)? {
@@ -1205,6 +1211,28 @@ impl Game<'_> {
         }
     }
 
+    /// `payload send CHANNEL HEX|utf8:TEXT client|server`: inject one declared
+    /// mod payload channel to the guests placed in the hosting level.
+    ///
+    /// In single player the hub belongs to the integrated server, so the frame
+    /// is sent from that thread, exactly as the LAN host's own sends are.
+    fn payload_control(&mut self, words: &[&str]) -> Result<Option<Value>> {
+        let Some((id, direction, bytes)) = parse_payload_command(words)? else {
+            return Ok(None);
+        };
+        let bytes_len = bytes.len();
+        let sent = if let Some(server) = &self.integrated {
+            server
+                .call(move |game| send_host_payload(game, &id, direction, bytes))
+                .ok_or("the integrated server stopped")??
+        } else {
+            send_host_payload(self, &id, direction, bytes)?
+        };
+        Ok(Some(
+            json!({ "ok": true, "guests": sent, "bytes": bytes_len }),
+        ))
+    }
+
     /// `horizon-ctl save` and `save-all`.
     fn control_save(&mut self, all: bool) -> Result<()> {
         if all {
@@ -1522,6 +1550,121 @@ impl Game<'_> {
     }
 }
 
+/// Send one declared payload frame to the guests placed in the host's level.
+///
+/// The frame is encoded against the channels a content root declared: an
+/// unknown id, a direction the declaration does not own, or bytes its codec
+/// rejects is refused instead of guessed. A world nobody joined has no guest
+/// to take the frame, which is an error rather than a silent success.
+fn send_host_payload(
+    game: &mut Game<'_>,
+    id: &str,
+    direction: PayloadDirection,
+    bytes: Vec<u8>,
+) -> std::result::Result<usize, String> {
+    let host = game
+        .lan
+        .as_mut()
+        .ok_or_else(|| "LAN host is not open".to_owned())?;
+    let packets = host_payload_packets(&java_payloads::declared(), id, direction, bytes)?;
+    let targets = payload_targets(host.hub.guests.iter().map(|g| (g.conn, g.placed)));
+    if targets.is_empty() {
+        return Err("no placed guest".to_owned());
+    }
+    for conn in &targets {
+        let guest = host
+            .hub
+            .guest(*conn)
+            .ok_or_else(|| format!("guest {conn} is not here"))?;
+        guest.send_all(&packets);
+    }
+    Ok(targets.len())
+}
+
+/// The connections an injected frame reaches: the guests placed in the level.
+/// A held guest (still loading in) cannot run a frame yet.
+fn payload_targets(guests: impl Iterator<Item = (u32, bool)>) -> Vec<u32> {
+    guests
+        .filter_map(|(conn, placed)| placed.then_some(conn))
+        .collect()
+}
+
+/// The `horizon:payload` packets one injected frame travels as: the frame
+/// encoded against `registry`, split into the bounded chunks a guest's
+/// assembler joins when it does not fit one packet.
+fn host_payload_packets(
+    registry: &java_payloads::PayloadRegistry,
+    id: &str,
+    direction: PayloadDirection,
+    bytes: Vec<u8>,
+) -> std::result::Result<Vec<C>, String> {
+    let mut link = java_payloads::PayloadLink::new(registry.clone());
+    let data = link.send(id, direction, bytes)?;
+    // The link's queued copy would only pile up: the bytes travel below.
+    link.take_outgoing();
+    Ok(java_payloads::chunk_envelopes(&data)?
+        .into_iter()
+        .map(|data| {
+            C::CustomPayload(CustomPayload {
+                channel: java_payloads::CHANNEL.to_owned(),
+                data,
+            })
+        })
+        .collect())
+}
+
+/// `payload send CHANNEL HEX|utf8:TEXT client|server`, or `None` for another
+/// command. Bounds are the transport's: a channel id of at most
+/// [`MAX_PAYLOAD_ID`] bytes and a payload of at most [`MAX_PAYLOAD_BYTES`].
+fn parse_payload_command(
+    words: &[&str],
+) -> std::result::Result<Option<(String, PayloadDirection, Vec<u8>)>, String> {
+    if words.first() != Some(&"payload") {
+        return Ok(None);
+    }
+    if words.len() != 5 || words[1] != "send" {
+        return Err("payload send CHANNEL HEX|utf8:TEXT client|server".to_owned());
+    }
+    let id = words[2];
+    if id.is_empty() || id.len() > MAX_PAYLOAD_ID {
+        return Err(format!(
+            "payload channel is empty or over {MAX_PAYLOAD_ID} bytes"
+        ));
+    }
+    let direction = match words[4] {
+        "client" => PayloadDirection::PlayToClient,
+        "server" => PayloadDirection::PlayToServer,
+        _ => return Err("payload role must be client or server".to_owned()),
+    };
+    let encoded = words[3];
+    let bytes = if let Some(text) = encoded.strip_prefix("utf8:") {
+        text.as_bytes().to_vec()
+    } else {
+        let hex = encoded.strip_prefix("hex:").unwrap_or(encoded);
+        if !hex.len().is_multiple_of(2) {
+            return Err("payload hex has an odd length".to_owned());
+        }
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().as_chunks::<2>().0 {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or_else(|| "payload hex is invalid".to_owned())?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or_else(|| "payload hex is invalid".to_owned())?;
+            bytes.push(((high << 4) | low) as u8);
+        }
+        bytes
+    };
+    if bytes.len() > MAX_PAYLOAD_BYTES {
+        return Err(format!(
+            "payload is {} bytes (max {MAX_PAYLOAD_BYTES})",
+            bytes.len()
+        ));
+    }
+    Ok(Some((id.to_owned(), direction, bytes)))
+}
+
 /// PCI vendor IDs of the GPU makers players have (Apple's is wgpu's Metal value).
 fn vendor_name(id: u32) -> String {
     match id {
@@ -1678,5 +1821,158 @@ mod tests {
         ] {
             assert_eq!(released_modifier(line), None, "{line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod payload_control_tests {
+    use super::*;
+
+    /// A registry of `(channel, direction)` declarations, codec-free.
+    fn declared(rows: &[(&str, PayloadDirection)]) -> java_payloads::PayloadRegistry {
+        let mut registry = java_payloads::PayloadRegistry::default();
+        for (id, direction) in rows {
+            registry
+                .register(java_payloads::PayloadDeclaration {
+                    id: (*id).to_owned(),
+                    direction: *direction,
+                    codec: None,
+                })
+                .unwrap();
+        }
+        registry
+    }
+
+    fn payload(
+        registry: &java_payloads::PayloadRegistry,
+        id: &str,
+        direction: PayloadDirection,
+        bytes: &[u8],
+    ) -> Vec<C> {
+        host_payload_packets(registry, id, direction, bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn parses_payload_forms_and_roles() {
+        let (id, direction, bytes) =
+            parse_payload_command(&["payload", "send", "demo:down", "utf8:hello", "client"])
+                .unwrap()
+                .unwrap();
+        assert_eq!(id, "demo:down");
+        assert_eq!(direction, PayloadDirection::PlayToClient);
+        assert_eq!(bytes, b"hello");
+
+        let (id, direction, bytes) =
+            parse_payload_command(&["payload", "send", "demo:up", "hex:00ff", "server"])
+                .unwrap()
+                .unwrap();
+        assert_eq!(id, "demo:up");
+        assert_eq!(direction, PayloadDirection::PlayToServer);
+        assert_eq!(bytes, [0, 255]);
+
+        // The `hex:` prefix is optional, and other commands are left alone.
+        let (_, _, bytes) = parse_payload_command(&["payload", "send", "demo:x", "0a0B", "client"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, [0x0a, 0x0b]);
+        assert_eq!(parse_payload_command(&["lan", "status"]).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_payload_bounds_and_bad_encoding() {
+        let channel = "x".repeat(MAX_PAYLOAD_ID + 1);
+        assert!(parse_payload_command(&["payload", "send", &channel, "00", "client"]).is_err());
+        let too_big = "00".repeat(MAX_PAYLOAD_BYTES + 1);
+        assert!(parse_payload_command(&["payload", "send", "demo:x", &too_big, "client"]).is_err());
+        assert!(parse_payload_command(&["payload", "send", "demo:x", "0", "client"]).is_err());
+        assert!(parse_payload_command(&["payload", "send", "demo:x", "gg", "client"]).is_err());
+        assert!(parse_payload_command(&["payload", "send", "demo:x", "00", "either"]).is_err());
+        assert!(parse_payload_command(&["payload", "take", "demo:x", "00", "client"]).is_err());
+        assert!(parse_payload_command(&["payload", "send", "demo:x", "00"]).is_err());
+    }
+
+    #[test]
+    fn an_injected_frame_is_encoded_for_a_declared_channel() {
+        let registry = declared(&[
+            ("demo:down", PayloadDirection::PlayToClient),
+            ("demo:up", PayloadDirection::PlayToServer),
+        ]);
+        let packets = payload(
+            &registry,
+            "demo:down",
+            PayloadDirection::PlayToClient,
+            b"hello",
+        );
+        assert_eq!(packets.len(), 1);
+        let C::CustomPayload(packet) = &packets[0] else {
+            panic!("an injected payload travels as a custom payload");
+        };
+        assert_eq!(packet.channel, "horizon:payload");
+        let (frame, used) = java_payloads::PayloadFrame::decode(&packet.data).unwrap();
+        assert_eq!(used, packet.data.len());
+        assert_eq!(frame.id(), "demo:down");
+        assert_eq!(frame.direction(), PayloadDirection::PlayToClient);
+        assert_eq!(frame.bytes(), b"hello");
+
+        // The injection never invents a channel or a direction: both must be
+        // declared in the content root that opened the world.
+        assert!(
+            host_payload_packets(
+                &registry,
+                "demo:missing",
+                PayloadDirection::PlayToClient,
+                Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            host_payload_packets(
+                &registry,
+                "demo:down",
+                PayloadDirection::PlayToServer,
+                Vec::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_oversized_injection_is_chunked_and_reassembled() {
+        let registry = declared(&[("demo:big", PayloadDirection::PlayToClient)]);
+        // 1 MiB is the largest frame, far past one packet's envelope.
+        let bytes = vec![0xa5; MAX_PAYLOAD_BYTES];
+        let packets = payload(
+            &registry,
+            "demo:big",
+            PayloadDirection::PlayToClient,
+            &bytes,
+        );
+        assert!(packets.len() > 1, "a 1 MiB frame is chunked");
+        let mut assembler = java_payloads::ChunkAssembler::new();
+        let mut joined = None;
+        for packet in &packets {
+            let C::CustomPayload(packet) = packet else {
+                panic!("a chunk travels as a custom payload");
+            };
+            assert_eq!(packet.channel, "horizon:payload");
+            if let Some(frame) = assembler.push(&packet.data).unwrap() {
+                joined = Some(frame);
+            }
+        }
+        let joined = joined.expect("the chunks join back into one frame");
+        let (frame, used) = java_payloads::PayloadFrame::decode(&joined).unwrap();
+        assert_eq!(used, joined.len());
+        assert_eq!(frame.id(), "demo:big");
+        assert_eq!(frame.bytes(), bytes.as_slice());
+    }
+
+    #[test]
+    fn only_placed_guests_are_targeted() {
+        assert_eq!(
+            payload_targets([(7u32, true), (8, false), (9, true)].into_iter()),
+            [7, 9]
+        );
+        assert!(payload_targets([(1u32, false)].into_iter()).is_empty());
+        assert!(payload_targets(std::iter::empty::<(u32, bool)>()).is_empty());
     }
 }
