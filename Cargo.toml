@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust", "third_party/winit", "third_party/wasm-bindgen"]
+exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust", "third_party/winit", "third_party/wasm-bindgen", "third_party/chrono"]
 members = [
     "crates/horizon-core",
     "crates/horizon-platform",
@@ -82,6 +82,8 @@ large_enum_variant = "allow"
 # wasm-bindgen itself from third_party/ (its closures' unwind-safety bound on wasm64; the folder's
 # Cargo.toml), here and for js-sys, web-sys and wasm-bindgen-futures, which name it from git.
 wasm-bindgen = { path = "third_party/wasm-bindgen" }
+# chrono 0.4.45 whose clock is the page's on wasm64 too (third_party/chrono/Cargo.toml).
+chrono = { path = "third_party/chrono" }
 wasm-bindgen-futures = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
 js-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
 web-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }

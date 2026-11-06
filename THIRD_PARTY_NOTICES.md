@@ -34,6 +34,14 @@ contributors, under the Apache License 2.0 (`third_party/winit/LICENSE`). Its we
 made with wasm-bindgen's `own_assert_unwind_safe` / `once_assert_unwind_safe`, so the web build
 compiles with panics that unwind (web/unwind.toml).
 
+## chrono
+
+`third_party/chrono` is [chrono](https://github.com/chronotope/chrono) 0.4.45 by Kang Seonghoon and
+the chrono contributors, under the MIT License or the Apache License 2.0
+(`third_party/chrono/LICENSE.txt`). Its `wasmbind` clock (`Local::now`, `Utc::now` through the
+page's `Date`) is on every wasm target, not wasm32 only, so the wasm64 build doesn't panic on
+std's missing clock.
+
 ## wasm-bindgen
 
 `third_party/wasm-bindgen` is the `wasm-bindgen` crate of
