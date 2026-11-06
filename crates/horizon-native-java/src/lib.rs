@@ -15,7 +15,7 @@ use std::{
 pub mod weaver;
 
 use weaver::{
-    InvokeShift, Shift, SiteSelector, SliceBounds, weave_classes_with_extras_and_instance_callbacks,
+    InvokeShift, Shift, SiteSelector, SliceBounds, weave_extended_classes_with_instance_callbacks,
 };
 
 pub use weaver::{
@@ -483,6 +483,12 @@ pub struct LoadTimeMixinWeave {
     /// The plans those bytes carry, in discovery order, with concrete target
     /// descriptors.
     pub woven: Vec<MixinInjectionPlan>,
+    /// The resolved FIELD/NEW/JUMP/@Redirect plans the bytes carry.
+    pub woven_anchors: Vec<MixinAnchorPlan>,
+    /// The resolved @ModifyArg plans the bytes carry.
+    pub woven_modify_args: Vec<MixinModifyArgPlan>,
+    /// The resolved @ModifyVariable plans the bytes carry.
+    pub woven_modify_variables: Vec<MixinModifyVariablePlan>,
     /// Everything else the jar's Mixin classes declare.
     pub skipped: Vec<SkippedMixinPlan>,
 }
@@ -554,6 +560,7 @@ const MAX_WEAVE_REASON_CHARS: usize = 200;
 /// Plans of one class the weave retries one at a time after a rejected pass.
 /// Matches the weaver's per-class bound: past it, every plan fails together for
 /// the same reason, so isolating them would only spend time on a hostile jar.
+#[allow(dead_code)]
 const MAX_ISOLATED_WEAVE_PLANS: usize = 32;
 
 /// `plans`, reordered so applying them one after another leaves each method's
@@ -11525,6 +11532,10 @@ impl NativeJar {
     /// [`Self::with_woven_classes`].
     pub fn plan_load_time_weave(&self, side: MixinSide) -> LoadTimeMixinWeave {
         let (mut plans, unresolved) = self.mixin_plan_scan();
+        let (anchors, unresolved_anchors) = self.mixin_anchor_scan();
+        let (overwrites, unresolved_overwrites) = self.mixin_overwrite_scan();
+        let (modify_args, unresolved_modify_args) = self.mixin_modify_arg_scan();
+        let (modify_variables, unresolved_modify_variables) = self.mixin_modify_variable_scan();
         let configs = self.mixin_configs();
         let config_sides = self.mixin_config_sides();
         self.sort_mixin_plans_in_apply_order_for_side(
@@ -11539,15 +11550,53 @@ impl NativeJar {
                 .iter()
                 .map(|plan| skipped_plan(plan, MixinSkipReason::Unresolved)),
         );
-        self.unwoven_mixin_work(&mut weave.skipped);
-        listed_without_plan(&configs, &plans, &mut weave.skipped);
-        // Grouped by target class so a class the weaver refuses costs only its
-        // own plans. Each group stays in apply order.
-        let mut by_owner: BTreeMap<String, Vec<MixinInjectionPlan>> = BTreeMap::new();
+        weave
+            .skipped
+            .extend(unresolved_anchors.iter().map(|(plan, _)| SkippedMixinPlan {
+                target: plan.target.clone(),
+                callback: plan.callback.clone(),
+                at: plan.at.clone(),
+                reason: MixinSkipReason::Unresolved,
+            }));
+        weave.skipped.extend(
+            unresolved_overwrites
+                .iter()
+                .map(|(plan, _)| skipped_plan(plan, MixinSkipReason::Unresolved)),
+        );
+        weave.skipped.extend(
+            unresolved_modify_args
+                .iter()
+                .map(|(plan, _)| SkippedMixinPlan {
+                    target: plan.target.clone(),
+                    callback: plan.callback.clone(),
+                    at: "@ModifyArg".into(),
+                    reason: MixinSkipReason::Unresolved,
+                }),
+        );
+        weave
+            .skipped
+            .extend(
+                unresolved_modify_variables
+                    .iter()
+                    .map(|(plan, _)| SkippedMixinPlan {
+                        target: plan.target.clone(),
+                        callback: plan.callback.clone(),
+                        at: "@ModifyVariable".into(),
+                        reason: MixinSkipReason::Unresolved,
+                    }),
+            );
+        self.unwoven_mixin_members(&mut weave.skipped);
+        let mut injection_by_owner: BTreeMap<String, Vec<MixinInjectionPlan>> = BTreeMap::new();
+        let mut anchor_by_owner: BTreeMap<String, Vec<MixinAnchorPlan>> = BTreeMap::new();
+        let mut modify_arg_by_owner: BTreeMap<String, Vec<MixinModifyArgPlan>> = BTreeMap::new();
+        let mut modify_variable_by_owner: BTreeMap<String, Vec<MixinModifyVariablePlan>> =
+            BTreeMap::new();
         for plan in &plans {
             match self.load_time_inject_plan(plan, side, &configs, &config_sides) {
                 Ok(concrete) => {
-                    let group = by_owner.entry(concrete.target.owner.clone()).or_default();
+                    let group = injection_by_owner
+                        .entry(concrete.target.owner.clone())
+                        .or_default();
                     if group.contains(&concrete) {
                         weave
                             .skipped
@@ -11559,8 +11608,78 @@ impl NativeJar {
                 Err(reason) => weave.skipped.push(skipped_plan(plan, reason)),
             }
         }
-        for (owner, group) in by_owner {
-            self.weave_plan_group(&owner, group, &mut weave);
+        for plan in anchors {
+            match self.load_time_anchor_plan(&plan, side, &configs, &config_sides) {
+                Ok(concrete) => anchor_by_owner
+                    .entry(concrete.target.owner.clone())
+                    .or_default()
+                    .push(concrete),
+                Err(reason) => weave.skipped.push(skipped_anchor_plan(&plan, reason)),
+            }
+        }
+        for plan in &overwrites {
+            match self.load_time_inject_plan(plan, side, &configs, &config_sides) {
+                Ok(concrete) => injection_by_owner
+                    .entry(concrete.target.owner.clone())
+                    .or_default()
+                    .push(concrete),
+                Err(reason) => weave.skipped.push(skipped_plan(plan, reason)),
+            }
+        }
+        for plan in modify_args {
+            match self.load_time_modify_arg_plan(&plan, side, &configs, &config_sides) {
+                Ok(concrete) => modify_arg_by_owner
+                    .entry(concrete.target.owner.clone())
+                    .or_default()
+                    .push(concrete),
+                Err(reason) => weave.skipped.push(skipped_modify_arg_plan(&plan, reason)),
+            }
+        }
+        for plan in modify_variables {
+            match self.load_time_modify_variable_plan(&plan, side, &configs, &config_sides) {
+                Ok(concrete) => modify_variable_by_owner
+                    .entry(concrete.target.owner.clone())
+                    .or_default()
+                    .push(concrete),
+                Err(reason) => weave
+                    .skipped
+                    .push(skipped_modify_variable_plan(&plan, reason)),
+            }
+        }
+        let mut all_owners = BTreeSet::new();
+        all_owners.extend(injection_by_owner.keys().cloned());
+        all_owners.extend(anchor_by_owner.keys().cloned());
+        all_owners.extend(modify_arg_by_owner.keys().cloned());
+        all_owners.extend(modify_variable_by_owner.keys().cloned());
+        let all_plans = plans
+            .iter()
+            .chain(overwrites.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let extra_owners = anchor_by_owner
+            .values()
+            .flat_map(|plans| plans.iter().map(|plan| plan.callback.owner.clone()))
+            .chain(
+                modify_arg_by_owner
+                    .values()
+                    .flat_map(|plans| plans.iter().map(|plan| plan.callback.owner.clone())),
+            )
+            .chain(
+                modify_variable_by_owner
+                    .values()
+                    .flat_map(|plans| plans.iter().map(|plan| plan.callback.owner.clone())),
+            )
+            .collect::<BTreeSet<_>>();
+        listed_without_plan(&configs, &all_plans, &extra_owners, &mut weave.skipped);
+        for owner in all_owners {
+            self.weave_plan_group(
+                &owner,
+                injection_by_owner.remove(&owner).unwrap_or_default(),
+                anchor_by_owner.remove(&owner).unwrap_or_default(),
+                modify_arg_by_owner.remove(&owner).unwrap_or_default(),
+                modify_variable_by_owner.remove(&owner).unwrap_or_default(),
+                &mut weave,
+            );
         }
         weave
     }
@@ -11679,39 +11798,29 @@ impl NativeJar {
         configs: &[MixinConfig],
         config_sides: &BTreeMap<String, MixinSide>,
     ) -> Result<MixinInjectionPlan, MixinSkipReason> {
-        if !matches!(plan.at.as_str(), "HEAD" | "RETURN" | "TAIL") {
+        if !matches!(plan.at.as_str(), "" | "HEAD" | "RETURN" | "TAIL" | "INVOKE") {
             return Err(MixinSkipReason::NonHeadAnchor);
         }
         // A `HEAD` insert must stay at offset 0 and a `RETURN`/`TAIL` insert at
         // its return site, so a `shift` is outside every anchor here; a `slice`
         // selects `RETURN` sites and is outside `HEAD`.
-        if plan.shift.is_some() || (plan.at == "HEAD" && plan.slice.is_some()) {
+        if (plan.at != "INVOKE" && plan.shift.is_some())
+            || (plan.at == "HEAD" && plan.slice.is_some())
+            || (plan.at.is_empty() && (plan.shift.is_some() || plan.slice.is_some()))
+        {
             return Err(MixinSkipReason::SelectorModifier);
         }
         mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
-        let class = self
-            .classes
-            .get(&plan.target.owner)
-            .ok_or(MixinSkipReason::TargetOutsideJar)?;
-        let mut candidates = class.methods.iter().filter(|method| {
-            method.name == plan.target.name
-                && (plan.target.descriptor.is_empty()
-                    || method.descriptor == plan.target.descriptor)
-        });
-        let target = candidates.next().ok_or(MixinSkipReason::TargetMissing)?;
-        if candidates.next().is_some() {
-            return Err(MixinSkipReason::AmbiguousTarget);
-        }
-        if target.name == "<init>" {
-            return Err(MixinSkipReason::ConstructorTarget);
-        }
+        let (target, callback) = self.load_time_target_callback(&plan.target, &plan.callback)?;
         let returns_value = crate::return_desc(&target.descriptor) != "V";
         // The `void` shapes are the plain `HEAD` `CallbackInfo`+cancel branch
         // and the stack-neutral RETURN/TAIL callback; the value shapes are the
         // RETURN/TAIL `CallbackInfoReturnable`. A cancellable `HEAD` on a
         // value-returning target and a cancellable `RETURN`/`TAIL` on a `void`
         // one have no woven shape here.
-        let cancellable_shape = if plan.at == "HEAD" {
+        let cancellable_shape = if plan.at == "INVOKE" {
+            true
+        } else if plan.at == "HEAD" {
             !returns_value
         } else {
             returns_value
@@ -11719,16 +11828,6 @@ impl NativeJar {
         if plan.cancellable && !cancellable_shape {
             return Err(MixinSkipReason::Cancellable);
         }
-        let callback = self
-            .classes
-            .get(&plan.callback.owner)
-            .and_then(|class| class.method(&plan.callback.name, &plan.callback.descriptor));
-        let Some(callback) = callback else {
-            return Err(MixinSkipReason::Weaver(bounded_weave_reason(&format!(
-                "Mixin callback {}#{}{} is not in this jar",
-                plan.callback.owner, plan.callback.name, plan.callback.descriptor
-            ))));
-        };
         // An instance callback is reached through a synthetic bridge class the
         // weaver adds (see `weave_classes_with_extras_and_instance_callbacks`).
         // A separate class cannot invoke a `private` one, and the load-time
@@ -11745,11 +11844,95 @@ impl NativeJar {
         Ok(concrete)
     }
 
+    /// Resolve the target overload and callback that every load-time family
+    /// must expose to the bytecode weaver.
+    fn load_time_target_callback(
+        &self,
+        target_ref: &MethodRef,
+        callback_ref: &MethodRef,
+    ) -> Result<(&Method, &Method), MixinSkipReason> {
+        let class = self
+            .classes
+            .get(&target_ref.owner)
+            .ok_or(MixinSkipReason::TargetOutsideJar)?;
+        let mut candidates = class.methods.iter().filter(|method| {
+            method.name == target_ref.name
+                && (target_ref.descriptor.is_empty() || method.descriptor == target_ref.descriptor)
+        });
+        let target = candidates.next().ok_or(MixinSkipReason::TargetMissing)?;
+        if candidates.next().is_some() {
+            return Err(MixinSkipReason::AmbiguousTarget);
+        }
+        if target.name == "<init>" {
+            return Err(MixinSkipReason::ConstructorTarget);
+        }
+        let callback = self
+            .classes
+            .get(&callback_ref.owner)
+            .and_then(|class| class.method(&callback_ref.name, &callback_ref.descriptor))
+            .ok_or_else(|| {
+                MixinSkipReason::Weaver(bounded_weave_reason(&format!(
+                    "Mixin callback {}#{}{} is not in this jar",
+                    callback_ref.owner, callback_ref.name, callback_ref.descriptor
+                )))
+            })?;
+        if !callback.is_static() && callback.access & 0x0002 != 0 {
+            return Err(MixinSkipReason::Weaver(bounded_weave_reason(&format!(
+                "Mixin callback {}#{}{} is private; a synthetic bridge class cannot invoke it, so the bounded weave needs it public or package-visible",
+                callback_ref.owner, callback_ref.name, callback_ref.descriptor
+            ))));
+        }
+        Ok((target, callback))
+    }
+
+    fn load_time_anchor_plan(
+        &self,
+        plan: &MixinAnchorPlan,
+        side: MixinSide,
+        configs: &[MixinConfig],
+        config_sides: &BTreeMap<String, MixinSide>,
+    ) -> Result<MixinAnchorPlan, MixinSkipReason> {
+        mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
+        let (target, _) = self.load_time_target_callback(&plan.target, &plan.callback)?;
+        let mut concrete = plan.clone();
+        concrete.target.descriptor = target.descriptor.clone();
+        Ok(concrete)
+    }
+
+    fn load_time_modify_arg_plan(
+        &self,
+        plan: &MixinModifyArgPlan,
+        side: MixinSide,
+        configs: &[MixinConfig],
+        config_sides: &BTreeMap<String, MixinSide>,
+    ) -> Result<MixinModifyArgPlan, MixinSkipReason> {
+        mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
+        let (target, _) = self.load_time_target_callback(&plan.target, &plan.callback)?;
+        let mut concrete = plan.clone();
+        concrete.target.descriptor = target.descriptor.clone();
+        Ok(concrete)
+    }
+
+    fn load_time_modify_variable_plan(
+        &self,
+        plan: &MixinModifyVariablePlan,
+        side: MixinSide,
+        configs: &[MixinConfig],
+        config_sides: &BTreeMap<String, MixinSide>,
+    ) -> Result<MixinModifyVariablePlan, MixinSkipReason> {
+        mixin_config_gate(configs, config_sides, &plan.callback.owner, side)?;
+        let (target, _) = self.load_time_target_callback(&plan.target, &plan.callback)?;
+        let mut concrete = plan.clone();
+        concrete.target.descriptor = target.descriptor.clone();
+        Ok(concrete)
+    }
+
     /// The distinct callbacks of `plans` that are instance methods in this jar.
     ///
     /// The weaver needs these named explicitly because the load-time weave
     /// passes it a class set holding only the target: from that set alone it
     /// cannot tell a static callback from an instance one.
+    #[allow(dead_code)]
     fn instance_callbacks_for(&self, plans: &[MixinInjectionPlan]) -> Vec<MethodRef> {
         let mut seen = BTreeSet::new();
         let mut instance = Vec::new();
@@ -11782,18 +11965,33 @@ impl NativeJar {
     fn weave_plan_group(
         &self,
         owner: &str,
-        mut group: Vec<MixinInjectionPlan>,
+        injections: Vec<MixinInjectionPlan>,
+        anchors: Vec<MixinAnchorPlan>,
+        modify_args: Vec<MixinModifyArgPlan>,
+        modify_variables: Vec<MixinModifyVariablePlan>,
         weave: &mut LoadTimeMixinWeave,
     ) {
         let Some(class) = self.classes.get(owner) else {
             return;
         };
         let set = BTreeMap::from([(owner.to_owned(), class.clone())]);
-        let instance_callbacks = self.instance_callbacks_for(&group);
-        let apply = |plans: &[MixinInjectionPlan]| -> Result<WovenClasses, String> {
-            let woven = weave_classes_with_extras_and_instance_callbacks(
+        let apply = |injections: &[MixinInjectionPlan],
+                     anchors: &[MixinAnchorPlan],
+                     modify_args: &[MixinModifyArgPlan],
+                     modify_variables: &[MixinModifyVariablePlan]|
+         -> Result<WovenClasses, String> {
+            let instance_callbacks = self.instance_callbacks_for_extended(
+                injections,
+                anchors,
+                modify_args,
+                modify_variables,
+            );
+            let woven = weave_extended_classes_with_instance_callbacks(
                 &set,
-                &mixin_plans_in_weave_order(plans),
+                &mixin_plans_in_weave_order(injections),
+                anchors,
+                modify_args,
+                modify_variables,
                 &instance_callbacks,
             )?;
             // Parsed here so `with_woven_classes` cannot fail on planned bytes.
@@ -11802,22 +12000,65 @@ impl NativeJar {
             }
             Ok(woven)
         };
-        let outcome = match apply(&group) {
-            Err(_) if group.len() <= MAX_ISOLATED_WEAVE_PLANS => {
-                group.retain(|plan| match apply(std::slice::from_ref(plan)) {
-                    Ok(_) => true,
-                    Err(error) => {
-                        let reason = MixinSkipReason::Weaver(bounded_weave_reason(&error));
-                        weave.skipped.push(skipped_plan(plan, reason));
-                        false
+        let mut injections = injections;
+        let mut anchors = anchors;
+        let mut modify_args = modify_args;
+        let mut modify_variables = modify_variables;
+        let outcome = match apply(&injections, &anchors, &modify_args, &modify_variables) {
+            Ok(woven) => Ok(woven),
+            Err(error) => {
+                let reason = MixinSkipReason::Weaver(bounded_weave_reason(&error));
+                injections.retain(
+                    |plan| match apply(std::slice::from_ref(plan), &[], &[], &[]) {
+                        Ok(_) => true,
+                        Err(_) => {
+                            weave.skipped.push(skipped_plan(plan, reason.clone()));
+                            false
+                        }
+                    },
+                );
+                anchors.retain(
+                    |plan| match apply(&[], std::slice::from_ref(plan), &[], &[]) {
+                        Ok(_) => true,
+                        Err(_) => {
+                            weave
+                                .skipped
+                                .push(skipped_anchor_plan(plan, reason.clone()));
+                            false
+                        }
+                    },
+                );
+                modify_args.retain(
+                    |plan| match apply(&[], &[], std::slice::from_ref(plan), &[]) {
+                        Ok(_) => true,
+                        Err(_) => {
+                            weave
+                                .skipped
+                                .push(skipped_modify_arg_plan(plan, reason.clone()));
+                            false
+                        }
+                    },
+                );
+                modify_variables.retain(|plan| {
+                    match apply(&[], &[], &[], std::slice::from_ref(plan)) {
+                        Ok(_) => true,
+                        Err(_) => {
+                            weave
+                                .skipped
+                                .push(skipped_modify_variable_plan(plan, reason.clone()));
+                            false
+                        }
                     }
                 });
-                if group.is_empty() {
+                if injections.is_empty()
+                    && anchors.is_empty()
+                    && modify_args.is_empty()
+                    && modify_variables.is_empty()
+                {
                     return;
                 }
-                apply(&group)
+                apply(&injections, &anchors, &modify_args, &modify_variables)
             }
-            outcome => outcome,
         };
         match outcome {
             Ok(woven) => {
@@ -11825,21 +12066,75 @@ impl NativeJar {
                 for (name, bytes) in woven.added {
                     weave.classes.added.entry(name).or_insert(bytes);
                 }
-                weave.woven.extend(group);
+                weave.woven.extend(injections);
+                weave.woven_anchors.extend(anchors);
+                weave.woven_modify_args.extend(modify_args);
+                weave.woven_modify_variables.extend(modify_variables);
             }
             Err(error) => {
                 let reason = MixinSkipReason::Weaver(bounded_weave_reason(&error));
-                weave
-                    .skipped
-                    .extend(group.iter().map(|plan| skipped_plan(plan, reason.clone())));
+                weave.skipped.extend(
+                    injections
+                        .iter()
+                        .map(|plan| skipped_plan(plan, reason.clone())),
+                );
+                weave.skipped.extend(
+                    anchors
+                        .iter()
+                        .map(|plan| skipped_anchor_plan(plan, reason.clone())),
+                );
+                weave.skipped.extend(
+                    modify_args
+                        .iter()
+                        .map(|plan| skipped_modify_arg_plan(plan, reason.clone())),
+                );
+                weave.skipped.extend(
+                    modify_variables
+                        .iter()
+                        .map(|plan| skipped_modify_variable_plan(plan, reason.clone())),
+                );
             }
         }
+    }
+
+    fn instance_callbacks_for_extended(
+        &self,
+        injections: &[MixinInjectionPlan],
+        anchors: &[MixinAnchorPlan],
+        modify_args: &[MixinModifyArgPlan],
+        modify_variables: &[MixinModifyVariablePlan],
+    ) -> Vec<MethodRef> {
+        let mut callbacks = Vec::new();
+        let mut seen = BTreeSet::new();
+        for callback in injections
+            .iter()
+            .map(|plan| &plan.callback)
+            .chain(anchors.iter().map(|plan| &plan.callback))
+            .chain(modify_args.iter().map(|plan| &plan.callback))
+            .chain(modify_variables.iter().map(|plan| &plan.callback))
+        {
+            if self
+                .classes
+                .get(&callback.owner)
+                .and_then(|class| class.method(&callback.name, &callback.descriptor))
+                .is_some_and(|method| !method.is_static())
+                && seen.insert((
+                    callback.owner.clone(),
+                    callback.name.clone(),
+                    callback.descriptor.clone(),
+                ))
+            {
+                callbacks.push(callback.clone());
+            }
+        }
+        callbacks
     }
 
     /// Record the Mixin work outside the `@Inject` plan set: the other plan
     /// families, resolved or not, and the members of each `@Mixin` class that
     /// real Mixin would merge into its target. Static helpers stay, because a
     /// static callback still reaches them in the Mixin class itself.
+    #[allow(dead_code)]
     fn unwoven_mixin_work(&self, skipped: &mut Vec<SkippedMixinPlan>) {
         const SYNTHETIC: u16 = 0x1000;
         // Methods these annotate already have a row of their own.
@@ -11924,6 +12219,60 @@ impl NativeJar {
                     descriptor: descriptor.clone(),
                 };
                 row(&member, &member, "@Mixin-member", true);
+            }
+        }
+    }
+
+    /// Preserve the report row for a mixin member that real Mixin would merge
+    /// into its target, without treating executable plan families as
+    /// unsupported before the extended weaver sees them.
+    fn unwoven_mixin_members(&self, skipped: &mut Vec<SkippedMixinPlan>) {
+        const SYNTHETIC: u16 = 0x1000;
+        const PLANNED: [&str; 5] = [
+            "Lorg/spongepowered/asm/mixin/injection/Inject;",
+            "Lorg/spongepowered/asm/mixin/injection/Redirect;",
+            "Lorg/spongepowered/asm/mixin/injection/ModifyArg;",
+            "Lorg/spongepowered/asm/mixin/injection/ModifyVariable;",
+            "Lorg/spongepowered/asm/mixin/Overwrite;",
+        ];
+        for class in self.classes.values() {
+            if !class
+                .annotations
+                .iter()
+                .any(|annotation| annotation.descriptor == "Lorg/spongepowered/asm/mixin/Mixin;")
+            {
+                continue;
+            }
+            let field = class
+                .fields
+                .iter()
+                .find(|field| field.access & SYNTHETIC == 0)
+                .map(|field| (&field.name, &field.descriptor));
+            let method = class
+                .methods
+                .iter()
+                .find(|method| {
+                    !method.is_static()
+                        && method.name != "<init>"
+                        && method.access & SYNTHETIC == 0
+                        && !method
+                            .annotations
+                            .iter()
+                            .any(|annotation| PLANNED.contains(&annotation.descriptor.as_str()))
+                })
+                .map(|method| (&method.name, &method.descriptor));
+            if let Some((name, descriptor)) = field.or(method) {
+                let member = MethodRef {
+                    owner: class.name.clone(),
+                    name: name.clone(),
+                    descriptor: descriptor.clone(),
+                };
+                skipped.push(SkippedMixinPlan {
+                    target: member.clone(),
+                    callback: member,
+                    at: "@Mixin-member".to_owned(),
+                    reason: MixinSkipReason::UnsupportedFamily,
+                });
             }
         }
     }
@@ -19323,11 +19672,13 @@ impl ExecutionConfigGate {
 fn listed_without_plan(
     configs: &[MixinConfig],
     plans: &[MixinInjectionPlan],
+    extra_owners: &BTreeSet<String>,
     skipped: &mut Vec<SkippedMixinPlan>,
 ) {
     let mut accounted = plans
         .iter()
         .map(|plan| plan.callback.owner.clone())
+        .chain(extra_owners.iter().cloned())
         .chain(skipped.iter().map(|row| row.callback.owner.clone()))
         .collect::<BTreeSet<_>>();
     for config in configs {
@@ -19361,6 +19712,36 @@ fn skipped_plan(plan: &MixinInjectionPlan, reason: MixinSkipReason) -> SkippedMi
         target: plan.target.clone(),
         callback: plan.callback.clone(),
         at: plan.at.clone(),
+        reason,
+    }
+}
+
+fn skipped_anchor_plan(plan: &MixinAnchorPlan, reason: MixinSkipReason) -> SkippedMixinPlan {
+    SkippedMixinPlan {
+        target: plan.target.clone(),
+        callback: plan.callback.clone(),
+        at: plan.at.clone(),
+        reason,
+    }
+}
+
+fn skipped_modify_arg_plan(plan: &MixinModifyArgPlan, reason: MixinSkipReason) -> SkippedMixinPlan {
+    SkippedMixinPlan {
+        target: plan.target.clone(),
+        callback: plan.callback.clone(),
+        at: "@ModifyArg".to_owned(),
+        reason,
+    }
+}
+
+fn skipped_modify_variable_plan(
+    plan: &MixinModifyVariablePlan,
+    reason: MixinSkipReason,
+) -> SkippedMixinPlan {
+    SkippedMixinPlan {
+        target: plan.target.clone(),
+        callback: plan.callback.clone(),
+        at: "@ModifyVariable".to_owned(),
         reason,
     }
 }
