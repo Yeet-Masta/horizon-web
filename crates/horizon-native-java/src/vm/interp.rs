@@ -573,6 +573,11 @@ impl Vm {
                     Op::ALoad(kind) => {
                         let i = pop!().i();
                         let a = pop!().r();
+                        if a == 0 {
+                            self.frames[fi].pc = pc as u32;
+                            let msg = self.helpful_npe(m, pc - 1);
+                            tri!(Err(self.npe(msg.as_deref())))
+                        }
                         let v = tri!(self.array_load(a, i));
                         if kind == b'J' || kind == b'D' {
                             push2!(v)
@@ -584,6 +589,11 @@ impl Vm {
                         let v = if kind == b'J' || kind == b'D' { pop2!() } else { pop!() };
                         let i = pop!().i();
                         let a = pop!().r();
+                        if a == 0 {
+                            self.frames[fi].pc = pc as u32;
+                            let msg = self.helpful_npe(m, pc - 1);
+                            tri!(Err(self.npe(msg.as_deref())))
+                        }
                         tri!(self.array_store(a, i, v));
                     }
                     Op::Pop => {

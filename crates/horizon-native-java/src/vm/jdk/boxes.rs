@@ -233,10 +233,10 @@ fn double_hex(v: f64) -> String {
 // The wrappers share their instance methods; each value lives in Data::Boxed.
 
 fn int_value(vm: &mut Vm, a: &[Value]) -> Res<Value> {
-    Ok(super::lang::widen(this_boxed(vm, a)?, b'I'))
+    Ok(Value::Int(to_int(this_boxed(vm, a)?)))
 }
 fn long_value(vm: &mut Vm, a: &[Value]) -> Res<Value> {
-    Ok(super::lang::widen(this_boxed(vm, a)?, b'J'))
+    Ok(Value::Long(to_long(this_boxed(vm, a)?)))
 }
 fn float_value(vm: &mut Vm, a: &[Value]) -> Res<Value> {
     let v = this_boxed(vm, a)?;
@@ -246,7 +246,10 @@ fn float_value(vm: &mut Vm, a: &[Value]) -> Res<Value> {
     })
 }
 fn double_value(vm: &mut Vm, a: &[Value]) -> Res<Value> {
-    Ok(super::lang::widen(this_boxed(vm, a)?, b'D'))
+    Ok(match this_boxed(vm, a)? {
+        Value::Double(d) => Value::Double(d),
+        v => super::lang::widen(v, b'D'),
+    })
 }
 fn to_int(v: Value) -> i32 {
     match v {

@@ -95,6 +95,11 @@ impl Class {
     pub fn java_name(&self) -> String {
         match self.kind {
             ClassKind::Primitive(p) => primitive_name(p).to_string(),
+            // A hidden class: `pkg.Outer$$Lambda/0x...`.
+            ClassKind::Synthetic if self.name.contains("$$Lambda/") => {
+                let (outer, rest) = self.name.split_once("$$Lambda/").unwrap_or((&self.name, ""));
+                format!("{}$$Lambda/{rest}", outer.replace('/', "."))
+            }
             _ => self.name.replace('/', "."),
         }
     }

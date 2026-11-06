@@ -631,7 +631,7 @@ impl Vm {
             }
             _ => self.invoke(target.method, &call)?,
         };
-        let produced = if target.kind == 8 { "L".to_string() } else { ret };
+        let produced = if target.kind == 8 { "Ljava/lang/Object;".to_string() } else { ret };
         self.adapt_return(result, &produced, &target.sam_ret)
     }
 

@@ -345,6 +345,13 @@ pub fn object_wait(vm: &mut Vm, a: &[Value]) -> Res<Value> {
     }
     vm.jdk.monitors.insert(t, held);
     result?;
+    let me = current(vm)?;
+    if rec(vm, me).is_some_and(|r| r.interrupted) {
+        if let Some(r) = rec_mut(vm, me) {
+            r.interrupted = false;
+        }
+        return Err(vm.throw_new("java/lang/InterruptedException", None));
+    }
     void()
 }
 
@@ -386,6 +393,13 @@ fn sleep(vm: &mut Vm, nanos: i64) -> Res<Value> {
     }
     run_pending(vm)?;
     vm.jdk.nanos += nanos as u64;
+    // Another thread may have interrupted this one while it slept.
+    if rec(vm, t).is_some_and(|r| r.interrupted) {
+        if let Some(r) = rec_mut(vm, t) {
+            r.interrupted = false;
+        }
+        return Err(vm.throw_new("java/lang/InterruptedException", Some("sleep interrupted")));
+    }
     void()
 }
 
@@ -538,9 +552,22 @@ fn thread_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             ret_str(vm, &format!("Thread[#{},{name},{},{group}]", r.id, r.priority))
         }
         "getStackTrace" => {
+            if t != current(vm)? {
+                let c = vm.load("java/lang/StackTraceElement")?;
+                let arr_class = vm.array_class_of(c)?;
+                return ret_ref(vm.new_array(arr_class, 0)?);
+            }
+            // The frames below this call, under Thread.getStackTrace's own.
+            let ex = vm.make_throwable("java/lang/Throwable", None)?;
+            let trace = vm.invoke_virtual(ex, "getStackTrace", "()[Ljava/lang/StackTraceElement;", &[])?.r();
+            let mut items = vm.ref_elements(trace);
             let c = vm.load("java/lang/StackTraceElement")?;
-            let arr_class = vm.array_class_of(c)?;
-            ret_ref(vm.new_array(arr_class, 0)?)
+            let own = vm.new_instance(c)?;
+            let (cls, name, file) = (vm.intern("java.lang.Thread")?, vm.intern("getStackTrace")?, vm.intern("Thread.java")?);
+            let ctor = vm.find_method(c, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V").ok_or_else(|| Exc::Internal("StackTraceElement".into()))?;
+            vm.invoke(ctor, &[Value::Ref(own), Value::Ref(cls), Value::Ref(name), Value::Ref(file), Value::Int(2475)])?;
+            items.insert(0, own);
+            ret_ref(vm.new_ref_array("Ljava/lang/StackTraceElement;", &items)?)
         }
         "checkAccess" => void(),
         _ => Err(Exc::Unsupported(format!("Thread.{op}"))),

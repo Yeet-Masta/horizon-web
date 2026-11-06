@@ -828,12 +828,18 @@
   {
    "suite": "rustyjvm",
    "main": "samples.nativecall.system.NativeCallSystemCurrentTimeMillis",
-   "category": "nativecall"
+   "category": "nativecall",
+   "needs": [
+    "env"
+   ]
   },
   {
    "suite": "rustyjvm",
    "main": "samples.nativecall.system.wallclock.WallClockExample",
-   "category": "nativecall"
+   "category": "nativecall",
+   "needs": [
+    "env"
+   ]
   },
   {
    "suite": "rustyjvm",
@@ -1161,7 +1167,10 @@
   {
    "suite": "rustyjvm",
    "main": "samples.system.getpropertyexample.SystemGetPropertyExample",
-   "category": "system"
+   "category": "system",
+   "needs": [
+    "env"
+   ]
   },
   {
    "suite": "rustyjvm",

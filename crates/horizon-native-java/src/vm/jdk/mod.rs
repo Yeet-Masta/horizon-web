@@ -232,6 +232,10 @@ pub struct VmState {
     pub nanos: u64,
     pub seed_uniquifier: u64,
     pub polymorphic: HashMap<(ClassId, String, String), super::MethodId>,
+    /// `ClassLoader.set*AssertionStatus`: by class name, by package (a
+    /// trailing `.`), and the default.
+    pub assertion_status: HashMap<String, bool>,
+    pub default_assertions: Option<bool>,
     pub proxies: Vec<reflect::ProxyClass>,
 }
 

@@ -1441,6 +1441,13 @@ fn map_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             }
             _ => ret_bool(false),
         },
+        "replaceIf" => match map_get(vm, t, arg(a, 1))? {
+            Some(v) if equals(vm, v, arg(a, 2))? => {
+                map_put(vm, t, arg(a, 1), arg(a, 3))?;
+                ret_bool(true)
+            }
+            _ => ret_bool(false),
+        },
         "replace" => match map_get(vm, t, arg(a, 1))? {
             Some(old) => {
                 map_put(vm, t, arg(a, 1), arg(a, 2))?;
@@ -2813,6 +2820,76 @@ fn array_hash(vm: &mut Vm, r: ObjId, deep: bool) -> Res<i32> {
     Ok(h)
 }
 
+/// The element kind of an array object (`L` for references).
+fn elem_kind(vm: &Vm, r: ObjId) -> u8 {
+    match vm.class_of(r).map(|c| &vm.class(c).kind) {
+        Some(crate::vm::ClassKind::Array { elem, .. }) => *elem,
+        _ => b'L',
+    }
+}
+
+/// `Arrays.compare` and `compareUnsigned`: the first differing elements
+/// compared as their wrapper's `compare` does, else the length difference.
+fn arrays_compare(vm: &mut Vm, a: &[Value], unsigned: bool) -> Res<Value> {
+    let (x, y, cmp) = (arg(a, 0).r(), arg(a, 1).r(), arg(a, 2).r());
+    if x == y {
+        return Ok(Value::Int(0));
+    }
+    if x == 0 || y == 0 {
+        return Ok(Value::Int(if x == 0 { -1 } else { 1 }));
+    }
+    let kind = elem_kind(vm, x);
+    let (p, q) = (vm.array_values(x), vm.array_values(y));
+    for (u, v) in p.iter().zip(&q) {
+        let c = match kind {
+            b'Z' => (u.i() != 0) as i32 - (v.i() != 0) as i32,
+            b'B' if unsigned => (u.i() as u8 as i32) - (v.i() as u8 as i32),
+            b'S' if unsigned => (u.i() as u16 as i32) - (v.i() as u16 as i32),
+            b'B' | b'S' | b'C' => u.i() - v.i(),
+            b'I' if unsigned => (u.i() as u32).cmp(&(v.i() as u32)) as i32,
+            b'I' => u.i().cmp(&v.i()) as i32,
+            b'J' if unsigned => (u.j() as u64).cmp(&(v.j() as u64)) as i32,
+            b'J' => u.j().cmp(&v.j()) as i32,
+            b'F' => java_double_order(u.f() as f64, v.f() as f64) as i32,
+            b'D' => java_double_order(u.d(), v.d()) as i32,
+            _ => {
+                if u.r() == v.r() {
+                    0
+                } else if u.r() == 0 || v.r() == 0 {
+                    if u.r() == 0 { -1 } else { 1 }
+                } else {
+                    compare(vm, *u, *v, cmp)?
+                }
+            }
+        };
+        if c != 0 {
+            return Ok(Value::Int(c));
+        }
+    }
+    Ok(Value::Int(p.len() as i32 - q.len() as i32))
+}
+
+fn arrays_mismatch(vm: &mut Vm, a: &[Value]) -> Res<Value> {
+    let (x, y) = (arg(a, 0).r(), arg(a, 1).r());
+    if x == 0 || y == 0 {
+        return Err(vm.npe(None));
+    }
+    let kind = elem_kind(vm, x);
+    let (p, q) = (vm.array_values(x), vm.array_values(y));
+    for (i, (u, v)) in p.iter().zip(&q).enumerate() {
+        let same = match kind {
+            b'F' => super::boxes::float_to_int_bits(u.f()) == super::boxes::float_to_int_bits(v.f()),
+            b'D' => super::boxes::double_to_long_bits(u.d()) == super::boxes::double_to_long_bits(v.d()),
+            b'L' => equals(vm, *u, *v)?,
+            _ => u == v,
+        };
+        if !same {
+            return Ok(Value::Int(i as i32));
+        }
+    }
+    Ok(Value::Int(if p.len() == q.len() { -1 } else { p.len().min(q.len()) as i32 }))
+}
+
 fn arrays_equals(vm: &mut Vm, a: &[Value]) -> Res<Value> {
     let (x, y) = (arg(a, 0).r(), arg(a, 1).r());
     if x == y {
@@ -4136,7 +4213,7 @@ fn atomic_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             set(vm, add(current, delta(arg(a, 1))));
             current
         }
-        "compareAndSet" => {
+        "compareAndSet" | "compareAndExchange" => {
             let same = match (current, arg(a, 1)) {
                 (Value::Ref(x), Value::Ref(y)) => x == y,
                 (x, y) => x == y,
@@ -4144,7 +4221,7 @@ fn atomic_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             if same {
                 set(vm, arg(a, 2));
             }
-            Value::Int(same as i32)
+            if op == "compareAndExchange" { current } else { Value::Int(same as i32) }
         }
         "updateAndGet" | "getAndUpdate" => {
             let f = arg(a, 1).r();
@@ -4273,6 +4350,7 @@ macro_rules! map_methods {
             "remove" "(Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "remove")),
             "remove" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| map_op(vm, a, "removePair")),
             "replace" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "replace")),
+            "replace" "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| map_op(vm, a, "replaceIf")),
             "clear" "()V" M => Some(|vm, a| map_op(vm, a, "clear")),
             "putAll" "(Ljava/util/Map;)V" M => Some(|vm, a| map_op(vm, a, "putAll")),
             "keySet" "()Ljava/util/Set;" M => Some(|vm, a| map_op(vm, a, "keySet")),
@@ -4424,6 +4502,10 @@ static TREEMAP_METHODS: &[NativeMethod] = natives![
     "put" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "put")),
     "putIfAbsent" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "putIfAbsent")),
     "remove" "(Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "remove")),
+    "remove" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| map_op(vm, a, "removePair")),
+    "replace" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "replace")),
+    "replace" "(Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| map_op(vm, a, "replaceIf")),
+    "replaceAll" "(Ljava/util/function/BiFunction;)V" M => Some(|vm, a| map_op(vm, a, "replaceAll")),
     "clear" "()V" M => Some(|vm, a| map_op(vm, a, "clear")),
     "putAll" "(Ljava/util/Map;)V" M => Some(|vm, a| map_op(vm, a, "putAll")),
     "keySet" "()Ljava/util/Set;" M => Some(|vm, a| map_op(vm, a, "keySet")),
@@ -4576,6 +4658,15 @@ macro_rules! atomic_class {
                 "getAndAdd" (concat!("(", $p, ")", $p)) M => Some(|vm, a| atomic_op(vm, a, "getAndAdd")),
                 "compareAndSet" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
                 "weakCompareAndSet" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+                "weakCompareAndSetPlain" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+                "weakCompareAndSetVolatile" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+                "weakCompareAndSetAcquire" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+                "weakCompareAndSetRelease" (concat!("(", $p, $p, ")Z")) M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+                "compareAndExchange" (concat!("(", $p, $p, ")", $p)) M => Some(|vm, a| atomic_op(vm, a, "compareAndExchange")),
+                "compareAndExchangeAcquire" (concat!("(", $p, $p, ")", $p)) M => Some(|vm, a| atomic_op(vm, a, "compareAndExchange")),
+                "compareAndExchangeRelease" (concat!("(", $p, $p, ")", $p)) M => Some(|vm, a| atomic_op(vm, a, "compareAndExchange")),
+                "getOpaque" (concat!("()", $p)) M => Some(|vm, a| atomic_op(vm, a, "get")),
+                "setOpaque" (concat!("(", $p, ")V")) M => Some(|vm, a| atomic_op(vm, a, "set")),
                 "intValue" "()I" M => Some(|vm, a| atomic_op(vm, a, "intValue")),
                 "longValue" "()J" M => Some(|vm, a| atomic_op(vm, a, "longValue")),
                 "doubleValue" "()D" M => Some(|vm, a| atomic_op(vm, a, "doubleValue")),
@@ -4713,7 +4804,7 @@ static CLASSES: &[NativeClass] = &[
     collection("java/util/concurrent/CopyOnWriteArrayList", "java/lang/Object", &["java/util/List", "java/util/RandomAccess", "java/lang/Cloneable", "java/io/Serializable"], LIST_METHODS, list_data),
     collection("java/util/concurrent/ConcurrentLinkedQueue", "java/util/AbstractQueue", &["java/util/Queue"], LIST_METHODS, list_data),
     collection("java/util/concurrent/ConcurrentLinkedDeque", "java/util/AbstractCollection", &["java/util/Deque"], LIST_METHODS, list_data),
-    collection("java/util/concurrent/LinkedBlockingQueue", "java/util/AbstractQueue", &["java/util/Queue"], LIST_METHODS, list_data),
+    collection("java/util/concurrent/LinkedBlockingQueue", "java/util/AbstractQueue", &["java/util/concurrent/BlockingQueue", "java/io/Serializable"], LIST_METHODS, list_data),
     collection("java/util/Arrays$ArrayList", "java/util/AbstractList", &["java/util/RandomAccess", "java/io/Serializable"], LIST_METHODS, list_data),
     collection("java/util/ImmutableCollections$ListN", "java/util/AbstractList", &["java/util/RandomAccess", "java/io/Serializable"], LIST_METHODS, list_data),
     collection("java/util/Collections$CopiesList", "java/util/AbstractList", &["java/util/RandomAccess", "java/io/Serializable"], LIST_METHODS, list_data),
@@ -4842,6 +4933,10 @@ static CLASSES: &[NativeClass] = &[
         "lazySet" "(Z)V" M => Some(|vm, a| atomic_op(vm, a, "set")),
         "getAndSet" "(Z)Z" M => Some(|vm, a| atomic_op(vm, a, "getAndSet")),
         "compareAndSet" "(ZZ)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "weakCompareAndSet" "(ZZ)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "compareAndExchange" "(ZZ)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndExchange")),
+        "getPlain" "()Z" M => Some(|vm, a| atomic_op(vm, a, "get")),
+        "setPlain" "(Z)V" M => Some(|vm, a| atomic_op(vm, a, "set")),
         "toString" "()Ljava/lang/String;" M => Some(|vm, a| atomic_op(vm, a, "toString")),
     ], statics: &[], clinit: None, data: Some(|| Data::Jdk(Box::new(State::Atomic(Value::Int(0))))) },
     NativeClass { name: "java/util/concurrent/atomic/AtomicReference", super_name: Some("java/lang/Object"), interfaces: &["java/io/Serializable"], access: PUBLIC, methods: natives![
@@ -4853,11 +4948,26 @@ static CLASSES: &[NativeClass] = &[
         "lazySet" "(Ljava/lang/Object;)V" M => Some(|vm, a| atomic_op(vm, a, "set")),
         "getAndSet" "(Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "getAndSet")),
         "compareAndSet" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "weakCompareAndSet" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "weakCompareAndSetPlain" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "weakCompareAndSetVolatile" "(Ljava/lang/Object;Ljava/lang/Object;)Z" M => Some(|vm, a| atomic_op(vm, a, "compareAndSet")),
+        "compareAndExchange" "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "compareAndExchange")),
+        "getAcquire" "()Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "get")),
+        "getOpaque" "()Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "get")),
+        "setRelease" "(Ljava/lang/Object;)V" M => Some(|vm, a| atomic_op(vm, a, "set")),
+        "setPlain" "(Ljava/lang/Object;)V" M => Some(|vm, a| atomic_op(vm, a, "set")),
+        "getAndAccumulate" "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "getAndAccumulate")),
         "updateAndGet" "(Ljava/util/function/UnaryOperator;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "updateAndGet")),
         "getAndUpdate" "(Ljava/util/function/UnaryOperator;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "getAndUpdate")),
         "accumulateAndGet" "(Ljava/lang/Object;Ljava/util/function/BinaryOperator;)Ljava/lang/Object;" M => Some(|vm, a| atomic_op(vm, a, "accumulateAndGet")),
         "toString" "()Ljava/lang/String;" M => Some(|vm, a| atomic_op(vm, a, "toString")),
     ], statics: &[], clinit: None, data: Some(|| Data::Jdk(Box::new(State::Atomic(Value::NULL)))) },
+    class("java/util/TreeSet$Extra", None, &[], 0, natives![
+        "<init>" "(Ljava/util/Comparator;)V" M => Some(|vm, a| tree_init(vm, a, true)),
+        "<init>" "(Ljava/util/SortedSet;)V" M => Some(|vm, a| tree_init(vm, a, true)),
+    ]),
+    collection("java/util/concurrent/ArrayBlockingQueue", "java/util/AbstractQueue", &["java/util/concurrent/BlockingQueue", "java/io/Serializable"], LIST_METHODS, list_data),
+    collection("java/util/concurrent/LinkedBlockingDeque", "java/util/AbstractQueue", &["java/util/concurrent/BlockingDeque", "java/io/Serializable"], LIST_METHODS, list_data),
     class("java/util/concurrent/atomic/AtomicInteger$Extra", None, &[], 0, natives![
         "updateAndGet" "(Ljava/util/function/IntUnaryOperator;)I" M => Some(|vm, a| atomic_op(vm, a, "updateAndGet")),
         "getAndUpdate" "(Ljava/util/function/IntUnaryOperator;)I" M => Some(|vm, a| atomic_op(vm, a, "getAndUpdate")),
@@ -5050,8 +5160,29 @@ static ARRAYS_METHODS: &[NativeMethod] = natives![
     "stream" "([J)Ljava/util/stream/LongStream;" S => Some(|vm, a| { let v = vm.array_values(arg(a, 0).r()); super::stream::long_stream_of(vm, v) }),
     "stream" "([D)Ljava/util/stream/DoubleStream;" S => Some(|vm, a| { let v = vm.array_values(arg(a, 0).r()); super::stream::double_stream_of(vm, v) }),
     "stream" "([Ljava/lang/Object;II)Ljava/util/stream/Stream;" S => Some(|vm, a| { let v = vm.array_values(arg(a, 0).r()); let (s, e) = (arg(a, 1).i() as usize, arg(a, 2).i() as usize); super::stream::stream_of(vm, v[s.min(v.len())..e.min(v.len())].to_vec()) }),
-    "compare" "([I[I)I" S => Some(|vm, a| { let (x, y) = (vm.array_values(arg(a, 0).r()), vm.array_values(arg(a, 1).r())); for (p, q) in x.iter().zip(&y) { if p.i() != q.i() { return Ok(Value::Int(if p.i() < q.i() { -1 } else { 1 })); } } Ok(Value::Int((x.len() as i32 - y.len() as i32).signum())) }),
-    "mismatch" "([I[I)I" S => Some(|vm, a| { let (x, y) = (vm.array_values(arg(a, 0).r()), vm.array_values(arg(a, 1).r())); for (i, (p, q)) in x.iter().zip(&y).enumerate() { if p != q { return Ok(Value::Int(i as i32)); } } Ok(Value::Int(if x.len() == y.len() { -1 } else { x.len().min(y.len()) as i32 })) }),
+    "compare" "([Z[Z)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([B[B)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([S[S)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([C[C)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([I[I)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([J[J)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([F[F)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([D[D)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([Ljava/lang/Comparable;[Ljava/lang/Comparable;)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compare" "([Ljava/lang/Object;[Ljava/lang/Object;Ljava/util/Comparator;)I" S => Some(|vm, a| arrays_compare(vm, a, false)),
+    "compareUnsigned" "([B[B)I" S => Some(|vm, a| arrays_compare(vm, a, true)),
+    "compareUnsigned" "([S[S)I" S => Some(|vm, a| arrays_compare(vm, a, true)),
+    "compareUnsigned" "([I[I)I" S => Some(|vm, a| arrays_compare(vm, a, true)),
+    "compareUnsigned" "([J[J)I" S => Some(|vm, a| arrays_compare(vm, a, true)),
+    "mismatch" "([Z[Z)I" S => Some(arrays_mismatch),
+    "mismatch" "([B[B)I" S => Some(arrays_mismatch),
+    "mismatch" "([C[C)I" S => Some(arrays_mismatch),
+    "mismatch" "([S[S)I" S => Some(arrays_mismatch),
+    "mismatch" "([I[I)I" S => Some(arrays_mismatch),
+    "mismatch" "([J[J)I" S => Some(arrays_mismatch),
+    "mismatch" "([F[F)I" S => Some(arrays_mismatch),
+    "mismatch" "([D[D)I" S => Some(arrays_mismatch),
+    "mismatch" "([Ljava/lang/Object;[Ljava/lang/Object;)I" S => Some(arrays_mismatch),
     "setAll" "([Ljava/lang/Object;Ljava/util/function/IntFunction;)V" S => Some(|vm, a| { let arr = arg(a, 0).r(); let n = vm.array(arr).map_or(0, Array::len); for i in 0..n { let v = vm.invoke_virtual(arg(a, 1).r(), "apply", "(I)Ljava/lang/Object;", &[Value::Int(i as i32)])?; vm.ref_array_set(arr, i, v.r()); } void() }),
     "setAll" "([ILjava/util/function/IntUnaryOperator;)V" S => Some(|vm, a| { let arr = arg(a, 0).r(); let n = vm.array(arr).map_or(0, Array::len); for i in 0..n { let v = vm.invoke_virtual(arg(a, 1).r(), "applyAsInt", "(I)I", &[Value::Int(i as i32)])?; vm.array_mut(arr).unwrap().set(i, v); } void() }),
 ];

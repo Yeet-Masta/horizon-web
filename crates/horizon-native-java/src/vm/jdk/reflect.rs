@@ -360,6 +360,9 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             ret_str(vm, &n)
         }
         "getPackage" => {
+            if matches!(vm.class(c).kind, ClassKind::Primitive(_) | ClassKind::Array { .. }) {
+                return ret_ref(0);
+            }
             let pkg = class_op(vm, a, "getPackageName")?;
             let cls = vm.load("java/lang/Package")?;
             let r = vm.new_instance(cls)?;
@@ -442,7 +445,13 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             }
             ret_ref(app_loader(vm)?)
         }
-        "desiredAssertionStatus" => ret_bool(vm.options.assertions && vm.class(c).class_file().is_some()),
+        "desiredAssertionStatus" => {
+            if vm.class(c).class_file().is_none() {
+                return ret_bool(false);
+            }
+            let name = vm.class(c).java_name();
+            ret_bool(desired_assertions(vm, &name))
+        }
         "getEnumConstants" => {
             if !is_enum_class(vm, c) {
                 return ret_ref(0);
@@ -547,7 +556,16 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
                     let k = vm.load(&n)?;
                     ret_ref(vm.mirror(k)?)
                 }
-                None if op == "getNestHost" => ret_ref(t),
+                None if op == "getNestHost" => {
+                    let name = vm.class(c).name.to_string();
+                    match name.split_once("$$Lambda") {
+                        Some((outer, _)) => {
+                            let k = vm.load(outer)?;
+                            ret_ref(vm.mirror(k)?)
+                        }
+                        None => ret_ref(t),
+                    }
+                }
                 None => ret_ref(0),
             }
         }
@@ -589,7 +607,24 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
         "getGenericSuperclass" => class_op(vm, a, "getSuperclass"),
         "getGenericInterfaces" => class_op(vm, a, "getInterfaces"),
         "getTypeParameters" => ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &[])?),
-        "getEnclosingMethod" | "getEnclosingConstructor" | "getSigners" | "getProtectionDomain" | "getModule" => ret_ref(0),
+        "getEnclosingMethod" | "getEnclosingConstructor" => {
+            let Some(cf) = vm.class(c).class_file().cloned() else { return ret_ref(0) };
+            let Some((cls, nt)) = cf.enclosing else { return ret_ref(0) };
+            if nt == 0 {
+                return ret_ref(0);
+            }
+            let outer = cf.class_name(cls).map_err(|e| Exc::Internal(e.0))?;
+            let (name, desc) = cf.name_and_type(nt).map_err(|e| Exc::Internal(e.0))?;
+            if (&*name == "<init>") != (op == "getEnclosingConstructor") {
+                return ret_ref(0);
+            }
+            let oc = vm.load(&outer)?;
+            match vm.find_method(oc, &name, &desc) {
+                Some(m) => ret_ref(method_object(vm, m)?),
+                None => ret_ref(0),
+            }
+        }
+        "getSigners" | "getProtectionDomain" | "getModule" => ret_ref(0),
         "isNestmateOf" => {
             let other = mirror_class(vm, arg(a, 1).r())?;
             let host = |vm: &mut Vm, k: ClassId| -> Res<ObjId> {
@@ -602,6 +637,23 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
         "hashCode" => Ok(Value::Int(vm.identity_hash(t))),
         _ => Err(Exc::Unsupported(format!("Class.{op}"))),
     }
+}
+
+/// `ClassLoader.desiredAssertionStatus`: the class's own setting, then its
+/// package's or an enclosing package's, then the default (`-ea`).
+fn desired_assertions(vm: &Vm, class: &str) -> bool {
+    let outer = class.split('$').next().unwrap_or(class);
+    if let Some(&on) = vm.jdk.assertion_status.get(outer) {
+        return on;
+    }
+    let mut pkg = outer;
+    while let Some((p, _)) = pkg.rsplit_once('.') {
+        if let Some(&on) = vm.jdk.assertion_status.get(&format!("{p}.")) {
+            return on;
+        }
+        pkg = p;
+    }
+    vm.jdk.default_assertions.unwrap_or(vm.options.assertions)
 }
 
 fn params_text(vm: &mut Vm, descs: &str) -> Res<String> {
@@ -619,7 +671,12 @@ fn resource_stream(vm: &mut Vm, path: &str) -> Res<Value> {
 }
 
 fn app_loader(vm: &mut Vm) -> Res<ObjId> {
-    let c = vm.load("jdk/internal/loader/ClassLoaders$AppClassLoader")?;
+    loader_object(vm, "jdk/internal/loader/ClassLoaders$AppClassLoader")
+}
+
+/// The app or platform class loader object, made once.
+fn loader_object(vm: &mut Vm, class: &str) -> Res<ObjId> {
+    let c = vm.load(class)?;
     if let Some(Value::Ref(r)) = vm.class(c).statics.first().copied()
         && r != 0
     {
@@ -635,15 +692,43 @@ fn app_loader(vm: &mut Vm) -> Res<ObjId> {
 
 fn loader_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
     match op {
-        "getSystemClassLoader" | "getPlatformClassLoader" => ret_ref(app_loader(vm)?),
+        "getSystemClassLoader" => ret_ref(app_loader(vm)?),
+        "getPlatformClassLoader" => ret_ref(loader_object(vm, "jdk/internal/loader/ClassLoaders$PlatformClassLoader")?),
         "loadClass" => for_name(vm, arg(a, 1).r(), false),
         "getResourceAsStream" => {
             let name = vm.string_nn(arg(a, 1).r())?;
             resource_stream(vm, name.trim_start_matches('/'))
         }
-        "getName" => ret_str(vm, "app"),
-        "getParent" | "getResource" => ret_ref(0),
-        "toString" => ret_str(vm, "jdk.internal.loader.ClassLoaders$AppClassLoader@1"),
+        "getName" | "getParent" | "toString" => {
+            let t = this(vm, a)?;
+            let platform = vm.class_of(t).is_some_and(|c| vm.class_name(c).ends_with("PlatformClassLoader"));
+            match op {
+                "getName" => ret_str(vm, if platform { "platform" } else { "app" }),
+                "getParent" if platform => ret_ref(0),
+                "getParent" => ret_ref(loader_object(vm, "jdk/internal/loader/ClassLoaders$PlatformClassLoader")?),
+                _ => {
+                    let h = vm.identity_hash(t);
+                    let n = vm.class_of(t).map(|c| vm.class(c).java_name()).unwrap_or_default();
+                    ret_str(vm, &format!("{n}@{:x}", h as u32))
+                }
+            }
+        }
+        "getResource" => ret_ref(0),
+        "setDefaultAssertionStatus" => {
+            vm.jdk.default_assertions = Some(arg(a, 1).z());
+            void()
+        }
+        "setClassAssertionStatus" | "setPackageAssertionStatus" => {
+            let name = if arg(a, 1).r() == 0 { String::new() } else { vm.string_nn(arg(a, 1).r())? };
+            let key = if op == "setPackageAssertionStatus" { format!("{name}.") } else { name };
+            vm.jdk.assertion_status.insert(key, arg(a, 2).z());
+            void()
+        }
+        "clearAssertionStatus" => {
+            vm.jdk.assertion_status.clear();
+            vm.jdk.default_assertions = Some(false);
+            void()
+        }
         _ => Err(Exc::Unsupported(format!("ClassLoader.{op}"))),
     }
 }
@@ -823,7 +908,7 @@ fn executable_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             ret_ref(vm.intern(&n)?)
         }
         "getDeclaringClass" => ret_ref(vm.mirror(method.class)?),
-        "getModifiers" => Ok(Value::Int(method_modifiers(vm, m))),
+        "getModifiers" => Ok(Value::Int((method.access & 0x1DFF) as i32)),
         "getParameterTypes" => {
             let ps = param_classes(vm, &method.desc)?;
             mirror_array(vm, &ps)
@@ -1876,6 +1961,7 @@ static EXECUTABLE_METHODS: &[NativeMethod] = natives![
     "getReturnType" "()Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getReturnType")),
     "getGenericReturnType" "()Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getGenericReturnType")),
     "getExceptionTypes" "()[Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getExceptionTypes")),
+    "getGenericExceptionTypes" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getExceptionTypes")),
     "getParameters" "()[Ljava/lang/reflect/Parameter;" M => Some(|vm, a| executable_op(vm, a, "getParameters")),
     "isVarArgs" "()Z" M => Some(|vm, a| executable_op(vm, a, "isVarArgs")),
     "isSynthetic" "()Z" M => Some(|vm, a| executable_op(vm, a, "isSynthetic")),
@@ -2046,13 +2132,28 @@ static CLASSES: &[NativeClass] = &[
         "getResource" "(Ljava/lang/String;)Ljava/net/URL;" M => Some(|vm, a| loader_op(vm, a, "getResource")),
         "getName" "()Ljava/lang/String;" M => Some(|vm, a| loader_op(vm, a, "getName")),
         "getParent" "()Ljava/lang/ClassLoader;" M => Some(|vm, a| loader_op(vm, a, "getParent")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| loader_op(vm, a, "toString")),
+        "setDefaultAssertionStatus" "(Z)V" M => Some(|vm, a| loader_op(vm, a, "setDefaultAssertionStatus")),
+        "setClassAssertionStatus" "(Ljava/lang/String;Z)V" M => Some(|vm, a| loader_op(vm, a, "setClassAssertionStatus")),
+        "setPackageAssertionStatus" "(Ljava/lang/String;Z)V" M => Some(|vm, a| loader_op(vm, a, "setPackageAssertionStatus")),
+        "clearAssertionStatus" "()V" M => Some(|vm, a| loader_op(vm, a, "clearAssertionStatus")),
     ]),
     NativeClass {
         name: "jdk/internal/loader/ClassLoaders$AppClassLoader",
         super_name: Some("java/lang/ClassLoader"),
         interfaces: &[],
         access: FINAL,
-        methods: natives!["toString" "()Ljava/lang/String;" M => Some(|vm, a| loader_op(vm, a, "toString"))],
+        methods: natives![],
+        statics: &[("INSTANCE", "Ljava/lang/ClassLoader;")],
+        clinit: None,
+        data: None,
+    },
+    NativeClass {
+        name: "jdk/internal/loader/ClassLoaders$PlatformClassLoader",
+        super_name: Some("java/lang/ClassLoader"),
+        interfaces: &[],
+        access: FINAL,
+        methods: natives![],
         statics: &[("INSTANCE", "Ljava/lang/ClassLoader;")],
         clinit: None,
         data: None,

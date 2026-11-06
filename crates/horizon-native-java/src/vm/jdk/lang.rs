@@ -76,6 +76,7 @@ static CLASSES: &[NativeClass] = &[
             "currentTimeMillis" "()J" S => Some(|vm, _| Ok(Value::Long(vm.options.epoch_millis + (vm.jdk.nanos / 1_000_000) as i64))),
             "nanoTime" "()J" S => Some(|vm, _| Ok(Value::Long(1_000_000_000 + vm.jdk.nanos as i64 + vm.instructions as i64))),
             "arraycopy" "(Ljava/lang/Object;ILjava/lang/Object;II)V" S => Some(system_arraycopy),
+            "mapLibraryName" "(Ljava/lang/String;)Ljava/lang/String;" S => Some(|vm, a| { let n = vm.string_nn(arg(a, 0).r())?; ret_str(vm, &format!("lib{n}.so")) }),
             "identityHashCode" "(Ljava/lang/Object;)I" S => Some(|vm, a| Ok(Value::Int(vm.identity_hash(arg(a, 0).r())))),
             "exit" "(I)V" S => Some(|_, a| Err(Exc::Exit(arg(a, 0).i()))),
             "getProperty" "(Ljava/lang/String;)Ljava/lang/String;" S => Some(system_get_property),
@@ -177,7 +178,22 @@ static CLASSES: &[NativeClass] = &[
         "hashCode" "()I" A => None,
         "toString" "()Ljava/lang/String;" A => None,
     ]),
-    class("java/lang/Void", Some("java/lang/Object"), &[], PUBLIC | FINAL, &[]),
+    NativeClass {
+        name: "java/lang/Void",
+        super_name: Some("java/lang/Object"),
+        interfaces: &[],
+        access: PUBLIC | FINAL,
+        methods: &[],
+        statics: &[("TYPE", "Ljava/lang/Class;")],
+        clinit: Some(|vm, _| {
+            let c = vm.load("java/lang/Void")?;
+            let p = vm.primitive_class(b'V');
+            let m = vm.mirror(p)?;
+            vm.set_static(c, "TYPE", Value::Ref(m));
+            void()
+        }),
+        data: None,
+    },
     class("java/lang/SecurityManager", Some("java/lang/Object"), &[], PUBLIC, &[]),
     // The throwables: each takes Throwable's four constructors.
     class("java/lang/Exception", Some("java/lang/Throwable"), &[], PUBLIC, THROWABLE_CTORS),
@@ -544,6 +560,7 @@ fn system_arraycopy(vm: &mut Vm, a: &[Value]) -> Res<Value> {
 
 fn component_name(vm: &Vm, array: ClassId) -> String {
     match vm.class(array).kind {
+        ClassKind::Array { elem: b'L', .. } => "object array".to_string(),
         ClassKind::Array { component, .. } => vm.class(component).java_name(),
         _ => vm.class(array).java_name(),
     }
