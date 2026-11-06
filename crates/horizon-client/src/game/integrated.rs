@@ -11,12 +11,11 @@
 use super::{
     Dim, Game, Options, PackResources, Resources, UiResources, WorldIcon,
     execution_role::ExecutionRole,
-    java_mods::{JavaCompatibilityReport, JavaLoader},
+    java_mods::JavaLoader,
     lan::{LanSettings, Owner, SyncPreload, preload_sync_data},
     world_loading::{WorldLoader, WorldRequest},
 };
 use horizon_client::level_loading::{STATUS_RADIUS, Stage};
-use horizon_client::mod_content::ContentMod;
 use horizon_client::spans::startup;
 use horizon_client::{
     Result,
@@ -25,7 +24,6 @@ use horizon_client::{
     settings::Settings,
     title::WorldOptions,
 };
-use horizon_mods::native::NativeDeclarations;
 use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
@@ -1234,34 +1232,43 @@ fn server_java_rows() -> Vec<String> {
 fn run_server_java_mods(options: &Options) -> Result<()> {
     run_server_java_mods_with(
         &options.java_mods,
-        super::java_mods::run_java_mods_with_declarations,
+        super::java_mods::fml_preflight,
+        super::java_mods::run_java_mods_batch,
     )
 }
 
 /// What one Java batch run returns: the rows it produced, one report per jar
-/// it started, and each jar's typed declarations (kept for the reload).
-type JavaBatch = std::result::Result<
-    (
-        Vec<ContentMod>,
-        Vec<JavaCompatibilityReport>,
-        Vec<NativeDeclarations>,
-    ),
-    String,
->;
+/// it started, each jar's typed declarations (kept for the reload) and why a
+/// jar that did not start was skipped.
+type JavaBatch = std::result::Result<super::java_mods::JavaBatchOutcome, String>;
 
-fn run_server_java_mods_with<F>(paths: &[PathBuf], run: F) -> Result<()>
+/// The server thread's Java startup, with the preflight and the batch as
+/// arguments so a test can watch the order without an environment or a child
+/// process.
+fn run_server_java_mods_with<P, F>(paths: &[PathBuf], preflight: P, run: F) -> Result<()>
 where
+    P: FnOnce(
+        ExecutionRole,
+        &[PathBuf],
+    ) -> std::result::Result<Option<super::java_mods::fml::FmlReport>, String>,
     F: FnOnce(&[PathBuf], ExecutionRole) -> JavaBatch,
 {
+    // The opt-in real NeoForge loader preflight is independent of the native
+    // interpreter path and runs with no explicit jar, because the operator
+    // asked whether the install's FML loads. A client never runs it; only
+    // `HORIZON_NEOFORGE_STRICT=1` stops startup on a failure.
+    preflight(ExecutionRole::IntegratedServer, paths)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     if paths.is_empty() {
         return Ok(());
     }
-    let (content, reports, declarations) = run(paths, ExecutionRole::IntegratedServer).map_err(
+    let batch = run(paths, ExecutionRole::IntegratedServer).map_err(
         |error| -> Box<dyn std::error::Error> {
             format!("native Java integrated-server startup failed: {error}").into()
         },
     )?;
-    for report in &reports {
+    batch.log_failures("Horizon: integrated-server Java compatibility skipped: ");
+    for report in &batch.reports {
         log::info!(
             "Horizon: integrated-server Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}",
             report.jar.display(),
@@ -1272,15 +1279,18 @@ where
             report.opaque
         );
     }
-    if !content.is_empty() {
+    if !batch.content.is_empty() {
         log::info!(
             "Horizon: integrated-server Java content: {} mod(s) kept for the next resource reload",
-            content.len()
+            batch.content.len()
         );
     }
+    // The window and its server thread share one process and one
+    // `server-status` store: this role's rows answer from it too.
+    super::java_mods::record_java_reports(&batch.reports);
     // The window built its root before this thread: the declarations wait in
     // the content store for the reload `poll_integrated_start` asks for.
-    super::java_mods::publish_server_declarations(declarations);
+    super::java_mods::publish_server_declarations(batch.declarations);
     Ok(())
 }
 
@@ -1401,11 +1411,20 @@ fn refused(owner: bool, published: bool, split_seat: bool, memory: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_client::mod_content::ContentMod;
 
     /// The server rows and the Java tests of every module are process-wide
     /// cells: they take turns.
     fn java_test_lock() -> std::sync::MutexGuard<'static, ()> {
         super::super::java_mods::test_lock()
+    }
+
+    /// The preflight a test passes when it is not the subject: it never ran.
+    fn skipped_preflight(
+        _: ExecutionRole,
+        _: &[PathBuf],
+    ) -> std::result::Result<Option<super::super::java_mods::fml::FmlReport>, String> {
+        Ok(None)
     }
 
     /// The server thread runs the jars once, as one batch, in its own role: the
@@ -1417,11 +1436,11 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         let role: std::cell::Cell<Option<ExecutionRole>> = std::cell::Cell::new(None);
         let paths = [PathBuf::from("one.jar"), PathBuf::from("two.jar")];
-        run_server_java_mods_with(&paths, |seen, kind| {
+        run_server_java_mods_with(&paths, skipped_preflight, |seen, kind| {
             calls.set(calls.get() + 1);
             role.set(Some(kind));
             assert_eq!(seen.len(), 2, "one batch, not one call per jar");
-            Ok((Vec::new(), Vec::new(), Vec::new()))
+            Ok(super::super::java_mods::JavaBatchOutcome::default())
         })
         .unwrap();
         assert_eq!(calls.get(), 1);
@@ -1435,9 +1454,9 @@ mod tests {
         let _guard = java_test_lock();
         super::super::java_mods::reset_server_content();
         let calls = std::cell::Cell::new(0);
-        run_server_java_mods_with(&[], |_, _| {
+        run_server_java_mods_with(&[], skipped_preflight, |_, _| {
             calls.set(calls.get() + 1);
-            Ok((Vec::new(), Vec::new(), Vec::new()))
+            Ok(super::super::java_mods::JavaBatchOutcome::default())
         })
         .unwrap();
         assert_eq!(calls.get(), 0);
@@ -1448,13 +1467,118 @@ mod tests {
     #[test]
     fn an_integrated_java_failure_stops_the_server_thread() {
         let _guard = java_test_lock();
-        let error = run_server_java_mods_with(&[PathBuf::from("bad.jar")], |_, _| {
-            Err("bad.jar: no native entrypoint".to_owned())
-        })
-        .unwrap_err()
-        .to_string();
+        let error =
+            run_server_java_mods_with(&[PathBuf::from("bad.jar")], skipped_preflight, |_, _| {
+                Err("bad.jar: no native entrypoint".to_owned())
+            })
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("integrated-server"), "{error}");
         assert!(error.contains("bad.jar"), "{error}");
+    }
+
+    /// The opt-in preflight runs before the batch, in the server role and with
+    /// every jar offered to it: the native batch cannot hide it.
+    #[test]
+    fn the_integrated_server_preflights_before_the_batch() {
+        let _guard = java_test_lock();
+        super::super::java_mods::reset_server_content();
+        let order = std::cell::RefCell::new(Vec::new());
+        let paths = [PathBuf::from("one.jar")];
+        run_server_java_mods_with(
+            &paths,
+            |role, jars| {
+                order.borrow_mut().push("preflight");
+                assert_eq!(role, ExecutionRole::IntegratedServer);
+                assert_eq!(jars, &paths[..]);
+                Ok(None)
+            },
+            |seen, _| {
+                order.borrow_mut().push("batch");
+                assert_eq!(seen, &paths[..]);
+                Ok(super::super::java_mods::JavaBatchOutcome::default())
+            },
+        )
+        .unwrap();
+        assert_eq!(*order.borrow(), ["preflight", "batch"]);
+    }
+
+    /// The preflight is independent of the native path: no `--java-mod` still
+    /// asks the install whether its FML loads.
+    #[test]
+    fn the_integrated_server_preflights_without_a_jar() {
+        let _guard = java_test_lock();
+        let calls = std::cell::Cell::new(0);
+        run_server_java_mods_with(
+            &[],
+            |role, jars| {
+                calls.set(calls.get() + 1);
+                assert_eq!(role, ExecutionRole::IntegratedServer);
+                assert!(jars.is_empty());
+                Ok(None)
+            },
+            |_, _| panic!("an empty batch is not run"),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// A preflight the environment made strict answers with its error, and the
+    /// batch never runs.
+    #[test]
+    fn a_strict_preflight_failure_stops_the_server_thread() {
+        let _guard = java_test_lock();
+        let calls = std::cell::Cell::new(0);
+        let error = run_server_java_mods_with(
+            &[PathBuf::from("one.jar")],
+            |_, _| Err("NeoForge FML preflight failed for integrated-server".to_owned()),
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Ok(super::super::java_mods::JavaBatchOutcome::default())
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NeoForge FML preflight"), "{error}");
+        assert_eq!(calls.get(), 0, "a failed preflight runs no jar");
+    }
+
+    /// The rows the server role reported reach the store `server-status`
+    /// answers from: the same process-wide store the dedicated role fills, so a
+    /// single-player world answers for its Java jars too.
+    #[test]
+    fn the_integrated_batch_answers_the_status_store() {
+        let _guard = java_test_lock();
+        let report = super::super::java_mods::JavaCompatibilityReport {
+            jar: PathBuf::from("/mods/integrated.jar"),
+            loader: Some(super::super::java_mods::JavaLoader::Fabric),
+            engine: super::super::java_mods::JavaEngine::NativeQualified,
+            entrypoints: 2,
+            registrations: 3,
+            opaque: 1,
+            isolation_failure: None,
+        };
+        run_server_java_mods_with(
+            &[PathBuf::from("integrated.jar")],
+            skipped_preflight,
+            |_, _| {
+                Ok(super::super::java_mods::JavaBatchOutcome {
+                    reports: vec![report.clone()],
+                    ..Default::default()
+                })
+            },
+        )
+        .unwrap();
+        let rows = super::super::java_mods::java_reports();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].jar, PathBuf::from("/mods/integrated.jar"));
+        assert_eq!(
+            rows[0].engine,
+            super::super::java_mods::JavaEngine::NativeQualified
+        );
+        assert_eq!(rows[0].registrations, 3);
+        // The store is process-wide: leave it empty for the other tests.
+        super::super::java_mods::record_java_reports(&[]);
     }
 
     /// The rows the server role declared stay for the next resource reload.
@@ -1474,15 +1598,15 @@ mod tests {
                 },
             )])
             .unwrap();
-        run_server_java_mods_with(&[PathBuf::from("demo.jar")], |_, _| {
-            Ok((
-                vec![ContentMod {
+        run_server_java_mods_with(&[PathBuf::from("demo.jar")], skipped_preflight, |_, _| {
+            Ok(super::super::java_mods::JavaBatchOutcome {
+                content: vec![ContentMod {
                     id: "demo".into(),
                     content: horizon_mods::Content::declared("demo"),
                 }],
-                Vec::new(),
-                vec![declarations],
-            ))
+                declarations: vec![declarations],
+                ..Default::default()
+            })
         })
         .unwrap();
         assert_eq!(server_java_rows(), vec!["demo".to_owned()]);

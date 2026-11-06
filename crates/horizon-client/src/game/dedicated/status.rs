@@ -1,17 +1,21 @@
 //! What `horizon-server` asks the dedicated server on its control endpoint (`--control-socket`, docs/server.md
 //! section 2): `server-status` answers with the tick rate, the tick times `/tick query` reports, the players
-//! (including their positions), the loaded chunks and the Java jars this role started; `console <line>` runs a console command and answers with the lines it logged;
+//! (including their positions), the loaded chunks, the Java jars this role started and the last opt-in
+//! NeoForge FML preflight; `console <line>` runs a console command and answers with the lines it logged;
 //! `server-events <since>` answers the typed events after that number (events.rs); `management <connection>
 //! <json>` edits the lists as vanilla's management protocol does (management.rs).
 //! `player-expect <uuid> [seconds]`, `player-drop <uuid>`, `player-export <uuid> [freeze]`,
 //! `player-release <uuid> ...`, `player-import <uuid> <json>` and `player-confirm <uuid> ...` are a proxy's,
 //! for a player it moves between two servers (transfer.rs).
-use super::super::java_mods::{JavaCompatibilityReport, JavaEngine, JavaLoader};
+use super::super::java_mods::{
+    JavaCompatibilityReport, JavaEngine, JavaLoader,
+    fml::{self, role_name},
+};
 use super::{ServerState, capture_log};
 use crate::game::Game;
 use serde_json::{Map, Value, json};
 use std::{
-    sync::{Mutex, atomic::Ordering},
+    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
@@ -22,7 +26,9 @@ const TPS_WINDOW: Duration = Duration::from_secs(5);
 const MAX_STATUS_JARS: usize = 8;
 /// The most payload channel ids the `java` section names; the count stays whole.
 const MAX_STATUS_ROWS: usize = 12;
-/// The most characters of a failure the `java` section repeats.
+/// The most mod ids the `fml` section lists; FML's count stays whole.
+const MAX_FML_IDS: usize = 16;
+/// The most characters of a failure the java and fml sections repeat.
 const MAX_STATUS_ERROR_CHARS: usize = 200;
 
 /// The engine labels `engines` counts, in the order it prints them. The
@@ -59,23 +65,16 @@ fn backend_name(engine: JavaEngine) -> &'static str {
     }
 }
 
-/// The rows the runner reported for this role, kept for `server-status`.
-///
-/// [`super::load_java_mods`] owns the batch and logs it, then drops it; status
-/// answers on the same thread later, so the batch is recorded here once.
-static JAVA_REPORTS: Mutex<Vec<JavaCompatibilityReport>> = Mutex::new(Vec::new());
+// The batch store belongs to the runner (`java_mods`): the integrated server
+// thread records into it too, and this module only answers from it. The
+// re-export keeps the dedicated startup's `status::record_java_reports` call.
+pub(super) use super::super::java_mods::record_java_reports;
 
-/// Records the batch a role's loader started: one report per jar that bootstrapped.
-#[allow(dead_code)] // the loader in dedicated.rs records its batch (see the seam noted there)
-pub(super) fn record_java_reports(reports: &[JavaCompatibilityReport]) {
-    *JAVA_REPORTS.lock().unwrap_or_else(|e| e.into_inner()) = reports.to_vec();
-}
-
+/// The batch a role recorded: the runner keeps it because both roles that
+/// start jars answer `server-status` from the same process, not because a
+/// status request runs on their thread.
 fn java_rows() -> Vec<JavaCompatibilityReport> {
-    JAVA_REPORTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    super::super::java_mods::java_reports()
 }
 
 /// The `java` key of `server-status`.
@@ -174,6 +173,38 @@ pub(super) fn java_section(reports: &[JavaCompatibilityReport], channels: &[Stri
         "payload_channels": channel_ids,
         "payload_channels_total": total_channels,
         "entries": entries,
+    })
+}
+
+/// The `fml` section of `server-status`: the last opt-in FancyModLoader
+/// preflight — its role, the jars offered to it, FML's own mod count and ids,
+/// why it failed and whether the environment asked for it to be strict. The
+/// keys are fixed: a server that never ran one answers `not-run` with empty
+/// fields, which is not the same as a failed preflight.
+fn fml_section(report: Option<&fml::FmlReport>, strict: bool) -> Value {
+    let Some(report) = report else {
+        return json!({
+            "status": "not-run",
+            "role": null,
+            "jars": 0,
+            "mods": null,
+            "ids": [],
+            "error": null,
+            "strict": strict,
+        });
+    };
+    let mut ids = report.mod_ids.clone();
+    ids.sort();
+    ids.dedup();
+    ids.truncate(MAX_FML_IDS);
+    json!({
+        "status": if report.succeeded() { "ok" } else { "failed" },
+        "role": role_name(report.role),
+        "jars": report.jars,
+        "mods": report.mods,
+        "ids": ids,
+        "error": report.failure.as_deref().map(bounded_error),
+        "strict": strict,
     })
 }
 
@@ -342,6 +373,7 @@ impl Game<'_> {
             // Additive: a reader written before this key existed reads the
             // fields above exactly as it did.
             "java": java_status(),
+            "fml": fml_section(fml::last_report().as_ref(), fml::strict_requested()),
         })
     }
 }
@@ -367,10 +399,14 @@ fn player_status(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_STATUS_ERROR_CHARS, MAX_STATUS_JARS, MAX_STATUS_ROWS, java_section, java_status,
-        player_status, record_java_reports,
+        MAX_FML_IDS, MAX_STATUS_ERROR_CHARS, MAX_STATUS_JARS, MAX_STATUS_ROWS, fml_section,
+        java_section, java_status, player_status,
     };
-    use crate::game::java_mods::{JavaCompatibilityReport, JavaEngine, JavaLoader};
+    use crate::game::execution_role::ExecutionRole;
+    use crate::game::java_mods::fml;
+    use crate::game::java_mods::{
+        JavaCompatibilityReport, JavaEngine, JavaLoader, record_java_reports,
+    };
     use serde_json::{Value, json};
     use std::path::PathBuf;
 
@@ -632,9 +668,11 @@ mod tests {
     }
 
     /// The runner's batch reaches the status key: the loader hands the rows
-    /// over, and the answer changes with it.
+    /// over, and the answer changes with it. Both roles record into the one
+    /// process-wide store, so the Java tests take turns.
     #[test]
     fn the_recorded_batch_answers_the_status_key() {
+        let _guard = crate::game::java_mods::test_lock();
         record_java_reports(&[java_report(
             "/mods/recorded.jar",
             JavaEngine::Native,
@@ -651,5 +689,95 @@ mod tests {
         record_java_reports(&[]);
         assert_eq!(java_status()["jars"], 0);
         assert_eq!(java_status()["entries"], json!([]));
+    }
+
+    /// A preflight built in memory with just the fields the section reads.
+    fn fml_report(
+        jars: usize,
+        mods: Option<usize>,
+        mod_ids: &[&str],
+        failure: Option<&str>,
+    ) -> fml::FmlReport {
+        fml::FmlReport {
+            role: ExecutionRole::DedicatedServer,
+            jars,
+            mods,
+            mod_ids: mod_ids.iter().map(|id| (*id).to_owned()).collect(),
+            failure: failure.map(str::to_owned),
+        }
+    }
+
+    /// A completed preflight says ok with FML's own counts, sorted and
+    /// deduplicated whatever order the probe printed.
+    #[test]
+    fn a_completed_preflight_says_ok_with_its_counts() {
+        let report = fml_report(2, Some(3), &["beta", "alpha", "alpha"], None);
+        let section = fml_section(Some(&report), false);
+        assert_eq!(
+            section,
+            json!({
+                "status": "ok",
+                "role": "dedicated-server",
+                "jars": 2,
+                "mods": 3,
+                "ids": ["alpha", "beta"],
+                "error": null,
+                "strict": false,
+            })
+        );
+        // Fixed keys, so a status reader never has to guess at a shape.
+        assert_eq!(
+            section.to_string(),
+            "{\"error\":null,\"ids\":[\"alpha\",\"beta\"],\"jars\":2,\"mods\":3,\
+             \"role\":\"dedicated-server\",\"status\":\"ok\",\"strict\":false}"
+        );
+    }
+
+    /// A failed preflight says failed, keeps no made-up count, and bounds both
+    /// its id list and its reason.
+    #[test]
+    fn a_failed_preflight_says_failed_and_bounds_its_ids_and_error() {
+        let ids: Vec<String> = (0..MAX_FML_IDS + 8)
+            .rev()
+            .map(|i| format!("m{i:02}"))
+            .collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let failure = format!("\t{}\nsecond line", "x".repeat(MAX_STATUS_ERROR_CHARS + 40));
+        let report = fml_report(1, None, &ids, Some(&failure));
+        let section = fml_section(Some(&report), true);
+        assert_eq!(section["status"], "failed");
+        assert_eq!(section["role"], "dedicated-server");
+        assert_eq!(section["jars"], 1);
+        // No count from FML: null, not a made-up zero.
+        assert_eq!(section["mods"], json!(null));
+        assert_eq!(section["strict"], true);
+        let listed = section["ids"].as_array().unwrap();
+        assert_eq!(listed.len(), MAX_FML_IDS);
+        assert_eq!(listed[0], "m00");
+        assert_eq!(listed[MAX_FML_IDS - 1], "m15");
+        let error = section["error"].as_str().unwrap();
+        assert_eq!(error.chars().count(), MAX_STATUS_ERROR_CHARS + 3);
+        assert!(error.starts_with(" xxx"), "{error}");
+        assert!(error.ends_with("..."), "{error}");
+        assert!(!error.chars().any(char::is_control), "{error}");
+    }
+
+    /// A server that never ran the preflight answers `not-run`, which is not a
+    /// failure, and still says whether the environment asked for strictness.
+    #[test]
+    fn no_preflight_answers_not_run_with_empty_fields() {
+        assert_eq!(
+            fml_section(None, false),
+            json!({
+                "status": "not-run",
+                "role": null,
+                "jars": 0,
+                "mods": null,
+                "ids": [],
+                "error": null,
+                "strict": false,
+            })
+        );
+        assert_eq!(fml_section(None, true)["strict"], true);
     }
 }

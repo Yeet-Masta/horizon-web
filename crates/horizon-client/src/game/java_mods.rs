@@ -21,6 +21,12 @@ use std::{
     },
 };
 
+/// The opt-in real-loader preflight. It lives beside this module because it
+/// is the Java path's own diagnostic, but its file stays `game/fml.rs` as the
+/// rest of the game's modules are laid out.
+#[path = "fml.rs"]
+pub(super) mod fml;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JavaLoader {
     Fabric,
@@ -62,6 +68,63 @@ pub(super) struct JavaCompatibilityReport {
     pub(super) registrations: usize,
     pub(super) opaque: usize,
     pub(super) isolation_failure: Option<String>,
+}
+
+/// Why one jar never started: the path, and the runner's reason without the
+/// path it already carries. A tolerant run logs it and plays on;
+/// `HORIZON_JAVA_STRICT=1` returns it, so a strict server names the jar and
+/// what was wrong with it instead of a bare path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct JavaJarFailure {
+    pub(super) jar: PathBuf,
+    pub(super) reason: String,
+}
+
+impl JavaJarFailure {
+    /// The one line a log or a strict error carries: the jar, then why.
+    pub(super) fn line(&self) -> String {
+        format!("{}: {}", self.jar.display(), self.reason)
+    }
+}
+
+/// One batch's result: the content root's rows, one report per jar that
+/// started, the declarations a server role keeps for its reload, and why each
+/// jar that did not start was skipped.
+#[derive(Default)]
+pub(super) struct JavaBatchOutcome {
+    pub(super) content: Vec<ContentMod>,
+    pub(super) reports: Vec<JavaCompatibilityReport>,
+    pub(super) declarations: Vec<NativeDeclarations>,
+    pub(super) failures: Vec<JavaJarFailure>,
+}
+
+impl JavaBatchOutcome {
+    /// Logs one line per skipped jar, each after the caller's role prefix.
+    pub(super) fn log_failures(&self, prefix: &str) {
+        for failure in &self.failures {
+            log::warn!("{prefix}{}", failure.line());
+        }
+    }
+}
+
+/// The last batch a role recorded for `server-status`: one report per jar that
+/// started. The dedicated role and the integrated server thread share this
+/// process, so a later batch replaces an earlier one.
+static JAVA_REPORTS: Mutex<Vec<JavaCompatibilityReport>> = Mutex::new(Vec::new());
+
+/// Records the batch a role's startup ran, replacing whatever was there.
+pub(in crate::game) fn record_java_reports(reports: &[JavaCompatibilityReport]) {
+    *JAVA_REPORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = reports.to_vec();
+}
+
+/// The recorded batch, for `server-status`'s `java` section.
+pub(in crate::game) fn java_reports() -> Vec<JavaCompatibilityReport> {
+    JAVA_REPORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 static RUNTIMES: OnceLock<
@@ -378,55 +441,79 @@ fn run_one(
     Ok((content, report, declarations))
 }
 
-pub(super) fn run_java_mods(
-    paths: &[PathBuf],
+/// The opt-in real-loader preflight (`fml`), logged once under the Java
+/// compatibility prefix and run before the native path. It is skipped unless
+/// `HORIZON_NEOFORGE_SERVER` and `HORIZON_JVM_BIN` are set, and its failure
+/// only stops startup under `HORIZON_NEOFORGE_STRICT=1`.
+pub(super) fn fml_preflight(
     role: ExecutionRole,
-) -> Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String> {
-    let (content, reports, _) = run_java_mods_with_declarations(paths, role)?;
-    Ok((content, reports))
+    jars: &[PathBuf],
+) -> Result<Option<fml::FmlReport>, String> {
+    let Some(outcome) = fml::preflight(role, jars) else {
+        return Ok(None);
+    };
+    let level = if outcome.report.succeeded() {
+        log::Level::Info
+    } else {
+        log::Level::Warn
+    };
+    for line in outcome.report.summary() {
+        log::log!(level, "Horizon: Java compatibility: {line}");
+    }
+    match outcome.strict_error() {
+        Some(error) => Err(error),
+        None => Ok(Some(outcome.report)),
+    }
 }
 
-/// [`run_java_mods`], also returning each jar's typed declarations: the
-/// integrated server keeps them for the content reload the window runs after
-/// this thread started (`publish_server_declarations`).
-pub(super) fn run_java_mods_with_declarations(
+/// The runner's error for one jar, without repeating the path the failure
+/// already names.
+fn jar_failure(path: &std::path::Path, error: String) -> JavaJarFailure {
+    let prefix = format!("{}: ", path.display());
+    let reason = match error.strip_prefix(&prefix) {
+        Some(reason) => reason.to_owned(),
+        None => error,
+    };
+    JavaJarFailure {
+        jar: path.to_path_buf(),
+        reason,
+    }
+}
+
+/// Runs one batch of jars and keeps every jar's outcome, including why a jar
+/// that never started was skipped ([`JavaBatchOutcome::failures`]). A caller
+/// logs those under its own role's prefix, or a strict startup returns them so
+/// the jar and its reason are named.
+pub(super) fn run_java_mods_batch(
     paths: &[PathBuf],
     role: ExecutionRole,
-) -> Result<
-    (
-        Vec<ContentMod>,
-        Vec<JavaCompatibilityReport>,
-        Vec<NativeDeclarations>,
-    ),
-    String,
-> {
+) -> Result<JavaBatchOutcome, String> {
     runtimes().lock().unwrap().clear();
     super::java_payloads::clear_handler_jars_as(handler_role(role));
-    let mut content = Vec::new();
-    let mut reports = Vec::new();
-    let mut declarations = Vec::new();
+    let mut batch = JavaBatchOutcome::default();
     let mut payload_declarations = Vec::new();
     for path in paths {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             run_one(path, role, &mut payload_declarations)
         })) {
             Ok(Ok((c, r, d))) => {
-                content.extend(c);
-                reports.push(r);
-                declarations.push(d);
+                batch.content.extend(c);
+                batch.reports.push(r);
+                batch.declarations.push(d);
             }
-            Ok(Err(e)) => log::warn!("Horizon: Java mod {e} skipped"),
-            Err(_) => log::warn!(
-                "Horizon: Java mod {} panicked and was skipped",
-                path.display()
-            ),
+            Ok(Err(error)) => batch.failures.push(jar_failure(path, error)),
+            Err(_) => batch.failures.push(JavaJarFailure {
+                jar: path.to_path_buf(),
+                reason: "panicked and was skipped".to_owned(),
+            }),
         }
     }
-    if let Err(e) = super::java_registry::publish(&declarations) {
+    if let Err(e) = super::java_registry::publish(&batch.declarations) {
         log::warn!("Horizon: Java registry snapshot not published: {e}");
     }
     if let Some(home) = std::env::var_os("HORIZON_HOME") {
-        let jars = reports
+        let jars = batch
+            .reports
             .iter()
             .map(|r| super::java_runtime_file::RuntimeJar {
                 file: r
@@ -452,7 +539,18 @@ pub(super) fn run_java_mods_with_declarations(
             },
         );
     }
-    Ok((content, reports, declarations))
+    Ok(batch)
+}
+
+/// The client role's batch: the content root's rows and one report per jar
+/// that started. Skipped jars are logged here, with no role in the prefix.
+pub(super) fn run_java_mods(
+    paths: &[PathBuf],
+    role: ExecutionRole,
+) -> Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String> {
+    let batch = run_java_mods_batch(paths, role)?;
+    batch.log_failures("Horizon: Java mod skipped: ");
+    Ok((batch.content, batch.reports))
 }
 
 #[cfg(test)]
@@ -538,5 +636,51 @@ mod tests {
         publish_server_declarations(vec![more]);
         assert!(server_content_needs_root(), "a changed batch asks again");
         reset_server_content();
+    }
+
+    /// A jar that never started contributes no report, but a failure that
+    /// names the jar and why: that is what a strict startup reports instead
+    /// of a path it has to guess about.
+    #[test]
+    fn a_jar_that_never_started_carries_its_reason() {
+        let _guard = test_lock();
+        let path = PathBuf::from("/horizon-absent-mod.jar");
+        let batch =
+            run_java_mods_batch(std::slice::from_ref(&path), ExecutionRole::DedicatedServer)
+                .unwrap();
+        assert!(batch.reports.is_empty());
+        assert!(batch.content.is_empty());
+        assert_eq!(batch.failures.len(), 1);
+        let failure = &batch.failures[0];
+        assert_eq!(failure.jar, path);
+        assert!(!failure.reason.is_empty());
+        assert!(
+            !failure.reason.contains("/horizon-absent-mod.jar"),
+            "the jar is not repeated inside its own reason: {}",
+            failure.reason
+        );
+        assert_eq!(
+            failure.line(),
+            format!("/horizon-absent-mod.jar: {}", failure.reason)
+        );
+    }
+
+    /// The runner's message is built as `<path>: <why>`; the failure keeps the
+    /// why alone, and an error that does not repeat the path keeps both.
+    #[test]
+    fn a_runner_error_keeps_its_reason_without_repeating_the_jar() {
+        let path = std::path::Path::new("/mods/a.jar");
+        let stripped = jar_failure(path, "/mods/a.jar: no native entrypoint".to_owned());
+        assert_eq!(stripped.reason, "no native entrypoint");
+        assert_eq!(stripped.jar, path);
+        let kept = jar_failure(path, "zip error: bad header".to_owned());
+        assert_eq!(kept.reason, "zip error: bad header");
+    }
+
+    /// A client role never reads the preflight environment, so a client
+    /// startup answers "skipped" whatever the operator exported.
+    #[test]
+    fn the_fml_preflight_never_runs_for_a_client() {
+        assert!(fml_preflight(ExecutionRole::Client, &[]).unwrap().is_none());
     }
 }
