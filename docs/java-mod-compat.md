@@ -1259,6 +1259,59 @@ with no façade and no game jar, against the ≤ 400 ms target above — which i
 to reach, not a claim already met. Numbers move with the JVM, the heap flag (`--heap`, default `-Xmx1g`)
 and the classpath, so compare like with like, and record the machine alongside the figure.
 
+### The bootstrap content cache
+
+Not every start needs the interpreter. What a jar declares depends on its bytes, this build's engine and
+the execution role, so a jar that started once is stored and replayed instead of parsed and executed
+again (`crates/horizon-client/src/game/java_cache.rs`). The entry holds the typed registration rows, the
+jar's own `META-INF/horizon-native.json` rows and the compatibility report; the declarations are rebuilt
+through the same converter the live path uses, so the content root of a warm start is the one the cold
+start built.
+
+- **Key.** The jar's sha256 and length, its role (`client`, `integrated-server`, `dedicated-server`) and
+  the engine's identity (the release commit, or for a local build the executable's modification time, as
+  the far-terrain cache does). The hash is verified on every load — a jar whose bytes changed looks up
+  another entry — and an entry naming another hash, length, role or engine is deleted, never used.
+- **Bound.** `java-content-cache/` under the game home, 256 MiB and 4096 entries, pruned after each batch
+  by removing the least recently used entries. No secrets: an entry is the jar's own declarations and
+  counts, nothing read from the player.
+- **What is never cached.** A jar that announced payload channels, because dispatch needs the
+  bootstrapped host rather than its rows; and any jar that did not start. Client-only jars never reach
+  the cache at all: the role check runs first, as it does on the live path.
+- **Off switch.** `HORIZON_JAVA_CACHE=0` (or `false`/`off`) skips both lookup and store;
+  `HORIZON_JAVA_CACHE_ENGINE` replaces the engine identity for an A/B run.
+- **Self-tests.** The module's tests prove that a jar with one byte more misses (its hash is another
+  key), that an entry naming another hash, length, role or engine is deleted rather than used, that a
+  corrupt entry is removed, that a replayed run rebuilds the same declarations as the live path, and
+  that pruning keeps the cache inside its entry bound.
+
+Measured 6 November 2026 (16 CPUs) on the 100-jar pool: the dedicated server over a flat world, one game
+folder, one `HORIZON_HOME` and one world reused by every run, the cache cleared before each cold run,
+eight cold and eight warm starts alternating. Jars are the first 100 of the 192 that start natively from
+the 500-jar corpus.
+
+| Start | Wall to `Done` (8 runs) | Median | Peak RSS (median) | Reused |
+|---|---|---:|---:|---:|
+| cold (empty cache) | 2.24–2.87 s | 2.48 s | 725 MiB | 0 of 100 |
+| warm (filled cache) | 2.08–2.60 s | 2.41 s | 671 MiB | 88 of 100 |
+
+A warm start is 0.16 s faster per cold/warm pair (mean and median of the eight pairs; range −0.02 to
++0.37 s), about 6% of time to `Done`, and its peak RSS is ~54 MiB lower because 88 jars are no longer
+parsed at once. Its `java-runtime.json` is byte-identical to the cold run's: same engine labels,
+woven/skipped counts and registration counts per jar. The twelve jars not reused are the ones that
+declare payload channels; the other 58 jars of the corpus never reach the cache because the role check
+skips them first. The cache held 88 entries in 448 KiB (~5 KiB each), so the byte bound is not what
+limits it here.
+
+The saving is smaller than the cold start's jar batch because the warm path still reads and hashes the
+jars — 150 MB here — and because the machine's load moved more than the difference did between some
+pairs. On the 500-jar corpus the batch is 5.14 s of a 10.46 s start, so the same ratio has more room
+there.
+
+Caveats: this is a parser measurement, not a claim that these 100 mods work (their mixins still target
+game classes, so `woven` is 0); a rebuild changes the engine identity and starts cold again; and the
+cache is keyed on the file's bytes, so re-signed or re-compressed jars are new jars.
+
 ## Trust
 
 A bridged jar is third-party code the registry never reviewed, running with the player's rights. That is

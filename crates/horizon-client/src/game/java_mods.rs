@@ -32,6 +32,11 @@ use std::{
 #[path = "fml.rs"]
 pub(super) mod fml;
 
+/// The bounded on-disk cache of a jar's bootstrap result, so an unchanged jar
+/// on a later start skips interpretation (`docs/java-mod-compat.md`).
+#[path = "java_cache.rs"]
+pub(super) mod java_cache;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JavaLoader {
     Fabric,
@@ -44,6 +49,17 @@ impl JavaLoader {
             Self::Fabric => "fabric",
             Self::NeoForge => "neoforge",
             Self::LegacyForge => "legacy-forge",
+        }
+    }
+
+    /// The loader a cache entry names, or `None` for a name this build does not
+    /// know (a cache written by another engine is a miss anyway).
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "fabric" => Some(Self::Fabric),
+            "neoforge" => Some(Self::NeoForge),
+            "legacy-forge" => Some(Self::LegacyForge),
+            _ => None,
         }
     }
 }
@@ -60,6 +76,15 @@ impl JavaEngine {
             Self::Native => "native",
             Self::NativeQualified => "native-qualified",
             Self::Refused => "refused",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "native" => Some(Self::Native),
+            "native-qualified" => Some(Self::NativeQualified),
+            "refused" => Some(Self::Refused),
+            _ => None,
         }
     }
 }
@@ -344,10 +369,11 @@ fn handler_role(role: ExecutionRole) -> super::java_payloads::HandlerRole {
 /// The jar and its host travel back with the rows so the batch's serial
 /// adoption step can publish the jar's payload channels (and keep the host
 /// only if it declared any); nothing else needs the parsed classes after its
-/// entrypoints ran.
+/// entrypoints ran. Both are `None` for a cached result: a jar that declared
+/// payload channels is never cached, so there is nothing left to adopt.
 struct JavaJarRun {
-    jar: horizon_native_java::NativeJar,
-    host: horizon_native_java::StdHost,
+    jar: Option<horizon_native_java::NativeJar>,
+    host: Option<horizon_native_java::StdHost>,
     content: Vec<ContentMod>,
     report: JavaCompatibilityReport,
     declarations: NativeDeclarations,
@@ -388,6 +414,100 @@ fn first_game_skip_reason(skipped: &[horizon_native_java::SkippedMixinPlan]) -> 
         })
 }
 
+/// The declaration rows of a cache entry, as the converter takes them.
+fn cached_rows(rows: &[java_cache::Row]) -> Vec<horizon_native_java::RegistryEntry> {
+    rows.iter().map(java_cache::Row::to_entry).collect()
+}
+
+/// A batch's declarations from one jar's row sets, in the order the live path
+/// merges them: the host's typed rows, then the jar's own metadata rows.
+fn cached_declarations(
+    rows: &[java_cache::Row],
+    metadata_rows: &[java_cache::Row],
+) -> Result<NativeDeclarations, String> {
+    let mut declarations = declarations_from_entries(&cached_rows(rows))?;
+    declarations.merge(declarations_from_entries(&cached_rows(metadata_rows))?)?;
+    Ok(declarations)
+}
+
+/// The report and rows of a jar that started on an earlier run, with nothing
+/// interpreted: the declarations are replayed through the same converter, so a
+/// cached jar and an interpreted one cannot disagree about what they declare.
+fn run_from_cache(path: &std::path::Path, entry: &java_cache::Entry) -> Result<JavaJarRun, String> {
+    let loader = match &entry.loader {
+        None => None,
+        Some(name) => Some(
+            JavaLoader::from_name(name)
+                .ok_or_else(|| format!("cached loader {name:?} is unknown"))?,
+        ),
+    };
+    let engine = JavaEngine::from_name(&entry.report_engine)
+        .ok_or_else(|| format!("cached engine {:?} is unknown", entry.report_engine))?;
+    let declarations = cached_declarations(&entry.rows, &entry.metadata_rows)?;
+    let content = declarations
+        .content_mods()?
+        .into_iter()
+        .map(|(id, content)| ContentMod { id, content })
+        .collect();
+    let report = JavaCompatibilityReport {
+        jar: path.to_path_buf(),
+        loader,
+        engine,
+        entrypoints: entry.entrypoints,
+        registrations: entry.registrations,
+        opaque: entry.opaque,
+        isolation_failure: entry.isolation_failure.clone(),
+        mixin: JavaMixinSummary {
+            woven: entry.woven,
+            skipped: entry.skipped,
+            first_skip_reason: entry.first_skip_reason.clone(),
+        },
+    };
+    Ok(JavaJarRun {
+        jar: None,
+        host: None,
+        content,
+        report,
+        declarations,
+    })
+}
+
+/// What a successful bootstrap stores for the next start.
+fn cache_entry(
+    identity: &java_cache::Identity,
+    role: ExecutionRole,
+    typed: &[horizon_native_java::RegistryEntry],
+    metadata: &[horizon_native_java::RegistryEntry],
+    report: &JavaCompatibilityReport,
+) -> java_cache::Entry {
+    let rows: Vec<java_cache::Row> = typed
+        .iter()
+        .filter_map(java_cache::Row::from_entry)
+        .collect();
+    let metadata_rows: Vec<java_cache::Row> = metadata
+        .iter()
+        .filter_map(java_cache::Row::from_entry)
+        .collect();
+    java_cache::Entry {
+        schema: java_cache::SCHEMA,
+        sha256: identity.sha256.clone(),
+        size: identity.size,
+        role: java_cache::role_key(role).to_owned(),
+        engine: java_cache::engine_key(),
+        loader: report.loader.map(JavaLoader::name).map(str::to_owned),
+        report_engine: report.engine.name().to_owned(),
+        entrypoints: report.entrypoints,
+        registrations: report.registrations,
+        opaque: report.opaque,
+        woven: report.mixin.woven,
+        skipped: report.mixin.skipped,
+        first_skip_reason: report.mixin.first_skip_reason.clone(),
+        isolation_failure: report.isolation_failure.clone(),
+        rows,
+        metadata_rows,
+    }
+}
+
 fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, String> {
     // Decide from loader metadata whether this jar can run in this role at
     // all. Most jars in a real pack are client-only and never start on a
@@ -420,6 +540,16 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
             .any(|name| name == "META-INF/mods.toml" || name == "META-INF/neoforge.mods.toml");
     if !fabric_entrypoint && !needs_class_discovery {
         return Err(format!("{}: no native entrypoint", path.display()));
+    }
+    // A jar that ran before on this build, in this role, with these exact bytes
+    // replays the rows it declared instead of being parsed and interpreted
+    // again. The lookup is keyed by the jar's sha256 and length, both taken
+    // from the file itself; failures fall through to the live path.
+    let cached = java_cache::lookup(path, role);
+    if let Some((_, Some(entry))) = &cached
+        && let Ok(run) = run_from_cache(path, entry)
+    {
+        return Ok(run);
     }
     let jar = horizon_native_java::NativeJar::from_path(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -528,13 +658,38 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
     // publishes its payload channels and keeps the host only if it declared
     // any. Nothing here touches process-wide state, so jars bootstrap in
     // parallel.
-    Ok(JavaJarRun {
-        jar,
-        host,
+    let run = JavaJarRun {
+        jar: Some(jar),
+        host: Some(host),
         content,
         report,
         declarations,
-    })
+    };
+    // Store the rows for the next start, unless the jar announced payload
+    // channels: those live in the bootstrapped host, which a later start cannot
+    // rebuild from rows, so such a jar keeps being interpreted every time.
+    if let Some((identity, _)) = &cached
+        && cacheable(&run)
+    {
+        let entry = cache_entry(
+            identity,
+            role,
+            &typed,
+            &run.jar.as_ref().expect("just built").native_declarations,
+            &run.report,
+        );
+        java_cache::remember(&entry);
+    }
+    Ok(run)
+}
+
+/// Whether a run may be stored for the next start. A jar that announced payload
+/// channels needs the bootstrapped host for dispatch, not just its rows, so
+/// only a run without any is replayed.
+fn cacheable(run: &JavaJarRun) -> bool {
+    run.host
+        .as_ref()
+        .is_some_and(|host| host.payload_registrations().is_empty())
 }
 
 /// The opt-in real-loader preflight (`fml`), logged once under the Java
@@ -758,7 +913,7 @@ fn adopt_run(
 ) {
     let JavaJarRun {
         jar,
-        mut host,
+        host,
         content,
         report,
         declarations,
@@ -770,21 +925,25 @@ fn adopt_run(
         }
     };
     let id = handler_role(role);
-    let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::java_payloads::adopt_host(id, &jar, &mut host, payload_declarations);
-    }));
-    // Dispatch keeps the hosts that declared payload channels
-    // (`java_payloads::store_handler_host_as`); no other consumer needs the
-    // parsed jar or its resources after its entrypoints ran, so do not hold
-    // them for the process lifetime.
-    drop(jar);
-    drop(host);
-    if adopted.is_err() {
-        batch.failures.push(JavaJarFailure {
-            jar: report.jar.clone(),
-            reason: "panicked while its registrations were adopted".to_owned(),
-        });
-        return;
+    // A cached result has neither: a jar that declared payload channels was
+    // never stored, so nothing is left to publish.
+    if let (Some(jar), Some(mut host)) = (jar, host) {
+        let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::java_payloads::adopt_host(id, &jar, &mut host, payload_declarations);
+        }));
+        // Dispatch keeps the hosts that declared payload channels
+        // (`java_payloads::store_handler_host_as`); no other consumer needs the
+        // parsed jar or its resources after its entrypoints ran, so do not hold
+        // them for the process lifetime.
+        drop(jar);
+        drop(host);
+        if adopted.is_err() {
+            batch.failures.push(JavaJarFailure {
+                jar: report.jar.clone(),
+                reason: "panicked while its registrations were adopted".to_owned(),
+            });
+            return;
+        }
     }
     batch.content.extend(content);
     batch.reports.push(report);
@@ -803,6 +962,7 @@ where
     F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String> + Send + Sync + 'static,
 {
     super::java_payloads::clear_handler_jars_as(handler_role(role));
+    let cache_before = java_cache::stats();
     let mut batch = JavaBatchOutcome::default();
     // The shared adoption step is serial, in path order: `adopt_host` mutates
     // the role's channel and handler maps, and a received frame answers from
@@ -811,6 +971,20 @@ where
     bootstrap_into(paths, role, run, |outcome| {
         adopt_run(&mut batch, &mut payload_declarations, role, outcome);
     });
+    // One line per batch: how much of the interpreter's work this start saved,
+    // and how close the cache is to its bound. No batch ran a lookup when the
+    // test seam replaced the per-jar step, so there is nothing to say (or prune)
+    // then.
+    let (hits, misses) = java_cache::stats();
+    let hits = hits.saturating_sub(cache_before.0);
+    let misses = misses.saturating_sub(cache_before.1);
+    if hits + misses > 0 {
+        log::info!(
+            "Horizon: Java content cache: {hits} of {} jar(s) reused, {misses} bootstrapped",
+            hits + misses
+        );
+        java_cache::prune();
+    }
     if let Err(e) = super::java_registry::publish(&batch.declarations) {
         log::warn!("Horizon: Java registry snapshot not published: {e}");
     }
@@ -949,8 +1123,8 @@ mod tests {
                     .map(|(id, content)| ContentMod { id, content })
                     .collect();
                 Ok(JavaJarRun {
-                    jar: horizon_native_java::NativeJar::default(),
-                    host: horizon_native_java::StdHost::new(),
+                    jar: Some(horizon_native_java::NativeJar::default()),
+                    host: Some(horizon_native_java::StdHost::new()),
                     content,
                     report: JavaCompatibilityReport {
                         jar: path.to_path_buf(),
@@ -1011,8 +1185,8 @@ mod tests {
                 .map(|(id, content)| ContentMod { id, content })
                 .collect();
             Ok(JavaJarRun {
-                jar: horizon_native_java::NativeJar::default(),
-                host: horizon_native_java::StdHost::new(),
+                jar: Some(horizon_native_java::NativeJar::default()),
+                host: Some(horizon_native_java::StdHost::new()),
                 content,
                 report: JavaCompatibilityReport {
                     jar: path.to_path_buf(),
@@ -1167,5 +1341,136 @@ mod tests {
         let bounded = first_game_skip_reason(&[long]).unwrap();
         assert_eq!(bounded.chars().count(), MAX_SKIP_REASON_CHARS);
         assert!(!bounded.contains(['\n', '\r']));
+    }
+
+    fn report_for(path: &str) -> JavaCompatibilityReport {
+        JavaCompatibilityReport {
+            jar: PathBuf::from(path),
+            loader: Some(JavaLoader::Fabric),
+            engine: JavaEngine::Native,
+            entrypoints: 1,
+            registrations: 1,
+            opaque: 0,
+            isolation_failure: None,
+            mixin: Default::default(),
+        }
+    }
+
+    /// A jar stored on one start replays exactly the declarations it recorded,
+    /// through the same converter the live path uses: the content root of a
+    /// warm start is the one the cold start built.
+    #[test]
+    fn a_cached_run_replays_the_rows_it_recorded() {
+        let _guard = test_lock();
+        let entries = [block_entry("fixture:ruby_block", "minecraft:stone")];
+        let live = declarations_from_entries(&entries).unwrap();
+        let identity = java_cache::Identity {
+            sha256: "a".repeat(64),
+            size: 1024,
+        };
+        let report = report_for("/mods/fixture.jar");
+        let entry = cache_entry(
+            &identity,
+            ExecutionRole::DedicatedServer,
+            &entries,
+            &[],
+            &report,
+        );
+        let cached = run_from_cache(std::path::Path::new("/mods/fixture.jar"), &entry).unwrap();
+        assert_eq!(cached.declarations, live);
+        assert_eq!(cached.content.len(), 1);
+        assert_eq!(cached.content[0].id, "fixture");
+        assert_eq!(cached.content[0].content.blocks.len(), 1);
+        assert_eq!(cached.report, report);
+        assert!(cached.jar.is_none() && cached.host.is_none());
+        assert!(!cacheable(&cached), "a replayed run has no host to adopt");
+    }
+
+    /// The rows are the declaration input, so a cache entry that cannot rebuild
+    /// them is a miss rather than a partly applied mod.
+    #[test]
+    fn a_cached_entry_with_a_bad_row_is_not_replayed() {
+        let _guard = test_lock();
+        let identity = java_cache::Identity {
+            sha256: "b".repeat(64),
+            size: 1024,
+        };
+        let mut entry = java_cache::Entry {
+            schema: java_cache::SCHEMA,
+            sha256: identity.sha256.clone(),
+            size: identity.size,
+            role: java_cache::role_key(ExecutionRole::Client).to_owned(),
+            engine: java_cache::engine_key(),
+            loader: Some("fabric".into()),
+            report_engine: "native".into(),
+            entrypoints: 1,
+            registrations: 1,
+            opaque: 0,
+            woven: 0,
+            skipped: 0,
+            first_skip_reason: None,
+            isolation_failure: None,
+            rows: Vec::new(),
+            metadata_rows: Vec::new(),
+        };
+        entry.rows.push(java_cache::Row {
+            registry: "minecraft:block".into(),
+            id: "fixture:broken".into(),
+            declaration: java_cache::Declaration::Block {
+                template: "minecraft:stone".into(),
+                properties: std::collections::BTreeMap::from([(
+                    "hardness".into(),
+                    "not a number".into(),
+                )]),
+                item: true,
+            },
+        });
+        assert!(run_from_cache(std::path::Path::new("/mods/fixture.jar"), &entry).is_err());
+    }
+
+    /// A jar that announced payload channels is never stored: its channels live
+    /// in the bootstrapped host, which a later start cannot rebuild from rows.
+    #[test]
+    fn a_jar_with_payload_channels_is_not_cacheable() {
+        use horizon_native_java::{Host, MethodRef, Value};
+        let _guard = test_lock();
+        let run = |host: horizon_native_java::StdHost| {
+            let entries = [block_entry("fixture:ruby_block", "minecraft:stone")];
+            let declarations = declarations_from_entries(&entries).unwrap();
+            let content = declarations
+                .content_mods()
+                .unwrap()
+                .into_iter()
+                .map(|(id, content)| ContentMod { id, content })
+                .collect();
+            JavaJarRun {
+                jar: Some(horizon_native_java::NativeJar::default()),
+                host: Some(host),
+                content,
+                report: report_for("/mods/fixture.jar"),
+                declarations,
+            }
+        };
+        assert!(cacheable(&run(horizon_native_java::StdHost::new())));
+
+        let mut host =
+            horizon_native_java::StdHost::new().with_packet_type("payload#1", "demo:frame");
+        Host::invoke(
+            &mut host,
+            &MethodRef {
+                owner: "net/fabricmc/fabric/api/client/networking/v1/ClientPlayNetworking".into(),
+                name: "registerGlobalReceiver".into(),
+                descriptor: "(Ljava/lang/Object;Ljava/lang/Object;)Z".into(),
+            },
+            &[
+                Value::Ref(Some("payload#1".into())),
+                Value::Ref(Some("handler#1".into())),
+            ],
+        )
+        .unwrap();
+        assert!(
+            !cacheable(&run(host)),
+            "a jar with payload channels keeps being interpreted"
+        );
     }
 }
