@@ -22341,6 +22341,26 @@ fn run_loading(
     Ok(())
 }
 
+/// The Java rows the content root layers: a client runs its jars here, in the
+/// client role; a dedicated server ran them at startup
+/// (`dedicated::load_java_mods`), before its content root was built.
+fn java_content_for_root(options: &Options) -> Vec<horizon_client::mod_content::ContentMod> {
+    if !options.execution_role.is_client() {
+        return dedicated::take_java_content();
+    }
+    java_mods::run_java_mods(&options.java_mods, options.execution_role)
+        .map(|(content, reports)| {
+            for report in reports {
+                log::info!("Horizon: Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}", report.jar.display(), report.engine.name(), report.loader.map_or("unknown", java_mods::JavaLoader::name), report.entrypoints, report.registrations, report.opaque);
+            }
+            content
+        })
+        .unwrap_or_else(|error| {
+            log::warn!("Horizon: Java mods not loaded: {error}");
+            Vec::new()
+        })
+}
+
 pub use launch_api::{UsageError, exit_code};
 
 pub fn run_with() -> Result<()> {
@@ -22403,6 +22423,12 @@ pub fn run_with() -> Result<()> {
         }
         return Err(error.into());
     }
+    // The server role's Java entrypoints run once here, in the server role,
+    // before the content root and the resources are built; a client's run at
+    // the content-root build below, in the client role.
+    if options.execution_role == execution_role::ExecutionRole::DedicatedServer {
+        dedicated::load_java_mods(&options)?;
+    }
     // Someone is playing: the anonymous ping behind the launcher's "N playing now", and the
     // official server in their list (servers.dat in the game folder, the working directory). Not
     // for a server, a benchmark, a run that quits by itself, a harness's fixture or a run that
@@ -22463,18 +22489,7 @@ pub fn run_with() -> Result<()> {
         &options.resources,
         &early_settings.mods.enabled,
         &options.dev_mods,
-        if options.execution_role.is_client() {
-            java_mods::run_java_mods(&options.java_mods, options.execution_role)
-                .map(|(content, reports)| {
-                    for report in reports {
-                        log::info!("Horizon: Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}", report.jar.display(), report.engine.name(), report.loader.map_or("unknown", java_mods::JavaLoader::name), report.entrypoints, report.registrations, report.opaque);
-                    }
-                    content
-                })
-                .unwrap_or_else(|error| { log::warn!("Horizon: Java mods not loaded: {error}"); Vec::new() })
-        } else {
-            Vec::new()
-        },
+        java_content_for_root(&options),
     );
     let loaded = load_resources(
         options.resources.clone(),
