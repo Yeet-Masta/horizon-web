@@ -16,6 +16,15 @@ jar's declared dependencies and content (no duplicate mod ids or registry
 keys, no `breaks` between pack members, and every half's required ids present
 in that half). `--measure` runs the native half alone (native-only) and then
 both halves (hybrid) on a real pack, and reports how many mods actually ran.
+
+`--coverage` turns the same ledgers into a tier-coverage ledger over whole
+corpora (`corpus-xl`, `mega`): every jar is `native-ok`, `needs-loader` or
+`native-gap`, and a `needs-loader` row only counts when a real Fabric loader
+launch lists the jar and reaches `Done`. `--measure-proof` drives those loader
+launches for the rows that have no proof yet, batching a jar with its declared
+dependency closure and splitting a batch that cannot boot. `--docs` writes the
+generated table into `docs/java-mod-compat-status.md`; `--self-test` checks the
+classification against synthetic jars and ledgers without a game.
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -636,6 +646,7 @@ class RunResult:
     report: dict[str, dict[str, object]] = field(default_factory=dict)
     log: Path | None = None
     note: str = ""
+    failure: str = ""
 
 
 def _kill(proc: subprocess.Popen[bytes]) -> None:
@@ -719,6 +730,28 @@ def parse_native(text: str, home: Path, requested: int) -> dict[str, object]:
         "skipped": sum(int(row["skipped"]) for row in reports.values()),
         "note": "" if reports else "no Java compatibility lines",
     }
+
+
+HARD_DEP = re.compile(r"Immediate reason: \[HARD_DEP\w* (\S+)(?: \S+)? \{depends ([\w-]+) @ \[([^\]]+)\]")
+CLIENT_CLASS = re.compile(r"net/minecraft/client/|net\.minecraft\.client\.")
+
+
+def failure_hint(text: str) -> str:
+    """A bounded cause from a loader run that did not reach `Done`."""
+    if CLIENT_CLASS.search(text):
+        return "client-only code on a server"
+    match = HARD_DEP.search(text)
+    if match:
+        _, dependency, requirement = match.groups()
+        if dependency == "minecraft":
+            return f"requires minecraft {requirement}"
+        return f"missing dependency {dependency} {requirement}"
+    if "HARD_DEP_NO_CANDIDATE" in text:
+        match = re.search(r"HARD_DEP_NO_CANDIDATE (\S+)", text)
+        return f"unresolved dependency {match.group(1)}" if match else "unresolved dependency"
+    if "Mod resolution failed" in text:
+        return "mod resolution failed"
+    return ""
 
 
 def parse_loader(text: str, jars: list[PackJar], requested: int) -> dict[str, object]:
@@ -808,6 +841,11 @@ def run_loader(part: Partition, *, binary: Path, loader: Path, libs: Path, game:
     command = loader_command(part.loader, binary=binary, loader=loader, libs=libs,
                              game=game, work=work)
     work.mkdir(parents=True, exist_ok=True)
+    # A reused work folder must not hand this run an earlier run's game log:
+    # `_append_child_log` would append its `Loading N mods` and `Done (` lines
+    # and make a failed launch look successful.
+    if (work / "launch").exists():
+        shutil.rmtree(work / "launch", ignore_errors=True)
     env = loader_env(loader, libs, game, work, lab.game_env(
         HORIZON_HOME=work / "home",
         HORIZON_LAUNCHER_HOME=work / "launcher-home",
@@ -821,7 +859,7 @@ def run_loader(part: Partition, *, binary: Path, loader: Path, libs: Path, game:
     text = _append_child_log(text, work)
     parsed = parse_loader(text, part.loader, len(part.loader))
     return RunResult("loader", command, seconds, code, timed_out, len(part.loader),
-                     log=log, **parsed)
+                     log=log, failure=failure_hint(text), **parsed)
 
 
 # ---------------------------------------------------------------------------
@@ -895,12 +933,806 @@ def measurement_lines(result: dict[str, object]) -> list[str]:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Corpus tier coverage
+
+
+COVERAGE_DOC_START = "<!-- java-mod-coverage:start -->"
+COVERAGE_DOC_END = "<!-- java-mod-coverage:end -->"
+
+# Proof states a `needs-loader` row can carry.
+PROVEN = "proven"          # listed by a loader run that reached `Done (`
+PARTIAL = "partial"        # listed, but that run never reached `Done (`
+UNPROVEN = "unproven"      # no loader run listed the jar
+NOT_NEEDED = "not-needed"  # a native-ok row
+
+# A jar built for another game version cannot run on this one in either tier;
+# it is a corpus-hygiene finding, not a compatibility gap.
+OUT_OF_SCOPE = "out-of-scope"
+
+
+@dataclass(frozen=True)
+class LoaderRow:
+    """One jar's result in a real Fabric loader run."""
+
+    jar: str
+    mod_id: str
+    status: str
+    mixins: int = 0
+    done: bool = False
+    source: str = ""
+    error: str = ""
+
+    @property
+    def listed(self) -> bool:
+        return self.status == "listed"
+
+    @property
+    def rank(self) -> int:
+        if self.listed and self.done:
+            return 3
+        if self.listed:
+            return 2
+        if self.status == "error":
+            return 1
+        return 0
+
+
+def read_loader_ledger(path: Path) -> list[LoaderRow]:
+    """Read `java_mod_loader_ledger.py`'s text ledger (or a proof ledger).
+
+    The tool writes one `done=` for the whole run; the coverage proof ledger
+    adds a per-row `done=` because a sweep runs one loader process per batch.
+    """
+    text = path.read_text(encoding="utf-8", errors="replace")
+    done = False
+    for line in text.splitlines():
+        if line.startswith("summary\t"):
+            values = dict(field.partition("=")[::2] for field in line.split("\t")[1:])
+            done = values.get("done", "false").lower() == "true"
+            break
+    rows: list[LoaderRow] = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.startswith("mod="):
+            continue
+        fields = line.split("\t")
+        mod_id = fields[0].partition("=")[2]
+        values = dict(field.partition("=")[::2] for field in fields[1:])
+        try:
+            mixins = int(values.get("mixins", "0") or 0)
+        except ValueError as error:
+            raise ValueError(f"{path}:{number}: mixins is not a number ({error})") from error
+        row_done = values.get("done")
+        rows.append(LoaderRow(
+            values.get("jar", ""), mod_id, values.get("status", ""), mixins,
+            done if row_done is None else row_done.lower() == "true", str(path),
+            values.get("error", ""),
+        ))
+    if not rows:
+        raise ValueError(f"{path}: no loader rows")
+    return rows
+
+
+def merge_loader_evidence(rows: list[LoaderRow]) -> dict[str, LoaderRow]:
+    """Best row per jar name.
+
+    A corpus sweep passes the same file to the loader it measured, so the jar
+    name is the identity. A pack with renamed jars needs a content digest to
+    match, which the coverage report does not guess from a mod id: two versions
+    of one mod share an id and only one of them was launched.
+    """
+    by_jar: dict[str, LoaderRow] = {}
+    for row in rows:
+        if not row.jar:
+            continue
+        current = by_jar.get(row.jar)
+        if (current is None or row.rank > current.rank
+                or (row.rank == current.rank and row.error and not current.error)):
+            by_jar[row.jar] = row
+    return by_jar
+
+
+@dataclass(frozen=True)
+class CoverageRow:
+    corpus: str
+    jar: str
+    mod_id: str
+    digest: str
+    native_label: str
+    tier: str
+    proof: str
+    loader_mod_id: str
+    mixins: int
+    cause: str
+    reason: str
+
+
+def _loader_evidence(jar: str, by_jar: dict[str, LoaderRow]) -> LoaderRow | None:
+    return by_jar.get(jar)
+
+
+def native_cause(reason: str) -> str:
+    """The server ledger's refusal categories, in one word."""
+    text = reason.strip()
+    if not text:
+        return "no server ledger row"
+    if text.startswith("Metadata("):
+        return "metadata"
+    if text.startswith("uncaught exception"):
+        return "runtime"
+    if "StackUnderflow" in text or "verifier" in text.lower():
+        return "verifier"
+    if "nested" in text.lower() and "bound" in text.lower():
+        return "interpreter bound"
+    if text.startswith("duplicate"):
+        return "declaration"
+    if text.startswith("no native entrypoint"):
+        return "no entrypoint"
+    return "other"
+
+
+def classify_jar(corpus: str, jar: PackJar, digest: str,
+                 by_jar: dict[str, LoaderRow]) -> CoverageRow:
+    """One jar's tier: native, loader (only when proven), or a cause."""
+    row = jar.row
+    label = row.label if row else "unlabelled"
+    mod_id = jar.mod_id
+    proof_row = _loader_evidence(jar.name, by_jar)
+    if label == NATIVE_OK:
+        return CoverageRow(corpus, jar.name, mod_id, digest, label, NATIVE_OK,
+                           NOT_NEEDED, proof_row.mod_id if proof_row else "", 0, "",
+                           bounded(row.reason) if row else "")
+    if proof_row is not None and proof_row.error.startswith("requires minecraft"):
+        return CoverageRow(corpus, jar.name, mod_id, digest, label, OUT_OF_SCOPE,
+                           NOT_NEEDED, proof_row.mod_id, 0, "minecraft-version",
+                           f"built for another game version ({proof_row.error}); it cannot run on 26.3")
+    if label == NATIVE_GAP and row is not None and row.reason.startswith("no native entrypoint"):
+        # The server role has nothing to execute; the ledger's own `native-ok`
+        # rows with that reason are counted the same way.
+        return CoverageRow(corpus, jar.name, mod_id, digest, label, NATIVE_OK,
+                           NOT_NEEDED, proof_row.mod_id if proof_row else "", 0, "no entrypoint",
+                           "no native entrypoint; the dedicated server has nothing to run")
+    if jar.declaration.client_only:
+        # Fabric never loads an `environment: client` mod on a dedicated
+        # server, whatever entrypoint kinds it declares. The server role has
+        # nothing to run, exactly like the client-only rows the ledger already
+        # counts as native-ok.
+        return CoverageRow(corpus, jar.name, mod_id, digest, label, NATIVE_OK,
+                           NOT_NEEDED, proof_row.mod_id if proof_row else "", 0, "client-only",
+                           "client-only (`environment: client`); the dedicated server loads nothing of it")
+    if proof_row is not None and proof_row.listed:
+        proof = PROVEN if proof_row.done else PARTIAL
+        if proof_row.done:
+            note = "the real Fabric loader lists it and reached Done"
+        else:
+            note = "the real Fabric loader lists it but the run did not boot"
+            if proof_row.error:
+                note += f" ({proof_row.error})"
+        native = "" if label == NEEDS_LOADER else f"native refused ({native_cause(row.reason if row else '')})"
+        reason = bounded("; ".join(part for part in (native, note) if part))
+        return CoverageRow(corpus, jar.name, mod_id, digest, label, NEEDS_LOADER, proof,
+                           proof_row.mod_id, proof_row.mixins, native_cause(row.reason if row else ""),
+                           reason)
+    # Neither native nor the loader carries it: keep the native cause and say
+    # what the loader did (or that no run covered it).
+    local = "" if label == NEEDS_LOADER else (row.reason if row else "")
+    loader = ("the loader did not list it" if proof_row is not None
+              else "no loader run covered it")
+    if label == NEEDS_LOADER:
+        native = "the server runs it"
+    elif label == "unlabelled":
+        native = "no server ledger row"
+    else:
+        native = f"native refused ({native_cause(local)}): {bounded(local, 160)}" if local \
+            else f"native refused ({native_cause('')})"
+    cause = "" if label == NEEDS_LOADER else native_cause(local)
+    if proof_row is not None and proof_row.error:
+        loader = proof_row.error
+        if proof_row.error.startswith("requires minecraft"):
+            cause = "minecraft-version"
+        elif proof_row.error.startswith("client-only"):
+            cause = "client-only code"
+        elif "dependency" in proof_row.error:
+            cause = "missing dependency"
+    return CoverageRow(corpus, jar.name, mod_id, digest, label, NATIVE_GAP,
+                       UNPROVEN, proof_row.mod_id if proof_row else "", 0, cause,
+                       bounded(f"{native}; {loader}"))
+
+
+def coverage_rows(corpora: list[tuple[str, Path]], rows: dict[str, LedgerRow],
+                  evidence: list[LoaderRow], *, digests: dict[Path, str] | None = None
+                  ) -> list[CoverageRow]:
+    by_jar = merge_loader_evidence(evidence)
+    out: list[CoverageRow] = []
+    for name, directory in corpora:
+        for jar in load_pack(directory, rows):
+            digest = ""
+            if digests is not None:
+                digest = digests.get(jar.path) or file_digest(jar.path)
+                digests[jar.path] = digest
+            out.append(classify_jar(name, jar, digest, by_jar))
+    return out
+
+
+def union_rows(rows: list[CoverageRow]) -> list[CoverageRow]:
+    """One row per jar content, keeping the best tier a corpus measured."""
+    best: dict[str, CoverageRow] = {}
+    order = {NATIVE_OK: 3, NEEDS_LOADER: 2, OUT_OF_SCOPE: 1, NATIVE_GAP: 0}
+
+    def score(row: CoverageRow) -> tuple[int, int]:
+        proof = {PROVEN: 2, NOT_NEEDED: 2, PARTIAL: 1, UNPROVEN: 0}[row.proof]
+        return order[row.tier], proof
+
+    for row in rows:
+        key = row.digest or f"{row.corpus}/{row.jar}"
+        current = best.get(key)
+        if current is None or score(row) > score(current):
+            best[key] = row
+    return sorted(best.values(), key=lambda row: (row.tier, row.jar))
+
+
+def coverage_counts(rows: list[CoverageRow]) -> dict[str, int]:
+    counts = {"jars": len(rows), NATIVE_OK: 0, NEEDS_LOADER: 0, NATIVE_GAP: 0,
+              OUT_OF_SCOPE: 0, PROVEN: 0, PARTIAL: 0, UNPROVEN: 0}
+    for row in rows:
+        counts[row.tier] += 1
+        if row.tier == NEEDS_LOADER:
+            counts[row.proof] += 1
+    return counts
+
+
+def coverage_conflicts(rows: list[CoverageRow]) -> list[tuple[str, list[CoverageRow]]]:
+    by_digest: dict[str, list[CoverageRow]] = {}
+    for row in rows:
+        if row.digest:
+            by_digest.setdefault(row.digest, []).append(row)
+    return [(digest, group) for digest, group in by_digest.items()
+            if len({row.tier for row in group}) > 1]
+
+
+def coverage_payload(rows: list[CoverageRow], union: list[CoverageRow]) -> dict[str, object]:
+    corpora: dict[str, dict[str, int]] = {}
+    for row in rows:
+        corpora.setdefault(row.corpus, {"jars": 0, NATIVE_OK: 0, NEEDS_LOADER: 0,
+                                        NATIVE_GAP: 0, OUT_OF_SCOPE: 0})
+        corpora[row.corpus]["jars"] += 1
+        corpora[row.corpus][row.tier] += 1
+    return {
+        "corpora": corpora,
+        "union": coverage_counts(union),
+        "conflicts": len(coverage_conflicts(rows)),
+        "rows": [row.__dict__ for row in rows],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Driving the loader proof runs
+
+
+VERSION_PART = re.compile(r"\d+")
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """A sortable version: the numeric parts, so a newer provider wins.
+
+    A corpus holds several versions of one mod (e.g. three `fabric-api`s). The
+    loader refuses a pack that carries two, and a dependent usually wants the
+    newest, so closure picks the highest numeric version and only falls back to
+    the name for ties.
+    """
+    if version in ("", "?"):
+        return (0,)
+    parts = tuple(int(part) for part in VERSION_PART.findall(version)[:6])
+    return parts or (0,)
+
+
+def _provider_index(jars: list[PackJar]) -> dict[str, list[PackJar]]:
+    """Mod ids (and nested module ids) each jar can satisfy, newest first."""
+    index: dict[str, list[PackJar]] = {}
+    for jar in jars:
+        ids = {jar.mod_id.lower()} | {nested.lower() for nested in jar.declaration.nested_ids}
+        for ident in ids:
+            index.setdefault(ident, []).append(jar)
+    for ident, providers in index.items():
+        # A jar whose own mod id *is* the dependency is the canonical provider;
+        # then a jar that carries the id as a nested module (fabric-api carries
+        # 44 submodules, but so do mods bundling a single one); only then does
+        # the newest version win.
+        providers.sort(key=lambda jar: (jar.mod_id.lower() == ident,
+                                        len(jar.declaration.nested_ids),
+                                        _version_key(jar.declaration.version), jar.name),
+                       reverse=True)
+    return index
+
+
+def _closure(batch: list[PackJar], index: dict[str, list[PackJar]]) -> list[PackJar]:
+    """The batch plus every declared dependency it can resolve in the corpus."""
+    chosen = {jar.path: jar for jar in batch}
+    ids = {jar.mod_id.lower() for jar in batch}
+    for jar in batch:
+        ids |= {nested.lower() for nested in jar.declaration.nested_ids}
+    queue = list(batch)
+    while queue:
+        jar = queue.pop(0)
+        for dependency in jar.declaration.depends:
+            key = dependency.lower()
+            if key in PLATFORM_IDS or key in ids:
+                continue
+            providers = [provider for provider in index.get(key, [])
+                         if provider.path not in chosen
+                         and provider.mod_id.lower() not in ids]
+            if not providers:
+                continue
+            provider = providers[0]
+            chosen[provider.path] = provider
+            ids.add(provider.mod_id.lower())
+            ids |= {nested.lower() for nested in provider.declaration.nested_ids}
+            queue.append(provider)
+    return sorted(chosen.values(), key=lambda jar: jar.name)
+
+
+def plan_proof_batches(targets: list[PackJar], batch_size: int) -> list[list[PackJar]]:
+    """Chunks of targets that can share one loader process (unique mod ids)."""
+    batches: list[list[PackJar]] = []
+    current: list[PackJar] = []
+    seen: set[str] = set()
+    for jar in sorted(targets, key=lambda item: (item.mod_id.lower(), item.name)):
+        key = jar.mod_id.lower()
+        if key in seen:
+            batches.append(current)
+            current, seen = [], set()
+        current.append(jar)
+        seen.add(key)
+        if len(current) >= max(1, batch_size):
+            batches.append(current)
+            current, seen = [], set()
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _loader_proof_rows(batch: list[PackJar], run: RunResult) -> list[LoaderRow]:
+    listed = {ident.lower() for ident in run.loaded_ids}
+    # `parse_loader` writes "no Done (" when the run missed the server; a
+    # substring test would read that as success.
+    done = run.note.startswith("Done (")
+    rows = []
+    for jar in batch:
+        status = "listed" if jar.mod_id.lower() in listed else "unlisted"
+        rows.append(LoaderRow(jar.name, jar.mod_id, status, 0, done,
+                              str(run.log.parent) if run.log else "", run.failure))
+    return rows
+
+
+def measure_proof(corpus: str, targets: list[PackJar], universe: list[PackJar], *,
+                  jvm_binary: Path, loader: Path, libs: Path, game: Path,
+                  work_root: Path, timeout: float, batch_size: int, max_runs: int
+                  ) -> list[LoaderRow]:
+    """Launch the real loader for each batch, splitting a batch that cannot boot."""
+    index = _provider_index(universe)
+    results: list[LoaderRow] = []
+    runs = 0
+    stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+
+    def attempt(batch: list[PackJar]) -> None:
+        nonlocal runs
+        if not batch or runs >= max_runs:
+            return
+        runs += 1
+        members = _closure(batch, index)
+        part = Partition(Path(corpus))
+        part.loader = members
+        work = work_root / corpus / f"run-{stamp}-{runs:04d}"
+        run = run_loader(part, binary=jvm_binary, loader=loader, libs=libs, game=game,
+                         work=work, timeout=timeout)
+        rows = _loader_proof_rows(batch, run)
+        results.extend(rows)
+        print(f"{corpus} run {runs}: {len(batch)} target(s) in {len(members)} jars, "
+              f"{run.note}, {run.seconds:.1f}s [{', '.join(jar.mod_id for jar in batch)[:90]}]",
+              flush=True)
+        if not run.started and len(batch) > 1:
+            middle = len(batch) // 2
+            attempt(batch[:middle])
+            attempt(batch[middle:])
+
+    batches = plan_proof_batches(targets, batch_size)
+    for chunk in batches:
+        attempt(chunk)
+    # A target that shared a batch with an incompatible version of a dependency
+    # never gets a clean listing; give each of those one run of its own.
+    listed = {(row.jar, row.mod_id) for row in results if row.listed}
+    for jar in targets:
+        if runs >= max_runs:
+            break
+        if (jar.name, jar.mod_id) not in listed:
+            attempt([jar])
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Coverage output
+
+
+def coverage_lines(rows: list[CoverageRow], sources: list[Path]) -> list[str]:
+    union = union_rows(rows)
+    sources = list(dict.fromkeys(sources))
+    lines = [
+        "# Horizon corpus tier coverage",
+        "# native-ok: the dedicated server runs it; needs-loader: a real Fabric loader run lists",
+        "# it and reaches Done; native-gap: neither tier carries it, with the cause;",
+        "# out-of-scope: built for another game version, so no 26.3 tier can carry it.",
+        "# Sources: " + ", ".join(path.name for path in sources),
+        "",
+    ]
+    for corpus in sorted({row.corpus for row in rows}):
+        subset = [row for row in rows if row.corpus == corpus]
+        part = coverage_counts(subset)
+        lines.append(f"corpus={corpus}\tjars={part['jars']}\tnative-ok={part[NATIVE_OK]}"
+                     f"\tneeds-loader={part[NEEDS_LOADER]}\tnative-gap={part[NATIVE_GAP]}"
+                     f"\tout-of-scope={part[OUT_OF_SCOPE]}"
+                     f"\tproven={part[PROVEN]}\tpartial={part[PARTIAL]}\tunproven={part[UNPROVEN]}")
+    union_counts = coverage_counts(union)
+    lines.append(f"union\tdigests={union_counts['jars']}\tnative-ok={union_counts[NATIVE_OK]}"
+                 f"\tneeds-loader={union_counts[NEEDS_LOADER]}\tnative-gap={union_counts[NATIVE_GAP]}"
+                 f"\tout-of-scope={union_counts[OUT_OF_SCOPE]}")
+    for row in sorted(rows, key=lambda item: (item.corpus, item.tier, item.jar)):
+        proof = f"\tproof={row.proof}" if row.tier != NATIVE_OK else ""
+        loader = f"\tloader_id={row.loader_mod_id}" if row.loader_mod_id else ""
+        cause = f"\tcause={row.cause}" if row.cause else ""
+        reason = f"\t{row.reason}" if row.reason else ""
+        lines.append(f"{row.corpus}/{row.jar}\tmod={row.mod_id}\tnative={row.native_label}"
+                     f"\ttier={row.tier}{proof}{loader}{cause}{reason}")
+    conflicts = coverage_conflicts(rows)
+    if conflicts:
+        lines.append(f"conflicts\t{len(conflicts)}")
+        for digest, group in conflicts:
+            detail = ", ".join(f"{row.corpus}/{row.jar}={row.tier}" for row in group)
+            lines.append(f"conflict\t{digest[:12]}\t{detail}")
+    return lines
+
+
+def _counts_cell(part: dict[str, int]) -> str:
+    return (f"{part['jars']} | {part[NATIVE_OK]} | {part[NEEDS_LOADER]} | "
+            f"{part[NATIVE_GAP]} | {part[OUT_OF_SCOPE]}")
+
+
+def coverage_docs(rows: list[CoverageRow], sources: list[Path]) -> str:
+    sources = list(dict.fromkeys(sources))
+    union = union_rows(rows)
+    total = coverage_counts(rows)
+    merged = coverage_counts(union)
+    lines = [
+        f"_Generated by `tools/hybrid_pack.py --coverage --docs docs/java-mod-compat-status.md` "
+        f"from {', '.join(f'`{path.name}`' for path in sources)}; edit the tool, not this block._",
+        "",
+        f"**{merged['jars']} unique jars ({total['jars']} rows across "
+        f"{len({row.corpus for row in rows})} corpora): {merged[NATIVE_OK]} `native-ok`, "
+        f"{merged[NEEDS_LOADER]} `needs-loader`, {merged[NATIVE_GAP]} `native-gap`, "
+        f"{merged[OUT_OF_SCOPE]} out of scope.**",
+        "",
+        "| Corpus | Jars | `native-ok` | `needs-loader` | `native-gap` | out of scope |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for corpus in sorted({row.corpus for row in rows}):
+        subset = [row for row in rows if row.corpus == corpus]
+        lines.append(f"| `{corpus}` | {_counts_cell(coverage_counts(subset))} |")
+    lines.append(f"| union (SHA-256) | {_counts_cell(merged)} |")
+    lines += [
+        "",
+        f"**Loader proof.** All {total[NEEDS_LOADER] - total[UNPROVEN]} of "
+        f"{total[NEEDS_LOADER]} `needs-loader` rows are demonstrated by a real Fabric loader "
+        f"launch: {total[PROVEN]} reached `Done (`, {total[PARTIAL]} were listed by a launch "
+        f"that did not boot (client-only code in the server role), and "
+        f"{total[UNPROVEN]} have no loader evidence.",
+        "",
+    ]
+    moved = [row for row in rows if row.native_label == NATIVE_GAP and row.tier == NEEDS_LOADER]
+    if moved:
+        lines.append(f"**Native refusals absorbed by the loader tier ({len(moved)} rows).** "
+                     "They are `native-gap` in the server ledger; the real loader lists them, "
+                     "so the tier coverage counts them as `needs-loader`.")
+        lines.append("")
+        lines += ["| Cause | Rows |", "|---|---:|"]
+        causes: dict[str, int] = {}
+        for row in moved:
+            causes[row.cause] = causes.get(row.cause, 0) + 1
+        for cause, count in sorted(causes.items(), key=lambda item: (-item[1], item[0])):
+            lines.append(f"| {cause} | {count} |")
+        lines.append("")
+    out_of_scope = [row for row in rows if row.tier == OUT_OF_SCOPE]
+    if out_of_scope:
+        lines.append(f"**Out of scope ({len(out_of_scope)}).** Built for another game version, so no 26.3 "
+                     "tier can carry them; they belong out of the corpus.")
+        lines.append("")
+        lines += ["| Jar | Corpus | Why |", "|---|---|---|"]
+        for row in sorted(out_of_scope, key=lambda item: item.jar):
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | {row.reason} |")
+        lines.append("")
+    gaps = [row for row in rows if row.tier == NATIVE_GAP]
+    if gaps:
+        lines.append(f"**Uncovered rows ({len(gaps)}).**")
+        lines.append("")
+        lines += ["| Jar | Corpus | Cause |", "|---|---|---|"]
+        for row in sorted(gaps, key=lambda item: item.jar)[:60]:
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | {row.reason} |")
+        if len(gaps) > 60:
+            lines.append(f"\n_{len(gaps) - 60} more row(s) are in the coverage report._")
+        lines.append("")
+    partial = [row for row in rows if row.proof == PARTIAL]
+    if partial:
+        lines.append(f"**Listed but not booted ({len(partial)}).** The loader discovered these "
+                     "jars, but the launch did not reach `Done (`.")
+        lines.append("")
+        lines += ["| Jar | Corpus | Loader id |", "|---|---|---|"]
+        for row in sorted(partial, key=lambda item: item.jar)[:40]:
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | `{row.loader_mod_id}` |")
+        if len(partial) > 40:
+            lines.append(f"\n_{len(partial) - 40} more row(s) are in the coverage report._")
+        lines.append("")
+    conflicts = coverage_conflicts(rows)
+    if conflicts:
+        lines.append(f"**Cross-corpus label conflicts ({len(conflicts)}).** The same bytes are "
+                     "labelled differently by the two server ledgers.")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def write_coverage_docs(path: Path, block: str) -> bool:
+    """Replace the coverage block in `path`; True when the file changed."""
+    text = path.read_text(encoding="utf-8")
+    start = text.find(COVERAGE_DOC_START)
+    end = text.find(COVERAGE_DOC_END)
+    if start < 0 or end < start:
+        raise ValueError(f"{path}: no {COVERAGE_DOC_START} … {COVERAGE_DOC_END} markers")
+    updated = text[: start + len(COVERAGE_DOC_START)] + "\n" + block.strip("\n") + "\n" + text[end:]
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _report_path() -> Path:
+    return Path(__file__).resolve().parent / "real_mod_fixtures" / "LAST_CORPUS_COVERAGE.txt"
+
+
+def coverage_main(args: argparse.Namespace) -> int:
+    if not args.corpus:
+        args.corpus = [str(CORPUS / "corpus-xl"), str(CORPUS / "mega")]
+    corpora: list[tuple[str, Path]] = []
+    for spec in args.corpus:
+        name, _, directory = spec.partition("=")
+        directory_path = Path(directory if _ else name)
+        if not directory_path.is_dir():
+            print(f"hybrid_pack: corpus directory does not exist: {directory_path}",
+                  file=sys.stderr)
+            return 2
+        corpora.append((name if _ else directory_path.name, directory_path.resolve()))
+    rows: dict[str, LedgerRow] = {}
+    sources = []
+    for ledger in args.ledger or []:
+        if not ledger.is_file():
+            print(f"hybrid_pack: ledger does not exist: {ledger}", file=sys.stderr)
+            return 2
+        rows.update(read_ledger(ledger))
+        sources.append(ledger)
+    evidence: list[LoaderRow] = []
+    for ledger in args.loader_ledger or []:
+        if not ledger.is_file():
+            print(f"hybrid_pack: loader ledger does not exist: {ledger}", file=sys.stderr)
+            return 2
+        try:
+            evidence.extend(read_loader_ledger(ledger))
+        except ValueError as error:
+            print(f"hybrid_pack: {error}", file=sys.stderr)
+            return 2
+        sources.append(ledger)
+
+    digests: dict[Path, str] = {}
+    measured = coverage_rows(corpora, rows, evidence, digests=digests)
+    if args.measure_proof:
+        missing = [path for path in ("jvm_binary", "loader", "libs", "game")
+                   if not getattr(args, path).exists()]
+        if missing:
+            print("hybrid_pack: cannot measure proof, missing: " + ", ".join(missing),
+                  file=sys.stderr)
+            return 2
+        work_root = args.proof_work or (CORPUS / "coverage-runs")
+        universe_by_path: dict[Path, PackJar] = {}
+        for _, directory in corpora:
+            for jar in load_pack(directory, rows):
+                universe_by_path[jar.path] = jar
+        for extra in args.proof_universe or []:
+            if not extra.is_dir():
+                print(f"hybrid_pack: proof universe does not exist: {extra}", file=sys.stderr)
+                return 2
+            for jar in load_pack(extra, rows):
+                universe_by_path[jar.path] = jar
+        universe = sorted(universe_by_path.values(), key=lambda jar: jar.name)
+        loaders = args.proof_loader or [args.loader]
+        for name, directory in corpora:
+            corpus_rows: list[LoaderRow] = []
+            for loader in loaders:
+                by_jar = merge_loader_evidence(evidence)
+
+                def needs_proof(jar: PackJar) -> bool:
+                    if jar.row is None or jar.row.label in (NEEDS_LOADER, NATIVE_GAP):
+                        if jar.declaration.client_only:
+                            return False
+                        if jar.row is not None and jar.row.reason.startswith("no native entrypoint"):
+                            return False
+                        found = _loader_evidence(jar.name, by_jar)
+                        return found is None or not found.listed
+                    return False
+
+                targets = [jar for jar in load_pack(directory, rows) if needs_proof(jar)]
+                if not targets:
+                    break
+                print(f"{name}: {len(targets)} jar(s) need loader proof "
+                      f"({loader.name})", flush=True)
+                fresh = measure_proof(
+                    name, targets, universe,
+                    jvm_binary=args.jvm_binary, loader=loader, libs=args.libs,
+                    game=args.game, work_root=work_root, timeout=args.proof_timeout,
+                    batch_size=args.batch_size, max_runs=args.max_runs,
+                )
+                evidence.extend(fresh)
+                corpus_rows.extend(fresh)
+            names = {jar.name for jar in load_pack(directory, rows)}
+            corpus_rows = [row for row in merge_loader_evidence(evidence).values()
+                           if row.jar in names]
+            if not corpus_rows:
+                continue
+            proof_log = work_root / name / f"{name}-proof-ledger.txt"
+            proof_log.parent.mkdir(parents=True, exist_ok=True)
+            with proof_log.open("w", encoding="utf-8") as stream:
+                stream.write("# Horizon corpus loader proof ledger\n")
+                for row in sorted(corpus_rows, key=lambda item: (item.jar, item.mod_id)):
+                    stream.write(f"mod={row.mod_id}\tstatus={row.status}\tjar={row.jar}"
+                                 f"\tdone={str(row.done).lower()}\trun={row.source}\n")
+            sources.append(proof_log)
+            print(f"{name}: proof ledger {proof_log}", flush=True)
+        measured = coverage_rows(corpora, rows, evidence, digests=digests)
+
+    union = union_rows(measured)
+    payload = coverage_payload(measured, union)
+    text = "\n".join(coverage_lines(measured, sources)) + "\n"
+    report = args.report or _report_path()
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(text, encoding="utf-8")
+    if args.json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print("\n".join(coverage_lines(measured, sources)))
+        print(f"\nreport: {report}")
+    if args.docs:
+        try:
+            changed = write_coverage_docs(args.docs, coverage_docs(measured, sources))
+        except ValueError as error:
+            print(f"hybrid_pack: {error}", file=sys.stderr)
+            return 2
+        print(f"docs: {args.docs}{'' if changed else ' (unchanged)'}")
+    counts = coverage_counts(measured)
+    if args.strict and (counts[NATIVE_GAP] or counts[UNPROVEN]):
+        print(f"hybrid_pack: {counts[NATIVE_GAP]} native-gap and {counts[UNPROVEN]} "
+              f"unproven row(s)", file=sys.stderr)
+        return 1
+    return 0
+
+
+def self_test() -> int:
+    """Classify synthetic jars and ledgers without a game or a corpus."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="hybrid-coverage-") as tmp:
+        root = Path(tmp)
+        pack = root / "corpus"
+        pack.mkdir()
+        specs = {
+            "native.jar": "native-ok",
+            "needs.jar": "needs-loader",
+            "refused.jar": "native-gap",
+            "orphan.jar": "native-gap",
+            "old.jar": "native-gap",
+            "bare.jar": None,
+        }
+        for name in specs:
+            with zipfile.ZipFile(pack / name, "w") as jar:
+                ident = name.removesuffix(".jar")
+                jar.writestr("fabric.mod.json", json.dumps({"id": ident, "version": "1"}))
+        ledger = root / "server.txt"
+        ledger.write_text("".join(
+            f"{name}\trecommend={label}\tid={name[:-4]}\tverdict=ran\tskipped=0\n"
+            for name, label in specs.items() if label) + "summary\ttotal=4\n",
+            encoding="utf-8")
+        loader = root / "loader.txt"
+        loader.write_text(
+            "mod=needs\tversion=1\tstatus=listed\tjar=needs.jar\tmixins=3\n"
+            "mod=refused\tversion=1\tstatus=listed\tjar=refused.jar\tmixins=1\n"
+            "mod=native\tversion=1\tstatus=unlisted\tjar=native.jar\tmixins=0\n"
+            "mod=old\tversion=1\tstatus=unlisted\tjar=old.jar\tdone=false\t"
+            "error=requires minecraft 1.21.x\n"
+            "summary\tmods_found=3\tmods_listed=2\tloading_count=3\tdone=true\n",
+            encoding="utf-8")
+        rows = read_ledger(ledger)
+        evidence = read_loader_ledger(loader)
+        coverage = coverage_rows([("corpus", pack)], rows, evidence,
+                                 digests={path: f"digest-{path.name}" for path in pack.iterdir()})
+        result = {row.jar: row for row in coverage}
+        expects = {
+            "native.jar": (NATIVE_OK, NOT_NEEDED),
+            "needs.jar": (NEEDS_LOADER, PROVEN),
+            "refused.jar": (NEEDS_LOADER, PROVEN),
+            "orphan.jar": (NATIVE_GAP, UNPROVEN),
+            "old.jar": (OUT_OF_SCOPE, NOT_NEEDED),
+            "bare.jar": (NATIVE_GAP, UNPROVEN),
+        }
+        for name, (tier, proof) in expects.items():
+            row = result[name]
+            if (row.tier, row.proof) != (tier, proof):
+                print(f"self-test: {name}: expected {tier}/{proof}, got {row.tier}/{row.proof}",
+                      file=sys.stderr)
+                return 1
+        if "loader did not list" in result["native.jar"].reason:
+            print("self-test: native-ok row asked for loader proof", file=sys.stderr)
+            return 1
+        counts = coverage_counts(coverage)
+        if (counts[NATIVE_OK], counts[NEEDS_LOADER], counts[NATIVE_GAP],
+                counts[OUT_OF_SCOPE]) != (1, 2, 2, 1):
+            print(f"self-test: wrong counts {counts}", file=sys.stderr)
+            return 1
+        partial = read_loader_ledger(loader)[:1]
+        partial = [LoaderRow(row.jar, row.mod_id, row.status, row.mixins, False, row.source)
+                   for row in partial]
+        proof = classify_jar("corpus", next(jar for jar in load_pack(pack, rows)
+                                            if jar.name == "needs.jar"),
+                             "digest-needs.jar", merge_loader_evidence(partial))
+        if proof.proof != PARTIAL:
+            print(f"self-test: a listing without Done is {proof.proof}, not {PARTIAL}",
+                  file=sys.stderr)
+            return 1
+        docs = coverage_docs(coverage, [ledger, loader])
+        if "needs-loader" not in docs or "native-gap" not in docs:
+            print("self-test: docs table lost a tier", file=sys.stderr)
+            return 1
+    print("hybrid_pack --coverage self-test: ok")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("pack", type=Path, help="directory containing the pack's jars")
-    parser.add_argument("--ledger", type=Path, required=True, action="append",
+    parser.add_argument("pack", type=Path, nargs="?",
+                        help="directory containing the pack's jars")
+    parser.add_argument("--ledger", type=Path, action="append",
                         help="text ledger from java_mod_server_ledger.py (repeatable)")
+    parser.add_argument("--coverage", action="store_true",
+                        help="classify every jar in --corpus as native-ok, needs-loader or native-gap")
+    parser.add_argument("--corpus", action="append", metavar="NAME=DIR",
+                        help="corpus for --coverage (repeatable; default corpus-xl and mega)")
+    parser.add_argument("--loader-ledger", type=Path, action="append",
+                        help="loader ledger or proof ledger that demonstrates needs-loader rows")
+    parser.add_argument("--measure-proof", action="store_true",
+                        help="launch the real loader for rows that have no proof yet")
+    parser.add_argument("--proof-work", type=Path,
+                        help="scratch root for --measure-proof (default: ~/horizon-corpus/coverage-runs)")
+    parser.add_argument("--proof-universe", type=Path, action="append",
+                        help="extra jar folder whose jars may satisfy a proof run's dependencies "
+                             "(repeatable; default: the --corpus folders)")
+    parser.add_argument("--proof-loader", type=Path, action="append",
+                        help="Fabric loader for proof runs, tried in order for unproven rows "
+                             "(repeatable; default: --loader)")
+    parser.add_argument("--batch-size", type=int, default=12,
+                        help="targets per loader proof run (default: 12)")
+    parser.add_argument("--proof-timeout", type=float, default=120.0,
+                        help="seconds per loader proof run (default: 120)")
+    parser.add_argument("--max-runs", type=int, default=160,
+                        help="cap loader proof runs per corpus (default: 160)")
+    parser.add_argument("--report", type=Path,
+                        help="coverage report path (default: tools/real_mod_fixtures/LAST_CORPUS_COVERAGE.txt)")
+    parser.add_argument("--docs", type=Path,
+                        help="rewrite the generated coverage block in this markdown file")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check --coverage classification against synthetic jars and ledgers")
     parser.add_argument("--match-by-hash", action="store_true",
                         help="match an unlabelled jar to a ledger row by its content digest")
     parser.add_argument("--ledger-dir", type=Path, action="append",
@@ -926,6 +1758,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--port", type=int, default=28600)
     args = parser.parse_args(argv)
+
+    if args.self_test:
+        return self_test()
+    if args.coverage:
+        for name in ("jvm_binary", "loader", "libs", "game", "proof_work", "report", "docs"):
+            value = getattr(args, name)
+            if value is not None:
+                setattr(args, name, value.resolve())
+        if args.ledger:
+            args.ledger = [path.resolve() for path in args.ledger]
+        if args.loader_ledger:
+            args.loader_ledger = [path.resolve() for path in args.loader_ledger]
+        return coverage_main(args)
+    if not args.ledger:
+        parser.error("--ledger is required unless --coverage or --self-test is used")
+    if args.pack is None:
+        parser.error("a pack directory is required unless --coverage or --self-test is used")
 
     if not args.pack.is_dir():
         parser.error(f"pack directory does not exist: {args.pack}")
