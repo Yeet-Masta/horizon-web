@@ -200,6 +200,72 @@
 //! is outside the bounded subset.  A jar that already declares the class keeps
 //! its own copy.
 //!
+//! # Extended anchors and injectors
+//!
+//! [`weave_anchor`] takes an [`AnchorRequest`] instead of one of the fixed
+//! plans: an `@At("FIELD")`, `NEW` or `JUMP` site, the `INVOKE` selector, or
+//! `HEAD`, with `ordinal`, `@Slice`, a signed `shift`/`by` distance and an
+//! `@Inject`/`@Redirect` choice.  [`AnchorRequest::from_plan`] reads discovery's
+//! [`MixinAnchorPlan`].
+//!
+//! - `@Inject` at `FIELD`, `NEW` or `JUMP` inserts the callback immediately
+//!   before the selected instruction.  A field *write* whose callback declares
+//!   the field value gets it as the callback's last argument: the insert stores
+//!   the value in a fresh local, pushes it after the target's arguments, calls
+//!   the callback and reloads it for the write.  A write callback that does not
+//!   declare it runs above the field operands the write already pushed.
+//! - `@Redirect` at `FIELD` replaces a read with the callback's return value
+//!   (the receiver is popped first) and a write with a callback that takes the
+//!   target arguments followed by the value and returns `void`.  A `@Redirect`
+//!   at `HEAD` is the whole-body [`weave_overwrite`].
+//! - [`weave_overwrite`] replaces a method body with one `invokestatic` and the
+//!   matching `xreturn`.  The original exception table, debug tables and
+//!   stack-map frames are dropped with the body; a constructor or static
+//!   initializer is rejected because it still has to call `super`.
+//! - [`weave_modify_arg`] rewrites one argument of a selected call.  A simple
+//!   callback takes that argument alone; the insert saves the arguments above
+//!   it in fresh locals, calls the callback and loads them back.  A full
+//!   callback mirrors the entire argument list; the insert saves every
+//!   argument and reloads the list with the result in place of `index`.
+//! - [`weave_modify_variable`] hooks a `STORE` (before the store) or a `LOAD`
+//!   (after the load) of a local selected by absolute slot or by the nth access
+//!   of the callback's value type.  A value-only callback is a stack-neutral
+//!   `invokestatic`; a callback that also captures the target arguments uses a
+//!   fresh local.
+//!
+//! Fresh locals are declared in every later `StackMapTable` frame (the full
+//! frame encoding is forced so a compressed delta cannot disagree).  A shifted
+//! insert walks the same instruction-boundary bound as [`ShiftBy`], and a
+//! redirect cannot be shifted because its replacement bytes have to stay on
+//! the instruction they replace.
+//!
+//! [`weave_class_extended`] applies every family to one class, and
+//! [`weave_extended_classes`] to a class set.  Instance callbacks from *any*
+//! family are routed through the same synthetic bridge class (the bridge emits
+//! the callback's own `xreturn`, so a non-void callback works too).
+//!
+//! What remains on the interpreter path, and why:
+//!
+//! - `@Redirect` at `NEW`: replacing `new`/`dup`/`<init>` changes object
+//!   initialization, not an insert.  A bounded rewrite would have to remove the
+//!   original constructor call and leave no uninitialized reference behind.
+//! - `@Redirect` at `JUMP`: replacing a branch rewrites control flow; no
+//!   stack-neutral insert expresses it.
+//! - `@Redirect` at `INVOKE`: the insert would have to pop the receiver and
+//!   every argument into locals (including the uninitialized object of an
+//!   `invokespecial`) and rebuild the call behind the callback.
+//! - A cancellable `@Inject` at `FIELD`/`NEW`/`JUMP`: cancellation needs a
+//!   branch and a value in the target's shape, which those anchors do not have.
+//! - `@ModifyVariable` at `LOAD` with a captured argument list when a later
+//!   stack-map frame exists: a branch that skips the load reaches the frame
+//!   without the insert's fresh local, so one frame cannot describe both paths.
+//! - An `@Overwrite` whose callback takes `CallbackInfo`: a cancellable
+//!   overwrite has to answer with the descriptor's default value, which the
+//!   body-replacement shape does not construct.
+//! - `@At(shift)`/`by` on FIELD/NEW/JUMP is available through
+//!   [`AnchorRequest::shift`], but discovery's [`MixinAnchorPlan`] has no field
+//!   for it yet.
+//!
 //! # Selector modifiers
 //!
 //! [`weave_invoke_at`], [`weave_invoke_selected`], [`weave_invoke_shifted`] and
@@ -249,7 +315,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     CALLBACK_INFO_CLASS, CALLBACK_INFO_DESC, CALLBACK_INFO_RETURNABLE_CLASS,
-    CALLBACK_INFO_RETURNABLE_DESC, ClassFile, Cp, MethodRef, MixinInjectionPlan,
+    CALLBACK_INFO_RETURNABLE_DESC, ClassFile, Cp, MethodRef, MixinAnchorPlan, MixinInjectionPlan,
+    MixinModifyArgPlan, MixinModifyVariablePlan,
 };
 
 const ACC_STATIC: u16 = 0x0008;
@@ -519,6 +586,446 @@ pub struct ReturnSelector {
     pub ordinal: Option<i32>,
     /// The return instructions the ordinal counts inside.
     pub slice: Option<SliceBounds>,
+}
+
+/// Which field access an `@At("FIELD")` anchor names.
+///
+/// A selector without an opcode keeps [`Self::Any`]: it matches every read or
+/// write of the field, the way Mixin's `FIELD` anchor does when a mod does not
+/// pin the access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldAccess {
+    Get,
+    Put,
+    StaticGet,
+    StaticPut,
+    Any,
+}
+
+impl FieldAccess {
+    fn of_opcode(opcode: u8) -> Option<Self> {
+        Some(match opcode {
+            0xb2 => Self::StaticGet,
+            0xb3 => Self::StaticPut,
+            0xb4 => Self::Get,
+            0xb5 => Self::Put,
+            _ => return None,
+        })
+    }
+
+    fn is_put(self) -> bool {
+        matches!(self, Self::Put | Self::StaticPut)
+    }
+
+    fn is_static(self) -> bool {
+        matches!(self, Self::StaticGet | Self::StaticPut)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Get => "GETFIELD",
+            Self::Put => "PUTFIELD",
+            Self::StaticGet => "GETSTATIC",
+            Self::StaticPut => "PUTSTATIC",
+            Self::Any => "FIELD",
+        }
+    }
+}
+
+/// One `@At("FIELD")` site: the access kind and the field it names.
+///
+/// `owner` and `descriptor` are optional for the same reason
+/// [`InvokeSelector`]'s descriptor is: an omitted owner matches the field on
+/// any type, and an omitted descriptor matches every field of that name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldSite {
+    pub access: FieldAccess,
+    pub owner: Option<String>,
+    pub name: String,
+    pub descriptor: Option<String>,
+}
+
+impl FieldSite {
+    fn matches(&self, access: FieldAccess, owner: &str, name: &str, descriptor: &str) -> bool {
+        (self.access == FieldAccess::Any || self.access == access)
+            && self
+                .owner
+                .as_deref()
+                .is_none_or(|expected| expected == owner)
+            && self.name == name
+            && self
+                .descriptor
+                .as_deref()
+                .is_none_or(|expected| expected == descriptor)
+    }
+}
+
+/// One `@At("NEW")` site: the internal name of the constructed class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSite {
+    pub owner: String,
+}
+
+/// One `@At("JUMP")` site: an optional jump opcode and bytecode offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JumpSite {
+    pub opcode: Option<u8>,
+    pub offset: Option<usize>,
+}
+
+/// The instruction site an [`AnchorRequest`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnchorSite {
+    Field(FieldSite),
+    New(NewSite),
+    Jump(JumpSite),
+    Invoke(InvokeSelector),
+    Head,
+}
+
+impl AnchorSite {
+    fn label(&self) -> String {
+        match self {
+            Self::Field(site) => site.access.label().to_owned(),
+            Self::New(site) => format!("NEW {}", site.owner),
+            Self::Jump(site) => match (site.opcode, site.offset) {
+                (Some(opcode), Some(offset)) => {
+                    format!("JUMP {} at {offset}", opcode_name(opcode))
+                }
+                (Some(opcode), None) => format!("JUMP {}", opcode_name(opcode)),
+                (None, Some(offset)) => format!("JUMP at {offset}"),
+                (None, None) => "JUMP".to_owned(),
+            },
+            Self::Invoke(selector) => format!(
+                "INVOKE {}.{}{}",
+                selector.owner, selector.name, selector.descriptor
+            ),
+            Self::Head => "HEAD".to_owned(),
+        }
+    }
+}
+
+/// One bounded anchor rewrite: the site, its ordinal/slice/shift modifiers,
+/// and whether it is an `@Inject` (callback before the site) or a `@Redirect`
+/// (callback replaces the site).
+///
+/// [`AnchorRequest::from_plan`] builds one from discovery's
+/// [`MixinAnchorPlan`].  The plan keeps `shift`/`by` out of its fields today, so
+/// a caller that has them sets [`Self::shift`] directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorRequest {
+    pub site: AnchorSite,
+    /// `@At.ordinal` over the matching sites, negative from the end.
+    pub ordinal: Option<i32>,
+    /// `@Slice(from = ..., to = ...)`, a half-open instruction range.
+    pub slice: Option<SliceBounds>,
+    /// `@At(shift = ..., by = ...)`, a signed instruction distance from the
+    /// selected site.  Redirects cannot be shifted: their replacement bytes
+    /// have to stay on the instruction they replace.
+    pub shift: Option<ShiftBy>,
+    /// `@Redirect` instead of `@Inject`.
+    pub redirect: bool,
+    pub cancellable: bool,
+}
+
+impl AnchorRequest {
+    /// Read discovery's raw anchor plan.
+    ///
+    /// A `FIELD` selector keeps its opcode when it names one of the four access
+    /// instructions; a `NEW` selector names an internal class; a `JUMP`
+    /// selector carries its bounded opcode and numeric offset; `HEAD` is only
+    /// meaningful for a `@Redirect`, where it is the whole-body replacement
+    /// [`weave_overwrite`] emits.
+    pub fn from_plan(plan: &MixinAnchorPlan) -> Result<Self, String> {
+        let site = match plan.at.as_str() {
+            "HEAD" => AnchorSite::Head,
+            "FIELD" => {
+                let spec = plan.site.as_deref().ok_or_else(|| {
+                    "@At(\"FIELD\") has no target selector; native field anchors need owner/name/descriptor"
+                        .to_owned()
+                })?;
+                let mut site = parse_field_site(spec).ok_or_else(|| {
+                    format!(
+                        "@At(\"FIELD\") selector {spec:?} is not one of the bounded owner/name/descriptor forms"
+                    )
+                })?;
+                site.access = match plan.opcode {
+                    Some(opcode) => FieldAccess::of_opcode(opcode).ok_or_else(|| {
+                        format!(
+                            "@At(\"FIELD\") opcode {opcode} is not GETFIELD, PUTFIELD, GETSTATIC or PUTSTATIC"
+                        )
+                    })?,
+                    None => site.access,
+                };
+                AnchorSite::Field(site)
+            }
+            "NEW" => {
+                let spec = plan.site.as_deref().ok_or_else(|| {
+                    "@At(\"NEW\") has no target class; native construction anchors need a class descriptor"
+                        .to_owned()
+                })?;
+                AnchorSite::New(parse_new_site(spec).ok_or_else(|| {
+                    format!("@At(\"NEW\") selector {spec:?} is not a bounded internal class name")
+                })?)
+            }
+            "JUMP" => {
+                if plan
+                    .opcode
+                    .is_some_and(|opcode| !is_bounded_jump_opcode(opcode))
+                {
+                    return Err(format!(
+                        "@At(\"JUMP\") opcode {} is not a bounded conditional/unconditional jump",
+                        plan.opcode.unwrap_or_default()
+                    ));
+                }
+                let offset = match plan.site.as_deref() {
+                    None => None,
+                    Some(spec) => {
+                        let numeric = spec
+                            .rsplit_once(':')
+                            .map_or(spec, |(_, offset)| offset)
+                            .trim();
+                        Some(numeric.parse::<usize>().map_err(|_| {
+                            format!(
+                                "@At(\"JUMP\") selector {spec:?} is not a numeric bytecode offset"
+                            )
+                        })?)
+                    }
+                };
+                AnchorSite::Jump(JumpSite {
+                    opcode: plan.opcode,
+                    offset,
+                })
+            }
+            "INVOKE" => {
+                let spec = plan
+                    .site
+                    .as_deref()
+                    .ok_or_else(|| "@At(\"INVOKE\") has no target selector".to_owned())?;
+                let site = parse_invoke_site(spec).ok_or_else(|| {
+                    format!(
+                        "@At(\"INVOKE\") selector {spec:?} is not one of the bounded call-site forms"
+                    )
+                })?;
+                AnchorSite::Invoke(InvokeSelector {
+                    owner: site.owner,
+                    name: site.name,
+                    descriptor: site.descriptor,
+                    ordinal: None,
+                    slice: None,
+                })
+            }
+            other => {
+                return Err(format!(
+                    "native anchor weaving does not support anchor {other}; it applies HEAD, INVOKE, FIELD, NEW and JUMP"
+                ));
+            }
+        };
+        let slice = anchor_slice_bounds(plan)?;
+        Ok(Self {
+            site,
+            ordinal: plan.ordinal,
+            slice,
+            shift: None,
+            redirect: plan.redirect,
+            cancellable: plan.cancellable,
+        })
+    }
+
+    /// The request an [`InvokeSelector`] plus its modifiers describes.
+    pub fn invoke(
+        selector: InvokeSelector,
+        ordinal: Option<i32>,
+        slice: Option<SliceBounds>,
+        shift: Option<ShiftBy>,
+        cancellable: bool,
+    ) -> Self {
+        Self {
+            site: AnchorSite::Invoke(selector),
+            ordinal,
+            slice,
+            shift,
+            redirect: false,
+            cancellable,
+        }
+    }
+}
+
+/// Parse `@At("FIELD")`'s selector, accepting the forms Mixin configs write:
+/// `Lowner/Type;name:desc`, `owner/Type#name:desc`, `owner.Type.name:desc`, the
+/// owner-less `name`/`name:desc`/`#name`, and any of those without a descriptor.
+fn parse_field_site(spec: &str) -> Option<FieldSite> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.contains(char::is_whitespace) {
+        return None;
+    }
+    let (head, descriptor) = match spec.rfind(':') {
+        Some(at) => {
+            let descriptor = spec.get(at + 1..)?;
+            if !crate::valid_field_descriptor(descriptor) {
+                return None;
+            }
+            (spec.get(..at)?, Some(descriptor.to_owned()))
+        }
+        None => (spec, None),
+    };
+    let (owner, name): (Option<String>, &str) = if let Some((owner, name)) = head.split_once('#') {
+        ((!owner.is_empty()).then(|| owner.to_owned()), name)
+    } else if head.starts_with('L') && head.contains(';') {
+        let (owner, name) = head.strip_prefix('L')?.split_once(';')?;
+        if owner.is_empty() {
+            return None;
+        }
+        (Some(owner.to_owned()), name)
+    } else if let Some(at) = head.rfind('.') {
+        let owner = head.get(..at)?;
+        let name = head.get(at + 1..)?;
+        if owner.is_empty() {
+            return None;
+        }
+        (Some(owner.to_owned()), name)
+    } else {
+        (None, head)
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$'))
+    {
+        return None;
+    }
+    let owner = owner.map(|owner| owner.replace('.', "/"));
+    if owner.as_deref().is_some_and(|owner| {
+        owner.is_empty()
+            || owner.starts_with('/')
+            || owner.ends_with('/')
+            || !owner
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '$'))
+    }) {
+        return None;
+    }
+    Some(FieldSite {
+        access: FieldAccess::Any,
+        owner,
+        name: name.to_owned(),
+        descriptor,
+    })
+}
+
+/// Parse `@At("NEW")`'s internal class name.
+fn parse_new_site(spec: &str) -> Option<NewSite> {
+    let spec = spec.trim();
+    let inner = spec
+        .strip_prefix('L')
+        .and_then(|spec| spec.strip_suffix(';'))
+        .unwrap_or(spec);
+    if inner.is_empty()
+        || inner.contains(char::is_whitespace)
+        || !inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '$'))
+    {
+        return None;
+    }
+    let inner = inner.replace('.', "/");
+    (!inner.is_empty() && !inner.starts_with('/') && !inner.ends_with('/'))
+        .then_some(NewSite { owner: inner })
+}
+
+/// The jump opcodes a `@At("JUMP")` request may bound.
+fn is_bounded_jump_opcode(opcode: u8) -> bool {
+    matches!(opcode, 0x99..=0xa7 | 0xc6 | 0xc7)
+}
+
+/// Parse one `@At(value = "INVOKE", target = ...)` selector, accepting the
+/// forms Mixin configs write: an internal owner, a binary owner with dots, or
+/// an owner-less `name`, any with an optional method descriptor.  A selector
+/// without a descriptor matches every overload of the name.
+fn parse_invoke_site(spec: &str) -> Option<MethodRef> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.contains(char::is_whitespace) {
+        return None;
+    }
+    let (head, descriptor) = match spec.find('(') {
+        Some(at) => {
+            let descriptor = spec.get(at..)?;
+            if !crate::valid_method_descriptor(descriptor) {
+                return None;
+            }
+            (spec.get(..at)?, descriptor)
+        }
+        None => (spec, ""),
+    };
+    let (owner, name) = if head.contains(';') {
+        let (owner, name) = head.strip_prefix('L')?.split_once(';')?;
+        (owner, name)
+    } else if let Some((owner, name)) = head.split_once('#') {
+        (owner, name)
+    } else {
+        let at = head.rfind('.')?;
+        (head.get(..at)?, head.get(at + 1..)?)
+    };
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '<' | '>'))
+        || !owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '$'))
+    {
+        return None;
+    }
+    let owner = owner.replace('.', "/");
+    if owner.is_empty() || owner.starts_with('/') || owner.ends_with('/') {
+        return None;
+    }
+    Some(MethodRef {
+        owner,
+        name: name.to_owned(),
+        descriptor: descriptor.to_owned(),
+    })
+}
+
+/// Parse one `@Slice` boundary label (`HEAD`, `RETURN`, `TAIL`, or
+/// `INVOKE:<call site>`) exactly as discovery does.
+fn anchor_slice_selector(label: &str) -> Result<SiteSelector, String> {
+    match label {
+        "HEAD" => Ok(SiteSelector::Head),
+        "RETURN" => Ok(SiteSelector::Return),
+        "TAIL" => Ok(SiteSelector::Tail),
+        _ => {
+            let spec = label.strip_prefix("INVOKE:").ok_or_else(|| {
+                format!(
+                    "@Slice anchor {label:?} is not a bounded boundary; native slices support HEAD, RETURN, TAIL and INVOKE"
+                )
+            })?;
+            let site = parse_invoke_site(spec).ok_or_else(|| {
+                format!("@Slice INVOKE boundary {spec:?} is not one of the bounded call-site forms")
+            })?;
+            Ok(SiteSelector::Invoke {
+                owner: site.owner,
+                name: site.name,
+                descriptor: site.descriptor,
+            })
+        }
+    }
+}
+
+/// Read one anchor plan's raw `@Slice` as the bounded half-open instruction
+/// range [`SliceBounds`] names.
+fn anchor_slice_bounds(plan: &MixinAnchorPlan) -> Result<Option<SliceBounds>, String> {
+    match (plan.slice_from.as_deref(), plan.slice_to.as_deref()) {
+        (None, None) => Ok(None),
+        (Some(from), Some(to)) => Ok(Some(SliceBounds {
+            from: anchor_slice_selector(from)?,
+            to: anchor_slice_selector(to)?,
+        })),
+        _ => Err(
+            "@Slice needs both a `from` and a `to` anchor; one bound alone does not name a range"
+                .to_owned(),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2974,6 +3481,7 @@ struct SyntheticFrame {
 /// through it: branch operands, switch tables, exception table ranges,
 /// `LineNumberTable`/`LocalVariableTable`/`LocalVariableTypeTable` `start_pc`,
 /// `StackMapTable` frame deltas and `uninitialized` offsets.
+#[allow(clippy::too_many_arguments)]
 fn relocate<'a>(
     label: &str,
     target: &Target<'a>,
@@ -2988,9 +3496,65 @@ fn relocate<'a>(
     extra_frames: &[SyntheticFrame],
     pool: &mut PoolBuilder<'_>,
 ) -> Result<CodePatch<'a>, String> {
+    relocate_patched(
+        label,
+        target,
+        code,
+        scan,
+        insertions,
+        bytes,
+        max_stack,
+        max_locals,
+        entry,
+        sites,
+        extra_frames,
+        &[],
+        None,
+        pool,
+    )
+}
+
+/// [`relocate`], plus fresh locals that a later `StackMapTable` frame has to
+/// declare.
+///
+/// A frame's locals list is exact: a slot the insert writes holds that type for
+/// the rest of the method, so a frame that omitted it would claim `Top` where
+/// the verifier sees a value.  Patching the frames forces the full-frame
+/// encoding, because a compressed frame is a delta from the one in front of it.
+#[allow(clippy::too_many_arguments)]
+fn relocate_patched<'a>(
+    label: &str,
+    target: &Target<'a>,
+    code: &CodeLayout<'a>,
+    scan: &CodeScan,
+    insertions: &[(usize, usize)],
+    bytes: &[u8],
+    max_stack: u16,
+    max_locals: u16,
+    entry: TargetEntry,
+    sites: FrameSites,
+    extra_frames: &[SyntheticFrame],
+    frame_locals: &[FrameLocalPatch],
+    replace: Option<(usize, usize)>,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<CodePatch<'a>, String> {
     let insertions = validate_insertions(label, scan, code.code.len(), insertions, bytes.len())?;
     let plan = stable_plan(label, scan, &insertions, entry)?;
-    let woven = emit_woven(label, code.code, scan, &plan, &insertions, bytes, entry)?;
+    let mut woven = emit_woven(label, code.code, scan, &plan, &insertions, bytes, entry)?;
+    if let Some((at, length)) = replace {
+        let mapped = map_offset(label, &plan, at, true)?;
+        let end = mapped.checked_add(length).ok_or_else(|| {
+            format!("{label}: the replaced instruction overflows the code length")
+        })?;
+        if end > woven.len() {
+            return Err(format!(
+                "{label}: the replaced instruction at {at} does not fit the woven code"
+            ));
+        }
+        for byte in &mut woven[mapped..end] {
+            *byte = 0x00; // nop: the insert already did the access's work
+        }
+    }
     verify_woven(label, &woven)?;
 
     let mut exception_table = Vec::with_capacity(code.exception_table.len());
@@ -3054,7 +3618,7 @@ fn relocate<'a>(
         match attribute {
             CodeAttribute::StackMap { name_index, frames } => {
                 has_stack_map = true;
-                let frames = if extras.is_empty() {
+                let frames = if extras.is_empty() && frame_locals.is_empty() {
                     relocate_frames(label, frames, &plan, &insertions, sites)?
                 } else {
                     relocate_frames_full(
@@ -3065,6 +3629,7 @@ fn relocate<'a>(
                         &insertions,
                         sites,
                         &extras,
+                        frame_locals,
                         pool,
                     )?
                 };
@@ -3255,22 +3820,29 @@ fn relocate_frames_full(
     insertions: &[(usize, usize)],
     sites: FrameSites,
     extras: &[SyntheticFrame],
+    frame_locals: &[FrameLocalPatch],
     pool: &mut PoolBuilder<'_>,
 ) -> Result<Vec<StackMapFrame>, String> {
     let full = full_frames(target, frames)?;
     let mut out = Vec::with_capacity(full.len() * 2 + extras.len());
     for (offset, locals, stack) in &full {
+        let mut locals = locals.clone();
+        for patch in frame_locals {
+            if *offset > patch.after {
+                set_frame_local(&mut locals, patch.slot, &patch.value);
+            }
+        }
         if inserted_at(insertions, *offset).is_some()
             && (*offset > 0 || sites == FrameSites::InsertOnly)
         {
             let boundary = map_offset(label, plan, *offset, false)?;
-            out.push(full_frame(label, boundary, locals, stack, plan, pool)?);
+            out.push(full_frame(label, boundary, &locals, stack, plan, pool)?);
             if sites == FrameSites::InsertOnly {
                 continue;
             }
         }
         let mapped = map_offset(label, plan, *offset, true)?;
-        out.push(full_frame(label, mapped, locals, stack, plan, pool)?);
+        out.push(full_frame(label, mapped, &locals, stack, plan, pool)?);
     }
     for extra in extras {
         let mapped = if extra.at_instruction {
@@ -3791,6 +4363,21 @@ fn values_from_slots(slots: &[ValueType]) -> Vec<ValueType> {
         values.pop();
     }
     values
+}
+
+/// Declare one fresh local in a frame's locals list, padding the slots before
+/// it with `Top`.
+fn set_frame_local(locals: &mut Vec<ValueType>, slot: u16, value: &ValueType) {
+    let mut slots = slots_from_values(locals);
+    let slot = slot as usize;
+    while slots.len() < slot + value.width() {
+        slots.push(ValueType::Top);
+    }
+    slots[slot] = value.clone();
+    if value.width() == 2 {
+        slots[slot + 1] = ValueType::Top;
+    }
+    *locals = values_from_slots(&slots);
 }
 
 fn value_from_verification(
@@ -5068,7 +5655,1462 @@ fn resolve_slice(
     Ok((from, to))
 }
 
-/// Insert a `HEAD` callback at offset 0 of `target`.
+/// One instruction an extended anchor selected, with the facts the callback
+/// shape needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AnchorHitKind {
+    Field {
+        access: FieldAccess,
+        owner: String,
+        name: String,
+        descriptor: String,
+    },
+    New {
+        owner: String,
+    },
+    Jump {
+        opcode: u8,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct AnchorHit {
+    at: usize,
+    kind: AnchorHitKind,
+}
+
+/// The owner, name and descriptor one `Fieldref` names.
+fn field_ref(pool: &[Cp], index: u16) -> Option<(&str, &str, &str)> {
+    match pool.get(index as usize) {
+        Some(Cp::FieldRef { class, nt }) => {
+            let owner = pool_class_at(pool, *class)?;
+            let (name, descriptor) = pool_name_type_at(pool, *nt)?;
+            Some((owner, name, descriptor))
+        }
+        _ => None,
+    }
+}
+
+/// Every field, construction and jump instruction in the method, in file
+/// order.
+fn scan_anchor_hits(
+    label: &str,
+    target: &Target<'_>,
+    code: &CodeLayout<'_>,
+    scan: &CodeScan,
+) -> Result<Vec<AnchorHit>, String> {
+    let mut hits = Vec::new();
+    for instruction in &scan.instructions {
+        let opcode = code_u1(code.code, instruction.at)?;
+        let kind = match opcode {
+            0xb2..=0xb5 => {
+                let index = code_u2(code.code, instruction.at + 1)?;
+                let Some((owner, name, descriptor)) = field_ref(target.pool, index) else {
+                    continue;
+                };
+                AnchorHitKind::Field {
+                    access: FieldAccess::of_opcode(opcode)
+                        .expect("the field opcode range maps to a FieldAccess"),
+                    owner: owner.to_owned(),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                }
+            }
+            0xbb => {
+                let index = code_u2(code.code, instruction.at + 1)?;
+                let Some(owner) = pool_class_at(target.pool, index) else {
+                    continue;
+                };
+                AnchorHitKind::New {
+                    owner: owner.to_owned(),
+                }
+            }
+            0x99..=0xa7 | 0xc6 | 0xc7 => AnchorHitKind::Jump { opcode },
+            _ => continue,
+        };
+        hits.push(AnchorHit {
+            at: instruction.at,
+            kind,
+        });
+    }
+    let _ = label;
+    Ok(hits)
+}
+
+fn anchor_hit_matches(hit: &AnchorHitKind, site: &AnchorSite) -> bool {
+    match (hit, site) {
+        (
+            AnchorHitKind::Field {
+                access,
+                owner,
+                name,
+                descriptor,
+            },
+            AnchorSite::Field(expected),
+        ) => expected.matches(*access, owner, name, descriptor),
+        (AnchorHitKind::New { owner }, AnchorSite::New(expected)) => owner == &expected.owner,
+        (
+            AnchorHitKind::Jump { opcode },
+            AnchorSite::Jump(JumpSite {
+                opcode: expected, ..
+            }),
+        ) => expected.is_none_or(|expected| expected == *opcode),
+        _ => false,
+    }
+}
+
+/// Resolve the sites an [`AnchorRequest`] names: every matching instruction,
+/// narrowed by the slice, then the ordinal (0-based, negative from the end),
+/// then moved by the shift.
+fn select_anchor_hits(
+    label: &str,
+    target: &Target<'_>,
+    code: &CodeLayout<'_>,
+    scan: &CodeScan,
+    request: &AnchorRequest,
+) -> Result<Vec<AnchorHit>, String> {
+    let anchor = request.site.label();
+    let mut selected = scan_anchor_hits(label, target, code, scan)?
+        .into_iter()
+        .filter(|hit| anchor_hit_matches(&hit.kind, &request.site))
+        .collect::<Vec<_>>();
+    if let AnchorSite::Jump(JumpSite {
+        offset: Some(offset),
+        ..
+    }) = &request.site
+    {
+        selected.retain(|hit| hit.at == *offset);
+    }
+    if selected.is_empty() {
+        return Err(format!("{label}: {anchor} matches no instruction"));
+    }
+    if let Some(slice) = &request.slice {
+        let (from, to) = resolve_slice(label, target, code, scan, slice)?;
+        selected.retain(|hit| hit.at >= from && hit.at < to);
+        if selected.is_empty() {
+            return Err(format!(
+                "{label}: {anchor} has no matching instruction inside the slice [{from}, {to})"
+            ));
+        }
+    }
+    if let Some(ordinal) = request.ordinal {
+        let index = ordinal_index(label, anchor.as_str(), selected.len(), ordinal)?;
+        selected = vec![selected[index].clone()];
+    }
+    if let Some(shift) = request.shift {
+        if request.redirect {
+            return Err(format!(
+                "{label}: a @Redirect at {anchor} cannot be shifted; its replacement bytes have to stay on the instruction they replace"
+            ));
+        }
+        let delta = shift.distance(label)?;
+        if delta != 0 {
+            let mut moved = Vec::with_capacity(selected.len());
+            for hit in selected {
+                let at = shifted_offset(label, code, scan, hit.at, delta)?;
+                moved.push(AnchorHit { at, kind: hit.kind });
+            }
+            selected = moved;
+        }
+    }
+    selected.sort_by_key(|hit| hit.at);
+    for pair in selected.windows(2) {
+        if pair[0].at == pair[1].at {
+            return Err(format!(
+                "{label}: two {anchor} sites converge on offset {} after the shift",
+                pair[0].at
+            ));
+        }
+    }
+    Ok(selected)
+}
+
+/// A local a bytecode insert writes and every later stack-map frame has to
+/// declare, because a frame's locals list is exact.
+#[derive(Debug, Clone)]
+struct FrameLocalPatch {
+    /// Original offset of the insert that writes the local.
+    after: usize,
+    slot: u16,
+    value: ValueType,
+}
+
+/// One bytecode insert and its resource demands.
+struct SiteInsert {
+    bytes: Vec<u8>,
+    /// Operand-stack slots the insert pushes at its peak.
+    stack_extra: u16,
+    /// The highest local slot the insert reads or writes, plus one.
+    local_slots: u16,
+    /// Fresh locals the insert leaves live until something overwrites them.
+    frame_locals: Vec<(u16, ValueType)>,
+    entry: TargetEntry,
+    frames: FrameSites,
+    /// Replace the original instruction with `nop`s of the same length, so a
+    /// redirect's insert is the only thing that performs the access.
+    replace_instruction: bool,
+}
+
+/// Place one insert and encode the class.
+fn insert_once(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    at: usize,
+    insert: SiteInsert,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<Vec<u8>, String> {
+    let target = prepare_target(class, target_ref)?;
+    let label = target.label();
+    let code = target.code()?;
+    let scan = scan_code(&label, code.code)?;
+    let max_stack = u32::from(code.max_stack)
+        .checked_add(u32::from(insert.stack_extra))
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| format!("{label}: woven max_stack overflows u16"))?;
+    let max_locals = code.max_locals.max(insert.local_slots);
+    let replace = if insert.replace_instruction {
+        let instruction = scan
+            .instructions
+            .iter()
+            .find(|instruction| instruction.at == at)
+            .ok_or_else(|| {
+                format!("{label}: the redirect site at {at} is not an instruction boundary")
+            })?;
+        Some((at, instruction.size))
+    } else {
+        None
+    };
+    let frame_locals = insert
+        .frame_locals
+        .iter()
+        .map(|(slot, value)| FrameLocalPatch {
+            after: at,
+            slot: *slot,
+            value: value.clone(),
+        })
+        .collect::<Vec<_>>();
+    let patch = relocate_patched(
+        &label,
+        &target,
+        code,
+        &scan,
+        &[(at, insert.bytes.len())],
+        &insert.bytes,
+        max_stack,
+        max_locals,
+        insert.entry,
+        insert.frames,
+        &[],
+        &frame_locals,
+        replace,
+        pool,
+    )?;
+    emit(
+        &target.layout,
+        Some(Patch {
+            method: target.method_index,
+            attribute: target.attribute_index,
+            code: patch,
+        }),
+        &pool.added,
+    )
+}
+
+/// Apply one [`AnchorRequest`]'s inserts right to left, re-parsing between
+/// edits so every offset is the current one.
+///
+/// Earlier inserts do not move later offsets, so walking the selected sites in
+/// reverse keeps each `i`-th selection stable: the callback call the insert
+/// adds could otherwise become another match for a broad selector.
+fn apply_anchor_inserts<F>(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    request: &AnchorRequest,
+    mut build: F,
+) -> Result<Vec<u8>, String>
+where
+    F: FnMut(
+        &ClassFile,
+        &Target<'_>,
+        &AnchorHit,
+        &mut PoolBuilder<'_>,
+    ) -> Result<SiteInsert, String>,
+{
+    let target = prepare_target(class, target_ref)?;
+    let label = target.label();
+    let code = target.code()?;
+    let scan = scan_code(&label, code.code)?;
+    let expected = select_anchor_hits(&label, &target, code, &scan, request)?;
+    let mut current = class.write()?;
+    for index in (0..expected.len()).rev() {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        let target = prepare_target(&next, target_ref)?;
+        let label = target.label();
+        let code = target.code()?;
+        let scan = scan_code(&label, code.code)?;
+        let selected = select_anchor_hits(&label, &target, code, &scan, request)?;
+        if selected.len() != expected.len() {
+            return Err(format!(
+                "{label}: the anchor selection changed from {} to {} site(s) while weaving; the bounded weaver refuses to guess which site is which",
+                expected.len(),
+                selected.len()
+            ));
+        }
+        let hit = &selected[index];
+        if hit.kind != expected[index].kind {
+            return Err(format!(
+                "{label}: the anchor site at offset {} changed identity while weaving",
+                expected[index].at
+            ));
+        }
+        let mut pool = PoolBuilder::new(&next.pool);
+        let insert = build(&next, &target, hit, &mut pool)?;
+        current = insert_once(&next, target_ref, hit.at, insert, &mut pool)?;
+    }
+    Ok(current)
+}
+
+/// Validate one callback descriptor against a base argument list.
+///
+/// `base` is the argument list the callback must consume, in order.  An
+/// instance target additionally accepts the target instance as an extra first
+/// parameter.  With `allow_info`, a trailing plain `CallbackInfo` is accepted
+/// and the caller constructs it.
+fn callback_shape_for(
+    target: &Target<'_>,
+    base: &[String],
+    callback_descriptor: &str,
+    anchor: &str,
+    allow_info: bool,
+) -> Result<CallbackShape, String> {
+    if !crate::valid_method_descriptor(callback_descriptor) {
+        return Err(format!(
+            "callback descriptor {callback_descriptor:?} is not a method descriptor"
+        ));
+    }
+    let arguments = crate::descriptor_arguments(callback_descriptor);
+    let (core, callback_info) =
+        if allow_info && arguments.last().map(String::as_str) == Some(CALLBACK_INFO_DESC) {
+            (&arguments[..arguments.len() - 1], true)
+        } else {
+            (arguments.as_slice(), false)
+        };
+    let mut with_receiver = Vec::with_capacity(base.len() + 1);
+    if !target.is_static {
+        with_receiver.push(format!("L{};", target.class_name));
+    }
+    with_receiver.extend_from_slice(base);
+    if core == base {
+        return Ok(CallbackShape {
+            takes_receiver: false,
+            callback_info,
+        });
+    }
+    if core == with_receiver.as_slice() {
+        return Ok(CallbackShape {
+            takes_receiver: !target.is_static,
+            callback_info,
+        });
+    }
+    let detail = if arguments
+        .last()
+        .is_some_and(|argument| argument == CALLBACK_INFO_RETURNABLE_DESC)
+    {
+        " (a CallbackInfoReturnable belongs only on a non-void RETURN/TAIL insert)"
+    } else {
+        ""
+    };
+    Err(format!(
+        "{anchor} callback {callback_descriptor} does not consume the expected arguments {base:?}{detail}"
+    ))
+}
+
+/// Push the callback's receiver (when it declares one) and the target's
+/// arguments, returning the operand-stack slots they occupy.
+fn emit_argument_loads(
+    target: &Target<'_>,
+    takes_receiver: bool,
+    out: &mut Vec<u8>,
+) -> Result<u16, String> {
+    let mut slots = 0u16;
+    for load in argument_loads(target, takes_receiver)? {
+        load.emit(out);
+        slots = slots
+            .checked_add(load.span().1)
+            .ok_or("argument slot overflow")?;
+    }
+    Ok(slots)
+}
+
+/// Construct one plain `CallbackInfo` on the operand stack.
+fn emit_new_callback_info(out: &mut Vec<u8>, pool: &mut PoolBuilder<'_>) -> Result<(), String> {
+    let class = pool.class(CALLBACK_INFO_CLASS)?;
+    out.push(0xbb); // new
+    out.extend_from_slice(&class.to_be_bytes());
+    out.push(0x59); // dup
+    let init = pool.method_ref(&MethodRef {
+        owner: CALLBACK_INFO_CLASS.to_owned(),
+        name: "<init>".to_owned(),
+        descriptor: "()V".to_owned(),
+    })?;
+    out.push(0xb7); // invokespecial
+    out.extend_from_slice(&init.to_be_bytes());
+    Ok(())
+}
+
+/// Emit the callback's arguments, an optional value read from a fresh local,
+/// the optional `CallbackInfo`, and the `invokestatic`.
+fn emit_callback(
+    target: &Target<'_>,
+    callback: &MethodRef,
+    shape: CallbackShape,
+    extra: Option<(u16, &str)>,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<(Vec<u8>, u16, u16), String> {
+    let mut out = Vec::new();
+    let mut slots = emit_argument_loads(target, shape.takes_receiver, &mut out)?;
+    let mut local_slots = argument_slots(target)?;
+    if let Some((slot, descriptor)) = extra {
+        let (opcode, width) = load_opcode(descriptor)?;
+        local_opcode(&mut out, opcode, slot);
+        slots = slots.checked_add(width).ok_or("argument slot overflow")?;
+        local_slots = local_slots.max(slot.checked_add(width).ok_or("local slot overflow")?);
+    }
+    if shape.callback_info {
+        emit_new_callback_info(&mut out, pool)?;
+        slots = slots.checked_add(1).ok_or("argument slot overflow")?;
+    }
+    let index = pool.method_ref(callback)?;
+    out.push(0xb8); // invokestatic
+    out.extend_from_slice(&index.to_be_bytes());
+    Ok((out, slots, local_slots))
+}
+
+/// The `xstore` opcode and width for one value descriptor.
+fn store_opcode(descriptor: &str) -> Result<(u8, u16), String> {
+    Ok(match descriptor.as_bytes().first().copied() {
+        Some(b'I' | b'Z' | b'B' | b'C' | b'S') => (0x36, 1),
+        Some(b'J') => (0x37, 2),
+        Some(b'F') => (0x38, 1),
+        Some(b'D') => (0x39, 2),
+        Some(b'L' | b'[') => (0x3a, 1),
+        Some(b'V') | None => {
+            return Err(format!("descriptor {descriptor:?} is not a value type"));
+        }
+        Some(other) => {
+            return Err(format!(
+                "descriptor {descriptor:?} has unknown first byte {}",
+                other as char
+            ));
+        }
+    })
+}
+
+/// The `xreturn` opcode for one method return descriptor.
+fn return_opcode(descriptor: &str) -> Result<u8, String> {
+    Ok(match descriptor {
+        "V" => 0xb1,
+        "J" => 0xad,
+        "F" => 0xae,
+        "D" => 0xaf,
+        "I" | "Z" | "B" | "C" | "S" => 0xac,
+        descriptor if descriptor.starts_with('L') || descriptor.starts_with('[') => 0xb0,
+        other => return Err(format!("descriptor {other:?} is not a return type")),
+    })
+}
+
+/// Apply one bounded `@Inject` at a FIELD, NEW or JUMP site.
+///
+/// A field write whose callback declares the field value gets it as the
+/// callback's last argument: the insert stores the value in a fresh local,
+/// pushes it after the target arguments, and reloads it for the write.  A
+/// callback that does not declare it runs with the target's arguments only,
+/// above the field operands the write already pushed.
+fn weave_anchor_inject(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    callback: &MethodRef,
+    request: &AnchorRequest,
+) -> Result<Vec<u8>, String> {
+    if request.cancellable {
+        return Err(format!(
+            "{}.{}: a cancellable {} @Inject is not a bounded anchor; cancellation belongs to HEAD/RETURN/INVOKE",
+            target_ref.owner,
+            target_ref.name,
+            request.site.label()
+        ));
+    }
+    apply_anchor_inserts(class, target_ref, request, |_class, target, hit, pool| {
+        let target_arguments = crate::descriptor_arguments(&target.descriptor);
+        let plain = callback_shape_for(
+            target,
+            &target_arguments,
+            &callback.descriptor,
+            &format!("@Inject at {}", request.site.label()),
+            true,
+        );
+        let mut valued = None;
+        if let AnchorHitKind::Field {
+            access, descriptor, ..
+        } = &hit.kind
+        {
+            if access.is_put() {
+                let mut base = target_arguments.clone();
+                base.push(descriptor.clone());
+                if let Ok(shape) = callback_shape_for(
+                    target,
+                    &base,
+                    &callback.descriptor,
+                    &format!("@Inject at {}", request.site.label()),
+                    true,
+                ) {
+                    valued = Some((shape, descriptor.clone()));
+                }
+            }
+        }
+        let (shape, value_descriptor) = match valued {
+            Some((shape, descriptor)) => (shape, Some(descriptor)),
+            None => (
+                plain.map_err(|error| format!("{}.{}: {error}", target.class_name, target.name))?,
+                None,
+            ),
+        };
+        if shape.takes_receiver && target.name == "<init>" {
+            return Err(format!(
+                "{}: a {} @Inject with the target receiver would pass `this` before the constructor has called super(); the callback must take the target's arguments only",
+                target.label(),
+                request.site.label()
+            ));
+        }
+        let mut bytes = Vec::new();
+        let mut frame_locals = Vec::new();
+        let mut local_slots = argument_slots(target)?;
+        let stack_extra;
+        if let Some(descriptor) = &value_descriptor {
+            let (opcode, width) = store_opcode(descriptor)?;
+            let slot = target.code()?.max_locals;
+            local_opcode(&mut bytes, opcode, slot);
+            let (call, slots, _locals) =
+                emit_callback(target, callback, shape, Some((slot, descriptor)), pool)?;
+            bytes.extend(call);
+            let (load, load_width) = load_opcode(descriptor)?;
+            local_opcode(&mut bytes, load, slot);
+            stack_extra = slots
+                .checked_add(load_width)
+                .and_then(|value| value.checked_add(1))
+                .ok_or("argument slot overflow")?;
+            local_slots = local_slots.max(slot.checked_add(width).ok_or("local slot overflow")?);
+            frame_locals.push((slot, ValueType::from_descriptor(descriptor)?));
+        } else {
+            let (call, slots, locals) = emit_callback(target, callback, shape, None, pool)?;
+            bytes.extend(call);
+            stack_extra = slots.checked_add(1).ok_or("argument slot overflow")?;
+            local_slots = local_slots.max(locals);
+        }
+        let frames = if frame_locals.is_empty() {
+            FrameSites::Both
+        } else {
+            FrameSites::InsertOnly
+        };
+        Ok(SiteInsert {
+            bytes,
+            stack_extra,
+            local_slots,
+            frame_locals,
+            entry: TargetEntry::Enter,
+            frames,
+            replace_instruction: false,
+        })
+    })
+}
+
+/// Apply one bounded `@Redirect` at a FIELD site.
+///
+/// A read redirect removes the receiver the original access would have
+/// consumed, then calls the callback, which returns the field's value.  A write
+/// redirect stores the written value in a fresh local, removes the receiver,
+/// and calls the callback with the target arguments followed by the value; the
+/// callback's `void` return means the original write does not happen.
+fn weave_anchor_redirect(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    callback: &MethodRef,
+    request: &AnchorRequest,
+) -> Result<Vec<u8>, String> {
+    if request.cancellable {
+        return Err(format!(
+            "{}.{}: a @Redirect is not cancellable",
+            target_ref.owner, target_ref.name
+        ));
+    }
+    apply_anchor_inserts(class, target_ref, request, |_class, target, hit, pool| {
+        let AnchorHitKind::Field {
+            access, descriptor, ..
+        } = &hit.kind
+        else {
+            return Err(format!(
+                "{}: @Redirect at {} is not a bounded anchor; redirects replace FIELD reads/writes and a HEAD body",
+                target.label(),
+                request.site.label()
+            ));
+        };
+        let target_arguments = crate::descriptor_arguments(&target.descriptor);
+        let mut bytes = Vec::new();
+        let mut frame_locals = Vec::new();
+        let mut local_slots = argument_slots(target)?;
+        let stack_extra;
+        if access.is_put() {
+            let mut base = target_arguments.clone();
+            base.push(descriptor.clone());
+            let shape = callback_shape_for(
+                target,
+                &base,
+                &callback.descriptor,
+                "@Redirect at FIELD (write)",
+                false,
+            )?;
+            if crate::return_desc(&callback.descriptor) != "V" {
+                return Err(format!(
+                    "{}: a write redirect callback must return void, but {} returns {}",
+                    target.label(),
+                    callback.descriptor,
+                    crate::return_desc(&callback.descriptor)
+                ));
+            }
+            if shape.takes_receiver && target.name == "<init>" {
+                return Err(format!(
+                    "{}: a write redirect taking the target receiver would pass an uninitialized `this`",
+                    target.label()
+                ));
+            }
+            let (opcode, width) = store_opcode(descriptor)?;
+            let slot = target.code()?.max_locals;
+            local_opcode(&mut bytes, opcode, slot);
+            if !access.is_static() {
+                bytes.push(0x57); // pop the field receiver
+            }
+            let (call, slots, _locals) =
+                emit_callback(target, callback, shape, Some((slot, descriptor)), pool)?;
+            bytes.extend(call);
+            stack_extra = slots
+                .checked_add(width)
+                .and_then(|value| value.checked_add(1))
+                .ok_or("argument slot overflow")?;
+            local_slots = local_slots.max(slot.checked_add(width).ok_or("local slot overflow")?);
+            frame_locals.push((slot, ValueType::from_descriptor(descriptor)?));
+        } else {
+            let shape = callback_shape_for(
+                target,
+                &target_arguments,
+                &callback.descriptor,
+                "@Redirect at FIELD (read)",
+                false,
+            )?;
+            let expected = crate::return_desc(&callback.descriptor);
+            if expected != descriptor {
+                return Err(format!(
+                    "{}: a read redirect callback must return the field type {descriptor}, but {} returns {expected}",
+                    target.label(),
+                    callback.descriptor
+                ));
+            }
+            if shape.takes_receiver && target.name == "<init>" {
+                return Err(format!(
+                    "{}: a read redirect taking the target receiver would pass an uninitialized `this`",
+                    target.label()
+                ));
+            }
+            if !access.is_static() {
+                bytes.push(0x57); // pop the field receiver
+            }
+            let (call, slots, locals) = emit_callback(target, callback, shape, None, pool)?;
+            bytes.extend(call);
+            stack_extra = slots.checked_add(1).ok_or("argument slot overflow")?;
+            local_slots = local_slots.max(locals);
+        }
+        // A redirect replaces the access's stack effect (a read turns the
+        // receiver into the value, a write consumes the operands), so the
+        // original instruction is a `nop` and only the insert's entry keeps a
+        // frame; the instruction itself no longer starts a basic block.
+        let frames = FrameSites::InsertOnly;
+        Ok(SiteInsert {
+            bytes,
+            stack_extra,
+            local_slots,
+            frame_locals,
+            entry: TargetEntry::Enter,
+            frames,
+            replace_instruction: true,
+        })
+    })
+}
+
+/// Apply one [`AnchorRequest`] to `class`.
+///
+/// `INVOKE` delegates to the existing call-site weaver (including its
+/// ordinal/slice/shift handling), `HEAD` with `redirect` replaces the body, and
+/// every other site is a FIELD, NEW or JUMP insert or redirect as documented
+/// on [`weave_anchor_inject`] and [`weave_anchor_redirect`].
+pub fn weave_anchor(
+    class: &ClassFile,
+    target: &MethodRef,
+    callback: &MethodRef,
+    request: &AnchorRequest,
+) -> Result<Vec<u8>, String> {
+    match &request.site {
+        AnchorSite::Head => {
+            validate_head_modifiers(class, target, request)?;
+            if request.redirect {
+                weave_overwrite(class, target, callback)
+            } else {
+                weave_head_shape(class, target, callback, request.shift)
+            }
+        }
+        AnchorSite::Invoke(selector) => {
+            if request.redirect {
+                return Err(format!(
+                    "{}.{}: @Redirect at INVOKE is not emitted by the bounded weaver; the interpreter executes it and a jar rewrite would have to replace the call and its arguments",
+                    target.owner, target.name
+                ));
+            }
+            let mut selector = selector.clone();
+            selector.ordinal = request.ordinal;
+            selector.slice = request.slice.clone();
+            match request.shift {
+                Some(shift) => weave_invoke_shifted_by(
+                    class,
+                    target,
+                    callback,
+                    &selector,
+                    shift,
+                    request.cancellable,
+                ),
+                None => {
+                    weave_invoke_selected(class, target, callback, &selector, request.cancellable)
+                }
+            }
+        }
+        _ if request.redirect => weave_anchor_redirect(class, target, callback, request),
+        _ => weave_anchor_inject(class, target, callback, request),
+    }
+}
+
+/// Validate the slice and ordinal of a HEAD request without rewriting.
+fn validate_head_modifiers(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    request: &AnchorRequest,
+) -> Result<(), String> {
+    if let Some(ordinal) = request.ordinal {
+        ordinal_index(
+            &format!("{}.{}", target_ref.owner, target_ref.name),
+            "HEAD",
+            1,
+            ordinal,
+        )?;
+    }
+    if let Some(slice) = &request.slice {
+        let target = prepare_target(class, target_ref)?;
+        let label = target.label();
+        let code = target.code()?;
+        let scan = scan_code(&label, code.code)?;
+        let (from, to) = resolve_slice(&label, &target, code, &scan, slice)?;
+        if from > 0 || to == 0 {
+            return Err(format!(
+                "{label}: the slice from {} to {} does not contain the HEAD site at offset 0",
+                slice.from.describe(),
+                slice.to.describe()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Apply one discovery anchor plan.
+pub fn weave_anchor_plan(class: &ClassFile, plan: &MixinAnchorPlan) -> Result<Vec<u8>, String> {
+    let request = AnchorRequest::from_plan(plan)?;
+    weave_anchor(class, &plan.target, &plan.callback, &request)
+}
+
+/// Apply every anchor plan that targets `class`, in declaration order,
+/// re-parsing between rewrites so each plan sees the previous ones.
+///
+/// A `@Redirect` at HEAD is the whole-body replacement [`weave_overwrite`]
+/// emits; mixing one with other plans on the same target is a reason, because
+/// the body it replaces is where those plans would have inserted.
+pub fn weave_anchor_plans(class: &ClassFile, plans: &[MixinAnchorPlan]) -> Result<Vec<u8>, String> {
+    let matching = plans
+        .iter()
+        .filter(|plan| plan.target.owner == class.name)
+        .collect::<Vec<_>>();
+    for plan in &matching {
+        if plan.redirect
+            && plan.at == "HEAD"
+            && matching.iter().any(|other| {
+                other.target.name == plan.target.name
+                    && other.target.descriptor == plan.target.descriptor
+                    && !std::ptr::eq(*other, *plan)
+            })
+        {
+            return Err(format!(
+                "{}.{}: a HEAD @Redirect replaces the whole body and cannot run alongside another anchor on the same target",
+                plan.target.owner, plan.target.name
+            ));
+        }
+    }
+    let mut current = class.write()?;
+    for plan in matching {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        current = weave_anchor_plan(&next, plan)?;
+    }
+    Ok(current)
+}
+
+/// Replace a method body with one call to `callback`.
+///
+/// The callback must return the target's return type and consume the target's
+/// arguments, optionally preceded by the target instance.  The rewritten code
+/// is just the argument loads, the `invokestatic` and the matching `xreturn`;
+/// the original exception table, debug tables and stack-map frames are dropped
+/// because none of their offsets exist any more.  Constructors and static
+/// initializers are rejected: a constructor still has to call `super`, which a
+/// whole-body call cannot do.
+pub fn weave_overwrite(
+    class: &ClassFile,
+    target_ref: &MethodRef,
+    callback: &MethodRef,
+) -> Result<Vec<u8>, String> {
+    let request = AnchorRequest {
+        site: AnchorSite::Head,
+        ordinal: None,
+        slice: None,
+        shift: None,
+        redirect: true,
+        cancellable: false,
+    };
+    validate_head_modifiers(class, target_ref, &request)?;
+    let target = prepare_target(class, target_ref)?;
+    if target.name == "<init>" || target.name == "<clinit>" {
+        return Err(format!(
+            "{}: @Overwrite of a constructor or static initializer is not a bounded body replacement",
+            target.label()
+        ));
+    }
+    let arguments = crate::descriptor_arguments(&target.descriptor);
+    let shape = callback_shape_for(
+        &target,
+        &arguments,
+        &callback.descriptor,
+        "@Overwrite",
+        false,
+    )?;
+    let expected = crate::return_desc(&target.descriptor);
+    let actual = crate::return_desc(&callback.descriptor);
+    if actual != expected {
+        return Err(format!(
+            "{}: @Overwrite callback {} returns {actual}, but the target returns {expected}",
+            target.label(),
+            callback.descriptor
+        ));
+    }
+    let mut pool = PoolBuilder::new(&class.pool);
+    let mut bytes = Vec::new();
+    let slots = emit_argument_loads(&target, shape.takes_receiver, &mut bytes)?;
+    let index = pool.method_ref(callback)?;
+    bytes.push(0xb8);
+    bytes.extend_from_slice(&index.to_be_bytes());
+    bytes.push(return_opcode(expected)?);
+    let max_stack = slots.max(1);
+    let max_locals = target.code()?.max_locals.max(argument_slots(&target)?);
+    emit(
+        &target.layout,
+        Some(Patch {
+            method: target.method_index,
+            attribute: target.attribute_index,
+            code: CodePatch {
+                code: bytes,
+                max_stack,
+                max_locals,
+                exception_table: Vec::new(),
+                attributes: Vec::new(),
+            },
+        }),
+        &pool.added,
+    )
+}
+
+/// One selected `@ModifyArg` call site.
+struct ModifyArgSite {
+    at: usize,
+    descriptor: String,
+    /// Whether the selected call pushes a receiver below its arguments.
+    receiver: bool,
+}
+
+fn modify_arg_sites(
+    label: &str,
+    target: &Target<'_>,
+    code: &CodeLayout<'_>,
+    scan: &CodeScan,
+    plan: &MixinModifyArgPlan,
+) -> Result<Vec<ModifyArgSite>, String> {
+    if plan.invoke_target.descriptor.is_empty() {
+        return Err(format!(
+            "{label}: @ModifyArg needs the invoked call's full descriptor; {}.{}{} has none",
+            plan.invoke_target.owner, plan.invoke_target.name, plan.invoke_target.descriptor
+        ));
+    }
+    let mut sites = invoke_candidates(target, code, scan, &plan.invoke_target)?;
+    if sites.is_empty() {
+        return Err(format!(
+            "{label}: @ModifyArg found no {}{} call site",
+            plan.invoke_target.owner, plan.invoke_target.name
+        ));
+    }
+    if let Some(ordinal) = plan.ordinal {
+        if ordinal >= sites.len() {
+            return Err(ordinal_out_of_range(
+                label,
+                "ModifyArg INVOKE",
+                sites.len(),
+                i32::try_from(ordinal).unwrap_or(i32::MAX),
+            ));
+        }
+        sites = vec![sites.remove(ordinal)];
+    }
+    Ok(sites
+        .into_iter()
+        .map(|site| ModifyArgSite {
+            at: site.at,
+            descriptor: site.descriptor,
+            receiver: site.receiver,
+        })
+        .collect())
+}
+
+/// The stack-and-local edits that insert one argument rewrite.
+fn build_modify_arg_insert(
+    target: &Target<'_>,
+    callback: &MethodRef,
+    descriptor: &str,
+    index: usize,
+    receiver: bool,
+    temp_base: u16,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<SiteInsert, String> {
+    let arguments = crate::descriptor_arguments(descriptor);
+    let Some(value) = arguments.get(index).cloned() else {
+        return Err(format!(
+            "{}: @ModifyArg index {index} is outside the call descriptor {descriptor}",
+            target.label()
+        ));
+    };
+    let callback_arguments = crate::descriptor_arguments(&callback.descriptor);
+    let simple = callback_arguments.len() == 1 && callback_arguments[0] == value;
+    let full = callback_arguments == arguments;
+    if !simple && !full {
+        return Err(format!(
+            "{}: @ModifyArg callback {} must take the modified {value} alone or mirror the call's arguments {:?}",
+            target.label(),
+            callback.descriptor,
+            arguments
+        ));
+    }
+    if crate::return_desc(&callback.descriptor) != value {
+        return Err(format!(
+            "{}: @ModifyArg callback {} returns {} but argument {index} of the call is {value}",
+            target.label(),
+            callback.descriptor,
+            crate::return_desc(&callback.descriptor)
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    let mut frame_locals = Vec::new();
+    let mut local_slots = argument_slots(target)?;
+    let args_slots = descriptor_argument_slots(descriptor)?
+        .checked_add(u16::from(receiver))
+        .ok_or("argument slot overflow")?;
+    let mut slot = temp_base;
+    let mut stack_extra = args_slots.saturating_add(2);
+
+    if simple {
+        let mut saved = Vec::new();
+        for argument in arguments.iter().skip(index + 1) {
+            let (_, width) = store_opcode(argument)?;
+            saved.push((slot, argument.clone()));
+            slot = slot.checked_add(width).ok_or("local slot overflow")?;
+        }
+        // The operand stack has the last argument on top, so the stores run in
+        // reverse order while each value keeps the slot its position names.
+        for (saved_slot, argument) in saved.iter().rev() {
+            let (opcode, _) = store_opcode(argument)?;
+            local_opcode(&mut bytes, opcode, *saved_slot);
+        }
+        let callback_index = pool.method_ref(callback)?;
+        bytes.push(0xb8);
+        bytes.extend_from_slice(&callback_index.to_be_bytes());
+        for (saved_slot, argument) in &saved {
+            let (opcode, _) = load_opcode(argument)?;
+            local_opcode(&mut bytes, opcode, *saved_slot);
+        }
+        for (saved_slot, argument) in saved {
+            local_slots = local_slots.max(
+                saved_slot
+                    .checked_add(store_opcode(&argument)?.1)
+                    .ok_or("local slot overflow")?,
+            );
+            frame_locals.push((saved_slot, ValueType::from_descriptor(&argument)?));
+        }
+        local_slots = local_slots.max(slot);
+        // The callback consumes the value that remains on the stack and leaves
+        // its replacement there, so the peak is the call's own argument slots.
+        stack_extra = stack_extra.max(args_slots.saturating_add(1));
+    } else {
+        let mut captured = Vec::new();
+        for argument in arguments.iter() {
+            let (_, width) = store_opcode(argument)?;
+            captured.push((slot, argument.clone()));
+            slot = slot.checked_add(width).ok_or("local slot overflow")?;
+        }
+        // Last argument on top: store in reverse, keep each argument's slot.
+        for (captured_slot, argument) in captured.iter().rev() {
+            let (opcode, _) = store_opcode(argument)?;
+            local_opcode(&mut bytes, opcode, *captured_slot);
+        }
+        for (captured_slot, argument) in &captured {
+            let (opcode, _) = load_opcode(argument)?;
+            local_opcode(&mut bytes, opcode, *captured_slot);
+        }
+        let callback_index = pool.method_ref(callback)?;
+        bytes.push(0xb8);
+        bytes.extend_from_slice(&callback_index.to_be_bytes());
+        let temp = slot;
+        let (store, width) = store_opcode(&value)?;
+        local_opcode(&mut bytes, store, temp);
+        for (position, (captured_slot, argument)) in captured.iter().enumerate() {
+            if position == index {
+                let (load, _) = load_opcode(&value)?;
+                local_opcode(&mut bytes, load, temp);
+            } else {
+                let (load, _) = load_opcode(argument)?;
+                local_opcode(&mut bytes, load, *captured_slot);
+            }
+        }
+        for (captured_slot, argument) in &captured {
+            local_slots = local_slots.max(
+                captured_slot
+                    .checked_add(store_opcode(argument)?.1)
+                    .ok_or("local slot overflow")?,
+            );
+            frame_locals.push((*captured_slot, ValueType::from_descriptor(argument)?));
+        }
+        local_slots = local_slots.max(temp.checked_add(width).ok_or("local slot overflow")?);
+        frame_locals.push((temp, ValueType::from_descriptor(&value)?));
+        stack_extra = stack_extra.max(args_slots.saturating_add(2));
+    }
+    Ok(SiteInsert {
+        bytes,
+        stack_extra,
+        local_slots,
+        frame_locals,
+        entry: TargetEntry::Enter,
+        frames: FrameSites::InsertOnly,
+        replace_instruction: false,
+    })
+}
+
+/// The local slots a method descriptor's arguments occupy.
+fn descriptor_argument_slots(descriptor: &str) -> Result<u16, String> {
+    let mut slots = 0u16;
+    for argument in crate::descriptor_arguments(descriptor) {
+        let (_, width) = load_opcode(&argument)?;
+        slots = slots.checked_add(width).ok_or("argument slot overflow")?;
+    }
+    Ok(slots)
+}
+
+/// Apply one `@ModifyArg` plan.
+///
+/// The callback runs immediately before the selected call and its return value
+/// replaces argument `index`.  A simple callback takes that argument alone; the
+/// insert saves the arguments above it in fresh locals, calls the callback and
+/// loads them back.  A full callback mirrors the whole argument list; the
+/// insert saves every argument, calls the callback, and reloads the list with
+/// the result in place of `index`.
+pub fn weave_modify_arg(class: &ClassFile, plan: &MixinModifyArgPlan) -> Result<Vec<u8>, String> {
+    let target = prepare_target(class, &plan.target)?;
+    let label = target.label();
+    let code = target.code()?;
+    let scan = scan_code(&label, code.code)?;
+    let sites = modify_arg_sites(&label, &target, code, &scan, plan)?;
+    let temp_base = code.max_locals;
+    let mut current = class.write()?;
+    for position in (0..sites.len()).rev() {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        let target = prepare_target(&next, &plan.target)?;
+        let label = target.label();
+        let code = target.code()?;
+        let scan = scan_code(&label, code.code)?;
+        let selected = modify_arg_sites(&label, &target, code, &scan, plan)?;
+        if selected.len() != sites.len() {
+            return Err(format!(
+                "{label}: the @ModifyArg call-site selection changed while weaving"
+            ));
+        }
+        let site = &selected[position];
+        let mut pool = PoolBuilder::new(&next.pool);
+        let insert = build_modify_arg_insert(
+            &target,
+            &plan.callback,
+            &site.descriptor,
+            plan.index,
+            site.receiver,
+            temp_base,
+            &mut pool,
+        )?;
+        current = insert_once(&next, &plan.target, site.at, insert, &mut pool)?;
+    }
+    Ok(current)
+}
+
+/// One selected `@ModifyVariable` local access.
+struct LocalSite {
+    at: usize,
+    /// The offset of the instruction after the access, where a LOAD hook goes.
+    next: usize,
+    slot: u16,
+}
+
+/// Decode one local load/store instruction.
+fn local_access(
+    label: &str,
+    code: &[u8],
+    at: usize,
+    opcode: u8,
+) -> Result<Option<(bool, u16, ValueType)>, String> {
+    let (store, slot, value) = match opcode {
+        0x15..=0x19 => (
+            false,
+            code_u1(code, at + 1)? as u16,
+            match opcode {
+                0x15 => ValueType::Int,
+                0x16 => ValueType::Long,
+                0x17 => ValueType::Float,
+                0x18 => ValueType::Double,
+                _ => ValueType::Object("java/lang/Object".to_owned()),
+            },
+        ),
+        0x1a..=0x1d => (false, (opcode - 0x1a) as u16, ValueType::Int),
+        0x1e..=0x21 => (false, (opcode - 0x1e) as u16, ValueType::Long),
+        0x22..=0x25 => (false, (opcode - 0x22) as u16, ValueType::Float),
+        0x26..=0x29 => (false, (opcode - 0x26) as u16, ValueType::Double),
+        0x2a..=0x2d => (
+            false,
+            (opcode - 0x2a) as u16,
+            ValueType::Object("java/lang/Object".to_owned()),
+        ),
+        0x36..=0x3a => (
+            true,
+            code_u1(code, at + 1)? as u16,
+            match opcode {
+                0x36 => ValueType::Int,
+                0x37 => ValueType::Long,
+                0x38 => ValueType::Float,
+                0x39 => ValueType::Double,
+                _ => ValueType::Object("java/lang/Object".to_owned()),
+            },
+        ),
+        0x3b..=0x3e => (true, (opcode - 0x3b) as u16, ValueType::Int),
+        0x3f..=0x42 => (true, (opcode - 0x3f) as u16, ValueType::Long),
+        0x43..=0x46 => (true, (opcode - 0x43) as u16, ValueType::Float),
+        0x47..=0x4a => (true, (opcode - 0x47) as u16, ValueType::Double),
+        0x4b..=0x4e => (
+            true,
+            (opcode - 0x4b) as u16,
+            ValueType::Object("java/lang/Object".to_owned()),
+        ),
+        0xc4 => {
+            let sub = code_u1(code, at + 1)?;
+            let index = code_u2(code, at + 2)?;
+            let (store, value) = match sub {
+                0x15 => (false, ValueType::Int),
+                0x16 => (false, ValueType::Long),
+                0x17 => (false, ValueType::Float),
+                0x18 => (false, ValueType::Double),
+                0x19 => (false, ValueType::Object("java/lang/Object".to_owned())),
+                0x36 => (true, ValueType::Int),
+                0x37 => (true, ValueType::Long),
+                0x38 => (true, ValueType::Float),
+                0x39 => (true, ValueType::Double),
+                0x3a => (true, ValueType::Object("java/lang/Object".to_owned())),
+                _ => return Ok(None),
+            };
+            (store, index, value)
+        }
+        _ => return Ok(None),
+    };
+    let _ = label;
+    Ok(Some((store, slot, value)))
+}
+
+fn value_matches(callback: &ValueType, local: &ValueType) -> bool {
+    match (callback, local) {
+        (ValueType::Object(_), ValueType::Object(_)) => true,
+        (ValueType::Object(_), ValueType::Null) => true,
+        (a, b) => a == b,
+    }
+}
+
+fn local_sites(
+    label: &str,
+    target: &Target<'_>,
+    code: &CodeLayout<'_>,
+    scan: &CodeScan,
+    plan: &MixinModifyVariablePlan,
+    callback_value: &ValueType,
+) -> Result<Vec<LocalSite>, String> {
+    let want_store = plan.at == "STORE";
+    let mut sites = Vec::new();
+    for (index, instruction) in scan.instructions.iter().enumerate() {
+        let opcode = code_u1(code.code, instruction.at)?;
+        let Some((store, slot, value)) = local_access(label, code.code, instruction.at, opcode)?
+        else {
+            continue;
+        };
+        if store != want_store || !value_matches(callback_value, &value) {
+            continue;
+        }
+        let Some(next) = scan.instructions.get(index + 1).map(|next| next.at) else {
+            continue;
+        };
+        sites.push(LocalSite {
+            at: instruction.at,
+            next,
+            slot,
+        });
+    }
+    if let Some(index) = plan.index {
+        let slot = u16::try_from(index).map_err(|_| {
+            format!("{label}: @ModifyVariable index {index} exceeds the local-slot limit")
+        })?;
+        sites.retain(|site| site.slot == slot);
+    } else if let Some(ordinal) = plan.ordinal {
+        if ordinal >= sites.len() {
+            return Err(format!(
+                "{label}: @ModifyVariable ordinal {ordinal} is outside the {} matching {} site(s)",
+                sites.len(),
+                plan.at
+            ));
+        }
+        sites = vec![sites.remove(ordinal)];
+    } else {
+        return Err(format!(
+            "{label}: @ModifyVariable needs an index or an ordinal; implicit capture is not modeled"
+        ));
+    }
+    if sites.is_empty() {
+        return Err(format!(
+            "{label}: @ModifyVariable matches no {} of a value the callback accepts",
+            plan.at
+        ));
+    }
+    let _ = target;
+    Ok(sites)
+}
+
+fn build_modify_variable_insert(
+    target: &Target<'_>,
+    callback: &MethodRef,
+    callback_value: &ValueType,
+    _site: &LocalSite,
+    temp_base: u16,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<SiteInsert, String> {
+    let callback_arguments = crate::descriptor_arguments(&callback.descriptor);
+    let Some(first) = callback_arguments.first() else {
+        return Err(format!(
+            "{}: @ModifyVariable callback {} takes no value",
+            target.label(),
+            callback.descriptor
+        ));
+    };
+    let expected = match callback_value {
+        ValueType::Int => "I".to_owned(),
+        ValueType::Long => "J".to_owned(),
+        ValueType::Float => "F".to_owned(),
+        ValueType::Double => "D".to_owned(),
+        ValueType::Object(_) => first.clone(),
+        other => {
+            return Err(format!(
+                "{}: @ModifyVariable cannot match a {other:?} local",
+                target.label()
+            ));
+        }
+    };
+    if crate::return_desc(&callback.descriptor) != expected {
+        return Err(format!(
+            "{}: @ModifyVariable callback {} returns {}, not the {expected} it captures",
+            target.label(),
+            callback.descriptor,
+            crate::return_desc(&callback.descriptor)
+        ));
+    }
+    let target_arguments = crate::descriptor_arguments(&target.descriptor);
+    let captures = &callback_arguments[1..];
+    if !captures.is_empty() && captures != target_arguments.as_slice() {
+        return Err(format!(
+            "{}: @ModifyVariable callback {} must take the value alone or followed by the target arguments {target_arguments:?}",
+            target.label(),
+            callback.descriptor
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut frame_locals = Vec::new();
+    let mut local_slots = argument_slots(target)?;
+    let stack_extra = if captures.is_empty() {
+        let index = pool.method_ref(callback)?;
+        bytes.push(0xb8);
+        bytes.extend_from_slice(&index.to_be_bytes());
+        2
+    } else {
+        let (store, width) = store_opcode(&expected)?;
+        local_opcode(&mut bytes, store, temp_base);
+        // The callback's first argument is the value, then the target's
+        // arguments, so the value is loaded before them.
+        let (load, _) = load_opcode(&expected)?;
+        local_opcode(&mut bytes, load, temp_base);
+        let pushes = emit_argument_loads(target, false, &mut bytes)?;
+        let index = pool.method_ref(callback)?;
+        bytes.push(0xb8);
+        bytes.extend_from_slice(&index.to_be_bytes());
+        local_slots = local_slots.max(temp_base.checked_add(width).ok_or("local slot overflow")?);
+        let frame_value = ValueType::from_descriptor(&expected)?;
+        frame_locals.push((temp_base, frame_value));
+        pushes
+            .checked_add(width)
+            .and_then(|value| value.checked_add(2))
+            .ok_or("argument slot overflow")?
+    };
+    let frames = if frame_locals.is_empty() {
+        FrameSites::Both
+    } else {
+        FrameSites::InsertOnly
+    };
+    Ok(SiteInsert {
+        bytes,
+        stack_extra,
+        local_slots,
+        frame_locals,
+        entry: TargetEntry::Enter,
+        frames,
+        replace_instruction: false,
+    })
+}
+
+/// Whether any `StackMapTable` frame sits at or after `offset`.
+fn has_frame_at_or_after(code: &CodeLayout<'_>, offset: usize) -> bool {
+    code.attributes.iter().any(|attribute| match attribute {
+        CodeAttribute::StackMap { frames, .. } => frames.iter().any(|frame| frame.offset >= offset),
+        _ => false,
+    })
+}
+
+/// Apply one `@ModifyVariable` plan.
+///
+/// At `STORE` the callback runs before the store, so its return value is what
+/// the local receives.  At `LOAD` it runs after the load, so it replaces the
+/// loaded value on the operand stack.  A callback that also declares the target
+/// arguments is supported for a store; the same shape at a load is rejected
+/// when a later stack-map frame exists, because a branch that skips the load
+/// would reach the frame without the insert's fresh local and a single frame
+/// cannot describe both paths.
+pub fn weave_modify_variable(
+    class: &ClassFile,
+    plan: &MixinModifyVariablePlan,
+) -> Result<Vec<u8>, String> {
+    if plan.at != "STORE" && plan.at != "LOAD" {
+        return Err(format!(
+            "{}.{}: @ModifyVariable anchor {} is not bounded; use STORE or LOAD",
+            plan.target.owner, plan.target.name, plan.at
+        ));
+    }
+    let callback_arguments = crate::descriptor_arguments(&plan.callback.descriptor);
+    let Some(first) = callback_arguments.first() else {
+        return Err(format!(
+            "@ModifyVariable callback {} takes no value",
+            plan.callback.descriptor
+        ));
+    };
+    let callback_value = ValueType::from_descriptor(first)?;
+    if !callback_arguments[1..].is_empty() {
+        // Capturing the target's arguments is accepted for a store; check the
+        // load shape against the frames before any edit.
+        if plan.at == "LOAD" {
+            let target = prepare_target(class, &plan.target)?;
+            let label = target.label();
+            let code = target.code()?;
+            let scan = scan_code(&label, code.code)?;
+            let sites = local_sites(&label, &target, code, &scan, plan, &callback_value)?;
+            if sites
+                .iter()
+                .any(|site| has_frame_at_or_after(code, site.next))
+            {
+                return Err(format!(
+                    "{label}: @ModifyVariable at LOAD with a captured argument list would leave fresh locals on only the fallthrough path into a stack-map frame; the bounded weaver cannot describe both paths"
+                ));
+            }
+        }
+    }
+
+    let target = prepare_target(class, &plan.target)?;
+    let label = target.label();
+    let code = target.code()?;
+    let scan = scan_code(&label, code.code)?;
+    let sites = local_sites(&label, &target, code, &scan, plan, &callback_value)?;
+    let temp_base = code.max_locals;
+    let mut current = class.write()?;
+    for position in (0..sites.len()).rev() {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        let target = prepare_target(&next, &plan.target)?;
+        let label = target.label();
+        let code = target.code()?;
+        let scan = scan_code(&label, code.code)?;
+        let selected = local_sites(&label, &target, code, &scan, plan, &callback_value)?;
+        if selected.len() != sites.len() {
+            return Err(format!(
+                "{label}: the @ModifyVariable local selection changed while weaving"
+            ));
+        }
+        let site = &selected[position];
+        let mut pool = PoolBuilder::new(&next.pool);
+        let mut insert = build_modify_variable_insert(
+            &target,
+            &plan.callback,
+            &callback_value,
+            site,
+            temp_base,
+            &mut pool,
+        )?;
+        let at = if plan.at == "STORE" {
+            insert.entry = TargetEntry::Enter;
+            site.at
+        } else {
+            // A LOAD callback runs after the load.  `Skip` keeps a branch that
+            // targets the next instruction from entering the insert, while
+            // straight-line execution falls through it.
+            insert.entry = TargetEntry::Skip;
+            site.next
+        };
+        current = insert_once(&next, &plan.target, at, insert, &mut pool)?;
+    }
+    Ok(current)
+}
+
 ///
 /// `class` must be the class that declares `target` (`target.owner` must equal
 /// [`ClassFile::name`]).  The returned bytes are the rewritten class; the input
@@ -6318,6 +8360,23 @@ pub fn weave_invoke_plan(class: &ClassFile, plan: &MixinInjectionPlan) -> Result
     }
 }
 
+/// Convert an `@At(shift = ..., by = ...)` pair to the signed instruction
+/// distance every shifted entry point takes.
+///
+/// `Before(by)` moves `by` instructions towards the method start, so it is
+/// `-by`; `After(by)` keeps the historical "after the site" meaning, which is
+/// `by + 1` boundaries from it (`After(0)` is the next instruction).
+fn plan_shift_by(shift: InvokeShift) -> ShiftBy {
+    match shift.direction {
+        Shift::Before => ShiftBy {
+            by: -i32::from(shift.by),
+        },
+        Shift::After => ShiftBy {
+            by: i32::from(shift.by) + 1,
+        },
+    }
+}
+
 /// Apply every plan that targets `class`: `HEAD` plans first, then
 /// `RETURN`/`TAIL` plans, then `INVOKE` plans, each group in declaration order.
 ///
@@ -6375,11 +8434,36 @@ fn weave_class_with_extras_inner(
         ));
     }
     for plan in &matching {
-        if !matches!(plan.at.as_str(), "HEAD" | "RETURN" | "TAIL" | "INVOKE") {
+        if !matches!(plan.at.as_str(), "HEAD" | "RETURN" | "TAIL" | "INVOKE" | "") {
             return Err(format!(
-                "{}.{}: anchor {} is not one the bounded weaver applies; it supports HEAD, RETURN, TAIL and INVOKE",
+                "{}.{}: anchor {} is not one the bounded weaver applies; it supports HEAD, RETURN, TAIL, INVOKE and the empty @At of an @Overwrite",
                 plan.target.owner, plan.target.name, plan.at
             ));
+        }
+        if plan.at.is_empty() {
+            if plan.cancellable {
+                return Err(format!(
+                    "{}.{}: an @Overwrite replaces the whole body and is not cancellable",
+                    plan.target.owner, plan.target.name
+                ));
+            }
+            if plan.ordinal.is_some() || plan.slice.is_some() || plan.shift.is_some() {
+                return Err(format!(
+                    "{}.{}: an @Overwrite replaces the whole body, so ordinal, slice and shift do not apply",
+                    plan.target.owner, plan.target.name
+                ));
+            }
+            if matching.iter().any(|other| {
+                other.target.name == plan.target.name
+                    && other.target.descriptor == plan.target.descriptor
+                    && !other.at.is_empty()
+            }) {
+                return Err(format!(
+                    "{}.{}: an @Overwrite replaces the whole body and cannot run alongside another plan on the same target",
+                    plan.target.owner, plan.target.name
+                ));
+            }
+            continue;
         }
         // A non-void `RETURN`/`TAIL` builds the `CallbackInfoReturnable` the
         // callback cancels with; a `void` `HEAD` builds the `CallbackInfo`.
@@ -6419,10 +8503,34 @@ fn weave_class_with_extras_inner(
             .last()
             .is_some_and(|argument| argument == CALLBACK_INFO_DESC)
     });
+    for plan in resolved.iter().filter(|plan| plan.at.is_empty()) {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        current = weave_overwrite(&next, &plan.target, &plan.callback)?;
+    }
     for plan in resolved.iter().filter(|plan| plan.at == "HEAD") {
         let next = ClassFile::parse(&current)
             .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
-        current = if plan.cancellable {
+        let shift = plan.shift.map(plan_shift_by);
+        if plan.cancellable {
+            if shift.is_some() {
+                return Err(format!(
+                    "{}.{}: a cancellable HEAD insert cannot be shifted; its cancellation branch has to stay at the method entry",
+                    plan.target.owner, plan.target.name
+                ));
+            }
+            validate_head_modifiers(
+                &next,
+                &plan.target,
+                &AnchorRequest {
+                    site: AnchorSite::Head,
+                    ordinal: plan.ordinal,
+                    slice: plan.slice.clone(),
+                    shift,
+                    redirect: false,
+                    cancellable: true,
+                },
+            )?;
             needs_callback_info = true;
             if let Some(ordinal) = plan.ordinal {
                 ordinal_index(
@@ -6432,10 +8540,22 @@ fn weave_class_with_extras_inner(
                     ordinal,
                 )?;
             }
-            weave_head_cancellable(&next, &plan.target, &plan.callback)?
+            current = weave_head_cancellable(&next, &plan.target, &plan.callback)?;
         } else {
-            weave_head_selected(&next, &plan.target, &plan.callback, plan.ordinal)?
-        };
+            validate_head_modifiers(
+                &next,
+                &plan.target,
+                &AnchorRequest {
+                    site: AnchorSite::Head,
+                    ordinal: plan.ordinal,
+                    slice: plan.slice.clone(),
+                    shift,
+                    redirect: false,
+                    cancellable: false,
+                },
+            )?;
+            current = weave_head_shape(&next, &plan.target, &plan.callback, shift)?;
+        }
     }
     for plan in resolved
         .iter()
@@ -6450,17 +8570,27 @@ fn weave_class_with_extras_inner(
             .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
         let returns_value = plan_returns_value(&next, plan);
         needs_returnable |= returns_value;
-        current = if plan.ordinal.is_some() || plan.slice.is_some() {
+        let selector = ReturnSelector {
+            mode,
+            ordinal: plan.ordinal,
+            slice: plan.slice.clone(),
+        };
+        current = if let Some(shift) = plan.shift.map(plan_shift_by) {
+            weave_returns_shifted(
+                &next,
+                &plan.target,
+                &plan.callback,
+                returns_value,
+                &selector,
+                shift,
+            )?
+        } else if plan.ordinal.is_some() || plan.slice.is_some() {
             weave_returns_selected(
                 &next,
                 &plan.target,
                 &plan.callback,
                 returns_value,
-                &ReturnSelector {
-                    mode,
-                    ordinal: plan.ordinal,
-                    slice: plan.slice.clone(),
-                },
+                &selector,
             )?
         } else {
             weave_return(&next, &plan.target, &plan.callback, mode)?
@@ -6569,9 +8699,35 @@ fn bridge_instance_callbacks(
                 .insert((plan.callback.name.clone(), plan.callback.descriptor.clone()));
         }
     }
+    let (added, bridges) = build_callback_bridges(class, &by_owner)?;
+    for plan in plans.iter_mut() {
+        let key = (
+            plan.callback.owner.clone(),
+            plan.callback.name.clone(),
+            plan.callback.descriptor.clone(),
+        );
+        if let Some(bridge) = bridges.get(&key) {
+            plan.callback = bridge.clone();
+        }
+    }
+    Ok(added)
+}
+
+/// One synthetic bridge per callback owner, holding one static field per
+/// distinct callback method.
+fn build_callback_bridges(
+    class: &ClassFile,
+    by_owner: &BTreeMap<String, BTreeSet<(String, String)>>,
+) -> Result<
+    (
+        BTreeMap<String, Vec<u8>>,
+        BTreeMap<(String, String, String), MethodRef>,
+    ),
+    String,
+> {
     let mut added = BTreeMap::new();
     let mut bridges = BTreeMap::new();
-    for (owner, methods) in &by_owner {
+    for (owner, methods) in by_owner {
         let bridge_name = bridge_class_name(owner, &class.name);
         if bridge_name.len() > u16::MAX as usize {
             return Err(format!(
@@ -6594,17 +8750,7 @@ fn bridge_instance_callbacks(
             );
         }
     }
-    for plan in plans.iter_mut() {
-        let key = (
-            plan.callback.owner.clone(),
-            plan.callback.name.clone(),
-            plan.callback.descriptor.clone(),
-        );
-        if let Some(bridge) = bridges.get(&key) {
-            plan.callback = bridge.clone();
-        }
-    }
-    Ok(added)
+    Ok((added, bridges))
 }
 
 /// The class file [`bridge_instance_callbacks`] adds beside a woven target.
@@ -6633,11 +8779,7 @@ fn bridge_class(
                 "{bridge_name}: callback descriptor {descriptor_text:?} is not a method descriptor"
             ));
         }
-        if crate::return_desc(descriptor_text) != "V" {
-            return Err(format!(
-                "{bridge_name}: a callback bridge only calls void callbacks, but {name}{descriptor_text} returns a value"
-            ));
-        }
+        let return_descriptor = crate::return_desc(descriptor_text);
         let method_name = pool_utf8(&mut pool, &format!("callback{index}"));
         let install_name = pool_utf8(&mut pool, &format!("install{index}"));
         let callback_name = pool_utf8(&mut pool, name);
@@ -6654,7 +8796,7 @@ fn bridge_class(
         }
         callback_body.push(0xb6); // invokevirtual <callback>
         callback_body.extend_from_slice(&call.to_be_bytes());
-        callback_body.push(0xb1); // return
+        callback_body.push(return_opcode(return_descriptor)?);
         let mut install_body = vec![0x2a, 0xb3]; // aload_0; putstatic <field>
         install_body.extend_from_slice(&field.to_be_bytes());
         install_body.push(0xb1); // return
@@ -6664,8 +8806,14 @@ fn bridge_class(
             install_name,
             install_descriptor,
             callback_body,
-            // The receiver and every argument.
-            callback_max_stack: slot.saturating_add(1),
+            // The receiver and every argument, or the return value when it is
+            // wider (a zero-argument callback returning a long still needs two
+            // stack slots after the call).
+            callback_max_stack: slot.saturating_add(1).max(match return_descriptor {
+                "J" | "D" => 2,
+                "V" => 0,
+                _ => 1,
+            }),
             callback_max_locals: slot,
             install_body,
         });
@@ -6927,6 +9075,338 @@ pub fn weave_classes_with_extras_and_instance_callbacks(
             None => {
                 woven.classes.insert(key.clone(), class.write()?);
             }
+        }
+    }
+    let declared = classes
+        .values()
+        .map(|class| class.name.clone())
+        .collect::<BTreeSet<_>>();
+    woven.added.retain(|name, _| !declared.contains(name));
+    Ok(woven)
+}
+
+/// Every callback among the extended plan families that `classes` declares as
+/// an instance method.
+pub fn detect_extended_instance_callbacks(
+    classes: &BTreeMap<String, ClassFile>,
+    injections: &[MixinInjectionPlan],
+    anchors: &[MixinAnchorPlan],
+    modify_args: &[MixinModifyArgPlan],
+    modify_variables: &[MixinModifyVariablePlan],
+) -> Vec<MethodRef> {
+    let mut seen = BTreeSet::new();
+    let mut instance = Vec::new();
+    let mut consider = |callback: &MethodRef| {
+        if let Some(method) = classes
+            .get(&callback.owner)
+            .and_then(|class| class.method(&callback.name, &callback.descriptor))
+            && !method.is_static()
+        {
+            let key = (
+                callback.owner.clone(),
+                callback.name.clone(),
+                callback.descriptor.clone(),
+            );
+            if seen.insert(key) {
+                instance.push(callback.clone());
+            }
+        }
+    };
+    for plan in injections {
+        consider(&plan.callback);
+    }
+    for plan in anchors {
+        consider(&plan.callback);
+    }
+    for plan in modify_args {
+        consider(&plan.callback);
+    }
+    for plan in modify_variables {
+        consider(&plan.callback);
+    }
+    instance
+}
+
+/// Replace every instance callback in every extended plan family with a static
+/// bridge method, and return the bridge classes.
+fn bridge_extended_callbacks(
+    class: &ClassFile,
+    injections: &mut [MixinInjectionPlan],
+    anchors: &mut [MixinAnchorPlan],
+    modify_args: &mut [MixinModifyArgPlan],
+    modify_variables: &mut [MixinModifyVariablePlan],
+    instance_callbacks: &[MethodRef],
+) -> Result<BTreeMap<String, Vec<u8>>, String> {
+    let mut by_owner: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    let mut consider = |callback: &MethodRef| {
+        if is_instance_callback(instance_callbacks, callback) {
+            by_owner
+                .entry(callback.owner.clone())
+                .or_default()
+                .insert((callback.name.clone(), callback.descriptor.clone()));
+        }
+    };
+    for plan in injections.iter() {
+        consider(&plan.callback);
+    }
+    for plan in anchors.iter() {
+        consider(&plan.callback);
+    }
+    for plan in modify_args.iter() {
+        consider(&plan.callback);
+    }
+    for plan in modify_variables.iter() {
+        consider(&plan.callback);
+    }
+    let (added, bridges) = build_callback_bridges(class, &by_owner)?;
+    let bridged = |callback: &mut MethodRef| {
+        let key = (
+            callback.owner.clone(),
+            callback.name.clone(),
+            callback.descriptor.clone(),
+        );
+        if let Some(bridge) = bridges.get(&key) {
+            *callback = bridge.clone();
+        }
+    };
+    for plan in injections.iter_mut() {
+        bridged(&mut plan.callback);
+    }
+    for plan in anchors.iter_mut() {
+        bridged(&mut plan.callback);
+    }
+    for plan in modify_args.iter_mut() {
+        bridged(&mut plan.callback);
+    }
+    for plan in modify_variables.iter_mut() {
+        bridged(&mut plan.callback);
+    }
+    Ok(added)
+}
+
+/// Weave one class with every extended plan family.
+///
+/// `@ModifyVariable` runs first, then `@ModifyArg` and the anchor plans, then
+/// the injection family through [`weave_class_with_extras`] (so `@Overwrite`,
+/// `HEAD` shift/slice and `RETURN`/`TAIL` shift land).  The count-sensitive
+/// families therefore see the original local accesses and call sites, and each
+/// rewrite re-parses the class so every selector sees the current bytecode.
+/// Synthetic classes the rewrite references are returned in the map, including
+/// `CallbackInfo`, `CallbackInfoReturnable` and one bridge per (target, callback
+/// owner) whose callbacks are instance methods.
+pub fn weave_class_extended(
+    class: &ClassFile,
+    injections: &[MixinInjectionPlan],
+    anchors: &[MixinAnchorPlan],
+    modify_args: &[MixinModifyArgPlan],
+    modify_variables: &[MixinModifyVariablePlan],
+) -> Result<(Vec<u8>, BTreeMap<String, Vec<u8>>), String> {
+    weave_class_extended_with_instance_callbacks(
+        class,
+        injections,
+        anchors,
+        modify_args,
+        modify_variables,
+        &[],
+    )
+}
+
+/// [`weave_class_extended`] with the instance callbacks named explicitly.
+pub fn weave_class_extended_with_instance_callbacks(
+    class: &ClassFile,
+    injections: &[MixinInjectionPlan],
+    anchors: &[MixinAnchorPlan],
+    modify_args: &[MixinModifyArgPlan],
+    modify_variables: &[MixinModifyVariablePlan],
+    instance_callbacks: &[MethodRef],
+) -> Result<(Vec<u8>, BTreeMap<String, Vec<u8>>), String> {
+    let mut injections = injections
+        .iter()
+        .filter(|plan| plan.target.owner == class.name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut anchors = anchors
+        .iter()
+        .filter(|plan| plan.target.owner == class.name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut modify_args = modify_args
+        .iter()
+        .filter(|plan| plan.target.owner == class.name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut modify_variables = modify_variables
+        .iter()
+        .filter(|plan| plan.target.owner == class.name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = injections.len() + anchors.len() + modify_args.len() + modify_variables.len();
+    if total > MAX_WEAVE_PLANS_PER_CLASS {
+        return Err(format!(
+            "class {} has {total} matching extended weave plans; the bounded weaver applies at most {MAX_WEAVE_PLANS_PER_CLASS}",
+            class.name
+        ));
+    }
+    for overwrite in injections.iter().filter(|plan| plan.at.is_empty()) {
+        let same_target = |target: &MethodRef| {
+            target.name == overwrite.target.name && target.descriptor == overwrite.target.descriptor
+        };
+        if anchors.iter().any(|plan| same_target(&plan.target))
+            || modify_args.iter().any(|plan| same_target(&plan.target))
+            || modify_variables
+                .iter()
+                .any(|plan| same_target(&plan.target))
+        {
+            return Err(format!(
+                "{}.{}: an @Overwrite replaces the whole body and cannot run alongside another plan family on the same target",
+                overwrite.target.owner, overwrite.target.name
+            ));
+        }
+    }
+    let bridges = bridge_extended_callbacks(
+        class,
+        &mut injections,
+        &mut anchors,
+        &mut modify_args,
+        &mut modify_variables,
+        instance_callbacks,
+    )?;
+
+    // Count-sensitive families run first, before any insert adds a local load
+    // or a call site they would count.  Selector-based anchors then see the
+    // rewritten code, and the injection family runs last because its
+    // HEAD/RETURN/TAIL/INVOKE selectors do not depend on bytecode offsets.
+    let mut current = class.write()?;
+    for plan in &modify_variables {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        current = weave_modify_variable(&next, plan)?;
+    }
+    for plan in &modify_args {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        current = weave_modify_arg(&next, plan)?;
+    }
+    for plan in &anchors {
+        let next = ClassFile::parse(&current)
+            .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+        current = weave_anchor_plan(&next, plan)?;
+    }
+    let current_class = ClassFile::parse(&current)
+        .map_err(|error| format!("rewritten class did not parse again: {error}"))?;
+    let (current, mut added) = weave_class_with_extras_inner(&current_class, &injections, &[])?;
+    let needs_callback_info = anchors.iter().any(|plan| {
+        crate::descriptor_arguments(&plan.callback.descriptor)
+            .last()
+            .is_some_and(|argument| argument == CALLBACK_INFO_DESC)
+    });
+    if needs_callback_info {
+        added
+            .entry(CALLBACK_INFO_CLASS.to_owned())
+            .or_insert(callback_info_class()?);
+    }
+    added.extend(bridges);
+    Ok((current, added))
+}
+
+/// Weave every class in a set with all extended plan families.
+///
+/// A plan that targets a class absent from the set is an error, the way
+/// [`weave_classes_with_extras`] reports it.  Instance callbacks are detected
+/// from the class set.
+pub fn weave_extended_classes(
+    classes: &BTreeMap<String, ClassFile>,
+    injections: &[MixinInjectionPlan],
+    anchors: &[MixinAnchorPlan],
+    modify_args: &[MixinModifyArgPlan],
+    modify_variables: &[MixinModifyVariablePlan],
+) -> Result<WovenClasses, String> {
+    let instance_callbacks = detect_extended_instance_callbacks(
+        classes,
+        injections,
+        anchors,
+        modify_args,
+        modify_variables,
+    );
+    weave_extended_classes_with_instance_callbacks(
+        classes,
+        injections,
+        anchors,
+        modify_args,
+        modify_variables,
+        &instance_callbacks,
+    )
+}
+
+/// [`weave_extended_classes`] with the instance callbacks named explicitly.
+pub fn weave_extended_classes_with_instance_callbacks(
+    classes: &BTreeMap<String, ClassFile>,
+    injections: &[MixinInjectionPlan],
+    anchors: &[MixinAnchorPlan],
+    modify_args: &[MixinModifyArgPlan],
+    modify_variables: &[MixinModifyVariablePlan],
+    instance_callbacks: &[MethodRef],
+) -> Result<WovenClasses, String> {
+    for callback in instance_callbacks {
+        if let Some(method) = classes
+            .get(&callback.owner)
+            .and_then(|class| class.method(&callback.name, &callback.descriptor))
+            && method.access & ACC_PRIVATE != 0
+        {
+            return Err(format!(
+                "Mixin callback {}.{}{} is private; a synthetic bridge class cannot invoke it, so the bounded weave needs it public or package-visible",
+                callback.owner, callback.name, callback.descriptor
+            ));
+        }
+    }
+    let mut owners = BTreeSet::new();
+    for plan in injections {
+        owners.insert(plan.target.owner.as_str());
+    }
+    for plan in anchors {
+        owners.insert(plan.target.owner.as_str());
+    }
+    for plan in modify_args {
+        owners.insert(plan.target.owner.as_str());
+    }
+    for plan in modify_variables {
+        owners.insert(plan.target.owner.as_str());
+    }
+    for owner in owners {
+        if !classes.values().any(|class| class.name == owner) {
+            return Err(format!(
+                "weave plan targets class {owner}, which is not in the class set"
+            ));
+        }
+    }
+
+    let mut woven = WovenClasses::default();
+    for (key, class) in classes {
+        let owned = injections
+            .iter()
+            .any(|plan| plan.target.owner == class.name)
+            || anchors.iter().any(|plan| plan.target.owner == class.name)
+            || modify_args
+                .iter()
+                .any(|plan| plan.target.owner == class.name)
+            || modify_variables
+                .iter()
+                .any(|plan| plan.target.owner == class.name);
+        if owned {
+            let (bytes, added) = weave_class_extended_with_instance_callbacks(
+                class,
+                injections,
+                anchors,
+                modify_args,
+                modify_variables,
+                instance_callbacks,
+            )?;
+            for (name, bytes) in added {
+                woven.added.entry(name).or_insert(bytes);
+            }
+            woven.classes.insert(key.clone(), bytes);
+        } else {
+            woven.classes.insert(key.clone(), class.write()?);
         }
     }
     let declared = classes
@@ -8087,6 +10567,747 @@ public final class Driver {
         assert_eq!(
             relocated_attributes, attributes,
             "the bootstrap row keeps its handle and argument indices"
+        );
+    }
+    fn compile_java_sources(
+        javac: &std::path::Path,
+        src: &std::path::Path,
+        classes: &std::path::Path,
+        sources: &[(&str, &str)],
+    ) {
+        let mut paths = Vec::new();
+        for (name, source) in sources {
+            let path = src.join(format!("{name}.java"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, source).unwrap();
+            paths.push(path);
+        }
+        let output = std::process::Command::new(javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(classes)
+            .args(&paths)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "javac: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn read_classes(classes: &std::path::Path, names: &[&str]) -> BTreeMap<String, ClassFile> {
+        names
+            .iter()
+            .map(|name| {
+                let bytes = std::fs::read(classes.join(format!("{name}.class"))).unwrap();
+                ((*name).to_owned(), ClassFile::parse(&bytes).unwrap())
+            })
+            .collect()
+    }
+
+    fn anchor_plan(
+        target: MethodRef,
+        callback: MethodRef,
+        at: &str,
+        site: Option<&str>,
+        opcode: Option<u8>,
+        redirect: bool,
+    ) -> MixinAnchorPlan {
+        MixinAnchorPlan {
+            target,
+            callback,
+            at: at.to_owned(),
+            site: site.map(str::to_owned),
+            opcode,
+            cancellable: false,
+            ordinal: None,
+            slice_from: None,
+            slice_to: None,
+            redirect,
+        }
+    }
+
+    fn method_ref(owner: &str, name: &str, descriptor: &str) -> MethodRef {
+        MethodRef {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+            descriptor: descriptor.to_owned(),
+        }
+    }
+
+    /// Compile a target with every extended anchor family, weave it, and run
+    /// the result on a real classloader.
+    ///
+    /// The test is the verifier check for the emission shapes: FIELD inserts
+    /// (read and write), NEW, JUMP, @Overwrite, @ModifyArg, @ModifyVariable at
+    /// STORE and LOAD, and HEAD with a shift and with a slice.
+    #[test]
+    fn extended_anchors_load_on_a_real_classloader() {
+        let (Some(javac), Some(java)) = (jdk_tool("javac"), jdk_tool("java")) else {
+            eprintln!("skipping: no JDK on PATH or JAVA_HOME");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "horizon-native-java-weaver-extended-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let classes = root.join("classes");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&classes).unwrap();
+        compile_java_sources(
+            &javac,
+            &src,
+            &classes,
+            &[
+                (
+                    "demo/Anchors",
+                    r#"package demo;
+public class Anchors {
+    public static int value = 5;
+    public static int hits = 0;
+    public static int read() { return value; }
+    public static void write(int x) { value = x; }
+    public static int make() { return new Object() == null ? 0 : 1; }
+    public static int branch(int x) { if (x > 0) { return 10; } return 20; }
+    public static int overwritten(int x) { return x + 1; }
+    public static int call(int x) { return twice(x); }
+    static int twice(int x) { return x * 2; }
+    public static int store(int x) { int y = x + 1; return y * 3; }
+    public static int load(int x) { int y = x + 1; return y * 3; }
+    public static int shifted(int x) { int y = x + 1; return y * 2; }
+    public static int sliced(int x) { int y = x + 1; return y * 2; }
+    public static void writeValued(int x) { value = x; }
+    public static int writeBranch(int x) { value = x; if (x > 0) { return 1; } return 2; }
+    public static int join(int a, int b) { return pair(a, b); }
+    static int pair(int a, int b) { return a * 10 + b; }
+    public static int fullMod(int a, int b) { return pair(a, b); }
+    public static int localWithArg(int x) { int y = x + 1; if (x > 0) { return y * 3; } return 0; }
+    public static int redirectedRead(int x) { if (x > 0) { x = 1; } else { x = 2; } return value; }
+    public static void redirectedWrite(int x) { value = x; }
+}
+"#,
+                ),
+                (
+                    "demo/Cb",
+                    r#"package demo;
+public class Cb {
+    public static void onRead() { Anchors.hits += 100; }
+    public static void onWrite(int x) { Anchors.hits += 1; }
+    public static void onNew() { Anchors.hits += 1000; }
+    public static void onBranch(int x) { Anchors.hits += 10000 + x; }
+    public static void onShift(int x) { Anchors.hits += 100000 + x; }
+    public static void onSliced(int x) { Anchors.hits += 1000000 + x; }
+    public static int overwrite(int x) { return x * 10; }
+    public static int plusOne(int x) { return x + 1; }
+    public static int timesTwo(int x) { return x * 2; }
+    public static int minusOne(int x) { return x - 1; }
+    public static void onWriteValued(int x, int value) { Anchors.hits += value; }
+    public static int addB(int a, int b) { return b + 100; }
+    public static int valuePlusArg(int value, int x) { return value * 10 + x; }
+    public static int readValue(int x) { return 99; }
+    public static void dropWrite(int targetArg, int written) { Anchors.value = 42; }
+}
+"#,
+                ),
+            ],
+        );
+        let set = read_classes(&classes, &["demo/Anchors", "demo/Cb"]);
+        let mut read_plan = anchor_plan(
+            method_ref("demo/Anchors", "read", "()I"),
+            method_ref("demo/Cb", "onRead", "()V"),
+            "FIELD",
+            Some("demo/Anchors#value:I"),
+            Some(0xb2),
+            false,
+        );
+        read_plan.slice_from = Some("HEAD".to_owned());
+        read_plan.slice_to = Some("RETURN".to_owned());
+        let mut new_plan = anchor_plan(
+            method_ref("demo/Anchors", "make", "()I"),
+            method_ref("demo/Cb", "onNew", "()V"),
+            "NEW",
+            Some("java/lang/Object"),
+            None,
+            false,
+        );
+        new_plan.slice_from = Some("HEAD".to_owned());
+        new_plan.slice_to = Some("RETURN".to_owned());
+        let mut jump_plan = anchor_plan(
+            method_ref("demo/Anchors", "branch", "(I)I"),
+            method_ref("demo/Cb", "onBranch", "(I)V"),
+            "JUMP",
+            None,
+            Some(0x9e),
+            false,
+        );
+        jump_plan.slice_from = Some("HEAD".to_owned());
+        jump_plan.slice_to = Some("RETURN".to_owned());
+        let anchors = vec![
+            read_plan,
+            anchor_plan(
+                method_ref("demo/Anchors", "write", "(I)V"),
+                method_ref("demo/Cb", "onWrite", "(I)V"),
+                "FIELD",
+                Some("demo/Anchors#value:I"),
+                Some(0xb3),
+                false,
+            ),
+            anchor_plan(
+                method_ref("demo/Anchors", "writeValued", "(I)V"),
+                method_ref("demo/Cb", "onWriteValued", "(II)V"),
+                "FIELD",
+                Some("demo/Anchors#value:I"),
+                Some(0xb3),
+                false,
+            ),
+            anchor_plan(
+                method_ref("demo/Anchors", "writeBranch", "(I)I"),
+                method_ref("demo/Cb", "onWriteValued", "(II)V"),
+                "FIELD",
+                Some("demo/Anchors#value:I"),
+                Some(0xb3),
+                false,
+            ),
+            new_plan,
+            jump_plan,
+            anchor_plan(
+                method_ref("demo/Anchors", "redirectedRead", "(I)I"),
+                method_ref("demo/Cb", "readValue", "(I)I"),
+                "FIELD",
+                Some("demo/Anchors#value:I"),
+                Some(0xb2),
+                true,
+            ),
+            anchor_plan(
+                method_ref("demo/Anchors", "redirectedWrite", "(I)V"),
+                method_ref("demo/Cb", "dropWrite", "(II)V"),
+                "FIELD",
+                Some("demo/Anchors#value:I"),
+                Some(0xb3),
+                true,
+            ),
+        ];
+        let mut overwrite = MixinInjectionPlan::overwrite(
+            method_ref("demo/Anchors", "overwritten", "(I)I"),
+            method_ref("demo/Cb", "overwrite", "(I)I"),
+        );
+        let mut shifted = MixinInjectionPlan::inject_at_head(
+            method_ref("demo/Anchors", "shifted", "(I)I"),
+            method_ref("demo/Cb", "onShift", "(I)V"),
+        );
+        shifted.shift = Some(InvokeShift {
+            direction: Shift::After,
+            by: 0,
+        });
+        let mut sliced = MixinInjectionPlan::inject_at_head(
+            method_ref("demo/Anchors", "sliced", "(I)I"),
+            method_ref("demo/Cb", "onSliced", "(I)V"),
+        );
+        sliced.slice = Some(SliceBounds {
+            from: SiteSelector::Head,
+            to: SiteSelector::Return,
+        });
+        overwrite.slice = None;
+        let injections = vec![overwrite, shifted, sliced];
+        let modify_args = vec![
+            MixinModifyArgPlan {
+                target: method_ref("demo/Anchors", "call", "(I)I"),
+                callback: method_ref("demo/Cb", "plusOne", "(I)I"),
+                invoke_target: method_ref("demo/Anchors", "twice", "(I)I"),
+                index: 0,
+                ordinal: None,
+            },
+            MixinModifyArgPlan {
+                target: method_ref("demo/Anchors", "join", "(II)I"),
+                callback: method_ref("demo/Cb", "plusOne", "(I)I"),
+                invoke_target: method_ref("demo/Anchors", "pair", "(II)I"),
+                index: 0,
+                ordinal: None,
+            },
+            MixinModifyArgPlan {
+                target: method_ref("demo/Anchors", "fullMod", "(II)I"),
+                callback: method_ref("demo/Cb", "addB", "(II)I"),
+                invoke_target: method_ref("demo/Anchors", "pair", "(II)I"),
+                index: 1,
+                ordinal: None,
+            },
+        ];
+        let modify_variables = vec![
+            MixinModifyVariablePlan {
+                target: method_ref("demo/Anchors", "store", "(I)I"),
+                callback: method_ref("demo/Cb", "timesTwo", "(I)I"),
+                at: "STORE".to_owned(),
+                index: Some(1),
+                ordinal: None,
+            },
+            MixinModifyVariablePlan {
+                target: method_ref("demo/Anchors", "load", "(I)I"),
+                callback: method_ref("demo/Cb", "minusOne", "(I)I"),
+                at: "LOAD".to_owned(),
+                index: Some(1),
+                ordinal: None,
+            },
+            MixinModifyVariablePlan {
+                target: method_ref("demo/Anchors", "localWithArg", "(I)I"),
+                callback: method_ref("demo/Cb", "valuePlusArg", "(II)I"),
+                at: "STORE".to_owned(),
+                index: Some(1),
+                ordinal: None,
+            },
+        ];
+        let woven =
+            weave_extended_classes(&set, &injections, &anchors, &modify_args, &modify_variables)
+                .unwrap();
+        let runner = root.join("runner");
+        std::fs::create_dir_all(&runner).unwrap();
+        for (name, bytes) in &woven.classes {
+            write_class_file(&runner, name, bytes);
+        }
+        for (name, bytes) in &woven.added {
+            write_class_file(&runner, name, bytes);
+        }
+        let driver_src = root.join("driver-src/driven/Driver.java");
+        std::fs::create_dir_all(driver_src.parent().unwrap()).unwrap();
+        std::fs::write(
+            &driver_src,
+            r#"package driven;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+public final class Driver {
+    public static void main(String[] args) throws Exception {
+        URL[] urls = { Paths.get(args[0]).toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader())) {
+            Class<?> target = Class.forName("demo.Anchors", true, loader);
+            System.out.println(
+                target.getMethod("read").invoke(null)
+                + "," + target.getMethod("make").invoke(null)
+                + "," + target.getMethod("branch", int.class).invoke(null, Integer.valueOf(3))
+                + "," + target.getMethod("overwritten", int.class).invoke(null, Integer.valueOf(4))
+                + "," + target.getMethod("call", int.class).invoke(null, Integer.valueOf(3))
+                + "," + target.getMethod("store", int.class).invoke(null, Integer.valueOf(4))
+                + "," + target.getMethod("load", int.class).invoke(null, Integer.valueOf(4))
+                + "," + target.getMethod("shifted", int.class).invoke(null, Integer.valueOf(2))
+                + "," + target.getMethod("sliced", int.class).invoke(null, Integer.valueOf(2))
+                + "," + target.getMethod("join", int.class, int.class).invoke(null, Integer.valueOf(3), Integer.valueOf(4))
+                + "," + target.getMethod("fullMod", int.class, int.class).invoke(null, Integer.valueOf(3), Integer.valueOf(4))
+                + "," + target.getMethod("localWithArg", int.class).invoke(null, Integer.valueOf(2))
+                + "," + target.getMethod("redirectedRead", int.class).invoke(null, Integer.valueOf(1))
+                + "," + target.getField("hits").getInt(null));
+            target.getMethod("redirectedWrite", int.class).invoke(null, Integer.valueOf(8));
+            System.out.println(target.getField("value").getInt(null));
+            target.getMethod("write", int.class).invoke(null, Integer.valueOf(9));
+            target.getMethod("writeValued", int.class).invoke(null, Integer.valueOf(6));
+            target.getMethod("writeBranch", int.class).invoke(null, Integer.valueOf(7));
+            System.out.println(target.getField("value").getInt(null) + "," + target.getField("hits").getInt(null));
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let driver = root.join("driver");
+        std::fs::create_dir_all(&driver).unwrap();
+        let output = std::process::Command::new(&javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(&driver)
+            .arg(&driver_src)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "javac driver: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(&java)
+            .arg("-cp")
+            .arg(&driver)
+            .arg("driven.Driver")
+            .arg(&runner)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "java: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // read 5, make 1, branch 10, overwritten 40, call 8, store 30, load 12,
+        // shifted 6, sliced 6, join 44, fullMod 134, localWithArg 96,
+        // redirectedRead 99.  hits: 100 + 1000 + (10000+3) + (100000+2) +
+        // (1000000+2) before the first print, then +1 (write), +6 (valued
+        // write) and +7 (a valued write with a stack-map frame after it).
+        assert!(
+            stdout.contains("5,1,10,40,8,30,12,6,6,44,134,96,99,1111107"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("42"), "{stdout}");
+        assert!(stdout.contains("7,1111121"), "{stdout}");
+    }
+
+    /// `AnchorRequest.shift` moves a FIELD insert off the access instruction,
+    /// which is the seam discovery does not fill yet: `MixinAnchorPlan` has no
+    /// shift field, so the caller passes [`ShiftBy`] directly.
+    #[test]
+    fn anchor_shift_moves_a_field_insert_on_a_real_classloader() {
+        let (Some(javac), Some(java)) = (jdk_tool("javac"), jdk_tool("java")) else {
+            eprintln!("skipping: no JDK on PATH or JAVA_HOME");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "horizon-native-java-weaver-anchor-shift-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let classes = root.join("classes");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&classes).unwrap();
+        compile_java_sources(
+            &javac,
+            &src,
+            &classes,
+            &[
+                (
+                    "demo/Shifty",
+                    r#"package demo;
+public class Shifty {
+    public static int value = 4;
+    public static int hits = 0;
+    public static int readShift() { return value; }
+}
+"#,
+                ),
+                (
+                    "demo/ShiftCb",
+                    r#"package demo;
+public class ShiftCb {
+    public static void onRead() { Shifty.hits += 100; }
+}
+"#,
+                ),
+            ],
+        );
+        let bytes = std::fs::read(classes.join("demo/Shifty.class")).unwrap();
+        let class = ClassFile::parse(&bytes).unwrap();
+        let request = AnchorRequest {
+            site: AnchorSite::Field(FieldSite {
+                access: FieldAccess::StaticGet,
+                owner: Some("demo/Shifty".to_owned()),
+                name: "value".to_owned(),
+                descriptor: Some("I".to_owned()),
+            }),
+            ordinal: None,
+            slice: None,
+            shift: Some(ShiftBy { by: 1 }),
+            redirect: false,
+            cancellable: false,
+        };
+        let woven = weave_anchor(
+            &class,
+            &method_ref("demo/Shifty", "readShift", "()I"),
+            &method_ref("demo/ShiftCb", "onRead", "()V"),
+            &request,
+        )
+        .unwrap();
+        let runner = root.join("runner");
+        std::fs::create_dir_all(&runner).unwrap();
+        write_class_file(&runner, "demo/Shifty", &woven);
+        write_class_file(
+            &runner,
+            "demo/ShiftCb",
+            &std::fs::read(classes.join("demo/ShiftCb.class")).unwrap(),
+        );
+        let driver_src = root.join("driver-src/driven/Driver.java");
+        std::fs::create_dir_all(driver_src.parent().unwrap()).unwrap();
+        std::fs::write(
+            &driver_src,
+            r#"package driven;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+public final class Driver {
+    public static void main(String[] args) throws Exception {
+        URL[] urls = { Paths.get(args[0]).toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader())) {
+            Class<?> target = Class.forName("demo.Shifty", true, loader);
+            System.out.println(
+                target.getMethod("readShift").invoke(null)
+                + "," + target.getField("hits").getInt(null));
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let driver = root.join("driver");
+        std::fs::create_dir_all(&driver).unwrap();
+        let output = std::process::Command::new(&javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(&driver)
+            .arg(&driver_src)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "javac driver: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(&java)
+            .arg("-cp")
+            .arg(&driver)
+            .arg("driven.Driver")
+            .arg(&runner)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "java: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("4,100"),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// `@ModifyArg` on a constructor call rewrites an argument while the
+    /// caller's `new`/`dup` pair keeps the uninitialized reference on the
+    /// operand stack below it.
+    #[test]
+    fn modify_arg_rewrites_a_constructor_argument() {
+        let (Some(javac), Some(java)) = (jdk_tool("javac"), jdk_tool("java")) else {
+            eprintln!("skipping: no JDK on PATH or JAVA_HOME");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "horizon-native-java-weaver-ctor-arg-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let classes = root.join("classes");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&classes).unwrap();
+        compile_java_sources(
+            &javac,
+            &src,
+            &classes,
+            &[
+                (
+                    "demo/CtorTarget",
+                    r#"package demo;
+public class CtorTarget {
+    public static int make(int x) { return new Box(x).value; }
+}
+class Box { public int value; Box(int v) { value = v; } }
+"#,
+                ),
+                (
+                    "demo/CtorCb",
+                    r#"package demo;
+public class CtorCb {
+    public static int plusOne(int x) { return x + 1; }
+}
+"#,
+                ),
+            ],
+        );
+        let set = read_classes(&classes, &["demo/CtorTarget", "demo/Box", "demo/CtorCb"]);
+        let modify_args = vec![MixinModifyArgPlan {
+            target: method_ref("demo/CtorTarget", "make", "(I)I"),
+            callback: method_ref("demo/CtorCb", "plusOne", "(I)I"),
+            invoke_target: method_ref("demo/Box", "<init>", "(I)V"),
+            index: 0,
+            ordinal: None,
+        }];
+        let woven = weave_extended_classes(&set, &[], &[], &modify_args, &[]).unwrap();
+        let runner = root.join("runner");
+        std::fs::create_dir_all(&runner).unwrap();
+        for (name, bytes) in &woven.classes {
+            write_class_file(&runner, name, bytes);
+        }
+        for (name, bytes) in &woven.added {
+            write_class_file(&runner, name, bytes);
+        }
+        let driver_src = root.join("driver-src/driven/Driver.java");
+        std::fs::create_dir_all(driver_src.parent().unwrap()).unwrap();
+        std::fs::write(
+            &driver_src,
+            r#"package driven;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+public final class Driver {
+    public static void main(String[] args) throws Exception {
+        URL[] urls = { Paths.get(args[0]).toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader())) {
+            Class<?> target = Class.forName("demo.CtorTarget", true, loader);
+            System.out.println(target.getMethod("make", int.class).invoke(null, Integer.valueOf(3)));
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let driver = root.join("driver");
+        std::fs::create_dir_all(&driver).unwrap();
+        let output = std::process::Command::new(&javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(&driver)
+            .arg(&driver_src)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "javac driver: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(&java)
+            .arg("-cp")
+            .arg(&driver)
+            .arg("driven.Driver")
+            .arg(&runner)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "java: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains('4'),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// A non-void instance callback behind an `@ModifyArg` goes through the
+    /// bridge, which has to `xreturn` the value the woven call expects.
+    #[test]
+    fn an_instance_modify_arg_bridge_loads_on_a_real_classloader() {
+        let (Some(javac), Some(java)) = (jdk_tool("javac"), jdk_tool("java")) else {
+            eprintln!("skipping: no JDK on PATH or JAVA_HOME");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!(
+            "horizon-native-java-weaver-modify-bridge-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let classes = root.join("classes");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&classes).unwrap();
+        compile_java_sources(
+            &javac,
+            &src,
+            &classes,
+            &[
+                (
+                    "demo/ArgTarget",
+                    r#"package demo;
+public class ArgTarget {
+    public static int call(int x) { return twice(x); }
+    static int twice(int x) { return x * 2; }
+}
+"#,
+                ),
+                (
+                    "demo/ArgMixin",
+                    r#"package demo;
+public class ArgMixin {
+    public int plusOne(int x) { return x + 1; }
+}
+"#,
+                ),
+            ],
+        );
+        let set = read_classes(&classes, &["demo/ArgTarget", "demo/ArgMixin"]);
+        let modify_args = vec![MixinModifyArgPlan {
+            target: method_ref("demo/ArgTarget", "call", "(I)I"),
+            callback: method_ref("demo/ArgMixin", "plusOne", "(I)I"),
+            invoke_target: method_ref("demo/ArgTarget", "twice", "(I)I"),
+            index: 0,
+            ordinal: None,
+        }];
+        let woven = weave_extended_classes(&set, &[], &[], &modify_args, &[]).unwrap();
+        let bridge = woven
+            .added
+            .keys()
+            .find(|name| name.contains("HorizonBridge"))
+            .expect("a non-void bridge class")
+            .clone();
+        let runner = root.join("runner");
+        std::fs::create_dir_all(&runner).unwrap();
+        for (name, bytes) in &woven.classes {
+            write_class_file(&runner, name, bytes);
+        }
+        for (name, bytes) in &woven.added {
+            write_class_file(&runner, name, bytes);
+        }
+        let driver_src = root.join("driver-src/driven/Driver.java");
+        std::fs::create_dir_all(driver_src.parent().unwrap()).unwrap();
+        std::fs::write(
+            &driver_src,
+            r#"package driven;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Paths;
+public final class Driver {
+    public static void main(String[] args) throws Exception {
+        URL[] urls = { Paths.get(args[0]).toUri().toURL() };
+        try (URLClassLoader loader = new URLClassLoader(urls, ClassLoader.getPlatformClassLoader())) {
+            Class<?> mixin = Class.forName("demo.ArgMixin", true, loader);
+            Object instance = mixin.getDeclaredConstructor().newInstance();
+            Class<?> bridge = Class.forName(args[1], true, loader);
+            bridge.getMethod("install0", mixin).invoke(null, instance);
+            Class<?> target = Class.forName("demo.ArgTarget", true, loader);
+            System.out.println(target.getMethod("call", int.class).invoke(null, Integer.valueOf(3)));
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+        let driver = root.join("driver");
+        std::fs::create_dir_all(&driver).unwrap();
+        let output = std::process::Command::new(&javac)
+            .args(["--release", "17", "-nowarn", "-d"])
+            .arg(&driver)
+            .arg(&driver_src)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "javac driver: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = std::process::Command::new(&java)
+            .arg("-cp")
+            .arg(&driver)
+            .arg("driven.Driver")
+            .arg(&runner)
+            .arg(bridge.replace('/', "."))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "java: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // twice(3 + 1) = 8.
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains('8'),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
         );
     }
 }
