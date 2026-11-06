@@ -130,6 +130,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -171,7 +180,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -379,7 +388,7 @@ version = "0.1.0"
 dependencies = [
  "horizon-mods",
  "serde_json",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -775,6 +784,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 
 [[package]]
+name = "derive_arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "des"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -827,7 +847,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1146,6 +1166,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,7 +1401,7 @@ dependencies = [
  "wgpu",
  "winit",
  "winresource",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1456,7 +1482,7 @@ dependencies = [
  "wgpu",
  "winit",
  "xxhash-rust",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1508,7 +1534,7 @@ dependencies = [
  "ureq",
  "wgpu",
  "winit",
- "zip",
+ "zip 9.1.3",
  "zune-jpeg",
 ]
 
@@ -1589,6 +1615,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-jvm"
+version = "0.1.0"
+dependencies = [
+ "jni 0.21.1",
+ "libc",
+ "serde_json",
+ "zip 2.6.1",
+]
+
+[[package]]
 name = "horizon-mcp"
 version = "0.1.0"
 dependencies = [
@@ -1626,19 +1662,27 @@ dependencies = [
  "sha2",
  "toml",
  "wasmparser",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
 name = "horizon-narrator"
 version = "0.1.0"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
  "log",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "horizon-native-java"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -1661,7 +1705,7 @@ dependencies = [
  "sha1",
  "toml",
  "ureq",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1673,7 +1717,7 @@ dependencies = [
  "regex",
  "sha1",
  "sha2",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1738,7 +1782,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "windows-sys 0.61.2",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1764,7 +1808,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "toml",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -1775,7 +1819,7 @@ dependencies = [
  "horizon-core",
  "naga",
  "png",
- "zip",
+ "zip 9.1.3",
 ]
 
 [[package]]
@@ -2048,6 +2092,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "java-locator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c46c1fe465c59b1474e665e85e1256c3893dd00927b8d55f63b09044c1e64f"
+dependencies = [
+ "glob",
+]
+
+[[package]]
 name = "jni"
 version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2056,7 +2109,9 @@ dependencies = [
  "cesu8",
  "cfg-if",
  "combine",
+ "java-locator",
  "jni-sys 0.3.1",
+ "libloading 0.7.4",
  "log",
  "thiserror 1.0.69",
  "walkdir",
@@ -2149,7 +2204,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aae1df220ece3c0ada96b8153459b67eebe9ae9212258bb0134ae60416fdf76"
 dependencies = [
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "pkg-config",
 ]
 
@@ -2170,6 +2225,16 @@ name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+
+[[package]]
+name = "libloading"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
+dependencies = [
+ "cfg-if",
+ "winapi",
+]
 
 [[package]]
 name = "libloading"
@@ -4582,7 +4647,7 @@ dependencies = [
  "js-sys",
  "khronos-egl",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga",
  "naga-types",
@@ -5181,7 +5246,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "once_cell",
  "rustix 1.1.5",
  "x11rb-protocol",
@@ -5378,6 +5443,21 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "zip"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "flate2",
+ "indexmap",
+ "memchr",
+ "zopfli",
 ]
 
 [[package]]
