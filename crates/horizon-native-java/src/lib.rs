@@ -4879,6 +4879,124 @@ impl Host for StdHost {
                     self.ensure_mutable_collection(receiver);
                     return Ok(Value::Void);
                 }
+                (owner, "offer" | "offerLast" | "addLast", "(Ljava/lang/Object;)Z")
+                    if is_queue_owner(owner) =>
+                {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .push(value);
+                    return Ok(Value::Int(1));
+                }
+                (owner, "push" | "addFirst" | "offerFirst", "(Ljava/lang/Object;)V")
+                    if is_queue_owner(owner) =>
+                {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .insert(0, value);
+                    return Ok(Value::Void);
+                }
+                (owner, "push", "(Ljava/lang/Object;)Z") if is_queue_owner(owner) => {
+                    let value = Self::argument(r, args, 0)?.clone();
+                    self.mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default()
+                        .insert(0, value);
+                    return Ok(Value::Int(1));
+                }
+                (owner, "poll" | "pollFirst" | "pop" | "removeFirst", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if matches!(r.name.as_str(), "pop" | "removeFirst") {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values.remove(0));
+                }
+                (owner, "pollLast" | "removeLast", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "removeLast" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values.pop().unwrap_or(Value::Ref(None)));
+                }
+                (owner, "peek" | "peekFirst" | "getFirst", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "getFirst" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values[0].clone());
+                }
+                (owner, "peekLast" | "getLast", "()Ljava/lang/Object;")
+                    if is_queue_owner(owner) =>
+                {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        if r.name == "getLast" {
+                            return Err(NativeError::UncaughtException {
+                                class: "java/util/NoSuchElementException".into(),
+                                message: Some("queue is empty".into()),
+                                frame: None,
+                            });
+                        }
+                        return Ok(Value::Ref(None));
+                    }
+                    return Ok(values[values.len() - 1].clone());
+                }
+                (owner, "element", "()Ljava/lang/Object;") if is_queue_owner(owner) => {
+                    let values = self
+                        .mutable_collections
+                        .entry(marker.to_owned())
+                        .or_default();
+                    if values.is_empty() {
+                        return Err(NativeError::UncaughtException {
+                            class: "java/util/NoSuchElementException".into(),
+                            message: Some("queue is empty".into()),
+                            frame: None,
+                        });
+                    }
+                    return Ok(values[0].clone());
+                }
                 (owner, "add", "(Ljava/lang/Object;)Z") if is_list_like_owner(owner) => {
                     let value = Self::argument(r, args, 0)?.clone();
                     self.mutable_collections
@@ -9218,6 +9336,7 @@ fn is_collection_owner(owner: &str) -> bool {
     is_list_owner(owner)
         || is_set_owner(owner)
         || is_map_owner(owner)
+        || is_queue_owner(owner)
         || matches!(
             owner,
             "java/lang/Iterable"
@@ -9256,6 +9375,7 @@ fn is_list_owner(owner: &str) -> bool {
 /// mutable table arm.
 fn is_list_like_owner(owner: &str) -> bool {
     is_list_owner(owner)
+        || is_queue_owner(owner)
         || matches!(
             owner,
             "java/util/Collection"
@@ -9266,6 +9386,35 @@ fn is_list_like_owner(owner: &str) -> bool {
                 | "java/util/AbstractCollection"
                 | "java/lang/Iterable"
         )
+}
+
+/// Every queue a jar constructs directly.
+///
+/// A queue keeps its elements in the same mutable table a list uses, so
+/// `add`/`size`/`isEmpty`/`iterator` answer through the list arms. `poll`,
+/// `peek` and `push` are the queue-only members modelled above them; the
+/// table is FIFO, which is what a `PriorityQueue`'s own iteration order is not,
+/// but is a bounded order the interpreter can reproduce deterministically.
+fn is_queue_owner(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/util/Queue"
+            | "java/util/Deque"
+            | "java/util/BlockingQueue"
+            | "java/util/BlockingDeque"
+            | "java/util/concurrent/BlockingQueue"
+            | "java/util/concurrent/BlockingDeque"
+            | "java/util/PriorityQueue"
+            | "java/util/ArrayDeque"
+            | "java/util/concurrent/ConcurrentLinkedQueue"
+            | "java/util/concurrent/ConcurrentLinkedDeque"
+            | "java/util/concurrent/LinkedBlockingQueue"
+            | "java/util/concurrent/LinkedBlockingDeque"
+            | "java/util/concurrent/ArrayBlockingQueue"
+            | "java/util/concurrent/PriorityBlockingQueue"
+            | "java/util/concurrent/DelayQueue"
+            | "java/util/concurrent/SynchronousQueue"
+    )
 }
 
 /// Every concrete set a jar constructs directly.
@@ -16298,6 +16447,32 @@ impl<H: Host> Runtime<'_, H> {
         format!("{}#{}{}", field.owner, field.name, field.descriptor)
     }
 
+    /// The class that declares `field`, walking the superclass chain the way
+    /// the JVM resolves an inherited field reference.
+    ///
+    /// `javac` names the class it read the field through, which for an
+    /// inherited field is the subclass. Keying static and instance fields by
+    /// the symbolic owner would then miss the value the declaring class's
+    /// initializer stored, so both a read and a write resolve first.
+    fn field_owner(&self, field: &MethodRef) -> String {
+        let mut current = field.owner.clone();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let Some(file) = self.class(&current) else {
+                break;
+            };
+            if file.fields.iter().any(|declared| {
+                declared.name == field.name && declared.descriptor == field.descriptor
+            }) {
+                return current;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                break;
+            }
+            current = file.super_name.clone();
+        }
+        field.owner.clone()
+    }
+
     /// Resolve a class this execution may link: the running jar's own classes
     /// first, then the host's sibling-jar tables in jar-id order.
     ///
@@ -17207,6 +17382,101 @@ impl<H: Host> Runtime<'_, H> {
     /// same bounded answer the rest of the reflection surface gives instead of
     /// inventing a hierarchy. The answer is a runtime-owned `Class[]`, so a
     /// caller can index it, ask its length, or ask each element's name.
+    /// Whether an object marker is an instance of `wanted`.
+    ///
+    /// Objects are markers, so the check walks the jar's own superclass chain
+    /// and the interfaces each class declares, plus the collection, array and
+    /// enum marker namespaces the runtime itself builds. A marker that names
+    /// no class (a string, a type node) is still an `Object`, which is what the
+    /// JVM answers for a reference.
+    fn object_is_instance_of(&self, marker: &str, wanted: &str) -> bool {
+        if wanted == "java/lang/Object" {
+            return true;
+        }
+        if generic_type_instance_of(marker, wanted) {
+            return true;
+        }
+        // Collections and optionals keep their kind in the marker prefix.
+        let kind = marker.split_once('/').map_or(marker, |(kind, _)| kind);
+        let kind = kind.split_once('#').map_or(kind, |(kind, _)| kind);
+        let collection_kinds: &[&str] = match kind {
+            "list" => &[
+                "java/util/List",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            "set" => &[
+                "java/util/Set",
+                "java/util/Collection",
+                "java/lang/Iterable",
+            ],
+            "map" => &["java/util/Map"],
+            _ => &[],
+        };
+        if collection_kinds.contains(&wanted) {
+            return true;
+        }
+        if marker.starts_with("array/") {
+            return matches!(
+                wanted,
+                "java/lang/Cloneable" | "java/io/Serializable" | "java/lang/constant/Constable"
+            );
+        }
+        // An enum constant names its enum class after the prefix.
+        if let Some(rest) = marker.strip_prefix("enum/")
+            && let Some((class, _)) = rest.rsplit_once('/')
+        {
+            return self.class_is_instance(class, wanted);
+        }
+        self.class_is_instance(marker, wanted)
+    }
+
+    /// Whether `name` is `wanted` or a subclass (or implementor) of it.
+    fn class_is_instance(&self, name: &str, wanted: &str) -> bool {
+        let mut current = name
+            .split_once('#')
+            .map_or(name, |(class, _)| class)
+            .to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file
+                .interface_names()
+                .iter()
+                .any(|interface| interface == wanted || self.interface_extends(interface, wanted))
+            {
+                return true;
+            }
+            if file.super_name.is_empty() || file.super_name == current {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
+    /// Whether an interface, or one it extends, is `wanted`.
+    fn interface_extends(&self, interface: &str, wanted: &str) -> bool {
+        let mut current = interface.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            if current == wanted {
+                return true;
+            }
+            let Some(file) = self.class(&current) else {
+                return false;
+            };
+            if file.super_name.is_empty() {
+                return false;
+            }
+            current = file.super_name.clone();
+        }
+        false
+    }
+
     fn invoke_class_interfaces(
         &mut self,
         r: &MethodRef,
@@ -17956,6 +18226,42 @@ impl<H: Host> Runtime<'_, H> {
             .collect::<Vec<_>>();
         self.arrays.insert(marker.clone(), values);
         Some(Value::Ref(Some(marker)))
+    }
+
+    /// Answer the vanilla static helpers mod bootstraps call.
+    ///
+    /// `Util.make(Supplier)` and `Util.make(value, Consumer)` are shorthands
+    /// for running a lambda, and a mod's static initializer relies on the
+    /// lambda's side effect and its return value. The game class is outside the
+    /// jar, so the interpreter runs the callback itself instead of letting the
+    /// host answer a null.
+    fn invoke_game_helpers(
+        &mut self,
+        r: &MethodRef,
+        args: &[Value],
+    ) -> Result<Option<Value>, NativeError> {
+        if r.owner != "net/minecraft/util/Util" {
+            return Ok(None);
+        }
+        match (r.name.as_str(), r.descriptor.as_str()) {
+            ("make", "(Ljava/util/function/Supplier;)Ljava/lang/Object;") => {
+                let Some(callback) = args.first() else {
+                    return Ok(None);
+                };
+                Ok(Some(
+                    self.invoke_callback(callback, &[])?
+                        .unwrap_or(Value::Ref(None)),
+                ))
+            }
+            ("make", "(Ljava/lang/Object;Ljava/util/function/Consumer;)Ljava/lang/Object;") => {
+                let value = args.first().cloned().unwrap_or(Value::Ref(None));
+                if let Some(callback) = args.get(1) {
+                    self.invoke_callback(callback, std::slice::from_ref(&value))?;
+                }
+                Ok(Some(value))
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Answer `StringBuilder`/`StringBuffer` members for a builder this
@@ -20491,7 +20797,8 @@ impl<H: Host> Runtime<'_, H> {
                     // and a class marker answers `Class`. Every other marker
                     // keeps the interpreter's previous neutral answer.
                     let matches = expect_ref(&value).is_some_and(|marker| {
-                        generic_type_instance_of(marker, &wanted)
+                        self.object_is_instance_of(marker, &wanted)
+                            || generic_type_instance_of(marker, &wanted)
                             || (wanted == "java/lang/Class"
                                 && class_marker_like(marker, self.classes, &self.linked))
                     });
@@ -20505,7 +20812,14 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb2 => {
                     let i = read_u16(code, &mut pc)?;
-                    let field = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    // An inherited field is declared by a superclass, so the
+                    // read resolves through the chain before it initializes
+                    // or keys anything.
+                    let field = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     // Reading a static field initializes its declaring class
                     // first, exactly as the JVM does. Without this a jar's
                     // `ItemInit.HANGING_POT_ITEM` read from another class's
@@ -20531,7 +20845,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb3 => {
                     let i = read_u16(code, &mut pc)?;
-                    let field = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let field = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     invoke_or_catch!(at, self.ensure_initialized(&field.owner));
                     let value = pop(&mut stack, class, method, at)?;
                     let outcome = self.dispatch_field_anchor(
@@ -20550,7 +20868,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb4 => {
                     let i = read_u16(code, &mut pc)?;
-                    let r = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let r = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     let receiver = pop(&mut stack, class, method, at)?;
                     let outcome =
                         self.dispatch_field_anchor(&r, false, None, class, method, desc, at)?;
@@ -20574,7 +20896,11 @@ impl<H: Host> Runtime<'_, H> {
                 }
                 0xb5 => {
                     let i = read_u16(code, &mut pc)?;
-                    let r = file.field_ref(i)?;
+                    let symbolic = file.field_ref(i)?;
+                    let r = MethodRef {
+                        owner: self.field_owner(&symbolic),
+                        ..symbolic
+                    };
                     let value = pop(&mut stack, class, method, at)?;
                     let receiver = pop(&mut stack, class, method, at)?;
                     let outcome = self.dispatch_field_anchor(
@@ -20702,6 +21028,8 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         value
                     } else if let Some(value) = self.invoke_game_enum_values(&r, class, method) {
+                        value
+                    } else if let Some(value) = self.invoke_game_helpers(&r, &args)? {
                         value
                     } else if let Some((owner, jar_owned)) =
                         self.dispatch_owner(&r, op, receiver.as_ref())
