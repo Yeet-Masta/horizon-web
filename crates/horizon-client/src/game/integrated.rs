@@ -11,10 +11,12 @@
 use super::{
     Dim, Game, Options, PackResources, Resources, UiResources, WorldIcon,
     execution_role::ExecutionRole,
+    java_mods::{JavaCompatibilityReport, JavaLoader},
     lan::{LanSettings, Owner, SyncPreload, preload_sync_data},
     world_loading::{WorldLoader, WorldRequest},
 };
 use horizon_client::level_loading::{STATUS_RADIUS, Stage};
+use horizon_client::mod_content::ContentMod;
 use horizon_client::spans::startup;
 use horizon_client::{
     Result,
@@ -27,6 +29,7 @@ use horizon_protocol::connection::Pipe;
 use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
     net::TcpListener,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicI32, AtomicU16, AtomicU32, Ordering},
@@ -1197,6 +1200,74 @@ impl Game<'_> {
     }
 }
 
+/// The Java rows the integrated server role loaded, in load order.
+///
+/// The window builds its content root and loads the resources before this
+/// thread starts, so a server-role row cannot move into the root it already
+/// has. They wait here for the next resource reload; the registry and the
+/// declaration stores are the server's own views in the meantime.
+static SERVER_JAVA_CONTENT: Mutex<Vec<ContentMod>> = Mutex::new(Vec::new());
+
+/// The mod ids the server role kept, for tests of the hand-over.
+#[cfg(test)]
+fn server_java_rows() -> Vec<String> {
+    SERVER_JAVA_CONTENT
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|row| row.id.clone())
+        .collect()
+}
+
+/// The server thread's Java entrypoints, in the server role.
+///
+/// The window runs the client role before it loads the resources and this
+/// thread runs the server role before it opens the world: a jar's server
+/// entrypoints are separate from its client ones, and a client-only jar is
+/// refused (and skipped) by the runner here. One batch call, not one per jar:
+/// the native loader's payload registry is process-global and is reset per
+/// call.
+fn run_server_java_mods(options: &Options) -> Result<()> {
+    run_server_java_mods_with(&options.java_mods, super::java_mods::run_java_mods)
+}
+
+/// What one Java batch run returns: the rows it produced and one report per
+/// jar it started.
+type JavaBatch =
+    std::result::Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String>;
+
+fn run_server_java_mods_with<F>(paths: &[PathBuf], run: F) -> Result<()>
+where
+    F: FnOnce(&[PathBuf], ExecutionRole) -> JavaBatch,
+{
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let (content, reports) = run(paths, ExecutionRole::IntegratedServer)
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            format!("native Java integrated-server startup failed: {error}").into()
+        })?;
+    for report in &reports {
+        log::info!(
+            "Horizon: integrated-server Java compatibility {}: engine={} loader={} entrypoints={} registrations={} opaque={}",
+            report.jar.display(),
+            report.engine.name(),
+            report.loader.map_or("unknown", JavaLoader::name),
+            report.entrypoints,
+            report.registrations,
+            report.opaque
+        );
+    }
+    if !content.is_empty() {
+        log::info!(
+            "Horizon: integrated-server Java content: {} mod(s) kept for the next resource reload",
+            content.len()
+        );
+    }
+    *SERVER_JAVA_CONTENT.lock().unwrap() = content;
+    Ok(())
+}
+
 /// The server thread: a game of its own over the shared resources.
 #[allow(clippy::too_many_arguments)]
 fn serve(
@@ -1209,6 +1280,7 @@ fn serve(
     tasks: Receiver<Task>,
     ready: &Sender<Ready>,
 ) -> Result<()> {
+    run_server_java_mods(&options)?;
     // The world prepares, and the registries the server sends are read, on
     // helper threads while this one builds the server's own Game: none of
     // them reads what another makes (`integrated_open` takes them up).
@@ -1313,6 +1385,74 @@ fn refused(owner: bool, published: bool, split_seat: bool, memory: bool) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kept rows are one process-wide cell; the Java tests here take turns.
+    fn java_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The server thread runs the jars once, as one batch, in its own role: the
+    /// window already ran the client role before it loaded the resources.
+    #[test]
+    fn the_integrated_server_runs_the_java_batch_once_in_its_role() {
+        let _guard = java_test_lock();
+        let calls = std::cell::Cell::new(0);
+        let role: std::cell::Cell<Option<ExecutionRole>> = std::cell::Cell::new(None);
+        let paths = [PathBuf::from("one.jar"), PathBuf::from("two.jar")];
+        run_server_java_mods_with(&paths, |seen, kind| {
+            calls.set(calls.get() + 1);
+            role.set(Some(kind));
+            assert_eq!(seen.len(), 2, "one batch, not one call per jar");
+            Ok((Vec::new(), Vec::new()))
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(role.get(), Some(ExecutionRole::IntegratedServer));
+    }
+
+    /// No `--java-mod`: the server thread starts no Java runtime at all.
+    #[test]
+    fn the_integrated_server_without_java_mods_runs_nothing() {
+        let _guard = java_test_lock();
+        let calls = std::cell::Cell::new(0);
+        run_server_java_mods_with(&[], |_, _| {
+            calls.set(calls.get() + 1);
+            Ok((Vec::new(), Vec::new()))
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+    }
+
+    /// A failed batch stops the server thread with an error that names the side.
+    #[test]
+    fn an_integrated_java_failure_stops_the_server_thread() {
+        let _guard = java_test_lock();
+        let error = run_server_java_mods_with(&[PathBuf::from("bad.jar")], |_, _| {
+            Err("bad.jar: no native entrypoint".to_owned())
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("integrated-server"), "{error}");
+        assert!(error.contains("bad.jar"), "{error}");
+    }
+
+    /// The rows the server role declared stay for the next resource reload.
+    #[test]
+    fn the_integrated_server_keeps_its_java_rows() {
+        let _guard = java_test_lock();
+        run_server_java_mods_with(&[PathBuf::from("demo.jar")], |_, _| {
+            Ok((
+                vec![ContentMod {
+                    id: "demo".into(),
+                    content: horizon_mods::Content::declared("demo"),
+                }],
+                Vec::new(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(server_java_rows(), vec!["demo".to_owned()]);
+    }
 
     #[test]
     fn pregen_toggle_back_is_queued_while_server_is_busy() {
