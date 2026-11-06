@@ -3759,9 +3759,17 @@ impl Host for StdHost {
             ("java/util/stream/Collectors", "toList", "()Ljava/util/stream/Collector;") => {
                 Ok(Value::Ref(Some("collector/list".into())))
             }
-            ("java/util/stream/Collectors", "toSet", "()Ljava/util/stream/Collector;") => {
-                Ok(Value::Ref(Some("collector/set".into())))
-            }
+            ("java/util/stream/Collectors", "toSet", "()Ljava/util/stream/Collector;")
+            | (
+                "java/util/stream/Collectors",
+                "toUnmodifiableSet",
+                "()Ljava/util/stream/Collector;",
+            ) => Ok(Value::Ref(Some("collector/set".into()))),
+            (
+                "java/util/stream/Collectors",
+                "toUnmodifiableList",
+                "()Ljava/util/stream/Collector;",
+            ) => Ok(Value::Ref(Some("collector/list".into()))),
             // Guava's immutable collectors are the same list/set shapes.
             (
                 "com/google/common/collect/ImmutableList",
@@ -17472,7 +17480,31 @@ impl<H: Host> Runtime<'_, H> {
             .get(&callback.target.owner)
             .or_else(|| linked.get(&callback.target.owner))
         else {
-            return Ok(None);
+            // A method reference to a JDK method (`List::stream`) has no jar
+            // body. The host's own surface answers it; a collection's `stream`
+            // is the interpreter's, and the host's identity `Function.apply`
+            // would otherwise hand the receiver back unchanged.
+            let (receiver, rest) = if let Some((receiver, rest)) = callback.captures.split_first() {
+                (receiver.clone(), rest.to_vec())
+            } else if let Some((receiver, rest)) = args.split_first() {
+                (receiver.clone(), rest.to_vec())
+            } else {
+                return Ok(None);
+            };
+            if callback.target.name == "stream"
+                && callback.target.descriptor == "()Ljava/util/stream/Stream;"
+                && is_collection_owner(&callback.target.owner)
+            {
+                let values = runtime_collection_values(self.host, &receiver)?
+                    .into_iter()
+                    .map(|value| parse_collection_value(&value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(Some(self.new_stream("callback", "stream", values)));
+            }
+            return self
+                .host
+                .invoke_instance(&callback.target, &receiver, &rest)
+                .map(Some);
         };
         let Some(method) = class.method(&callback.target.name, &callback.target.descriptor) else {
             return Ok(None);
@@ -20231,6 +20263,26 @@ impl<H: Host> Runtime<'_, H> {
             };
             return Ok(Some(self.new_stream(class, method, values)));
         }
+        // `Stream.concat(first, second)` is the two-source shape a constant
+        // table builder uses; both sides are streams this runtime owns.
+        if r.owner == "java/util/stream/Stream"
+            && r.name == "concat"
+            && r.descriptor
+                == "(Ljava/util/stream/Stream;Ljava/util/stream/Stream;)Ljava/util/stream/Stream;"
+        {
+            let mut values = self
+                .stream(args.first().ok_or_else(|| {
+                    NativeError::Metadata("Stream.concat needs a first stream".into())
+                })?)?
+                .clone();
+            values.extend(
+                self.stream(args.get(1).ok_or_else(|| {
+                    NativeError::Metadata("Stream.concat needs a second stream".into())
+                })?)?
+                .clone(),
+            );
+            return Ok(Some(self.new_stream(class, method, values)));
+        }
         // `ServiceLoader.stream()` hands out one `Provider` per seeded
         // service entry; the provider marker names its implementation class
         // so the following `Provider.get` can build the real instance.
@@ -20303,6 +20355,27 @@ impl<H: Host> Runtime<'_, H> {
                     }
                 }
                 self.new_stream(class, method, filtered)
+            }
+            ("flatMap", "(Ljava/util/function/Function;)Ljava/util/stream/Stream;") => {
+                let callback = StdHost::argument(r, args, 0)?;
+                let mut flattened = Vec::new();
+                for value in &values {
+                    let mapped =
+                        match self.invoke_callback(callback, std::slice::from_ref(value))? {
+                            Some(result) => result,
+                            None => self.host.invoke_instance(
+                                &MethodRef {
+                                    owner: "java/util/function/Function".into(),
+                                    name: "apply".into(),
+                                    descriptor: "(Ljava/lang/Object;)Ljava/lang/Object;".into(),
+                                },
+                                callback,
+                                std::slice::from_ref(value),
+                            )?,
+                        };
+                    flattened.extend(self.stream(&mapped)?.clone());
+                }
+                self.new_stream(class, method, flattened)
             }
             ("distinct", "()Ljava/util/stream/Stream;") => {
                 let mut distinct = Vec::with_capacity(values.len());
@@ -20430,6 +20503,10 @@ impl<H: Host> Runtime<'_, H> {
                         let parts = payload.split('\u{1f}').collect::<Vec<_>>();
                         let (prefix, delimiter, suffix) = match parts.as_slice() {
                             [delimiter] => ("", *delimiter, ""),
+                            // `joining(delimiter)` writes the empty prefix
+                            // before the separator, so its payload splits into
+                            // an empty head and the delimiter.
+                            ["", delimiter] => ("", *delimiter, ""),
                             [prefix, delimiter, suffix] => (*prefix, *delimiter, *suffix),
                             _ => return Ok(None),
                         };

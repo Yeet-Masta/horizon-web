@@ -141,6 +141,17 @@ public final class Probe {
             + numbers[3];
     }
 
+    public static String streamPieces() {
+        java.util.List<java.util.List<String>> groups =
+            java.util.List.of(java.util.List.of("a", "b"), java.util.List.of("c"));
+        java.util.Set<String> all = groups.stream()
+            .flatMap(java.util.List::stream)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        java.util.stream.Stream<String> joined = java.util.stream.Stream.concat(
+            java.util.stream.Stream.of("x"), java.util.stream.Stream.of("y", "z"));
+        return all.size() + "|" + joined.collect(java.util.stream.Collectors.joining("-"));
+    }
+
     public static String utilMake() {
         StringBuilder builder = new StringBuilder();
         List<String> made = Util.make(() -> {
@@ -288,6 +299,12 @@ fn a_queue_drains_and_reports_empty() {
 fn arrays_copy_of_grows_the_copy_and_zeroes_the_tail() {
     let fixture = Fixture::build("array-copy");
     assert_eq!(fixture.text("arrayCopy"), "3|a|null|4|0");
+}
+
+#[test]
+fn flat_map_method_references_and_stream_concat_work() {
+    let fixture = Fixture::build("stream-pieces");
+    assert_eq!(fixture.text("streamPieces"), "3|x-y-z");
 }
 
 #[test]
