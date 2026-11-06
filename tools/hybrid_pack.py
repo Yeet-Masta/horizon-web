@@ -25,6 +25,16 @@ launches for the rows that have no proof yet, batching a jar with its declared
 dependency closure and splitting a batch that cannot boot. `--docs` writes the
 generated table into `docs/java-mod-compat-status.md`; `--self-test` checks the
 classification against synthetic jars and ledgers without a game.
+
+`--native-score` is the phase-2 scoreboard. It takes every `needs-loader` row
+(the jars the loader tier carries, proven by the loader proof ledgers), runs
+each unique jar again with the native-only dedicated server, and asks how many
+of them no longer need the loader: the run must reach `Done (`, execute a
+server entrypoint, and have no server-side plan whose target is outside the
+jar. It writes `tools/real_mod_fixtures/LAST_NATIVE_SCORE.txt`, appends one
+measurement to `tools/real_mod_fixtures/NATIVE_SCORE_HISTORY.txt`, and rewrites
+the trend block in `docs/java-mod-compat-status.md`. A duplicate content digest
+across corpora is run once and shares its outcome.
 """
 
 from __future__ import annotations
@@ -1619,6 +1629,565 @@ def coverage_main(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# Phase 2: the native score over the loader-tier rows
+
+
+SCORE_DOC_START = "<!-- java-mod-native-score:start -->"
+SCORE_DOC_END = "<!-- java-mod-native-score:end -->"
+
+# What one fresh native-only run says about a jar that needed the loader.
+SCORE_NATIVE = "loader-free"  # runs, and no server-side plan targets a class outside the jar
+SCORE_LOADER = "loader"     # runs, but at least one server-side game-class plan still skips
+SCORE_REFUSED = "refused"   # native refuses it, or the run never reached `Done (`
+SCORE_SKIPPED = "skipped"   # the server role has no entrypoint to run
+SCORE_MISSING = "missing"   # the jar file is not in the corpus folder
+SCORE_ORDER = (SCORE_NATIVE, SCORE_LOADER, SCORE_REFUSED, SCORE_SKIPPED, SCORE_MISSING)
+SCORE_MEANING = {
+    SCORE_NATIVE: "runs, and no server-side plan targets a class outside the jar",
+    SCORE_LOADER: "runs, but still skips at least one server-side game-class plan",
+    SCORE_REFUSED: "native execution refuses it or the run did not reach `Done (`",
+    SCORE_SKIPPED: "the server role has no entrypoint to run",
+    SCORE_MISSING: "the jar is not in the corpus folder",
+}
+
+FIXTURES = Path(__file__).resolve().parent / "real_mod_fixtures"
+DEFAULT_SCORE_LEDGERS = ("LAST_SERVER_LEDGER_223.txt", "LAST_SERVER_LEDGER_500.txt")
+DEFAULT_PROOF_LEDGERS = ("LAST_LOADER_PROOF_223.txt", "LAST_LOADER_PROOF_500.txt")
+
+
+@dataclass(frozen=True)
+class ScoreTarget:
+    """One unique jar content to run, and the first row that names it."""
+
+    row: CoverageRow
+    jar: PackJar
+    path: Path
+
+
+@dataclass(frozen=True)
+class ScoreOutcome:
+    status: str
+    engine: str
+    woven: int
+    skipped: int
+    game_plans: int
+    server_plans: int
+    seconds: float
+    note: str
+
+
+@dataclass(frozen=True)
+class ScoreRow:
+    corpus: str
+    jar: str
+    mod_id: str
+    digest: str
+    status: str
+    engine: str
+    woven: int
+    skipped: int
+    game_plans: int
+    server_plans: int
+    seconds: float
+    note: str
+
+
+def score_targets(corpora: list[tuple[str, Path]], rows: dict[str, LedgerRow],
+                  evidence: list[LoaderRow]
+                  ) -> tuple[list[ScoreTarget], list[tuple[CoverageRow, ScoreTarget]]]:
+    """The loader-tier jars to run once, and every coverage row they answer for.
+
+    The rows are `needs-loader` in the tier coverage, so the set is exactly the
+    loader tier's load. Two corpora often hold the same bytes under the same
+    name; one run answers both rows.
+    """
+    by_jar = merge_loader_evidence(evidence)
+    digests: dict[Path, str] = {}
+    unique: dict[str, ScoreTarget] = {}
+    pairs: list[tuple[CoverageRow, ScoreTarget]] = []
+    for name, directory in corpora:
+        for jar in load_pack(directory, rows):
+            digest = digests.get(jar.path) or file_digest(jar.path)
+            digests[jar.path] = digest
+            coverage = classify_jar(name, jar, digest, by_jar)
+            if coverage.tier != NEEDS_LOADER:
+                continue
+            key = digest or f"{name}/{jar.name}"
+            target = unique.get(key)
+            if target is None:
+                target = ScoreTarget(coverage, jar, jar.path)
+                unique[key] = target
+            pairs.append((coverage, target))
+    return list(unique.values()), pairs
+
+
+def score_key(row: CoverageRow | ScoreRow) -> str:
+    return row.digest or f"{row.corpus}/{row.jar}"
+
+
+def native_status(*, present: bool, engine: str, done: bool, entrypoints: int,
+                  skipped: int, game_plans: int) -> str:
+    """The phase-2 question, from one fresh native-only run.
+
+    A jar is `native` when that run reached `Done (`, executed a server
+    entrypoint, and either holds no server-side plan whose target is outside
+    the jar or skipped nothing at all. A plan the weaver or a game hook applied
+    stops being skipped, so `skipped == 0` counts as applied even while the
+    static report still names the plan. Otherwise the loader still carries that
+    plan, whatever share of the jar's other skips are client-side.
+    """
+    if not present:
+        return SCORE_MISSING
+    if engine in ("", "?", "refused") or not done:
+        return SCORE_REFUSED
+    if entrypoints <= 0:
+        return SCORE_SKIPPED
+    if game_plans and skipped:
+        return SCORE_LOADER
+    return SCORE_NATIVE
+
+
+def mixin_sides(configs: list[object]) -> dict[str, str]:
+    """Each mixin class's physical side from the jar's own configs.
+
+    A class in a common `mixins` list applies on both sides; a class only in a
+    `client` or `server` list applies there. The first config that names a class
+    decides, matching the load-time gate's "first config that lists it" rule,
+    and a later listing on the other side widens it to `both`.
+    """
+    sides: dict[str, str] = {}
+    for config in configs:
+        if not isinstance(config, dict):
+            continue
+        common = {str(item) for item in config.get("mixins") or ()}
+        server = common | {str(item) for item in config.get("server") or ()}
+        client = common | {str(item) for item in config.get("client") or ()}
+        for name in server:
+            if sides.get(name) == "client":
+                sides[name] = "both"
+            elif name not in sides:
+                sides[name] = "server"
+        for name in client:
+            if sides.get(name) == "server":
+                sides[name] = "both"
+            elif name not in sides:
+                sides[name] = "client"
+    return sides
+
+
+def plan_counts(plans: list[object], names: set[str],
+                sides: dict[str, str]) -> tuple[int, int]:
+    """(game plans, server-side plans) for one jar's plan report."""
+    total = game = 0
+    for plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        callback = str(plan.get("callback", "")).split("#", 1)[0].replace("/", ".")
+        if sides.get(callback, "both") == "client":
+            continue
+        total += 1
+        target = str(plan.get("target", ""))
+        if target and f"{target}.class" not in names:
+            game += 1
+    return game, total
+
+
+def server_plan_counts(probe: Path, jar: Path) -> tuple[int, int]:
+    """(game plans, server-side plans) from `horizon-native-java --mixin-plans`.
+
+    A game plan is a server-side plan whose target class the jar does not hold,
+    so only a loader or a native game hook can apply it. Client-only mixins are
+    not the loader's business on a dedicated server and are not counted, and a
+    plan listed in a common `mixins` array applies on both sides.
+    """
+    result = subprocess.run(
+        [str(probe), "--json", "--mixin-plans", str(jar)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    report = json.loads(result.stdout)
+    plans = report.get("plans")
+    if not isinstance(plans, list):
+        raise ValueError(f"{probe.name} reported no plan list for {jar.name}")
+    return plan_counts(plans, set(zipfile.ZipFile(jar).namelist()),
+                       mixin_sides(report.get("configs") or []))
+
+
+def native_failure(text: str, jar_name: str) -> str:
+    """The one line a refused native run wrote against this jar."""
+    line = next((line for line in text.splitlines()
+                 if "skipping " in line and jar_name in line), None)
+    if line:
+        return bounded(line.rsplit(f"{jar_name}:", 1)[-1].strip())
+    for pattern in (r"startup failed:\s*([^\n]+)", r"refused:\s*([^\n]+)",
+                    r"Metadata\([^\n]+", r"uncaught exception[^\n]+",
+                    r"no native Fabric or NeoForge entrypoint[^\n]*"):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return bounded(match.group(1) if match.lastindex else match.group(0))
+    errors = [line for line in text.splitlines()
+              if "ERROR" in line and (jar_name in line or "Horizon:" in line)]
+    return bounded(errors[-1].split("ERROR", 1)[-1].lstrip(" :")) if errors else ""
+
+
+def run_native_jar(target: ScoreTarget, *, binary: Path, resources: Path, work: Path,
+                   timeout: float, port: int, probe: Path,
+                   game_hooks: bool = False) -> ScoreOutcome:
+    """One dedicated server with one jar, the committed ledger's method."""
+    command = native_command([target.jar], binary=binary, resources=resources,
+                             work=work, port=port)
+    for directory in (work / "game", work / "home"):
+        directory.mkdir(parents=True, exist_ok=True)
+    (work / "game" / "eula.txt").write_text("eula=true\n", encoding="utf-8")
+    (work / "game" / "server.properties").write_text(
+        f"level-type=minecraft:flat\nonline-mode=false\nserver-port={port}\n",
+        encoding="utf-8")
+    env = lab.game_env(
+        HORIZON_HOME=work / "home",
+        HORIZON_LAUNCHER_HOME=work / "launcher-home",
+        XDG_DATA_HOME=work / "xdg-data",
+        XDG_CONFIG_HOME=work / "xdg-config",
+    )
+    if game_hooks:
+        env["HORIZON_JAVA_GAME_HOOKS"] = "1"
+    env["TMPDIR"] = str(work / "tmp")
+    (work / "tmp").mkdir(parents=True, exist_ok=True)
+    text, seconds, _code, timed_out, _log = _run(
+        command, work=work, env=env, timeout=timeout, stop_at_done=True)
+    parsed = parse_native(text, work / "home", 1)
+    report = parsed["report"].get(target.jar.name)
+    engine = str(report["engine"]) if report else "refused"
+    entrypoints = int(report["entrypoints"]) if report else 0
+    skipped = int(report["skipped"]) if report else 0
+    woven = int(report["woven"]) if report else 0
+    done = "Done (" in text
+    game_plans, server_plans = (server_plan_counts(probe, target.path) if report
+                                else (0, 0))
+    status = native_status(present=True, engine=engine, done=done,
+                           entrypoints=entrypoints, skipped=skipped,
+                           game_plans=game_plans)
+    note = ""
+    if status == SCORE_REFUSED:
+        note = native_failure(text, target.jar.name)
+        if not note:
+            note = "hard timeout" if timed_out else (
+                "started but no `Done (`" if report else "engine refused")
+    elif status == SCORE_SKIPPED:
+        note = "no server-role entrypoint"
+    elif status == SCORE_LOADER:
+        note = (f"{game_plans} of {server_plans} server-side plan(s) target a class "
+                "outside the jar")
+    elif skipped == 0 and server_plans:
+        note = "every server-side plan applied"
+    return ScoreOutcome(status, engine, woven, skipped, game_plans, server_plans,
+                        round(seconds, 3), bounded(note))
+
+
+def score_counts(rows: list[ScoreRow]) -> dict[str, int]:
+    counts = {"jars": len(rows), "unique": 0, SCORE_NATIVE: 0, SCORE_LOADER: 0,
+              SCORE_REFUSED: 0, SCORE_SKIPPED: 0, SCORE_MISSING: 0,
+              "plans_skipped": 0, "game_plans": 0, "server_plans": 0}
+    seen: set[str] = set()
+    for row in rows:
+        counts[row.status] += 1
+        key = score_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        counts["unique"] += 1
+        counts["plans_skipped"] += row.skipped
+        counts["game_plans"] += row.game_plans
+        counts["server_plans"] += row.server_plans
+    return counts
+
+
+def score_lines(rows: list[ScoreRow], *, sources: list[Path],
+                meta: dict[str, str], partial: bool = False) -> list[str]:
+    counts = score_counts(rows)
+    lines = [
+        "# Horizon phase-2 native score",
+        "# Each needs-loader row is run again with the native-only dedicated server.",
+        "# `loader-free` means that run reached Done, executed a server entrypoint,",
+        "# and no server-side plan targets a class outside the jar (the loader carries",
+        "# nothing). `loader` means it runs but at least one such plan still skips.",
+        f"# date={meta['date']}\tcommit={meta['commit']}\tbinary={meta['binary']}"
+        f"\tgame_hooks={meta['hooks']}",
+        "# Sources: " + ", ".join(path.name for path in sources),
+    ]
+    if partial:
+        lines.append("# partial: true (--score-limit cut the target list)")
+    lines.append("")
+    for row in sorted(rows, key=lambda item: (SCORE_ORDER.index(item.status),
+                                              item.corpus, item.jar)):
+        note = f"\tnote={row.note}" if row.note else ""
+        lines.append(f"mod={row.mod_id}\tjar={row.jar}\tcorpus={row.corpus}"
+                     f"\tstatus={row.status}\tengine={row.engine}"
+                     f"\twoven={row.woven}\tskipped={row.skipped}"
+                     f"\tgame_plans={row.game_plans}\tserver_plans={row.server_plans}"
+                     f"\tseconds={row.seconds:.3f}{note}")
+    summary = "\t".join(f"{key}={value}" for key, value in counts.items())
+    lines.append("summary\t" + summary + ("\tpartial=true" if partial else ""))
+    return lines
+
+
+SCORE_HISTORY_FIELDS = ("date", "commit", "binary", "hooks", "jars", "unique",
+                        SCORE_NATIVE, SCORE_LOADER, SCORE_REFUSED, SCORE_SKIPPED,
+                        SCORE_MISSING, "plans_skipped", "game_plans", "server_plans")
+
+
+def read_score_history(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    records: list[dict[str, str]] = []
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        values = line.split("\t")
+        if len(values) != len(SCORE_HISTORY_FIELDS):
+            raise ValueError(f"{path}:{number}: expected {len(SCORE_HISTORY_FIELDS)} "
+                             f"columns, got {len(values)}")
+        records.append(dict(zip(SCORE_HISTORY_FIELDS, values)))
+    return records
+
+
+def record_score(path: Path, record: dict[str, str]) -> list[dict[str, str]]:
+    """Append one measurement; the same binary and counts replaces the last row."""
+    records = read_score_history(path)
+    signature = tuple(record[field] for field in SCORE_HISTORY_FIELDS if field != "date")
+    if records:
+        previous = tuple(records[-1][field] for field in SCORE_HISTORY_FIELDS
+                         if field != "date")
+        if previous == signature:
+            records[-1] = record
+        else:
+            records.append(record)
+    else:
+        records.append(record)
+    lines = ["# Horizon phase-2 native score trend",
+             "# " + "\t".join(SCORE_HISTORY_FIELDS)]
+    lines += ["\t".join(record[field] for field in SCORE_HISTORY_FIELDS)
+              for record in records]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return records
+
+
+def score_docs(rows: list[ScoreRow], history: list[dict[str, str]],
+               sources: list[Path]) -> str:
+    counts = score_counts(rows)
+    runs = counts[SCORE_NATIVE] + counts[SCORE_LOADER]
+    lines = [
+        f"_Generated by `tools/hybrid_pack.py --native-score --docs docs/java-mod-compat-status.md` "
+        f"from {', '.join(f'`{path.name}`' for path in sources)}; edit the tool, not this block._",
+        "",
+        f"**Phase 2 score: {runs} of {counts['jars']} `needs-loader` rows "
+        f"({counts['unique']} unique jars) run natively on a fresh native-only run; "
+        f"{counts[SCORE_NATIVE]} are loader-free, {counts[SCORE_LOADER]} still need the loader, "
+        f"{counts[SCORE_REFUSED]} refused, {counts[SCORE_SKIPPED]} skipped, "
+        f"{counts[SCORE_MISSING]} missing.**",
+        "",
+        "| Status | Rows | What it means |",
+        "|---|---:|---|",
+    ]
+    for status in SCORE_ORDER:
+        if counts[status]:
+            lines.append(f"| `{status}` | {counts[status]} | {SCORE_MEANING[status]} |")
+    lines += [
+        "",
+        "**Trend.** One point per measurement: a rerun with the same commit, binary and "
+        "counts replaces the last row instead of adding a duplicate.",
+        "",
+        "| Date (UTC) | Commit | Binary | Hooks | Rows | Unique | `loader-free` | still need loader | refused | plans skipped | game plans |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for record in history[-12:]:
+        lines.append(f"| {record['date']} | `{record['commit']}` | {record['binary']} | "
+                     f"{record['hooks']} | {record['jars']} | {record['unique']} | "
+                     f"{record[SCORE_NATIVE]} | {record[SCORE_LOADER]} | "
+                     f"{record[SCORE_REFUSED]} | {record['plans_skipped']} | "
+                     f"{record['game_plans']} |")
+    native = [row for row in rows if row.status == SCORE_NATIVE]
+    if native:
+        lines += ["", f"**Loader-free ({len(native)}).** The run reached `Done (` and no "
+                  "server-side plan targets a class outside the jar.", "",
+                  "| Jar | Corpus | Engine | Skipped | Server plans |",
+                  "|---|---|---|---:|---:|"]
+        for row in sorted(native, key=lambda item: (item.corpus, item.jar))[:60]:
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | {row.engine} | {row.skipped} | "
+                         f"{row.server_plans} |")
+        if len(native) > 60:
+            lines.append(f"\n_{len(native) - 60} more row(s) are in the score ledger._")
+    else:
+        lines += ["", "_No `needs-loader` row is loader-free yet: every one still has a "
+                  "server-side plan aimed outside its own jar._"]
+    loader = [row for row in rows if row.status == SCORE_LOADER]
+    if loader:
+        lines += ["", f"**Still needs the loader ({len(loader)}).**", "",
+                  "| Jar | Corpus | Server game plans | Server plans |",
+                  "|---|---|---:|---:|"]
+        for row in sorted(loader, key=lambda item: (item.corpus, item.jar))[:40]:
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | {row.game_plans} | "
+                         f"{row.server_plans} |")
+        if len(loader) > 40:
+            lines.append(f"\n_{len(loader) - 40} more row(s) are in the score ledger._")
+    failed = [row for row in rows if row.status in (SCORE_REFUSED, SCORE_SKIPPED,
+                                                    SCORE_MISSING)]
+    if failed:
+        lines += ["", f"**Not runnable natively ({len(failed)}).**", "",
+                  "| Jar | Corpus | Status | Why |", "|---|---|---|---|"]
+        for row in sorted(failed, key=lambda item: (item.status, item.corpus, item.jar))[:40]:
+            lines.append(f"| `{row.jar}` | `{row.corpus}` | `{row.status}` | {row.note} |")
+        if len(failed) > 40:
+            lines.append(f"\n_{len(failed) - 40} more row(s) are in the score ledger._")
+    return "\n".join(lines)
+
+
+def write_score_docs(path: Path, block: str) -> bool:
+    text = path.read_text(encoding="utf-8")
+    start = text.find(SCORE_DOC_START)
+    end = text.find(SCORE_DOC_END)
+    if start < 0 or end < start:
+        raise ValueError(f"{path}: no {SCORE_DOC_START} … {SCORE_DOC_END} markers")
+    updated = text[: start + len(SCORE_DOC_START)] + "\n" + block.strip("\n") + "\n" + text[end:]
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _git_commit() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent),
+             "rev-parse", "--short=9", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return result.stdout.strip() or "unknown"
+
+
+def _binary_stamp(path: Path) -> str:
+    try:
+        return time.strftime("%Y%m%d-%H%M", time.localtime(path.stat().st_mtime))
+    except OSError:
+        return "missing"
+
+
+def native_score_main(args: argparse.Namespace) -> int:
+    if args.score_work is None:
+        args.score_work = CORPUS / "native-score-runs"
+    if not args.corpus:
+        args.corpus = [f"corpus-xl={CORPUS / 'corpus-xl'}",
+                       f"mega={CORPUS / 'mega'}"]
+    corpora: list[tuple[str, Path]] = []
+    for spec in args.corpus:
+        name, separator, directory = spec.partition("=")
+        directory_path = Path(directory if separator else name)
+        if not directory_path.is_dir():
+            print(f"hybrid_pack: corpus directory does not exist: {directory_path}",
+                  file=sys.stderr)
+            return 2
+        corpora.append((name if separator else directory_path.name, directory_path.resolve()))
+    ledgers = args.ledger or [FIXTURES / name for name in DEFAULT_SCORE_LEDGERS]
+    proof_ledgers = args.loader_ledger or [FIXTURES / name for name in DEFAULT_PROOF_LEDGERS]
+    rows: dict[str, LedgerRow] = {}
+    sources: list[Path] = []
+    for ledger in ledgers:
+        if not ledger.is_file():
+            print(f"hybrid_pack: server ledger does not exist: {ledger}", file=sys.stderr)
+            return 2
+        rows.update(read_ledger(ledger))
+        sources.append(ledger)
+    evidence: list[LoaderRow] = []
+    for ledger in proof_ledgers:
+        if not ledger.is_file():
+            print(f"hybrid_pack: loader proof ledger does not exist: {ledger}",
+                  file=sys.stderr)
+            return 2
+        try:
+            evidence.extend(read_loader_ledger(ledger))
+        except ValueError as error:
+            print(f"hybrid_pack: {error}", file=sys.stderr)
+            return 2
+        sources.append(ledger)
+    if not args.native_binary.is_file():
+        print(f"hybrid_pack: native binary does not exist: {args.native_binary}",
+              file=sys.stderr)
+        return 2
+    if not args.resources.is_dir():
+        print(f"hybrid_pack: resources directory does not exist: {args.resources}",
+              file=sys.stderr)
+        return 2
+    if not args.plan_probe.is_file():
+        print(f"hybrid_pack: plan probe does not exist: {args.plan_probe}", file=sys.stderr)
+        return 2
+    targets, pairs = score_targets(corpora, rows, evidence)
+    if not targets:
+        print("hybrid_pack: no needs-loader rows to score", file=sys.stderr)
+        return 1
+    partial = bool(args.score_limit)
+    if partial:
+        targets = targets[: args.score_limit]
+        keep = {score_key(target.row) for target in targets}
+        pairs = [(coverage, target) for coverage, target in pairs
+                 if score_key(target.row) in keep]
+        if args.docs:
+            print("hybrid_pack: --score-limit cannot write the docs block",
+                  file=sys.stderr)
+            return 2
+    stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    outcomes: dict[str, ScoreOutcome] = {}
+    for index, target in enumerate(targets):
+        work = args.score_work / f"{stamp}-{index:03d}"
+        print(f"[{index + 1}/{len(targets)}] {target.jar.name}", flush=True)
+        outcomes[score_key(target.row)] = run_native_jar(
+            target, binary=args.native_binary, resources=args.resources, work=work,
+            timeout=args.score_timeout, port=args.score_port + index,
+            probe=args.plan_probe, game_hooks=args.score_game_hooks)
+    score_rows = [
+        ScoreRow(coverage.corpus, coverage.jar, coverage.mod_id, coverage.digest,
+                 outcome.status, outcome.engine, outcome.woven, outcome.skipped,
+                 outcome.game_plans, outcome.server_plans, outcome.seconds,
+                 outcome.note)
+        for coverage, target in pairs
+        for outcome in (outcomes[score_key(target.row)],)
+    ]
+    counts = score_counts(score_rows)
+    meta = {"date": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "commit": _git_commit(), "binary": _binary_stamp(args.native_binary),
+            "hooks": "on" if args.score_game_hooks else "off"}
+    text = "\n".join(score_lines(score_rows, sources=sources, meta=meta,
+                                 partial=partial)) + "\n"
+    args.score_report.parent.mkdir(parents=True, exist_ok=True)
+    args.score_report.write_text(text, encoding="utf-8")
+    history_record = {field: str(counts[field]) for field in SCORE_HISTORY_FIELDS
+                      if field in counts}
+    history_record.update({"date": meta["date"], "commit": meta["commit"],
+                           "binary": meta["binary"], "hooks": meta["hooks"]})
+    history = (read_score_history(args.score_history) if partial
+               else record_score(args.score_history, history_record))
+    runs = counts[SCORE_NATIVE] + counts[SCORE_LOADER]
+    print(f"native score: {runs}/{counts['jars']} rows "
+          f"({counts['unique']} unique jars) run natively; "
+          f"{counts[SCORE_NATIVE]} loader-free, "
+          f"{counts[SCORE_LOADER]} still need the loader, "
+          f"{counts[SCORE_REFUSED]} refused, {counts[SCORE_MISSING]} missing")
+    print(f"report: {args.score_report}")
+    print(f"history: {args.score_history}")
+    if args.docs:
+        try:
+            changed = write_score_docs(args.docs, score_docs(score_rows, history, sources))
+        except ValueError as error:
+            print(f"hybrid_pack: {error}", file=sys.stderr)
+            return 2
+        print(f"docs: {args.docs}{'' if changed else ' (unchanged)'}")
+    if args.strict and counts[SCORE_NATIVE] != counts["jars"]:
+        print(f"hybrid_pack: {counts['jars'] - counts[SCORE_NATIVE]} needs-loader "
+              "row(s) are not native yet", file=sys.stderr)
+        return 1
+    return 0
+
+
 def self_test() -> int:
     """Classify synthetic jars and ledgers without a game or a corpus."""
     import tempfile
@@ -1694,7 +2263,75 @@ def self_test() -> int:
         if "needs-loader" not in docs or "native-gap" not in docs:
             print("self-test: docs table lost a tier", file=sys.stderr)
             return 1
-    print("hybrid_pack --coverage self-test: ok")
+
+        # --- the phase-2 scoreboard ---
+        targets, pairs = score_targets([("corpus", pack)], rows, evidence)
+        names = sorted(target.jar.name for target in targets)
+        if names != ["needs.jar", "refused.jar"] or len(pairs) != 2:
+            print(f"self-test: native score targets {names} ({len(pairs)} rows)",
+                  file=sys.stderr)
+            return 1
+        base = dict(present=True, engine="native-qualified", done=True,
+                    entrypoints=1, skipped=10, game_plans=5)
+        cases = [
+            (dict(base, present=False), SCORE_MISSING),
+            (dict(base, engine="refused"), SCORE_REFUSED),
+            (dict(base, done=False), SCORE_REFUSED),
+            (dict(base, entrypoints=0), SCORE_SKIPPED),
+            (base, SCORE_LOADER),
+            (dict(base, skipped=0), SCORE_NATIVE),       # every server plan applied
+            (dict(base, game_plans=0), SCORE_NATIVE),    # only client-side skips
+            (dict(base, skipped=3, game_plans=0), SCORE_NATIVE),
+        ]
+        for kwargs, expected in cases:
+            status = native_status(**kwargs)
+            if status != expected:
+                print(f"self-test: native_status({kwargs}) = {status}, not {expected}",
+                      file=sys.stderr)
+                return 1
+        sides = mixin_sides([
+            {"mixins": ["pkg.Common"], "server": ["pkg.Server"], "client": ["pkg.Client"]},
+            {"client": ["pkg.Common"]},
+        ])
+        if sides != {"pkg.Common": "both", "pkg.Server": "server",
+                     "pkg.Client": "client"}:
+            print(f"self-test: mixin sides {sides}", file=sys.stderr)
+            return 1
+        plans = [
+            {"callback": "pkg/Common#a", "target": "net/minecraft/A"},
+            {"callback": "pkg/Client#b", "target": "net/minecraft/B"},
+            {"callback": "pkg/Server#c", "target": "pkg/inside/Lib"},
+            {"callback": "pkg/Server#d", "target": "net/minecraft/C"},
+        ]
+        if plan_counts(plans, {"pkg/inside/Lib.class"}, sides) != (2, 3):
+            print("self-test: server-side plan count is wrong", file=sys.stderr)
+            return 1
+        score_rows = [ScoreRow(row.corpus, row.jar, row.mod_id, row.digest,
+                               SCORE_LOADER, "native-qualified", 0, 3, 2, 4, 1.0, "")
+                      for row in coverage if row.tier == NEEDS_LOADER]
+        if score_counts(score_rows)[SCORE_LOADER] != 2:
+            print("self-test: native score lost a loader row", file=sys.stderr)
+            return 1
+        history = root / "history.txt"
+        first = {"date": "2026-11-06T00:00:00Z", "commit": "abc", "binary": "b",
+                 "hooks": "off", "jars": "2", "unique": "2", SCORE_NATIVE: "0",
+                 SCORE_LOADER: "2", SCORE_REFUSED: "0", SCORE_SKIPPED: "0",
+                 SCORE_MISSING: "0", "plans_skipped": "6", "game_plans": "6",
+                 "server_plans": "8"}
+        record_score(history, first)
+        second = dict(first, date="2026-11-06T01:00:00Z",
+                      **{SCORE_NATIVE: "1", SCORE_LOADER: "1"})
+        if len(record_score(history, second)) != 2:
+            print("self-test: a changed score did not append to the trend", file=sys.stderr)
+            return 1
+        if len(record_score(history, dict(second, date="later"))) != 2:
+            print("self-test: an unchanged score duplicated its trend row", file=sys.stderr)
+            return 1
+        score = score_docs(score_rows, read_score_history(history), [ledger, loader])
+        if "Phase 2 score" not in score or "Still needs the loader" not in score:
+            print("self-test: native score docs lost their block", file=sys.stderr)
+            return 1
+    print("hybrid_pack self-test: ok")
     return 0
 
 
@@ -1707,8 +2344,31 @@ def main(argv: list[str] | None = None) -> int:
                         help="text ledger from java_mod_server_ledger.py (repeatable)")
     parser.add_argument("--coverage", action="store_true",
                         help="classify every jar in --corpus as native-ok, needs-loader or native-gap")
+    parser.add_argument("--native-score", action="store_true", dest="native_score",
+                        help="run every needs-loader row on the native-only server and "
+                             "score how many no longer need the loader")
+    parser.add_argument("--score-report", type=Path,
+                        default=FIXTURES / "LAST_NATIVE_SCORE.txt",
+                        help="phase-2 score ledger (default: tools/real_mod_fixtures/LAST_NATIVE_SCORE.txt)")
+    parser.add_argument("--score-history", type=Path,
+                        default=FIXTURES / "NATIVE_SCORE_HISTORY.txt",
+                        help="phase-2 trend file (default: tools/real_mod_fixtures/NATIVE_SCORE_HISTORY.txt)")
+    parser.add_argument("--score-work", type=Path,
+                        help="scratch root for --native-score (default: ~/horizon-corpus/native-score-runs)")
+    parser.add_argument("--score-timeout", type=float, default=60.0,
+                        help="seconds per native score run (default: 60)")
+    parser.add_argument("--score-port", type=int, default=28800,
+                        help="first port a native score run binds (default: 28800)")
+    parser.add_argument("--score-limit", type=int, default=0,
+                        help="run only the first N unique jars (smoke test; does not write docs)")
+    parser.add_argument("--score-game-hooks", action="store_true",
+                        help="set HORIZON_JAVA_GAME_HOOKS=1 and measure the opt-in hook tier")
+    parser.add_argument("--plan-probe", type=Path,
+                        default=Path("target/fast/horizon-native-java"),
+                        help="horizon-native-java used for the game-class plan count")
     parser.add_argument("--corpus", action="append", metavar="NAME=DIR",
-                        help="corpus for --coverage (repeatable; default corpus-xl and mega)")
+                        help="corpus for --coverage or --native-score (repeatable; default "
+                             "corpus-xl and mega)")
     parser.add_argument("--loader-ledger", type=Path, action="append",
                         help="loader ledger or proof ledger that demonstrates needs-loader rows")
     parser.add_argument("--measure-proof", action="store_true",
@@ -1732,7 +2392,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--docs", type=Path,
                         help="rewrite the generated coverage block in this markdown file")
     parser.add_argument("--self-test", action="store_true",
-                        help="check --coverage classification against synthetic jars and ledgers")
+                        help="check the coverage and native-score classification against "
+                             "synthetic jars and ledgers")
     parser.add_argument("--match-by-hash", action="store_true",
                         help="match an unlabelled jar to a ledger row by its content digest")
     parser.add_argument("--ledger-dir", type=Path, action="append",
@@ -1746,7 +2407,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--measure", action="store_true", help="run native-only and hybrid")
     parser.add_argument("--json", action="store_true", dest="json_output")
     parser.add_argument("--strict", action="store_true",
-                        help="exit 1 when the declared-content check finds a conflict")
+                        help="coverage: exit 1 on a conflict; native score: exit 1 while a row "
+                             "still needs the loader")
     parser.add_argument("--work-dir", type=Path,
                         help="scratch root (default: ~/horizon-corpus/hybrid-runs/<pack>-<time>)")
     parser.add_argument("--native-binary", type=Path, default=DEFAULT_NATIVE_BINARY)
@@ -1761,6 +2423,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.self_test:
         return self_test()
+    if args.native_score:
+        for name in ("native_binary", "resources", "plan_probe", "score_work",
+                     "score_report", "score_history", "docs"):
+            value = getattr(args, name)
+            if value is not None:
+                setattr(args, name, value.resolve())
+        if args.ledger:
+            args.ledger = [path.resolve() for path in args.ledger]
+        if args.loader_ledger:
+            args.loader_ledger = [path.resolve() for path in args.loader_ledger]
+        return native_score_main(args)
     if args.coverage:
         for name in ("jvm_binary", "loader", "libs", "game", "proof_work", "report", "docs"):
             value = getattr(args, name)
@@ -1772,9 +2445,10 @@ def main(argv: list[str] | None = None) -> int:
             args.loader_ledger = [path.resolve() for path in args.loader_ledger]
         return coverage_main(args)
     if not args.ledger:
-        parser.error("--ledger is required unless --coverage or --self-test is used")
+        parser.error("--ledger is required unless --coverage, --native-score or --self-test is used")
     if args.pack is None:
-        parser.error("a pack directory is required unless --coverage or --self-test is used")
+        parser.error("a pack directory is required unless --coverage, --native-score or "
+                     "--self-test is used")
 
     if not args.pack.is_dir():
         parser.error(f"pack directory does not exist: {args.pack}")
