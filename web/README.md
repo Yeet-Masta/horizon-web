@@ -277,7 +277,10 @@ python3 tools/upstream_watch.py --base $base --head upstream/main   # what the m
 python3 tools/upstream_watch.py --open-prs ludovic111/horizon       # the open pull requests that will
 ```
 
-then the checks above. `.github/workflows/upstream-sync.yml` does this every six hours: it
+The root `README.md` is the web branch's own: `.gitattributes` keeps it through merges once
+`git config merge.ours.driver true` is set in the clone (the workflow sets it).
+
+Then the checks above. `.github/workflows/upstream-sync.yml` does this every six hours: it
 merges into the `upstream-sync` branch, runs the checks there (with a token that can only
 read: it builds upstream's code), and opens a pull request into `web` with the results and
 the watch list, or an issue naming the files when the merge conflicts. Nothing reaches `web`

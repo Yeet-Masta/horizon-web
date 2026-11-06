@@ -61,6 +61,8 @@ jobs:
           mkdir -p report
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # README.md is the web branch's own (.gitattributes: merge=ours).
+          git config merge.ours.driver true
           git checkout -q -B upstream-sync
           if git merge -q --no-commit --no-ff upstream/main; then
             echo "conflicts=0" >> "$GITHUB_OUTPUT"
