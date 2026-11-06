@@ -83,13 +83,9 @@ def binary(name, directory=None):
 
 
 def game_env(base=None, **overrides):
-    """The environment for a measured run: no audio, no Discord presence, no telemetry, and no real player
-    folders (the caller passes HORIZON_HOME and friends inside its scratch folder)."""
-    env = dict(os.environ if base is None else base)
-    env.update({key: str(value) for key, value in overrides.items()})
-    env.setdefault("HORIZON_NO_AUDIO", "1")
-    env.setdefault("HORIZON_NO_DISCORD", "1")
-    env.setdefault("HORIZON_LAUNCHER_NO_SELF_UPDATE", "1")
+    """The environment for a measured run: lab.game_env's scratch folders and no audio, plus no telemetry for
+    the measured game (the caller passes HORIZON_HOME and friends inside its scratch folder)."""
+    env = lab.game_env(base, **overrides)
     env.setdefault("HORIZON_TELEMETRY_URL", "off")
     return env
 
