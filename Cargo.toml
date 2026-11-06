@@ -1,6 +1,8 @@
 [workspace]
 exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu-hal", "third_party/naga", "third_party/libmimalloc-sys"]
 members = [
+    "crates/horizon-native-java",
+    "crates/horizon-jvm",
     "crates/horizon-core",
     "crates/horizon-dualsense",
     "crates/horizon-narrator",
