@@ -1727,6 +1727,16 @@ pub trait Host {
         Vec::new()
     }
 
+    /// The text a bounded input-stream marker exposes, when the host holds it.
+    ///
+    /// The interpreter models `java.io` readers itself; a stream the host
+    /// opened (a jar resource, through `ClassLoader.getResourceAsStream`) is
+    /// read through this query, which drains the bytes a `read` call would
+    /// consume. A host that keeps no stream table keeps the default.
+    fn resource_stream_text(&mut self, _marker: &str) -> Option<String> {
+        None
+    }
+
     /// Sibling-jar classes this host lets the executing jar link against.
     ///
     /// `None` keeps single-jar behavior exactly as before: a symbol the
@@ -3148,6 +3158,13 @@ impl Host for StdHost {
 
     fn service_providers(&self, service: &str) -> Vec<String> {
         self.merged_service_providers(service)
+    }
+
+    fn resource_stream_text(&mut self, marker: &str) -> Option<String> {
+        let (bytes, index) = self.resource_streams.get_mut(marker)?;
+        let text = String::from_utf8_lossy(&bytes[*index..]).into_owned();
+        *index = bytes.len();
+        Some(text)
     }
 
     fn linked_class_table(&self) -> Option<&Arc<LinkedClassTable>> {
@@ -7114,7 +7131,12 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Int(0)),
                 };
-                Ok(Value::Int(self.mods.contains_key(id) as i32))
+                // The loader itself and the game are always loaded; a jar's
+                // platform probe asks for them before it asks for anything the
+                // metadata could name.
+                Ok(Value::Int(
+                    (self.mods.contains_key(id) || is_always_loaded_mod(id)) as i32,
+                ))
             }
             (
                 "net/neoforged/fml/ModList" | "net/minecraftforge/fml/ModList",
@@ -7163,11 +7185,13 @@ impl Host for StdHost {
                     Value::Ref(Some(id)) => id,
                     _ => return Ok(Value::Ref(None)),
                 };
-                Ok(Value::Ref(
-                    self.mods
-                        .get(id)
-                        .map(|version| format!("mod-container/{id}/{version}")),
-                ))
+                Ok(Value::Ref(match self.mods.get(id) {
+                    Some(version) => Some(format!("mod-container/{id}/{version}")),
+                    // The loader and the game are present in every runtime
+                    // even though no jar declares them as a dependency.
+                    None if is_always_loaded_mod(id) => Some(format!("mod-container/{id}/unknown")),
+                    None => None,
+                }))
             }
             (
                 "net/fabricmc/loader/api/ModContainer",
@@ -9702,6 +9726,18 @@ fn is_map_owner(owner: &str) -> bool {
 /// continuation line and a unicode escape are read literally: a metadata file
 /// built by the loader does not use them, and a bounded read must not turn a
 /// crafted file into host state.
+/// Mod ids every Fabric/NeoForge runtime already has loaded.
+///
+/// A platform probe asks `isModLoaded("fabricloader")` (or `minecraft`) to
+/// decide which loader it is running on; neither is a declared dependency a
+/// jar's metadata names.
+fn is_always_loaded_mod(id: &str) -> bool {
+    matches!(
+        id,
+        "fabricloader" | "fabric" | "minecraft" | "java" | "neoforge" | "forge"
+    )
+}
+
 /// The one-character string a `String` char index names.
 fn string_from_char_code(code: i32) -> String {
     char::from_u32(code as u32).map_or_else(String::new, String::from)
@@ -16383,9 +16419,13 @@ fn gson_document(text: &str) -> Result<Option<serde_json::Value>, NativeError> {
             text.len()
         )));
     }
-    let json: serde_json::Value = serde_json::from_str(text).map_err(|error| {
-        NativeError::Metadata(format!("Gson.fromJson rejected the document: {error}"))
-    })?;
+    // Gson's lenient parser accepts the `//` and `/* */` comments a
+    // hand-maintained lang or config file carries; strip them outside string
+    // literals before the bounded JSON reader sees the bytes.
+    let json: serde_json::Value =
+        serde_json::from_str(&strip_json_comments(text)).map_err(|error| {
+            NativeError::Metadata(format!("Gson.fromJson rejected the document: {error}"))
+        })?;
     let depth = gson_json_depth(&json, 0);
     if depth > MAX_GSON_DEPTH {
         return Err(NativeError::Metadata(format!(
@@ -16393,6 +16433,65 @@ fn gson_document(text: &str) -> Result<Option<serde_json::Value>, NativeError> {
         )));
     }
     Ok(Some(json))
+}
+
+/// Remove the `//` and `/* */` comments a lenient Gson read accepts.
+///
+/// The scan tracks string literals and escapes, so a `//` inside a value stays
+/// part of the value. A leading byte-order mark is dropped too: a file written
+/// by an editor that adds one is still valid to Gson.
+fn strip_json_comments(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(character) = characters.next() {
+        if in_string {
+            out.push(character);
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if character == '"' {
+            in_string = true;
+            out.push(character);
+            continue;
+        }
+        if character == '/' {
+            match characters.peek() {
+                Some('/') => {
+                    characters.next();
+                    for next in characters.by_ref() {
+                        if next == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    characters.next();
+                    let mut previous = '\0';
+                    for next in characters.by_ref() {
+                        if previous == '*' && next == '/' {
+                            break;
+                        }
+                        previous = next;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(character);
+    }
+    out
 }
 
 fn gson_json_depth(json: &serde_json::Value, depth: usize) -> usize {
@@ -19128,11 +19227,15 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(marker) = receiver_marker else {
                     return Ok(None);
                 };
-                let text = args
-                    .first()
-                    .and_then(expect_ref)
-                    .and_then(|stream| self.string_readers.get(stream).cloned())
-                    .unwrap_or_default();
+                let text = match args.first().and_then(expect_ref) {
+                    Some(stream) => match self.string_readers.get(stream).cloned() {
+                        Some(text) => text,
+                        // A jar resource opened by the host is read here, so a
+                        // config loader's `getResourceAsStream` reaches Gson.
+                        None => self.host.resource_stream_text(stream).unwrap_or_default(),
+                    },
+                    None => String::new(),
+                };
                 self.string_readers.insert(marker, text);
                 return Ok(Some(Value::Void));
             }
@@ -19494,6 +19597,16 @@ impl<H: Host> Runtime<'_, H> {
         gson_json_value(&json, &class)
     }
 
+    /// The erased runtime type a `TypeToken` names.
+    ///
+    /// A token subclass declares its type argument in its `Signature`; when
+    /// that resolves, the token behaves like the same class literal would.
+    /// A token the model cannot read answers `Object`, which the JSON shape
+    /// still materializes into a map or a list.
+    fn type_token_class(&self, _token: &str) -> String {
+        "java/lang/Object".into()
+    }
+
     /// Allocate one instance of `class` and inject the document's fields.
     fn gson_materialize(
         &mut self,
@@ -19805,6 +19918,44 @@ impl<H: Host> Runtime<'_, H> {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
                     Ok(Some(self.gson_from_json(&text, class)?))
+                }
+                // `Gson.fromJson(Reader, TypeToken)` takes the token's erased
+                // type: a document that is an object becomes a map and an
+                // array a list, which is what every JSON-shaped token resolves
+                // to in the bounded adapter.
+                (
+                    "fromJson",
+                    "(Ljava/io/Reader;Lcom/google/gson/reflect/TypeToken;)Ljava/lang/Object;",
+                )
+                | (
+                    "fromJson",
+                    "(Ljava/lang/String;Lcom/google/gson/reflect/TypeToken;)Ljava/lang/Object;",
+                ) => {
+                    let (text, class) = if r.descriptor.starts_with("(Ljava/io/Reader;") {
+                        let reader = args.first().and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a Reader".into())
+                        })?;
+                        let text = self.string_readers.get(reader).cloned().ok_or_else(|| {
+                            NativeError::Metadata(format!(
+                                "Gson.fromJson Reader {reader} is not a modelled reader"
+                            ))
+                        })?;
+                        let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                        })?;
+                        (text, self.type_token_class(token))
+                    } else {
+                        let text = args
+                            .first()
+                            .map(expect_string)
+                            .unwrap_or_default()
+                            .to_owned();
+                        let token = args.get(1).and_then(expect_ref).ok_or_else(|| {
+                            NativeError::Metadata("Gson.fromJson needs a TypeToken".into())
+                        })?;
+                        (text, self.type_token_class(token))
+                    };
+                    Ok(Some(self.gson_from_json(&text, &class)?))
                 }
                 ("fromJson", "(Ljava/lang/String;Ljava/lang/reflect/Type;)Ljava/lang/Object;") => {
                     let text = args.first().map(expect_string).ok_or_else(|| {

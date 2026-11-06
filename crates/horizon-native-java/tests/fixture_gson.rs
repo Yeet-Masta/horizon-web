@@ -68,6 +68,14 @@ public final class Probe {
             + reader.size() + "|" + gson.toJson(table) + "|" + sink.toString();
     }
 
+    // Fabric reads its metadata with Gson's lenient parser, which accepts
+    // `//` comments and a leading byte-order mark.
+    public static String lenient(String json) {
+        Gson gson = new GsonBuilder().create();
+        Map<?, ?> values = gson.fromJson(json, Map.class);
+        return String.valueOf(values.size());
+    }
+
     public static String parse(String json) {
         Gson gson = new GsonBuilder().create();
         List<?> values = gson.fromJson(json, List.class);
@@ -236,6 +244,20 @@ impl Fixture {
         )
     }
 
+    fn text_with(&self, method: &str, argument: &str) -> String {
+        match self
+            .call(
+                method,
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[Value::Ref(Some(argument.to_owned()))],
+            )
+            .unwrap()
+        {
+            Value::Ref(Some(text)) => text,
+            other => panic!("{method} did not return a string: {other:?}"),
+        }
+    }
+
     fn text(&self, method: &str) -> String {
         match self.call(method, "()Ljava/lang/String;", &[]).unwrap() {
             Value::Ref(Some(text)) => text,
@@ -268,6 +290,13 @@ fn malformed_json_is_refused_with_a_bounded_reason() {
         message.contains("Gson.fromJson rejected the document"),
         "unexpected error: {message}"
     );
+}
+
+#[test]
+fn lenient_json_accepts_comments_and_a_byte_order_mark() {
+    let fixture = Fixture::build("lenient");
+    let document = "\u{feff}{\n // a comment\n \"a\": 1, /* inline */ \"b\": 2 }";
+    assert_eq!(fixture.text_with("lenient", document), "2");
 }
 
 #[test]
