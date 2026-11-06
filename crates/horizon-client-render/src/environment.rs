@@ -93,16 +93,17 @@ impl Track {
         }
         let t = ticks.rem_euclid(period);
         let (first, last) = (k[0], k[k.len() - 1]);
-        let mut segments = vec![(last.1, last.0 - period, first.1, first.0)];
-        for pair in k.windows(2) {
-            segments.push((pair[0].1, pair[0].0, pair[1].1, pair[1].0));
-        }
-        segments.push((last.1, last.0, first.1, first.0 + period));
-        let segment = segments
-            .iter()
+        // The segments around the day, the last one wrapping to the first keyframe: walked
+        // without collecting them, as this runs for several tracks every frame.
+        let wrap = (last.1, last.0, first.1, first.0 + period);
+        let segment = std::iter::once((last.1, last.0 - period, first.1, first.0))
+            .chain(
+                k.windows(2)
+                    .map(|pair| (pair[0].1, pair[0].0, pair[1].1, pair[1].0)),
+            )
+            .chain(std::iter::once(wrap))
             .find(|s| t < s.3)
-            .copied()
-            .unwrap_or(segments[segments.len() - 1]);
+            .unwrap_or(wrap);
         let (from, from_t, to, to_t) = segment;
         if t <= from_t {
             return from;

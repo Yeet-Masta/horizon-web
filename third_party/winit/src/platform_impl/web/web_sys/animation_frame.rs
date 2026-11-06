@@ -32,8 +32,10 @@ impl AnimationFrameHandler {
     }
 
     pub fn request(&self) {
-        if let Some(handle) = self.handle.take() {
-            self.window.cancel_animation_frame(handle).expect("Failed to cancel animation frame");
+        // A frame asked for already comes: asked again, it was cancelled and asked anew, and a
+        // game asking at each wake-up spent a tenth of the page's thread on the two calls.
+        if self.handle.get().is_some() {
+            return;
         }
 
         let handle = self

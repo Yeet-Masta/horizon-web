@@ -2,9 +2,12 @@
 //! one lock, taken by spinning (a browser's page thread may not wait), by
 //! every allocation of every thread: the workers' allocations held the
 //! page's frames up and their spinning took the cores. Here each thread
-//! keeps the small blocks it frees, by size class, and hands them out again
-//! without the lock; only a miss, a large or over-aligned block, or a full
-//! class goes to std's allocator.
+//! keeps the blocks up to 64 KiB it frees, by size class, and hands them out
+//! again without the lock; only a miss, a larger or over-aligned block, or a
+//! full class goes to std's allocator. A class keeps at most 512 blocks and,
+//! past 1 KiB, 256 KiB of them. (Up to 1 KiB only, a frame's lists growing
+//! past it took the lock at each doubling, and a Chromium profile of a laptop
+//! had the page's thread spinning on it for half of its slowest frames.)
 //!
 //! A thread's lists live in its thread-local storage, which wasm-bindgen
 //! sets up by allocating it (and the thread's stack): until then this
@@ -28,9 +31,24 @@ use std::{
 };
 
 /// Size classes, in bytes: a block up to the largest comes from a class.
-const CLASSES: [usize; 12] = [16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024];
+const CLASSES: [usize; 24] = [
+    16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192,
+    12288, 16384, 24576, 32768, 49152, 65536,
+];
 /// Blocks a thread keeps of a class before its frees go back to std's.
 const KEEP: u32 = 512;
+/// Bytes a thread keeps of a class past 1 KiB: a worker that frees its meshes
+/// keeps no more than this of each size for itself.
+const KEEP_BYTES: usize = 256 << 10;
+/// Blocks a thread keeps of class `c`.
+const fn keep(c: usize) -> u32 {
+    let by_bytes = KEEP_BYTES / CLASSES[c];
+    if CLASSES[c] <= 1024 || by_bytes >= KEEP as usize {
+        KEEP
+    } else {
+        by_bytes as u32
+    }
+}
 /// Every class's blocks are aligned this far.
 const ALIGN: usize = 16;
 /// Below this address a thread-local's address is only its offset in the
@@ -181,7 +199,7 @@ unsafe impl GlobalAlloc for Cached {
             return locked(|| unsafe { System.dealloc(block_ptr, layout) });
         };
         let kept = with_lists(|lists| {
-            if lists.len[c] >= KEEP {
+            if lists.len[c] >= keep(c) {
                 return false;
             }
             // SAFETY: the block is at least 16 bytes, 16-aligned, and ours now.
@@ -217,8 +235,23 @@ unsafe impl GlobalAlloc for Cached {
         // with this alignment.
         let new = unsafe { Layout::from_size_align_unchecked(new_size, layout.align()) };
         match (class(layout), class(new)) {
+            // Shrinking stays where it is, in std's allocator.
             // SAFETY: std's block, with its layout.
-            (None, None) => locked(|| unsafe { System.realloc(block_ptr, layout, new_size) }),
+            (None, None) if new_size <= layout.size() => {
+                locked(|| unsafe { System.realloc(block_ptr, layout, new_size) })
+            }
+            // Growing moves the bytes outside the lock: through std's realloc the copy of a
+            // large block (a mesh, a chunk's packet) held every other thread's allocation.
+            // SAFETY: a fresh block of std's for the new layout, the old bytes copied into it
+            // and the old block given back with its layout.
+            (None, None) => unsafe {
+                let moved = locked(|| System.alloc(new));
+                if !moved.is_null() {
+                    ptr::copy_nonoverlapping(block_ptr, moved, layout.size());
+                    locked(|| System.dealloc(block_ptr, layout));
+                }
+                moved
+            },
             // The class's block has room for it already.
             (Some(a), Some(b)) if a == b => block_ptr,
             // SAFETY: a fresh block for the new layout, the old one's bytes
