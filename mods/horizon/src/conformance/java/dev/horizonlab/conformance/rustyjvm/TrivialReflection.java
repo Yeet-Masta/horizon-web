@@ -1,0 +1,53 @@
+package samples.reflection.trivial;
+
+public class TrivialReflection {
+    public static void main(String[] args) {
+        print(Class.class);
+        print(Object.class);
+        print(Examinee.class);
+        print(ExamineeInterface.class);
+        print(Rcd.class);
+        print(Enm.class);
+        print(int.class);
+
+        // Nested classes record private/protected/static only in the InnerClasses attribute,
+        // never in their own ClassFile access_flags.
+        print(PrivateStaticNested.class);
+        print(ProtectedInner.class);
+        print(PackagePrivateStaticNested.class);
+    }
+
+    private static class PrivateStaticNested {
+    }
+
+    protected class ProtectedInner {
+    }
+
+    static final class PackagePrivateStaticNested {
+    }
+
+    private static void print(Class<?> clazz) {
+        System.out.println("Class: " + clazz);
+        System.out.println("  modifiers: " + clazz.getModifiers());
+        System.out.println("  isPrimitive: " + clazz.isPrimitive());
+        System.out.println("  isArray: " + clazz.isArray());
+        System.out.println("  isInterface: " + clazz.isInterface());
+        System.out.println("  isEnum: " + clazz.isEnum());
+        System.out.println("  isAnnotation: " + clazz.isAnnotation());
+        System.out.println("  isSynthetic: " + clazz.isSynthetic());
+        System.out.println("  isRecord: " + clazz.isRecord());
+        System.out.println("  isEnumeration: " + clazz.isEnum());
+    }
+}
+
+abstract class Examinee {
+}
+
+interface ExamineeInterface {
+}
+
+record Rcd() {
+}
+
+enum Enm {
+}

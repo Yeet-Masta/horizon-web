@@ -1,0 +1,1758 @@
+{
+ "suites": {
+  "rustyjvm": {
+   "dir": "rustyjvm",
+   "javac": {
+    "HelpfulNpeDebugInfo.java": [
+     "-g"
+    ],
+    "StringConcatInline.java": [
+     "-XDstringConcat=inline"
+    ],
+    "BootstrapMethodInvokerExample.java": [
+     "--patch-module",
+     "java.base=."
+    ],
+    "ConstantPoolExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.reflect=ALL-UNNAMED",
+     "--patch-module",
+     "java.base=."
+    ],
+    "StringConcatHelperExample.java": [
+     "--patch-module",
+     "java.base=."
+    ],
+    "ReflectionAreNestMatesExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.reflect=ALL-UNNAMED"
+    ],
+    "ReflectionGetCallerClassExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.reflect=ALL-UNNAMED"
+    ],
+    "UnsafeGetLongUnalignedExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UnsafeUsage.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UnsafeObjectFieldOffset.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UnsafeObjectFieldOffsetErrors.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UnsafePutReferenceVolatileExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UnsafeZeroAllocation.java": [
+     "--add-exports",
+     "java.base/jdk.internal.misc=ALL-UNNAMED"
+    ],
+    "UserPerfCounterExample.java": [
+     "--add-exports",
+     "java.base/jdk.internal.perf=ALL-UNNAMED",
+     "--add-exports",
+     "java.management/sun.management.counter=ALL-UNNAMED"
+    ]
+   }
+  },
+  "generated": {
+   "generated": true
+  },
+  "lang": {
+   "dir": "lang"
+  },
+  "bench": {
+   "dir": "bench"
+  }
+ },
+ "programs": [
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.adder.ints.AdderInt",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.adder.longs.AdderLong",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.addernegative.AdderNegativeLong",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.extremestack.ints.ExtremeStackInt",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.extremestack.longs.ExtremeStackLong",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.fibonacci.iterative.FibonacciIterative",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.fibonacci.recursive.FibonacciRecursive",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.operations.doubles.DoubleOperations",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.operations.floats.FloatOperations",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.overflow.ArithmeticIntegralOverflow",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.sub.doubles.SubDoubles",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.sub.floats.SubFloats",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.sub.ints.SubInts",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arithmetics.sub.longs.SubLongs",
+   "category": "arithmetics"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.array.ints.ArrayInt",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.array.longs.ArrayLong",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.array3d.Array3D",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.bounds.ArrayIndexOutOfBounds",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.defaultvalues.ArrayDefaultValues",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.arrays.tostringexample.ArrayToStringExample",
+   "category": "arrays"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.advancedpooldemo.AdvancedPoolDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.atomics.AtomicCasExamples",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.forkjoin.ForkJoinExamples",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.scopedvalue.ScopedValueExample",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.CurrentStackTraceDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.InterruptSleepDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.InterruptWaitDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.JoinDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.NotifyAllDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.SleepDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.SyncCounterDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.ThreadDumpDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.ThreadEdgeCasesDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.ThreadLocalDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.ThreadStartDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.ThreadStateDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.WaitNotifyDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.threads.WorkerUncaughtDemo",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.concurrency.varhandle.VarHandleCasExamples",
+   "category": "concurrency"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.exceptions.proper.handling.of.fillinstacktrace.FillInStackTraceExplicit",
+   "category": "exceptions"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.instance.ints.InstanceFieldsUserInts",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.instance.longs.InstanceFieldsUserLong",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.advanced.StaticInitializationAdvanced",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.array.StaticInitializationArray",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.chain.StaticInitializationChain",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.circular.StaticInitializationCircular",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.ints.StaticFieldsUserInts",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.lazy.LazyInitializationExample",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.fields.staticinitialization.oneclass.StaticInitializationWithinOneClass",
+   "category": "fields"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.filesystem.getdefaultfilesystem.GetDefaultFileSystem",
+   "category": "filesystem",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.abstractclass.AbstractClass",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.abstractclasswithoutimpl.AbstractClassWithoutInterfaceImplementation",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.defaultmethodviaparent.DefaultMethodViaParentExample",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.instancefield.InheritanceInstanceField",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.interfaceandabstractclass.InterfaceAndAbstractClass",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.interfacedefaultmethoddirectcall.InterfaceDefaultMethodDirectCall",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.interfaces.inheritedimplementation.InheritedImplementationInterface",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.interfaces.oneinterfaceextendsanother.OneInterfaceExtendsAnother",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.interfaces.trivial.TrivialInterface",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.parentstaticinit.InitParentStaticBlockBeforeChild",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.staticfield.InheritanceStaticField",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.staticmethod.ParentStaticMethodCalledViaChild",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.staticmethodreturnsinterface.StaticMethodReturnsInterface",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.inheritance.usegrandparentmethodviasuper.UseGrandParentMethodViaSuperExample",
+   "category": "inheritance"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.bufferedoutputstreamchunkingexample.BufferedOutputStreamChunkingExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.file.deleteonexitdemo.DeleteOnExitDemo",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.fileexample.FileExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.fileinputstreamexample.FileInputStreamExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.fileinputstreamthrowexample.FileInputStreamThrowExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.fileoutputstreamexample.FileOutputStreamExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.fileoutputstreamthrowexample.FileOutputStreamThrowExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.listdirectory.ListDirectory",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.printstreamexample.PrintStreamExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.randomaccessfilepointer.RandomAccessFilePointer",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.randomaccessfilesetlength.RandomAccessFileSetLength",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.randomaccessfilesinglebyte.RandomAccessFileSingleByte",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.randomaccessfilevsmmapexample.RandomAccessFileVsMMapExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.io.xmlstringtofileexample.XmlStringToFileExample",
+   "category": "io",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.arrays.trivial.TrivialUtilArrays",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.concurrent.hashmap.trivial.TrivialConcurrentHashMap",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.hashmap.trivial.TrivialHashMap",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.mapinterface.usage.AdvancedMapInterfaceUsage",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.properties.trivial.PropertiesTrivial",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javabase.util.treemap.trivial.TrivialTreeMap",
+   "category": "javabase"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.abstractclasses.abstractclassstaticinit.AbstractClassStaticInitExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.assertions.status.AssertionStatusExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.assertions.status.AssertionStatusExample",
+   "category": "javacore",
+   "variant": "ea",
+   "jvm": [
+    "-ea"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.assertions.trivial.AssertionExample",
+   "category": "javacore",
+   "jvm": [
+    "-ea"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.bytes.trivial.ByteOperations",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.cast.arrays.ArrayCastExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.cast.trivial.TrivialCast",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.cloneable.trivial.CloneExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.doubles.trivial.LongToDoubleAndBack",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.enums.tricky.TrickyEnumsExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.enums.trivial.EnumsExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.exceptionexample.ExceptionExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.hashcodes.trivial.HashCodeExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.invokedynamic.lambda.LambdaExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.loadlibrary.example.JniClassOperationsDemo",
+   "category": "javacore",
+   "needs": [
+    "jni"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.loadlibrary.example.JniNoSuchIdDemo",
+   "category": "javacore",
+   "needs": [
+    "jni"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.loadlibrary.example.LoadLibraryExample",
+   "category": "javacore",
+   "needs": [
+    "jni"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.loadlibrary.inheritedfields.JniInheritedFieldsDemo",
+   "category": "javacore",
+   "needs": [
+    "jni"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.loadlibrary.objectops.JniIsSameObjectDemo",
+   "category": "javacore",
+   "needs": [
+    "jni"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.object.trivial.ObjectMethods",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.recordexample.RecordExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.rethrowloopexample.RethrowExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.streams.streamexamples.StreamExamples",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.concat.advanced.StringConcatTest",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.concat.trivial.StringConcatInline",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.cpool.advanced.StringPoolAdvanced",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.cpool.trivial.TrivialStringsCPool",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.nonvalidcesu8.NonValidCESU8",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.trivial.EmptyStringInCPool",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.trivial.ToStringAndBack",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.strings.trivial.TrivialStrings",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.switches.trivial.SwitchExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.unhandledexception.UnhandledExceptionExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.varargs.trivial.VarArgsExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javacore.wide.instructions.trivial.WideInstructionsExample",
+   "category": "javacore"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.javautil.random.RandomExample",
+   "category": "javautil"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.reflection.getcallerclass.ReflectionGetCallerClassExample",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.getlongunaligned.UnsafeGetLongUnalignedExample",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.objectfieldoffset.UnsafeObjectFieldOffset",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.objectfieldoffseterrors.UnsafeObjectFieldOffsetErrors",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.putreferencevolatile.UnsafePutReferenceVolatileExample",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.trivial.UnsafeUsage",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.jdkinternal.unsafe.zeroallocation.UnsafeZeroAllocation",
+   "category": "jdkinternal",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.loader.appclassloaderdemo.AppClassLoaderDemo",
+   "category": "loader"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.locale.localemonthsexample.LocaleMonthsExample",
+   "category": "locale"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.locale.showlocale.ShowLocale",
+   "category": "locale"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.module.inspectmodule.InspectModule",
+   "category": "module",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nativecall.system.NativeCallSystemArrayCopy",
+   "category": "nativecall"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nativecall.system.NativeCallSystemCurrentTimeMillis",
+   "category": "nativecall"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nativecall.system.wallclock.WallClockExample",
+   "category": "nativecall"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nio.filedispatcherexample.FileDispatcherExample",
+   "category": "nio",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nio.filedispatcherimpl.filedispatcherimpldemo.FileDispatcherImplDemo",
+   "category": "nio",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nio.filetypechecks.FileTypeChecksExample",
+   "category": "nio",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.nio.niofileexample.NioFileExample",
+   "category": "nio",
+   "needs": [
+    "files"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.npe.allnpeexamples.AllNPEExamples",
+   "category": "npe"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.npe.helpfulnpedebuginfo.HelpfulNpeDebugInfo",
+   "category": "npe"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.patterns.composite.CompositePattern",
+   "category": "patterns"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.perf.userperfcounterexample.UserPerfCounterExample",
+   "category": "perf",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.constantcallsiteexample.ConstantCallSiteExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.directconstructorhandleaccessor.DirectConstructorHandleAccessorExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.directmethodhandleaccessor.DirectMethodHandleAccessorExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.getdeclaredconstructorexample.GetDeclaredConstructorExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.getdeclaredmethod.GetDeclaredMethodExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.methodhandleexample.MethodHandleExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.methodhandlewidefields.MethodHandleWideFields",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.mutablecallsiteexample.MutableCallSiteExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.nativeaccessorreturnvalues.NativeAccessorReturnValues",
+   "category": "reflection",
+   "jvm": [
+    "-Djdk.reflect.useNativeAccessorOnly=true"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.sealed.SealedClassesExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.stringconcat.StringConcatFactoryExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.ArrayClass",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.TrivialReflection",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.arenestmatesexample.ReflectionAreNestMatesExample",
+   "category": "reflection",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classgetdeclaringclassexample.GetDeclaringClassExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classgetname.ClassGetNameExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classgetnesthostexample.ClassGetNestHostExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classgetsuperclassexample.GetSuperclassExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classisinstanceexample.ClassIsInstanceExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.classisinterface.ClassIsInterfaceExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.declaredconstructors.DeclaredConstructorsExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.declaredfields.DeclaredFieldsExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.declaredmethods.DeclaredMethodsExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.enclosingmethod.EnclosingMethodExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.forname.ClassForNameExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.getinterfacesexample.GetInterfacesExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.instanceofexample.InstanceOfExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.isannotationexample.IsAnnotationExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.isassignablefromexample.IsAssignableFromExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.isenumexample.IsEnumExample",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.reflection.trivial.synthetic.classes.SyntheticPrimitiveClasses",
+   "category": "reflection"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.regex.regexexample.RegexExample",
+   "category": "regex"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "CompactSourceFilesArgsExample",
+   "category": "rustyjvm",
+   "args": [
+    "Monica",
+    "Eve",
+    "Jessica"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "CompactSourceFilesExample",
+   "category": "rustyjvm"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "java.lang.ConstantPoolExample",
+   "category": "rustyjvm",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "java.lang.StringConcatHelperExample",
+   "category": "rustyjvm",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "java.lang.invoke.BootstrapMethodInvokerExample",
+   "category": "rustyjvm",
+   "needs": [
+    "jdk-internal"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.shutdown.exitwithcodedemo.ExitWithCodeDemo",
+   "category": "shutdown",
+   "args": [
+    "42"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticfield.interfacehierarchy.StaticFieldFromSecondParentInterfaceExample",
+   "category": "staticfield"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.byconstructor.StaticInitializationByConstructorExample",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.bymethodhandle.MethodHandleStaticInitCases",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.child_field_in_parent_block_accessed_by_child.ChildFieldInParentBlockAccessedByChild",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.child_field_in_parent_block_accessed_by_parent.ChildFieldInParentBlockAccessedByParent",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.const_vs_nonconst_fields.ConstVsNonConstFieldsExample",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.initialized_child_field_in_parent_block_accessed_by_child.InitializedChildFieldInParentBlockAccessedByChild",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.initialized_child_field_in_parent_block_accessed_by_parent.InitializedChildFieldInParentBlockAccessedByParent",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.interfaceinitializationdoesnotinitializesuperinterfaces.InterfaceInitializationDoesNotInitializeSuperinterfaces",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.parentstaticfield.OnlyTheClassThatDeclaresStaticFieldIsInitialized",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.staticinit.parentstaticfieldaccess.StaticFieldAccessFromParentExample",
+   "category": "staticinit"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.getpropertyexample.SystemGetPropertyExample",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.load.SystemLoad",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.maplibraryname.MapLibraryNameExample",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.normaloutputwitherroutput.NormalOutputWithErrorOutput",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.outexample.SystemOutExample",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.programargs.ProgramArgsExample",
+   "category": "system",
+   "args": [
+    "Hello",
+    "from",
+    "Java",
+    "!"
+   ]
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.system.setin.SystemSetInExample",
+   "category": "system"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.zlib.inflaterresetdemo.InflaterResetDemo",
+   "category": "zlib"
+  },
+  {
+   "suite": "rustyjvm",
+   "main": "samples.zlib.zlibexample.ZlibExample",
+   "category": "zlib"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.nop.NopGeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.swap.SwapGeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.pop2.Pop2GeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.dup_x2.DupX2GeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.dup2_x1.Dup2_X1GeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.opcodes.dup2_x2.Dup2_X2GeneratedExample",
+   "category": "opcodes"
+  },
+  {
+   "suite": "generated",
+   "main": "samples.invalidprograms.operandstackoverflow.OperandStackOverflowExample",
+   "category": "verifier"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Lambdas",
+   "category": "lambdas"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.RecordsEnums",
+   "category": "records-enums-switch"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.GenericsInner",
+   "category": "generics-inner"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Exceptions",
+   "category": "exceptions"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Strings",
+   "category": "strings"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Numbers",
+   "category": "numbers-boxing"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Collections1",
+   "category": "collections"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Streams",
+   "category": "streams-optional"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.MathRandom",
+   "category": "math-random"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Reflection",
+   "category": "reflection"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.StaticInit",
+   "category": "static-init"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Threads",
+   "category": "threads"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Uncaught",
+   "category": "exceptions"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.Exit",
+   "category": "launcher-exit"
+  },
+  {
+   "suite": "lang",
+   "main": "dev.horizonlab.conformance.lang.IoText",
+   "category": "io-text"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Startup",
+   "category": "bench",
+   "startup": true
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Recursion",
+   "category": "bench"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Arrays1",
+   "category": "bench"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Collections2",
+   "category": "bench"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Strings2",
+   "category": "bench"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Streams2",
+   "category": "bench"
+  },
+  {
+   "suite": "bench",
+   "main": "dev.horizonlab.conformance.bench.Objects2",
+   "category": "bench"
+  }
+ ],
+ "mods": {
+  "dir": "mods",
+  "stubs": "stubs",
+  "jars": [
+   {
+    "name": "gems",
+    "dir": "gems",
+    "packages": [
+     "modfixture.gems"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "ordered": true,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:item",
+       "id": "gems:gem_dust",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "8"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "gems:ruby",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "16",
+         "rarity": "uncommon"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "gems:sapphire",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "32",
+         "rarity": "rare"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "gems:topaz",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "64",
+         "rarity": "common"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "gems:polished_ruby",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "8"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "name": "stone",
+    "dir": "stone",
+    "packages": [
+     "modfixture.stone"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "ordered": true,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:block",
+       "id": "stone:polished_marble",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "1.5",
+         "explosion_resistance": "6",
+         "requires_tool": "true"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "stone:polished_marble"
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "stone:polished_chalk",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "0.5",
+         "explosion_resistance": "0.5"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "stone:polished_chalk"
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "stone:polished_basalt_brick",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "2",
+         "explosion_resistance": "8",
+         "requires_tool": "true"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "stone:polished_basalt_brick"
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "stone:polished_old_cobble",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "2.5",
+         "explosion_resistance": "6",
+         "requires_tool": "true"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "stone:polished_old_cobble"
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "stone:polished_slate",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "3",
+         "explosion_resistance": "6",
+         "requires_tool": "true"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "stone:polished_slate"
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "stone:reinforced_slate",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "12",
+         "explosion_resistance": "1200",
+         "requires_tool": "true"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "name": "subclass",
+    "dir": "subclass",
+    "packages": [
+     "modfixture.subclass"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "ordered": true,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:item",
+       "id": "subclass:wand_100",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "1",
+         "rarity": "epic"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "subclass:slippery_ice",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "0.5",
+         "explosion_resistance": "0.5",
+         "friction": "0.98"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "subclass:charged_100",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "3"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "name": "events",
+    "dir": "events",
+    "packages": [
+     "modfixture.events"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "ordered": true,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:item",
+       "id": "events:pebble",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "64"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "events:crystal",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "16",
+         "rarity": "rare"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "events:orb",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "1",
+         "rarity": "epic"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "name": "configured",
+    "dir": "configured",
+    "packages": [
+     "modfixture.configured"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "ordered": true,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:item",
+       "id": "configured:copper_coin",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "50"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "configured:gold_coin",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "10"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "configured:huge_coin",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "99"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "configured:silver_coin",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "25"
+        }
+       }
+      }
+     ]
+    }
+   },
+   {
+    "name": "neogems",
+    "dir": "neogems",
+    "packages": [
+     "modfixture.neogems"
+    ],
+    "role": "server",
+    "expect": {
+     "status": "ok",
+     "entrypoints": 1,
+     "completed": 1,
+     "exact": true,
+     "registrations": [
+      {
+       "registry": "minecraft:item",
+       "id": "neogems:amber",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "max_stack_size": "16"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:item",
+       "id": "neogems:jade",
+       "declaration": {
+        "kind": "item",
+        "properties": {
+         "rarity": "rare"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "neogems:amber_block",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "1",
+         "explosion_resistance": "3"
+        }
+       }
+      },
+      {
+       "registry": "minecraft:block",
+       "id": "neogems:jade_block",
+       "declaration": {
+        "kind": "block",
+        "properties": {
+         "hardness": "4",
+         "explosion_resistance": "4",
+         "requires_tool": "true"
+        }
+       }
+      }
+     ]
+    }
+   }
+  ]
+ }
+}

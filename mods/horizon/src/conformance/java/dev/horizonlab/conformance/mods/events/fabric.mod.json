@@ -1,0 +1,1 @@
+{"schemaVersion": 1, "id": "events", "version": "1.0.0", "entrypoints": {"main": ["modfixture.events.EventsMod"]}}

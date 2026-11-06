@@ -250,3 +250,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+## rusty-jvm test programs
+
+`mods/horizon/src/conformance/java/dev/horizonlab/conformance/rustyjvm/` holds the Java test
+programs of [rusty-jvm](https://github.com/hextriclosan/rusty-jvm) 0.6.0 (`tests/test_data`, commit
+9834291e6a19) by Igor Rudenko, under the MIT License (`LICENSE` in that folder). They are part of
+the conformance corpus `tools/java_conformance.py` runs on HotSpot and on horizon-native-java;
+seven of them, which rusty-jvm keeps as assembled class files, are rebuilt by the harness
+(`GENERATED` in `tools/java_conformance.py`), and the two that need its third-party
+`algorithm.jar` are left out.
