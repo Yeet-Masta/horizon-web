@@ -18924,7 +18924,7 @@ impl<H: Host> Runtime<'_, H> {
             };
             return Err(NativeError::UncaughtException {
                 class: class.into(),
-                message: Some(format!("{path}")),
+                message: Some(path.to_string()),
                 frame: None,
             });
         };
@@ -18987,7 +18987,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(path) = self.io_paths.get(&marker).cloned() else {
                     return Ok(None);
                 };
-                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("exists", "()Z") | ("isFile", "()Z") => {
                         Value::Int(i32::from(self.io_files.contains_key(&path)))
                     }
@@ -19029,7 +19029,7 @@ impl<H: Host> Runtime<'_, H> {
                         "()Ljava/lang/String;",
                     ) => Value::Ref(Some(path)),
                     _ => return Ok(None),
-                }));
+                }))
             }
             "java/nio/file/Path" if r.name == "toFile" => {
                 let Some(path) = receiver.map(path_text).map(str::to_owned) else {
@@ -19039,13 +19039,13 @@ impl<H: Host> Runtime<'_, H> {
                 if let Some(marker) = expect_ref(&value) {
                     self.io_paths.insert(marker.to_owned(), path);
                 }
-                return Ok(Some(value));
+                Ok(Some(value))
             }
             "java/nio/file/Files" => {
                 let Some(path) = args.first().map(path_text).map(str::to_owned) else {
                     return Ok(None);
                 };
-                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("exists", descriptor) if descriptor.starts_with("(Ljava/nio/file/Path;") => {
                         if !self.io_files.contains_key(&path) {
                             // A resource the jar ships still answers through the
@@ -19148,7 +19148,7 @@ impl<H: Host> Runtime<'_, H> {
                         value
                     }
                     _ => return Ok(None),
-                }));
+                }))
             }
             "java/io/FileWriter" | "java/io/PrintWriter" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19170,7 +19170,7 @@ impl<H: Host> Runtime<'_, H> {
                     let path = args.first().and_then(|value| self.io_path_of(value));
                     self.io_open_writer(&marker, path, !appending);
                 }
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/OutputStreamWriter" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19178,7 +19178,7 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 let path = args.first().and_then(|value| self.io_path_of(value));
                 self.io_open_writer(&marker, path, false);
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/BufferedWriter" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19186,14 +19186,14 @@ impl<H: Host> Runtime<'_, H> {
                 };
                 let path = args.first().and_then(|value| self.io_path_of(value));
                 self.io_open_writer(&marker, path, false);
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/StringWriter" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
                     return Ok(None);
                 };
                 self.io_open_writer(&marker, None, true);
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/FileOutputStream" | "java/io/FileInputStream" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19211,7 +19211,7 @@ impl<H: Host> Runtime<'_, H> {
                             .is_some_and(|value| expect_int(r, value).unwrap_or(0) != 0);
                     self.io_open_writer(&marker, Some(path), !appending);
                 }
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/FileReader" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19221,7 +19221,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(None);
                 };
                 self.io_open_reader(r, &marker, &path, true)?;
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/InputStreamReader" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19237,7 +19237,7 @@ impl<H: Host> Runtime<'_, H> {
                     None => String::new(),
                 };
                 self.string_readers.insert(marker, text);
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/BufferedReader" if r.name == "<init>" => {
                 let Some(marker) = receiver_marker else {
@@ -19249,7 +19249,7 @@ impl<H: Host> Runtime<'_, H> {
                     .and_then(|reader| self.string_readers.remove(reader))
                     .unwrap_or_default();
                 self.string_readers.insert(marker, text);
-                return Ok(Some(Value::Void));
+                Ok(Some(Value::Void))
             }
             "java/io/Writer"
             | "java/io/BufferedWriter"
@@ -19263,7 +19263,7 @@ impl<H: Host> Runtime<'_, H> {
                 let Some(_) = self.io_sink_key(&marker) else {
                     return Ok(None);
                 };
-                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("write", "(Ljava/lang/String;)V") => {
                         let text = args.first().map(expect_string).unwrap_or_default();
                         self.io_write(&marker, text);
@@ -19323,7 +19323,7 @@ impl<H: Host> Runtime<'_, H> {
                     {
                         let text = args
                             .first()
-                            .map(|value| java_value_text(value, &descriptor))
+                            .map(|value| java_value_text(value, descriptor))
                             .unwrap_or_default();
                         self.io_write(&marker, &text);
                         Value::Ref(Some(marker))
@@ -19378,7 +19378,7 @@ impl<H: Host> Runtime<'_, H> {
                         Value::Ref(Some(self.io_sink_text(&marker)))
                     }
                     _ => return Ok(None),
-                }));
+                }))
             }
             "java/io/InputStream" | "java/io/FileInputStream" | "java/io/ByteArrayInputStream" => {
                 let Some(marker) = receiver_marker else {
@@ -19390,7 +19390,7 @@ impl<H: Host> Runtime<'_, H> {
                 // A stream this invocation opened carries its bytes as UTF-8
                 // text: reading drains from the front, exactly the way the
                 // bounded reader surface consumes a file.
-                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("readAllBytes", "()[B") | ("readNBytes", "()[B") => {
                         let text = self.string_readers.remove(&marker).unwrap_or_default();
                         self.string_readers.insert(marker.clone(), String::new());
@@ -19476,7 +19476,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     ("close", "()V") => Value::Void,
                     _ => return Ok(None),
-                }));
+                }))
             }
             "java/io/Reader"
             | "java/io/BufferedReader"
@@ -19490,7 +19490,7 @@ impl<H: Host> Runtime<'_, H> {
                 if !self.string_readers.contains_key(&marker) {
                     return Ok(None);
                 }
-                return Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
+                Ok(Some(match (r.name.as_str(), r.descriptor.as_str()) {
                     ("read", "()I") => match self.string_readers.get_mut(&marker) {
                         Some(text) if !text.is_empty() => {
                             let mut units = text.encode_utf16();
@@ -19552,7 +19552,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     ("close", "()V") => Value::Void,
                     _ => return Ok(None),
-                }));
+                }))
             }
             _ => Ok(None),
         }
@@ -19902,7 +19902,7 @@ impl<H: Host> Runtime<'_, H> {
                     let class = args.get(1).and_then(expect_ref).ok_or_else(|| {
                         NativeError::Metadata("Gson.fromJson needs a Class".into())
                     })?;
-                    Ok(Some(self.gson_from_json(&text, class)?))
+                    Ok(Some(self.gson_from_json(text, class)?))
                 }
                 ("fromJson", "(Ljava/io/Reader;Ljava/lang/Class;)Ljava/lang/Object;") => {
                     let reader = args.first().and_then(expect_ref).ok_or_else(|| {
@@ -19970,7 +19970,7 @@ impl<H: Host> Runtime<'_, H> {
                             _ => None,
                         })
                         .unwrap_or_else(|| "java/lang/Object".into());
-                    Ok(Some(self.gson_from_json(&text, &raw)?))
+                    Ok(Some(self.gson_from_json(text, &raw)?))
                 }
                 _ => Ok(None),
             },
