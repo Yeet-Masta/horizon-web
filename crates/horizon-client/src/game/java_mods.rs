@@ -164,9 +164,18 @@ pub(super) fn content_mods(
         .collect())
 }
 
+fn handler_role(role: ExecutionRole) -> super::java_payloads::HandlerRole {
+    match role {
+        ExecutionRole::Client => super::java_payloads::HandlerRole::Client,
+        ExecutionRole::IntegratedServer => super::java_payloads::HandlerRole::IntegratedServer,
+        ExecutionRole::DedicatedServer => super::java_payloads::HandlerRole::DedicatedServer,
+    }
+}
+
 fn run_one(
     path: &std::path::Path,
     role: ExecutionRole,
+    payload_declarations: &mut Vec<super::java_payloads::PayloadDeclaration>,
 ) -> Result<(Vec<ContentMod>, JavaCompatibilityReport, NativeDeclarations), String> {
     let jar = horizon_native_java::NativeJar::from_path(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -265,6 +274,9 @@ fn run_one(
             .count(),
         isolation_failure: None,
     };
+    // Publish the jar's payload channels and keep its host before the runtimes
+    // map takes ownership: dispatch resolves a marker through that host.
+    super::java_payloads::adopt_host(handler_role(role), &jar, &mut host, payload_declarations);
     runtimes().lock().unwrap().push((jar, host));
     Ok((content, report, declarations))
 }
@@ -274,11 +286,15 @@ pub(super) fn run_java_mods(
     role: ExecutionRole,
 ) -> Result<(Vec<ContentMod>, Vec<JavaCompatibilityReport>), String> {
     runtimes().lock().unwrap().clear();
+    super::java_payloads::clear_handler_jars_as(handler_role(role));
     let mut content = Vec::new();
     let mut reports = Vec::new();
     let mut declarations = Vec::new();
+    let mut payload_declarations = Vec::new();
     for path in paths {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_one(path, role))) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_one(path, role, &mut payload_declarations)
+        })) {
             Ok(Ok((c, r, d))) => {
                 content.extend(c);
                 reports.push(r);
