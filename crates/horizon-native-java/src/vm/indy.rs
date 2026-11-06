@@ -151,9 +151,14 @@ impl Vm {
                         other => return Err(Exc::Unsupported(format!("switch label {other:?}"))),
                     });
                 }
+                // A switch over a primitive (a record's int component) has a
+                // primitive selector.
+                let primitive = classfile::parse_method_desc(&site_desc)
+                    .and_then(|(p, _)| p.first().filter(|d| d.len() == 1).map(|d| d.as_bytes()[0]));
                 CallSite::TypeSwitch {
                     labels: labels.into(),
                     enum_switch: &*bsm_ref.name == "enumSwitch",
+                    primitive,
                 }
             }
             (class, name) => {
@@ -456,14 +461,51 @@ impl Vm {
             CallSite::TypeSwitch {
                 labels,
                 enum_switch,
+                primitive,
             } => {
                 let restart = self.stack.pop().unwrap_or_default().i();
-                let target = self.stack.pop().unwrap_or_default().r();
-                let index = self.type_switch(target, restart, &labels, enum_switch)?;
+                let index = match primitive {
+                    Some(p) => {
+                        let v = if p == b'J' || p == b'D' {
+                            self.stack.pop();
+                            self.stack.pop().unwrap_or_default()
+                        } else {
+                            self.stack.pop().unwrap_or_default()
+                        };
+                        self.primitive_switch(p, v, restart, &labels)
+                    }
+                    None => {
+                        let target = self.stack.pop().unwrap_or_default().r();
+                        self.type_switch(target, restart, &labels, enum_switch)?
+                    }
+                };
                 self.stack.push(Value::Int(index));
             }
         }
         Ok(())
+    }
+
+    /// A pattern switch over a primitive value: a primitive class label
+    /// matches its own type (and the wider types it converts to exactly), a
+    /// constant label its value, a reference label the boxed value's class.
+    fn primitive_switch(&mut self, p: u8, v: Value, restart: i32, labels: &[Label]) -> i32 {
+        for (i, label) in labels.iter().enumerate().skip(restart.max(0) as usize) {
+            let hit = match label {
+                Label::Class(c) => match self.class(*c).kind {
+                    ClassKind::Primitive(q) => q == p || matches!((p, q), (b'B' | b'S' | b'C', b'I' | b'J' | b'D') | (b'I', b'J' | b'D') | (b'F', b'D') | (b'B', b'S')),
+                    _ => {
+                        let wrapper = super::jdk::boxes::wrapper_name(p);
+                        self.find_loaded(wrapper).is_some_and(|w| self.is_subclass(w, *c))
+                    }
+                },
+                Label::Int(x) => v.i() == *x && matches!(p, b'I' | b'S' | b'B' | b'C' | b'Z'),
+                _ => false,
+            };
+            if hit {
+                return i as i32;
+            }
+        }
+        labels.len() as i32
     }
 
     fn type_switch(&mut self, target: ObjId, restart: i32, labels: &[Label], enum_switch: bool) -> Res<i32> {

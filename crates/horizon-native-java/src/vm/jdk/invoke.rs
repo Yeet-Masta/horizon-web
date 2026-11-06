@@ -30,6 +30,8 @@ pub enum Target {
     /// A `VarHandle` on a field, or on an array's elements (`owner` 0).
     VarField { owner: ClassId, slot: usize, is_static: bool },
     VarArray,
+    /// A call site's `dynamicInvoker`: whatever the site's target is now.
+    Site(ObjId),
 }
 
 #[derive(Debug, Clone)]
@@ -411,6 +413,13 @@ fn lookup_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
 /// its target's types, boxed or unboxed as `asType` would.
 pub fn call_handle(vm: &mut Vm, h: ObjId, args: &[Value]) -> Res<Value> {
     let Some(hd) = handle(vm, h).cloned() else { return Err(vm.npe(None)) };
+    if let Target::Site(site) = hd.target {
+        let current = site_parts(vm, site).0;
+        if current == 0 {
+            return Err(vm.throw_new("java/lang/IllegalStateException", Some("uninitialized call site")));
+        }
+        return call_handle(vm, current, args);
+    }
     let mut all: Vec<Value> = args.to_vec();
     for (pos, v) in &hd.bound {
         all.insert((*pos).min(all.len()), *v);
@@ -507,6 +516,7 @@ pub fn call_handle(vm: &mut Vm, h: ObjId, args: &[Value]) -> Res<Value> {
             Ok(Value::Top)
         }
         Target::VarField { .. } | Target::VarArray => Err(Exc::Internal("a VarHandle called as a MethodHandle".into())),
+        Target::Site(_) => unreachable!(),
     }
 }
 
@@ -777,6 +787,68 @@ fn handles_static(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
     }
 }
 
+// ------------------------------------------------------------------ call sites
+
+/// A call site's target handle and its type.
+fn site_parts(vm: &Vm, site: ObjId) -> (ObjId, ObjId) {
+    match state(vm, site) {
+        Some(State::Generic(v)) if v.len() == 2 => (v[0].r(), v[1].r()),
+        _ => (0, 0),
+    }
+}
+
+fn site_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    let t = this(vm, a)?;
+    let set = |vm: &mut Vm, target: ObjId, mtype: ObjId| {
+        if let Some(o) = vm.obj_mut(t) {
+            o.data = Data::Jdk(Box::new(State::Generic(vec![Value::Ref(target), Value::Ref(mtype)])));
+        }
+    };
+    match op {
+        "initTarget" => {
+            let h = arg(a, 1).r();
+            let Some(desc) = handle(vm, h).map(|x| x.desc.clone()) else { return Err(vm.npe(None)) };
+            let mt = method_type_of(vm, &desc)?;
+            set(vm, h, mt);
+            void()
+        }
+        "initType" => {
+            set(vm, 0, arg(a, 1).r());
+            void()
+        }
+        "getTarget" => ret_ref(site_parts(vm, t).0),
+        "type" => ret_ref(site_parts(vm, t).1),
+        "setTarget" => {
+            let constant = vm.class_of(t).is_some_and(|c| vm.class_name(c) == "java/lang/invoke/ConstantCallSite");
+            if constant {
+                return Err(vm.throw_new("java/lang/UnsupportedOperationException", None));
+            }
+            let h = arg(a, 1).r();
+            let mt = site_parts(vm, t).1;
+            let (want, have) = (method_type_desc(vm, mt), handle(vm, h).map(|x| x.desc.clone()));
+            if have.is_none() {
+                return Err(vm.npe(None));
+            }
+            if want.is_some() && want != have {
+                let msg = format!("{} should be of type {}", type_text(vm, &have.unwrap_or_default())?, type_text(vm, &want.unwrap_or_default())?);
+                return Err(vm.throw_new("java/lang/invoke/WrongMethodTypeException", Some(&msg)));
+            }
+            set(vm, h, mt);
+            void()
+        }
+        "dynamicInvoker" => {
+            let constant = vm.class_of(t).is_some_and(|c| vm.class_name(c) == "java/lang/invoke/ConstantCallSite");
+            let (target, mt) = site_parts(vm, t);
+            if constant {
+                return ret_ref(target);
+            }
+            let desc = method_type_desc(vm, mt).unwrap_or_default();
+            ret_ref(new_handle(vm, Handle { target: Target::Site(t), bound: Vec::new(), desc, var_desc: String::new() })?)
+        }
+        _ => Err(Exc::Unsupported(format!("CallSite.{op}"))),
+    }
+}
+
 /// A `CONSTANT_MethodHandle` loaded by `ldc`.
 pub fn handle_constant(vm: &mut Vm, cf: &ClassFile, index: u16) -> Res<ObjId> {
     let h = handle_ref(cf, index)?;
@@ -966,7 +1038,24 @@ static CLASSES: &[NativeClass] = &[
         "arrayElementVarHandle" "(Ljava/lang/Class;)Ljava/lang/invoke/VarHandle;" S => Some(|vm, a| handles_static(vm, a, "arrayElementVarHandle")),
     ]),
     NativeClass { name: "java/lang/invoke/MethodHandles$Lookup", super_name: Some("java/lang/Object"), interfaces: &[], access: PUBLIC | FINAL, methods: LOOKUP_METHODS, statics: &[], clinit: None, data: None },
-    class("java/lang/invoke/CallSite", Some("java/lang/Object"), &[], PUBLIC | 0x0400, &[]),
+    class("java/lang/invoke/CallSite", Some("java/lang/Object"), &[], PUBLIC | 0x0400, natives![
+        "getTarget" "()Ljava/lang/invoke/MethodHandle;" M => Some(|vm, a| site_op(vm, a, "getTarget")),
+        "setTarget" "(Ljava/lang/invoke/MethodHandle;)V" M => Some(|vm, a| site_op(vm, a, "setTarget")),
+        "type" "()Ljava/lang/invoke/MethodType;" M => Some(|vm, a| site_op(vm, a, "type")),
+        "dynamicInvoker" "()Ljava/lang/invoke/MethodHandle;" M => Some(|vm, a| site_op(vm, a, "dynamicInvoker")),
+    ]),
+    class("java/lang/invoke/ConstantCallSite", Some("java/lang/invoke/CallSite"), &[], PUBLIC, natives![
+        "<init>" "(Ljava/lang/invoke/MethodHandle;)V" M => Some(|vm, a| site_op(vm, a, "initTarget")),
+    ]),
+    class("java/lang/invoke/MutableCallSite", Some("java/lang/invoke/CallSite"), &[], PUBLIC, natives![
+        "<init>" "(Ljava/lang/invoke/MethodHandle;)V" M => Some(|vm, a| site_op(vm, a, "initTarget")),
+        "<init>" "(Ljava/lang/invoke/MethodType;)V" M => Some(|vm, a| site_op(vm, a, "initType")),
+        "syncAll" "([Ljava/lang/invoke/MutableCallSite;)V" S => Some(|_, _| void()),
+    ]),
+    class("java/lang/invoke/VolatileCallSite", Some("java/lang/invoke/CallSite"), &[], PUBLIC, natives![
+        "<init>" "(Ljava/lang/invoke/MethodHandle;)V" M => Some(|vm, a| site_op(vm, a, "initTarget")),
+        "<init>" "(Ljava/lang/invoke/MethodType;)V" M => Some(|vm, a| site_op(vm, a, "initType")),
+    ]),
     class("java/lang/constant/ClassDesc", None, &[], super::INTERFACE, natives!["descriptorString" "()Ljava/lang/String;" A => None]),
     NativeClass { name: "java/lang/constant/ClassDesc$Native", super_name: Some("java/lang/Object"), interfaces: &["java/lang/constant/ClassDesc"], access: FINAL, methods: natives![], statics: &[], clinit: None, data: None },
     NativeClass { name: "java/lang/Enum$EnumDesc", super_name: Some("java/lang/Object"), interfaces: &[], access: PUBLIC | FINAL, methods: natives![], statics: &[], clinit: None, data: None },

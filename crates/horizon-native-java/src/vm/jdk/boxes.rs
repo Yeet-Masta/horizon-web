@@ -810,6 +810,14 @@ static CHARACTER: &[NativeMethod] = natives![
 
 // ------------------------------------------------------------------ Math
 
+/// `Math.pow`: C's `pow`, except that Java makes `(±1)^(±∞)` NaN.
+fn java_pow(x: f64, y: f64) -> f64 {
+    if x.abs() == 1.0 && y.is_infinite() {
+        return f64::NAN;
+    }
+    libm::pow(x, y)
+}
+
 fn ulp(d: f64) -> f64 {
     if d.is_nan() {
         return f64::NAN;
@@ -917,7 +925,7 @@ static MATH: &[NativeMethod] = natives![
     "clamp" "(FFF)F" S => Some(|_, a| { let (v, lo, hi) = (arg(a, 0).f() as f64, arg(a, 1).f() as f64, arg(a, 2).f() as f64); Ok(Value::Float(java_min_f(hi, java_max_f(v, lo)) as f32)) }),
     "sqrt" "(D)D" S => Some(|_, a| Ok(Value::Double(arg(a, 0).d().sqrt()))),
     "cbrt" "(D)D" S => Some(|_, a| Ok(Value::Double(libm::cbrt(arg(a, 0).d())))),
-    "pow" "(DD)D" S => Some(|_, a| Ok(Value::Double(libm::pow(arg(a, 0).d(), arg(a, 1).d())))),
+    "pow" "(DD)D" S => Some(|_, a| Ok(Value::Double(java_pow(arg(a, 0).d(), arg(a, 1).d())))),
     "exp" "(D)D" S => Some(|_, a| Ok(Value::Double(libm::exp(arg(a, 0).d())))),
     "expm1" "(D)D" S => Some(|_, a| Ok(Value::Double(libm::expm1(arg(a, 0).d())))),
     "log" "(D)D" S => Some(|_, a| Ok(Value::Double(libm::log(arg(a, 0).d())))),

@@ -18,7 +18,7 @@ pub fn classes() -> &'static [NativeClass] {
 pub enum Member {
     Method(MethodId),
     Constructor(MethodId),
-    Field { owner: ClassId, name: Arc<str>, desc: Arc<str>, slot: usize, is_static: bool, access: u16, annotations: Option<Arc<[u8]>> },
+    Field { owner: ClassId, name: Arc<str>, desc: Arc<str>, slot: usize, is_static: bool, access: u16, annotations: Option<Arc<[u8]>>, signature: Option<Arc<str>> },
     RecordComponent { record: ClassId, index: usize },
     Parameter { method: MethodId, index: usize },
 }
@@ -75,7 +75,7 @@ fn field_object(vm: &mut Vm, owner: ClassId, f: &crate::vm::class::FieldInfo, is
     new_member(
         vm,
         "java/lang/reflect/Field",
-        Member::Field { owner, name: f.name.clone(), desc: f.desc.clone(), slot: f.slot, is_static, access: f.access, annotations: f.annotations.clone() },
+        Member::Field { owner, name: f.name.clone(), desc: f.desc.clone(), slot: f.slot, is_static, access: f.access, annotations: f.annotations.clone(), signature: f.signature.clone() },
     )
 }
 
@@ -604,9 +604,39 @@ fn class_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             let items: Vec<ObjId> = if found != 0 { vec![found] } else { Vec::new() };
             ret_ref(vm.new_ref_array(&d, &items)?)
         }
-        "getGenericSuperclass" => class_op(vm, a, "getSuperclass"),
-        "getGenericInterfaces" => class_op(vm, a, "getInterfaces"),
-        "getTypeParameters" => ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &[])?),
+        "getGenericSuperclass" | "getGenericInterfaces" | "getTypeParameters" => {
+            let sig = vm.class(c).class_file().and_then(|cf| cf.signature.clone()).or_else(|| jdk_signature(vm.class_name(c)).map(Arc::from));
+            let Some(sig) = sig.and_then(|s| parse_class_signature(&s)) else {
+                return match op {
+                    "getGenericSuperclass" => class_op(vm, a, "getSuperclass"),
+                    "getGenericInterfaces" => class_op(vm, a, "getInterfaces"),
+                    _ => ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &[])?),
+                };
+            };
+            let ctx = Generic { class: c, method: None };
+            match op {
+                "getGenericSuperclass" => {
+                    if vm.class(c).is_interface() {
+                        return ret_ref(0);
+                    }
+                    ret_ref(type_object(vm, &sig.superclass, ctx)?)
+                }
+                "getGenericInterfaces" => {
+                    let mut items = Vec::new();
+                    for i in &sig.interfaces {
+                        items.push(type_object(vm, i, ctx)?);
+                    }
+                    ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &items)?)
+                }
+                _ => {
+                    let mut items = Vec::new();
+                    for (n, _) in &sig.params {
+                        items.push(type_variable(vm, n, ctx)?);
+                    }
+                    ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &items)?)
+                }
+            }
+        }
         "getEnclosingMethod" | "getEnclosingConstructor" => {
             let Some(cf) = vm.class(c).class_file().cloned() else { return ret_ref(0) };
             let Some((cls, nt)) = cf.enclosing else { return ret_ref(0) };
@@ -924,6 +954,35 @@ fn executable_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             mirror_array(vm, &ps)
         }
         "getParameterCount" => Ok(Value::Int(param_classes(vm, &method.desc)?.len() as i32)),
+        "getGenericReturnType" | "getGenericParameterTypes" | "getTypeParameters" | "getGenericExceptionTypes" if method.info.as_ref().and_then(|i| i.signature.clone()).is_some() => {
+            let sig = method.info.as_ref().and_then(|i| i.signature.clone()).unwrap_or_default();
+            let Some(ms) = parse_method_signature(&sig) else { return Err(vm.throw_new("java/lang/reflect/GenericSignatureFormatError", Some(&sig))) };
+            let ctx = Generic { class: method.class, method: Some(m) };
+            match op {
+                "getGenericReturnType" => ret_ref(type_object(vm, &ms.ret, ctx)?),
+                "getGenericParameterTypes" | "getGenericExceptionTypes" => {
+                    let list = if op == "getGenericParameterTypes" { &ms.params } else { &ms.throws };
+                    let mut items = Vec::new();
+                    for t in list {
+                        items.push(type_object(vm, t, ctx)?);
+                    }
+                    if op == "getGenericExceptionTypes" && items.is_empty() {
+                        return executable_op(vm, a, "getExceptionTypes");
+                    }
+                    ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &items)?)
+                }
+                _ => {
+                    let mut items = Vec::new();
+                    for (n, _) in &ms.type_params {
+                        items.push(type_variable(vm, n, ctx)?);
+                    }
+                    ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &items)?)
+                }
+            }
+        }
+        "getTypeParameters" => ret_ref(vm.new_ref_array("Ljava/lang/reflect/TypeVariable;", &[])?),
+        "getGenericParameterTypes" => executable_op(vm, a, "getParameterTypes"),
+        "getGenericExceptionTypes" => executable_op(vm, a, "getExceptionTypes"),
         "getReturnType" | "getGenericReturnType" => {
             let (_, ret) = classfile::parse_method_desc(&method.desc).unwrap_or_default();
             let ret = ret.to_string();
@@ -1061,7 +1120,12 @@ fn common_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
 fn field_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
     let t = this(vm, a)?;
     let Some(rf) = reflected(vm, t) else { return Err(Exc::Internal("not a member".into())) };
-    let Member::Field { owner, name, desc, slot, is_static, access, .. } = rf.member.clone() else { return common_op(vm, a, op) };
+    let Member::Field { owner, name, desc, slot, is_static, access, signature, .. } = rf.member.clone() else { return common_op(vm, a, op) };
+    if op == "getGenericType"
+        && let Some(sig) = signature.as_deref().and_then(|s| Parser::new(s).field_type())
+    {
+        return ret_ref(type_object(vm, &sig, Generic { class: owner, method: None })?);
+    }
     match op {
         "getName" => ret_ref(vm.intern(&name)?),
         "getDeclaringClass" => ret_ref(vm.mirror(owner)?),
@@ -1724,31 +1788,41 @@ fn annotation_elements(vm: &mut Vm, obj: ObjId, ann: ClassId) -> Res<Vec<(Arc<st
         Some(State::Generic(v)) => v.clone(),
         _ => Vec::new(),
     };
-    let mut out = Vec::new();
+    // Each element, its value, and whether the annotation type gives it a default.
+    let mut members = Vec::new();
     for m in vm.class(ann).method_order.clone() {
         let method = vm.method(m).clone();
         if method.is_static() || !method.desc.starts_with("()") {
             continue;
         }
         let ret = method.desc[2..].to_string();
-        let mut value = None;
-        for pair in given.chunks(2) {
-            if vm.string(pair[0].r()).as_deref() == Some(&*method.name) {
-                value = Some(pair[1]);
-            }
-        }
-        let value = match value {
-            Some(v) => v,
-            None => {
-                let Some(bytes) = method.info.as_ref().and_then(|i| i.annotation_default.clone()) else { continue };
+        let given_value = given.chunks(2).position(|pair| vm.string(pair[0].r()).as_deref() == Some(&*method.name));
+        let default = method.info.as_ref().and_then(|i| i.annotation_default.clone());
+        let value = match (given_value, &default) {
+            (Some(i), _) => given[i * 2 + 1],
+            (None, Some(bytes)) => {
                 let Some(cf) = vm.class(ann).class_file().cloned() else { continue };
-                let mut r = Reader::new(&bytes);
+                let mut r = Reader::new(bytes);
                 element_value(vm, &cf, &mut r, &ret)?
             }
+            (None, None) => continue,
         };
-        out.push((method.name.clone(), ret, value));
+        members.push((method.name.clone(), ret, value, default.is_some(), given_value));
     }
-    Ok(out)
+    // Java's order: the members with defaults as a HashMap of their names
+    // holds them, then the others as the annotation gave them.
+    let mut defaults = super::util::JMap::with_capacity(Some(0), 0.75);
+    for (i, (name, _, _, has_default, _)) in members.iter().enumerate() {
+        if *has_default {
+            let units: Vec<u16> = name.encode_utf16().collect();
+            defaults.insert(super::util::JMap::spread(super::string::java_hash(&units)), Value::Int(i as i32), Value::Int(0));
+        }
+    }
+    let mut order: Vec<usize> = defaults.order().iter().filter_map(|&slot| defaults.entry(slot).map(|e| e.key.i() as usize)).collect();
+    let mut rest: Vec<usize> = (0..members.len()).filter(|&i| !members[i].3).collect();
+    rest.sort_by_key(|&i| members[i].4.unwrap_or(usize::MAX));
+    order.extend(rest);
+    Ok(order.into_iter().map(|i| (members[i].0.clone(), members[i].1.clone(), members[i].2)).collect())
 }
 
 fn annotation_call(vm: &mut Vm, obj: ObjId, ann: ClassId, name: &str, desc: &str, args: &[Value]) -> Res<Value> {
@@ -1885,6 +1959,448 @@ fn quote_char(u: u16, quote: char) -> String {
     }
 }
 
+// ------------------------------------------------------------------ generic signatures
+
+/// A type in a generic signature (JVMS 4.7.9.1).
+#[derive(Debug, Clone, PartialEq)]
+enum Sig {
+    Base(u8),
+    /// A class type: its binary name with `$` for nesting, its type arguments,
+    /// and its parameterized owner when the owner has arguments.
+    Class { name: String, args: Vec<SigArg>, owner: Option<Box<Sig>> },
+    Var(String),
+    Array(Box<Sig>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum SigArg {
+    Any,
+    Extends(Sig),
+    Super(Sig),
+    Exact(Sig),
+}
+
+struct ClassSig {
+    params: Vec<(String, Vec<Sig>)>,
+    superclass: Sig,
+    interfaces: Vec<Sig>,
+}
+
+struct MethodSig {
+    type_params: Vec<(String, Vec<Sig>)>,
+    params: Vec<Sig>,
+    ret: Sig,
+    throws: Vec<Sig>,
+}
+
+struct Parser<'a> {
+    s: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(s: &'a str) -> Self {
+        Parser { s: s.as_bytes(), i: 0 }
+    }
+    fn peek(&self) -> Option<u8> {
+        self.s.get(self.i).copied()
+    }
+    fn eat(&mut self, c: u8) -> bool {
+        if self.peek() == Some(c) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn ident(&mut self) -> String {
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            if matches!(c, b';' | b'<' | b'>' | b':' | b'.' | b'/') {
+                break;
+            }
+            self.i += 1;
+        }
+        String::from_utf8_lossy(&self.s[start..self.i]).into_owned()
+    }
+    fn type_params(&mut self) -> Option<Vec<(String, Vec<Sig>)>> {
+        let mut out = Vec::new();
+        if !self.eat(b'<') {
+            return Some(out);
+        }
+        while !self.eat(b'>') {
+            let name = self.ident();
+            let mut bounds = Vec::new();
+            // Class bound (may be empty), then interface bounds.
+            if !self.eat(b':') {
+                return None;
+            }
+            if self.peek() != Some(b':') {
+                bounds.push(self.reference()?);
+            }
+            while self.eat(b':') {
+                bounds.push(self.reference()?);
+            }
+            out.push((name, bounds));
+        }
+        Some(out)
+    }
+    fn reference(&mut self) -> Option<Sig> {
+        match self.peek()? {
+            b'L' => self.class_type(),
+            b'T' => {
+                self.i += 1;
+                let n = self.ident();
+                self.eat(b';').then_some(Sig::Var(n))
+            }
+            b'[' => {
+                self.i += 1;
+                Some(Sig::Array(Box::new(self.java_type()?)))
+            }
+            _ => None,
+        }
+    }
+    fn java_type(&mut self) -> Option<Sig> {
+        match self.peek()? {
+            c @ (b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b'V') => {
+                self.i += 1;
+                Some(Sig::Base(c))
+            }
+            _ => self.reference(),
+        }
+    }
+    fn field_type(&mut self) -> Option<Sig> {
+        self.java_type()
+    }
+    fn args(&mut self) -> Option<Vec<SigArg>> {
+        let mut out = Vec::new();
+        if !self.eat(b'<') {
+            return Some(out);
+        }
+        while !self.eat(b'>') {
+            out.push(match self.peek()? {
+                b'*' => {
+                    self.i += 1;
+                    SigArg::Any
+                }
+                b'+' => {
+                    self.i += 1;
+                    SigArg::Extends(self.reference()?)
+                }
+                b'-' => {
+                    self.i += 1;
+                    SigArg::Super(self.reference()?)
+                }
+                _ => SigArg::Exact(self.reference()?),
+            });
+        }
+        Some(out)
+    }
+    fn class_type(&mut self) -> Option<Sig> {
+        if !self.eat(b'L') {
+            return None;
+        }
+        let mut name = String::new();
+        loop {
+            name.push_str(&self.ident());
+            if self.eat(b'/') {
+                name.push('/');
+            } else {
+                break;
+            }
+        }
+        let mut current = Sig::Class { name: name.clone(), args: self.args()?, owner: None };
+        while self.eat(b'.') {
+            let inner = self.ident();
+            name = format!("{name}${inner}");
+            let args = self.args()?;
+            let owner = match &current {
+                Sig::Class { args, owner, .. } if !args.is_empty() || owner.is_some() => Some(Box::new(current.clone())),
+                _ => None,
+            };
+            current = Sig::Class { name: name.clone(), args, owner };
+        }
+        self.eat(b';').then_some(current)
+    }
+}
+
+fn parse_class_signature(s: &str) -> Option<ClassSig> {
+    let mut p = Parser::new(s);
+    let params = p.type_params()?;
+    let superclass = p.class_type()?;
+    let mut interfaces = Vec::new();
+    while p.peek().is_some() {
+        interfaces.push(p.class_type()?);
+    }
+    Some(ClassSig { params, superclass, interfaces })
+}
+
+fn parse_method_signature(s: &str) -> Option<MethodSig> {
+    let mut p = Parser::new(s);
+    let type_params = p.type_params()?;
+    if !p.eat(b'(') {
+        return None;
+    }
+    let mut params = Vec::new();
+    while !p.eat(b')') {
+        params.push(p.java_type()?);
+    }
+    let ret = p.java_type()?;
+    let mut throws = Vec::new();
+    while p.eat(b'^') {
+        throws.push(p.reference()?);
+    }
+    Some(MethodSig { type_params, params, ret, throws })
+}
+
+/// The generic signatures of the JDK classes the VM has natively (they have
+/// no class file to read them from).
+fn jdk_signature(class: &str) -> Option<&'static str> {
+    const OBJ: &str = "Ljava/lang/Object;";
+    let _ = OBJ;
+    Some(match class {
+        "java/util/ArrayList" => "<E:Ljava/lang/Object;>Ljava/util/AbstractList<TE;>;Ljava/util/List<TE;>;Ljava/util/RandomAccess;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/LinkedList" => "<E:Ljava/lang/Object;>Ljava/util/AbstractSequentialList<TE;>;Ljava/util/List<TE;>;Ljava/util/Deque<TE;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/HashMap" => "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/Map<TK;TV;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/LinkedHashMap" => "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/HashMap<TK;TV;>;Ljava/util/SequencedMap<TK;TV;>;",
+        "java/util/TreeMap" => "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/NavigableMap<TK;TV;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/HashSet" => "<E:Ljava/lang/Object;>Ljava/util/AbstractSet<TE;>;Ljava/util/Set<TE;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/LinkedHashSet" => "<E:Ljava/lang/Object;>Ljava/util/HashSet<TE;>;Ljava/util/SequencedSet<TE;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/TreeSet" => "<E:Ljava/lang/Object;>Ljava/util/AbstractSet<TE;>;Ljava/util/NavigableSet<TE;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/ArrayDeque" => "<E:Ljava/lang/Object;>Ljava/util/AbstractCollection<TE;>;Ljava/util/Deque<TE;>;Ljava/lang/Cloneable;Ljava/io/Serializable;",
+        "java/util/AbstractList" => "<E:Ljava/lang/Object;>Ljava/util/AbstractCollection<TE;>;Ljava/util/List<TE;>;",
+        "java/util/AbstractMap" => "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Map<TK;TV;>;",
+        "java/util/AbstractSet" => "<E:Ljava/lang/Object;>Ljava/util/AbstractCollection<TE;>;Ljava/util/Set<TE;>;",
+        "java/util/AbstractCollection" => "<E:Ljava/lang/Object;>Ljava/lang/Object;Ljava/util/Collection<TE;>;",
+        "java/util/concurrent/ConcurrentHashMap" => "<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/concurrent/ConcurrentMap<TK;TV;>;Ljava/io/Serializable;",
+        "java/util/EnumMap" => "<K:Ljava/lang/Enum<TK;>;V:Ljava/lang/Object;>Ljava/util/AbstractMap<TK;TV;>;Ljava/io/Serializable;Ljava/lang/Cloneable;",
+        "java/lang/Enum" => "<E:Ljava/lang/Enum<TE;>;>Ljava/lang/Object;Ljava/lang/constant/Constable;Ljava/lang/Comparable<TE;>;Ljava/io/Serializable;",
+        "java/util/Optional" => "<T:Ljava/lang/Object;>Ljava/lang/Object;",
+        _ => return None,
+    })
+}
+
+/// Where a signature's type variables are declared.
+#[derive(Clone, Copy)]
+struct Generic {
+    class: ClassId,
+    method: Option<MethodId>,
+}
+
+fn new_generic(vm: &mut Vm, class: &str, items: Vec<Value>) -> Res<ObjId> {
+    let c = vm.load(class)?;
+    let r = vm.new_instance(c)?;
+    if let Some(o) = vm.obj_mut(r) {
+        o.data = Data::Jdk(Box::new(State::Generic(items)));
+    }
+    Ok(r)
+}
+
+/// A signature type as the `Type` object reflection returns for it.
+fn type_object(vm: &mut Vm, sig: &Sig, ctx: Generic) -> Res<ObjId> {
+    match sig {
+        Sig::Base(p) => {
+            let c = vm.primitive_class(*p);
+            vm.mirror(c)
+        }
+        Sig::Class { name, args, owner } if args.is_empty() && owner.is_none() => {
+            let c = vm.load(name)?;
+            vm.mirror(c)
+        }
+        Sig::Class { name, args, owner } => {
+            let raw = vm.load(name)?;
+            let raw = vm.mirror(raw)?;
+            let mut items = Vec::new();
+            for a in args {
+                items.push(arg_object(vm, a, ctx)?);
+            }
+            let arr = vm.new_ref_array("Ljava/lang/reflect/Type;", &items)?;
+            let owner = match owner {
+                Some(o) => type_object(vm, o, ctx)?,
+                None => {
+                    // A nested class's owner is its declaring class.
+                    let m = Value::Ref(raw);
+                    class_op(vm, &[m], "getDeclaringClass")?.r()
+                }
+            };
+            new_generic(vm, "sun/reflect/generics/reflectiveObjects/ParameterizedTypeImpl", vec![Value::Ref(raw), Value::Ref(arr), Value::Ref(owner)])
+        }
+        Sig::Var(n) => type_variable(vm, n, ctx),
+        Sig::Array(c) => {
+            let component = type_object(vm, c, ctx)?;
+            match vm.mirror_class(component) {
+                Some(k) => {
+                    let ac = vm.array_class_of(k)?;
+                    vm.mirror(ac)
+                }
+                None => new_generic(vm, "sun/reflect/generics/reflectiveObjects/GenericArrayTypeImpl", vec![Value::Ref(component)]),
+            }
+        }
+    }
+}
+
+fn arg_object(vm: &mut Vm, a: &SigArg, ctx: Generic) -> Res<ObjId> {
+    let object = vm.known.object;
+    let object = vm.mirror(object)?;
+    let (upper, lower) = match a {
+        SigArg::Exact(s) => return type_object(vm, s, ctx),
+        SigArg::Any => (vec![object], vec![]),
+        SigArg::Extends(s) => (vec![type_object(vm, s, ctx)?], vec![]),
+        SigArg::Super(s) => (vec![object], vec![type_object(vm, s, ctx)?]),
+    };
+    let u = vm.new_ref_array("Ljava/lang/reflect/Type;", &upper)?;
+    let l = vm.new_ref_array("Ljava/lang/reflect/Type;", &lower)?;
+    new_generic(vm, "sun/reflect/generics/reflectiveObjects/WildcardTypeImpl", vec![Value::Ref(u), Value::Ref(l)])
+}
+
+/// A type variable: its name, its declaration (a class or method object),
+/// and the declaration's context to find its bounds in.
+fn type_variable(vm: &mut Vm, name: &str, ctx: Generic) -> Res<ObjId> {
+    // The method declares it, or its class, or an enclosing class.
+    let mut decl = 0;
+    if let Some(m) = ctx.method {
+        let declared = vm.method(m).info.as_ref().and_then(|i| i.signature.clone()).and_then(|s| parse_method_signature(&s)).is_some_and(|ms| ms.type_params.iter().any(|(n, _)| n == name));
+        if declared {
+            decl = method_object(vm, m)?;
+        }
+    }
+    let mut class = Some(ctx.class);
+    while decl == 0 {
+        let Some(c) = class else { break };
+        let declared = vm.class(c).class_file().and_then(|cf| cf.signature.clone()).and_then(|s| parse_class_signature(&s)).is_some_and(|cs| cs.params.iter().any(|(n, _)| n == name));
+        if declared {
+            decl = vm.mirror(c)?;
+            break;
+        }
+        class = inner_entry(vm, c).and_then(|(o, _)| o).and_then(|o| vm.find_loaded(&o));
+    }
+    let n = vm.intern(name)?;
+    new_generic(vm, "sun/reflect/generics/reflectiveObjects/TypeVariableImpl", vec![Value::Ref(n), Value::Ref(decl), Value::Int(ctx.class as i32)])
+}
+
+fn type_name_of(vm: &mut Vm, t: ObjId) -> Res<String> {
+    if let Some(c) = vm.mirror_class(t) {
+        return Ok(type_name(vm, c));
+    }
+    let s = vm.invoke_virtual(t, "getTypeName", "()Ljava/lang/String;", &[])?;
+    Ok(vm.string(s.r()).unwrap_or_default())
+}
+
+fn generic_type_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    let t = this(vm, a)?;
+    let items = match state(vm, t) {
+        Some(State::Generic(v)) => v.clone(),
+        _ => Vec::new(),
+    };
+    let kind = vm.class_of(t).map(|c| vm.class_name(c).rsplit('/').next().unwrap_or("").to_string()).unwrap_or_default();
+    match (kind.as_str(), op) {
+        ("ParameterizedTypeImpl", "getRawType") => Ok(items[0]),
+        ("ParameterizedTypeImpl", "getActualTypeArguments") => {
+            let args = vm.ref_elements(items[1].r());
+            ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &args)?)
+        }
+        ("ParameterizedTypeImpl", "getOwnerType") => Ok(items[2]),
+        ("ParameterizedTypeImpl", "toString") => {
+            let raw = vm.mirror_class(items[0].r()).unwrap_or(0);
+            let owner = items[2].r();
+            let mut s = if owner != 0 {
+                let mut o = type_name_of(vm, owner)?;
+                o.push('$');
+                let owner_raw = match state(vm, owner) {
+                    Some(State::Generic(v)) if vm.mirror_class(owner).is_none() => vm.mirror_class(v[0].r()),
+                    _ => None,
+                };
+                match owner_raw {
+                    Some(or) => o.push_str(&vm.class(raw).java_name().replace(&format!("{}$", vm.class(or).java_name()), "")),
+                    None => o.push_str(&super::lang::simple_name(vm, raw)),
+                }
+                o
+            } else {
+                vm.class(raw).java_name()
+            };
+            let args = vm.ref_elements(items[1].r());
+            if !args.is_empty() {
+                let mut names = Vec::new();
+                for x in args {
+                    names.push(type_name_of(vm, x)?);
+                }
+                s.push_str(&format!("<{}>", names.join(", ")));
+            }
+            ret_str(vm, &s)
+        }
+        ("TypeVariableImpl", "getName" | "toString") => Ok(items[0]),
+        ("TypeVariableImpl", "getGenericDeclaration") => Ok(items[1]),
+        ("TypeVariableImpl", "getBounds") => {
+            let name = vm.string(items[0].r()).unwrap_or_default();
+            let ctx_class = items[2].i() as ClassId;
+            let decl = items[1].r();
+            let (bounds, ctx) = match member(vm, decl) {
+                Some(Member::Method(m)) => {
+                    let b = vm.method(m).info.as_ref().and_then(|i| i.signature.clone()).and_then(|s| parse_method_signature(&s)).and_then(|ms| ms.type_params.into_iter().find(|(n, _)| *n == name)).map(|(_, b)| b);
+                    (b, Generic { class: vm.method(m).class, method: Some(m) })
+                }
+                _ => {
+                    let c = vm.mirror_class(decl).unwrap_or(ctx_class);
+                    let b = vm.class(c).class_file().and_then(|cf| cf.signature.clone()).and_then(|s| parse_class_signature(&s)).and_then(|cs| cs.params.into_iter().find(|(n, _)| *n == name)).map(|(_, b)| b);
+                    (b, Generic { class: c, method: None })
+                }
+            };
+            let mut out = Vec::new();
+            for b in bounds.unwrap_or_default() {
+                out.push(type_object(vm, &b, ctx)?);
+            }
+            if out.is_empty() {
+                let o = vm.known.object;
+                out.push(vm.mirror(o)?);
+            }
+            ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &out)?)
+        }
+        ("WildcardTypeImpl", "getUpperBounds") => {
+            let x = vm.ref_elements(items[0].r());
+            ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &x)?)
+        }
+        ("WildcardTypeImpl", "getLowerBounds") => {
+            let x = vm.ref_elements(items[1].r());
+            ret_ref(vm.new_ref_array("Ljava/lang/reflect/Type;", &x)?)
+        }
+        ("WildcardTypeImpl", "toString") => {
+            let (upper, lower) = (vm.ref_elements(items[0].r()), vm.ref_elements(items[1].r()));
+            let s = if let Some(&l) = lower.first() {
+                format!("? super {}", type_name_of(vm, l)?)
+            } else {
+                match upper.first() {
+                    Some(&u) if vm.mirror_class(u) != Some(vm.known.object) => format!("? extends {}", type_name_of(vm, u)?),
+                    _ => "?".to_string(),
+                }
+            };
+            ret_str(vm, &s)
+        }
+        ("GenericArrayTypeImpl", "getGenericComponentType") => Ok(items[0]),
+        ("GenericArrayTypeImpl", "toString") => {
+            let s = format!("{}[]", type_name_of(vm, items[0].r())?);
+            ret_str(vm, &s)
+        }
+        (_, "equals") => {
+            let o = arg(a, 1).r();
+            if o == t {
+                return ret_bool(true);
+            }
+            if o == 0 || vm.class_of(o) != vm.class_of(t) {
+                return ret_bool(false);
+            }
+            let x = generic_type_op(vm, &[Value::Ref(t)], "toString")?;
+            let y = generic_type_op(vm, &[Value::Ref(o)], "toString")?;
+            ret_bool(vm.string(x.r()) == vm.string(y.r()))
+        }
+        (_, "hashCode") => {
+            let x = generic_type_op(vm, &[Value::Ref(t)], "toString")?;
+            let u = vm.string_units(x.r()).unwrap_or(&[]).to_vec();
+            Ok(Value::Int(super::string::java_hash(&u)))
+        }
+        _ => Err(Exc::Unsupported(format!("{kind}.{op}"))),
+    }
+}
+
 // ------------------------------------------------------------------ classes
 
 static CLASS_METHODS: &[NativeMethod] = natives![
@@ -1966,12 +2482,13 @@ static EXECUTABLE_METHODS: &[NativeMethod] = natives![
     "getDeclaringClass" "()Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getDeclaringClass")),
     "getModifiers" "()I" M => Some(|vm, a| executable_op(vm, a, "getModifiers")),
     "getParameterTypes" "()[Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getParameterTypes")),
-    "getGenericParameterTypes" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getParameterTypes")),
+    "getGenericParameterTypes" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getGenericParameterTypes")),
+    "getTypeParameters" "()[Ljava/lang/reflect/TypeVariable;" M => Some(|vm, a| executable_op(vm, a, "getTypeParameters")),
     "getParameterCount" "()I" M => Some(|vm, a| executable_op(vm, a, "getParameterCount")),
     "getReturnType" "()Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getReturnType")),
     "getGenericReturnType" "()Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getGenericReturnType")),
     "getExceptionTypes" "()[Ljava/lang/Class;" M => Some(|vm, a| executable_op(vm, a, "getExceptionTypes")),
-    "getGenericExceptionTypes" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getExceptionTypes")),
+    "getGenericExceptionTypes" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| executable_op(vm, a, "getGenericExceptionTypes")),
     "getParameters" "()[Ljava/lang/reflect/Parameter;" M => Some(|vm, a| executable_op(vm, a, "getParameters")),
     "isVarArgs" "()Z" M => Some(|vm, a| executable_op(vm, a, "isVarArgs")),
     "isSynthetic" "()Z" M => Some(|vm, a| executable_op(vm, a, "isSynthetic")),
@@ -2060,6 +2577,43 @@ static CLASSES: &[NativeClass] = &[
     class("java/lang/reflect/GenericDeclaration", None, &["java/lang/reflect/AnnotatedElement"], INTERFACE, &[]),
     class("java/lang/reflect/Member", None, &[], INTERFACE, natives!["getName" "()Ljava/lang/String;" A => None]),
     class("java/lang/reflect/TypeVariable", None, &["java/lang/reflect/Type"], INTERFACE, &[]),
+    class("java/lang/reflect/ParameterizedType", None, &["java/lang/reflect/Type"], INTERFACE, &[]),
+    class("java/lang/reflect/WildcardType", None, &["java/lang/reflect/Type"], INTERFACE, &[]),
+    class("java/lang/reflect/GenericArrayType", None, &["java/lang/reflect/Type"], INTERFACE, &[]),
+    class("java/lang/reflect/GenericSignatureFormatError", Some("java/lang/ClassFormatError"), &[], PUBLIC, super::lang::THROWABLE_CTORS),
+    class("sun/reflect/generics/reflectiveObjects/ParameterizedTypeImpl", Some("java/lang/Object"), &["java/lang/reflect/ParameterizedType"], FINAL, natives![
+        "getRawType" "()Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getRawType")),
+        "getActualTypeArguments" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getActualTypeArguments")),
+        "getOwnerType" "()Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getOwnerType")),
+        "getTypeName" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "equals" "(Ljava/lang/Object;)Z" M => Some(|vm, a| generic_type_op(vm, a, "equals")),
+        "hashCode" "()I" M => Some(|vm, a| generic_type_op(vm, a, "hashCode")),
+    ]),
+    class("sun/reflect/generics/reflectiveObjects/TypeVariableImpl", Some("java/lang/Object"), &["java/lang/reflect/TypeVariable"], FINAL, natives![
+        "getName" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "getName")),
+        "getBounds" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getBounds")),
+        "getGenericDeclaration" "()Ljava/lang/reflect/GenericDeclaration;" M => Some(|vm, a| generic_type_op(vm, a, "getGenericDeclaration")),
+        "getTypeName" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "equals" "(Ljava/lang/Object;)Z" M => Some(|vm, a| generic_type_op(vm, a, "equals")),
+        "hashCode" "()I" M => Some(|vm, a| generic_type_op(vm, a, "hashCode")),
+    ]),
+    class("sun/reflect/generics/reflectiveObjects/WildcardTypeImpl", Some("java/lang/Object"), &["java/lang/reflect/WildcardType"], FINAL, natives![
+        "getUpperBounds" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getUpperBounds")),
+        "getLowerBounds" "()[Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getLowerBounds")),
+        "getTypeName" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "equals" "(Ljava/lang/Object;)Z" M => Some(|vm, a| generic_type_op(vm, a, "equals")),
+        "hashCode" "()I" M => Some(|vm, a| generic_type_op(vm, a, "hashCode")),
+    ]),
+    class("sun/reflect/generics/reflectiveObjects/GenericArrayTypeImpl", Some("java/lang/Object"), &["java/lang/reflect/GenericArrayType"], FINAL, natives![
+        "getGenericComponentType" "()Ljava/lang/reflect/Type;" M => Some(|vm, a| generic_type_op(vm, a, "getGenericComponentType")),
+        "getTypeName" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| generic_type_op(vm, a, "toString")),
+        "equals" "(Ljava/lang/Object;)Z" M => Some(|vm, a| generic_type_op(vm, a, "equals")),
+        "hashCode" "()I" M => Some(|vm, a| generic_type_op(vm, a, "hashCode")),
+    ]),
     class("java/lang/reflect/InvocationHandler", None, &[], INTERFACE, natives!["invoke" "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;" A => None]),
     class("java/lang/annotation/Annotation", None, &[], INTERFACE, natives!["annotationType" "()Ljava/lang/Class;" A => None]),
     class("java/lang/annotation/Inherited", None, &["java/lang/annotation/Annotation"], INTERFACE | 0x2000, &[]),
@@ -2177,6 +2731,20 @@ static CLASSES: &[NativeClass] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_signatures_parse() {
+        let cs = parse_class_signature("<K:Ljava/lang/Object;V::Ljava/lang/Comparable<TV;>;>Ljava/util/AbstractMap<TK;TV;>;Ljava/util/Map<TK;TV;>;").unwrap();
+        assert_eq!(cs.params.len(), 2);
+        assert_eq!(cs.params[1].1, vec![Sig::Class { name: "java/lang/Comparable".into(), args: vec![SigArg::Exact(Sig::Var("V".into()))], owner: None }]);
+        assert_eq!(cs.interfaces.len(), 1);
+        let ms = parse_method_signature("<T:Ljava/lang/Object;>(Ljava/util/List<+TT;>;[I)Ljava/util/Map$Entry<**>;^Ljava/io/IOException;").unwrap();
+        assert_eq!(ms.params[1], Sig::Array(Box::new(Sig::Base(b'I'))));
+        assert_eq!(ms.ret, Sig::Class { name: "java/util/Map$Entry".into(), args: vec![SigArg::Any, SigArg::Any], owner: None });
+        assert_eq!(ms.throws.len(), 1);
+        let inner = Parser::new("Lpkg/Outer<Ljava/lang/String;>.Inner<TT;>;").field_type().unwrap();
+        assert!(matches!(inner, Sig::Class { ref name, owner: Some(_), .. } if name == "pkg/Outer$Inner"));
+    }
 
     #[test]
     fn modifier_text_uses_java_order() {

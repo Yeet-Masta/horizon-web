@@ -783,8 +783,9 @@ fn scoped_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
                 _ => Vec::new(),
             };
             let depth = vm.jdk.scoped.len();
+            let thread = vm.current_thread;
             for pair in bindings.chunks(2) {
-                vm.jdk.scoped.push((pair[0].r(), pair[1]));
+                vm.jdk.scoped.push((thread, pair[0].r(), pair[1]));
             }
             let result = if op == "run" {
                 vm.invoke_virtual(arg(a, 1).r(), "run", "()V", &[]).map(|_| Value::Top)
@@ -796,7 +797,8 @@ fn scoped_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
         }
         "get" | "isBound" | "orElse" | "orElseThrow" => {
             let t = this(vm, a)?;
-            let found = vm.jdk.scoped.iter().rev().find(|(sv, _)| *sv == t).map(|(_, v)| *v);
+            let thread = vm.current_thread;
+            let found = vm.jdk.scoped.iter().rev().find(|(th, sv, _)| *sv == t && *th == thread).map(|(_, _, v)| *v);
             match (op, found) {
                 ("isBound", f) => ret_bool(f.is_some()),
                 (_, Some(v)) => Ok(v),
@@ -809,6 +811,275 @@ fn scoped_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             }
         }
         _ => Err(Exc::Unsupported(format!("ScopedValue.{op}"))),
+    }
+}
+
+// ------------------------------------------------------------------ UUID
+
+/// MD5 (RFC 1321), for `UUID.nameUUIDFromBytes`.
+pub fn md5(input: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16,
+        23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    let k: Vec<u32> = (0..64).map(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32).collect();
+    let (mut a0, mut b0, mut c0, mut d0) = (0x6745_2301u32, 0xefcd_ab89u32, 0x98ba_dcfeu32, 0x1032_5476u32);
+    let mut msg = input.to_vec();
+    let bits = (input.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bits.to_le_bytes());
+    for chunk in msg.chunks(64) {
+        let m: Vec<u32> = chunk.chunks(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let f = f.wrapping_add(a).wrapping_add(k[i]).wrapping_add(m[g]);
+            a = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(f.rotate_left(S[i]));
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+    let mut out = [0u8; 16];
+    for (i, w) in [a0, b0, c0, d0].iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    out
+}
+
+fn uuid_bits(vm: &Vm, r: ObjId) -> (i64, i64) {
+    match state(vm, r) {
+        Some(State::Generic(v)) if v.len() == 2 => (v[0].j(), v[1].j()),
+        _ => (0, 0),
+    }
+}
+
+fn new_uuid(vm: &mut Vm, msb: i64, lsb: i64) -> Res<ObjId> {
+    let c = vm.load("java/util/UUID")?;
+    let r = vm.new_instance(c)?;
+    if let Some(o) = vm.obj_mut(r) {
+        o.data = Data::Jdk(Box::new(State::Generic(vec![Value::Long(msb), Value::Long(lsb)])));
+    }
+    Ok(r)
+}
+
+fn uuid_from_bytes(b: [u8; 16]) -> (i64, i64) {
+    let msb = b[..8].iter().fold(0u64, |acc, &x| (acc << 8) | x as u64);
+    let lsb = b[8..].iter().fold(0u64, |acc, &x| (acc << 8) | x as u64);
+    (msb as i64, lsb as i64)
+}
+
+fn uuid_text(msb: i64, lsb: i64) -> String {
+    let (m, l) = (msb as u64, lsb as u64);
+    format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", m >> 32, (m >> 16) & 0xFFFF, m & 0xFFFF, l >> 48, l & 0xFFFF_FFFF_FFFF)
+}
+
+fn uuid_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    match op {
+        "init" => {
+            let t = this(vm, a)?;
+            if let Some(o) = vm.obj_mut(t) {
+                o.data = Data::Jdk(Box::new(State::Generic(vec![arg(a, 1), arg(a, 2)])));
+            }
+            void()
+        }
+        "randomUUID" => {
+            // Version 4 from the VM's own generator: random, and the same every run.
+            let r = super::util::shared_random(vm)?;
+            let mut b = [0u8; 16];
+            for chunk in b.chunks_mut(4) {
+                let v = vm.invoke_virtual(r, "nextInt", "()I", &[])?.i();
+                chunk.copy_from_slice(&v.to_be_bytes());
+            }
+            b[6] = (b[6] & 0x0f) | 0x40;
+            b[8] = (b[8] & 0x3f) | 0x80;
+            let (m, l) = uuid_from_bytes(b);
+            ret_ref(new_uuid(vm, m, l)?)
+        }
+        "nameUUIDFromBytes" => {
+            let bytes = super::string::bytes_of(vm, arg(a, 0).r())?;
+            let mut b = md5(&bytes);
+            b[6] = (b[6] & 0x0f) | 0x30;
+            b[8] = (b[8] & 0x3f) | 0x80;
+            let (m, l) = uuid_from_bytes(b);
+            ret_ref(new_uuid(vm, m, l)?)
+        }
+        "fromString" => {
+            let s = vm.string_nn(arg(a, 0).r())?;
+            let parts: Vec<&str> = s.split('-').collect();
+            let bad = |vm: &mut Vm| vm.throw_new("java/lang/IllegalArgumentException", Some(&format!("Invalid UUID string: {s}")));
+            if parts.len() != 5 || s.len() > 36 {
+                return Err(bad(vm));
+            }
+            let mut n = [0u64; 5];
+            for (i, p) in parts.iter().enumerate() {
+                match u64::from_str_radix(p, 16) {
+                    Ok(v) if !p.is_empty() => n[i] = v,
+                    _ => return Err(bad(vm)),
+                }
+            }
+            let msb = ((n[0] & 0xFFFF_FFFF) << 32) | ((n[1] & 0xFFFF) << 16) | (n[2] & 0xFFFF);
+            let lsb = ((n[3] & 0xFFFF) << 48) | (n[4] & 0xFFFF_FFFF_FFFF);
+            ret_ref(new_uuid(vm, msb as i64, lsb as i64)?)
+        }
+        _ => {
+            let t = this(vm, a)?;
+            let (m, l) = uuid_bits(vm, t);
+            match op {
+                "getMostSignificantBits" => Ok(Value::Long(m)),
+                "getLeastSignificantBits" => Ok(Value::Long(l)),
+                "version" => Ok(Value::Int(((m >> 12) & 0x0f) as i32)),
+                "variant" => {
+                    // (lsb >>> (64 - (lsb >>> 62))) & (lsb >> 63), with Java's shift masking.
+                    let shift = (64 - ((l as u64) >> 62)) & 63;
+                    Ok(Value::Int((((l as u64) >> shift) as i64 & (l >> 63)) as i32))
+                }
+                "toString" => ret_str(vm, &uuid_text(m, l)),
+                "hashCode" => {
+                    let hilo = m ^ l;
+                    Ok(Value::Int(((hilo >> 32) as i32) ^ (hilo as i32)))
+                }
+                "equals" => {
+                    let o = arg(a, 1).r();
+                    ret_bool(o != 0 && vm.class_of(o) == vm.class_of(t) && uuid_bits(vm, o) == (m, l))
+                }
+                "compareTo" => {
+                    let (om, ol) = uuid_bits(vm, arg(a, 1).r());
+                    Ok(Value::Int(m.cmp(&om).then(l.cmp(&ol)) as i32))
+                }
+                _ => Err(Exc::Unsupported(format!("UUID.{op}"))),
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------ HexFormat
+
+/// A `HexFormat`: delimiter, prefix, suffix, upper case.
+fn hex_parts(vm: &Vm, r: ObjId) -> (String, String, String, bool) {
+    match state(vm, r) {
+        Some(State::Generic(v)) if v.len() == 4 => (vm.string(v[0].r()).unwrap_or_default(), vm.string(v[1].r()).unwrap_or_default(), vm.string(v[2].r()).unwrap_or_default(), v[3].z()),
+        _ => (String::new(), String::new(), String::new(), false),
+    }
+}
+
+fn new_hex(vm: &mut Vm, d: &str, p: &str, s: &str, upper: bool) -> Res<Value> {
+    let c = vm.load("java/util/HexFormat")?;
+    let r = vm.new_instance(c)?;
+    let (d, p, s) = (vm.intern(d)?, vm.intern(p)?, vm.intern(s)?);
+    if let Some(o) = vm.obj_mut(r) {
+        o.data = Data::Jdk(Box::new(State::Generic(vec![Value::Ref(d), Value::Ref(p), Value::Ref(s), Value::Int(upper as i32)])));
+    }
+    ret_ref(r)
+}
+
+fn hex_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    match op {
+        "of" => return new_hex(vm, "", "", "", false),
+        "ofDelimiter" => {
+            let d = vm.string_nn(arg(a, 0).r())?;
+            return new_hex(vm, &d, "", "", false);
+        }
+        "isHexDigit" => return ret_bool((arg(a, 0).i() as u8 as char).is_ascii_hexdigit() && arg(a, 0).i() < 128),
+        "fromHexDigits" | "fromHexDigitsToLong" | "fromHexDigit" => {
+            let text = if op == "fromHexDigit" { ((arg(a, 0).i() as u8) as char).to_string() } else { vm.string_nn(arg(a, 0).r())? };
+            let max = if op == "fromHexDigitsToLong" { 16 } else { 8 };
+            if text.len() > max || text.is_empty() {
+                let msg = format!("string length greater than {max}: {}", text.len());
+                return Err(vm.throw_new("java/lang/IllegalArgumentException", Some(&msg)));
+            }
+            return match u64::from_str_radix(&text, 16) {
+                Ok(v) if op == "fromHexDigitsToLong" => Ok(Value::Long(v as i64)),
+                Ok(v) => Ok(Value::Int(v as u32 as i32)),
+                Err(_) => Err(vm.throw_new("java/lang/NumberFormatException", Some(&format!("not a hexadecimal digit: \"{text}\"")))),
+            };
+        }
+        _ => {}
+    }
+    let t = this(vm, a)?;
+    let (d, p, s, upper) = hex_parts(vm, t);
+    let case = |x: String| if upper { x.to_uppercase() } else { x };
+    match op {
+        "withUpperCase" => new_hex(vm, &d, &p, &s, true),
+        "withLowerCase" => new_hex(vm, &d, &p, &s, false),
+        "withDelimiter" => {
+            let n = vm.string_nn(arg(a, 1).r())?;
+            new_hex(vm, &n, &p, &s, upper)
+        }
+        "withPrefix" => {
+            let n = vm.string_nn(arg(a, 1).r())?;
+            new_hex(vm, &d, &n, &s, upper)
+        }
+        "withSuffix" => {
+            let n = vm.string_nn(arg(a, 1).r())?;
+            new_hex(vm, &d, &p, &n, upper)
+        }
+        "delimiter" => ret_str(vm, &d),
+        "prefix" => ret_str(vm, &p),
+        "suffix" => ret_str(vm, &s),
+        "isUpperCase" => ret_bool(upper),
+        "formatHex" => {
+            let b = super::string::bytes_of(vm, arg(a, 1).r())?;
+            let (st, en) = if a.len() > 2 { (arg(a, 2).i().max(0) as usize, arg(a, 3).i().max(0) as usize) } else { (0, b.len()) };
+            let parts: Vec<String> = b[st.min(b.len())..en.min(b.len())].iter().map(|x| format!("{p}{}{s}", case(format!("{x:02x}")))).collect();
+            ret_str(vm, &parts.join(&d))
+        }
+        "parseHex" => {
+            let text = String::from_utf16_lossy(&super::string::units(vm, arg(a, 1).r())?);
+            let mut out = Vec::new();
+            let mut rest = text.as_str();
+            let mut first = true;
+            while !rest.is_empty() {
+                if !first {
+                    rest = match rest.strip_prefix(d.as_str()) {
+                        Some(r) => r,
+                        None => return Err(vm.throw_new("java/lang/IllegalArgumentException", Some("found: missing delimiter"))),
+                    };
+                }
+                first = false;
+                rest = rest.strip_prefix(p.as_str()).unwrap_or(rest);
+                let (hex, after) = rest.split_at(2.min(rest.len()));
+                match u8::from_str_radix(hex, 16) {
+                    Ok(v) if hex.len() == 2 => out.push(v),
+                    _ => return Err(vm.throw_new("java/lang/NumberFormatException", Some(&format!("not a hexadecimal digit: \"{hex}\"")))),
+                }
+                rest = after.strip_prefix(s.as_str()).unwrap_or(after);
+            }
+            super::string::bytes_value(vm, out)
+        }
+        "toHexDigits" => {
+            let v = arg(a, 1);
+            let text = match (v, a.len()) {
+                (Value::Long(x), _) => format!("{x:016x}"),
+                (Value::Int(x), 3) => {
+                    let digits = arg(a, 2).i().clamp(0, 16) as usize;
+                    let full = format!("{:016x}", x as i64);
+                    full[16 - digits..].to_string()
+                }
+                (Value::Int(x), _) => format!("{x:08x}"),
+                _ => String::new(),
+            };
+            ret_str(vm, &case(text))
+        }
+        "toHexDigitsByte" => ret_str(vm, &case(format!("{:02x}", arg(a, 1).i() as u8))),
+        "toHexDigitsShort" | "toHexDigitsChar" => ret_str(vm, &case(format!("{:04x}", arg(a, 1).i() as u16))),
+        "toString" => {
+            let text = format!("uppercase: {upper}, delimiter: \"{d}\", prefix: \"{p}\", suffix: \"{s}\"");
+            ret_str(vm, &text)
+        }
+        _ => Err(Exc::Unsupported(format!("HexFormat.{op}"))),
     }
 }
 
@@ -973,6 +1244,48 @@ static CLASSES: &[NativeClass] = &[
         "call" "(Ljava/lang/ScopedValue$CallableOp;)Ljava/lang/Object;" M => Some(|vm, a| scoped_op(vm, a, "call")),
     ]),
     class("java/lang/ScopedValue$CallableOp", None, &[], super::INTERFACE, natives!["call" "()Ljava/lang/Object;" super::A => None]),
+    NativeClass { name: "java/util/UUID", super_name: Some("java/lang/Object"), interfaces: &["java/io/Serializable", "java/lang/Comparable"], access: PUBLIC | FINAL, methods: natives![
+        "<init>" "(JJ)V" M => Some(|vm, a| uuid_op(vm, a, "init")),
+        "randomUUID" "()Ljava/util/UUID;" S => Some(|vm, a| uuid_op(vm, a, "randomUUID")),
+        "nameUUIDFromBytes" "([B)Ljava/util/UUID;" S => Some(|vm, a| uuid_op(vm, a, "nameUUIDFromBytes")),
+        "fromString" "(Ljava/lang/String;)Ljava/util/UUID;" S => Some(|vm, a| uuid_op(vm, a, "fromString")),
+        "getMostSignificantBits" "()J" M => Some(|vm, a| uuid_op(vm, a, "getMostSignificantBits")),
+        "getLeastSignificantBits" "()J" M => Some(|vm, a| uuid_op(vm, a, "getLeastSignificantBits")),
+        "version" "()I" M => Some(|vm, a| uuid_op(vm, a, "version")),
+        "variant" "()I" M => Some(|vm, a| uuid_op(vm, a, "variant")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| uuid_op(vm, a, "toString")),
+        "hashCode" "()I" M => Some(|vm, a| uuid_op(vm, a, "hashCode")),
+        "equals" "(Ljava/lang/Object;)Z" M => Some(|vm, a| uuid_op(vm, a, "equals")),
+        "compareTo" "(Ljava/util/UUID;)I" M => Some(|vm, a| uuid_op(vm, a, "compareTo")),
+        "compareTo" "(Ljava/lang/Object;)I" M => Some(|vm, a| uuid_op(vm, a, "compareTo")),
+    ], statics: &[], clinit: None, data: None },
+    NativeClass { name: "java/util/HexFormat", super_name: Some("java/lang/Object"), interfaces: &[], access: PUBLIC | FINAL, methods: natives![
+        "of" "()Ljava/util/HexFormat;" S => Some(|vm, a| hex_op(vm, a, "of")),
+        "ofDelimiter" "(Ljava/lang/String;)Ljava/util/HexFormat;" S => Some(|vm, a| hex_op(vm, a, "ofDelimiter")),
+        "isHexDigit" "(I)Z" S => Some(|vm, a| hex_op(vm, a, "isHexDigit")),
+        "fromHexDigit" "(I)I" S => Some(|vm, a| hex_op(vm, a, "fromHexDigit")),
+        "fromHexDigits" "(Ljava/lang/CharSequence;)I" S => Some(|vm, a| hex_op(vm, a, "fromHexDigits")),
+        "fromHexDigitsToLong" "(Ljava/lang/CharSequence;)J" S => Some(|vm, a| hex_op(vm, a, "fromHexDigitsToLong")),
+        "withUpperCase" "()Ljava/util/HexFormat;" M => Some(|vm, a| hex_op(vm, a, "withUpperCase")),
+        "withLowerCase" "()Ljava/util/HexFormat;" M => Some(|vm, a| hex_op(vm, a, "withLowerCase")),
+        "withDelimiter" "(Ljava/lang/String;)Ljava/util/HexFormat;" M => Some(|vm, a| hex_op(vm, a, "withDelimiter")),
+        "withPrefix" "(Ljava/lang/String;)Ljava/util/HexFormat;" M => Some(|vm, a| hex_op(vm, a, "withPrefix")),
+        "withSuffix" "(Ljava/lang/String;)Ljava/util/HexFormat;" M => Some(|vm, a| hex_op(vm, a, "withSuffix")),
+        "delimiter" "()Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "delimiter")),
+        "prefix" "()Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "prefix")),
+        "suffix" "()Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "suffix")),
+        "isUpperCase" "()Z" M => Some(|vm, a| hex_op(vm, a, "isUpperCase")),
+        "formatHex" "([B)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "formatHex")),
+        "formatHex" "([BII)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "formatHex")),
+        "parseHex" "(Ljava/lang/CharSequence;)[B" M => Some(|vm, a| hex_op(vm, a, "parseHex")),
+        "toHexDigits" "(B)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigitsByte")),
+        "toHexDigits" "(S)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigitsShort")),
+        "toHexDigits" "(C)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigitsChar")),
+        "toHexDigits" "(I)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigits")),
+        "toHexDigits" "(J)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigits")),
+        "toHexDigits" "(JI)Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toHexDigits")),
+        "toString" "()Ljava/lang/String;" M => Some(|vm, a| hex_op(vm, a, "toString")),
+    ], statics: &[], clinit: None, data: None },
     jdk_enum!("java/lang/annotation/ElementType", ["TYPE", "FIELD", "METHOD", "PARAMETER", "CONSTRUCTOR", "LOCAL_VARIABLE", "ANNOTATION_TYPE", "PACKAGE", "TYPE_PARAMETER", "TYPE_USE", "MODULE", "RECORD_COMPONENT"]),
     jdk_enum!("java/lang/annotation/RetentionPolicy", ["SOURCE", "CLASS", "RUNTIME"]),
 ];
@@ -993,6 +1306,17 @@ mod tests {
         // new SplittableRandom(99).nextInt() on HotSpot 25.
         let seed = 99u64.wrapping_add(GOLDEN_GAMMA);
         assert_eq!(mix32(seed), -801_679_754);
+    }
+
+    #[test]
+    fn md5_and_name_uuids_match_java() {
+        assert_eq!(md5(b"").iter().map(|b| format!("{b:02x}")).collect::<String>(), "d41d8cd98f00b204e9800998ecf8427e");
+        // UUID.nameUUIDFromBytes("OfflinePlayer:Steve".getBytes()) on HotSpot.
+        let mut b = md5(b"OfflinePlayer:Steve");
+        b[6] = (b[6] & 0x0f) | 0x30;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        let (m, l) = uuid_from_bytes(b);
+        assert_eq!(uuid_text(m, l), "5627dd98-e6be-3c21-b8a8-e92344183641");
     }
 
     #[test]

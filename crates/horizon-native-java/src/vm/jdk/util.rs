@@ -2288,6 +2288,126 @@ fn tree_set_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
     }
 }
 
+// ------------------------------------------------------------------ enums
+
+fn ordinal_comparator(vm: &mut Vm, enum_class: ObjId) -> Res<ObjId> {
+    native_comparator(vm, Cmp::Ordinal(enum_class))
+}
+
+/// The enum class whose constants a value belongs to (a constant with a body
+/// is an anonymous subclass).
+fn enum_class_of(vm: &mut Vm, e: ObjId) -> Res<ObjId> {
+    let Some(mut c) = vm.class_of(e) else { return Err(vm.npe(None)) };
+    if let Some(s) = vm.class(c).super_class
+        && vm.class_name(s) != "java/lang/Enum"
+        && vm.class(s).access & 0x4000 != 0
+    {
+        c = s;
+    }
+    vm.mirror(c)
+}
+
+fn enum_map_init(vm: &mut Vm, a: &[Value]) -> Res<Value> {
+    let t = this(vm, a)?;
+    let src = arg(a, 1).r();
+    if src == 0 {
+        return Err(vm.npe(None));
+    }
+    let (mirror, entries) = if vm.mirror_class(src).is_some() {
+        (src, Vec::new())
+    } else {
+        let cmp = tree_cmp(vm, src);
+        let mirror = match state(vm, cmp) {
+            Some(State::Generic(v)) if v.len() == 2 => v[1].r(),
+            _ => 0,
+        };
+        (mirror, tree_entries(vm, src))
+    };
+    let comparator = ordinal_comparator(vm, mirror)?;
+    if let Some(o) = vm.obj_mut(t) {
+        o.data = Data::Jdk(Box::new(State::Tree(Box::new(JTree { entries, comparator, mod_count: 0, set: false }))));
+    }
+    void()
+}
+
+fn new_enum_set(vm: &mut Vm, mirror: ObjId, mut items: Vec<Value>) -> Res<Value> {
+    let comparator = ordinal_comparator(vm, mirror)?;
+    items.sort_by_key(|v| super::lang::enum_parts(vm, v.r()).1);
+    items.dedup_by_key(|v| v.r());
+    let entries = items.into_iter().map(|v| (v, Value::Int(1))).collect();
+    ret_ref(new_collection(vm, "java/util/RegularEnumSet", State::Tree(Box::new(JTree { entries, comparator, mod_count: 0, set: true })))?)
+}
+
+fn enum_set(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
+    match op {
+        "noneOf" | "allOf" => {
+            let mirror = arg(a, 0).r();
+            let Some(c) = vm.mirror_class(mirror) else { return Err(vm.npe(None)) };
+            if vm.class(c).access & 0x4000 == 0 {
+                let msg = format!("{} not an enum", vm.class(c).java_name());
+                return Err(vm.throw_new("java/lang/ClassCastException", Some(&msg)));
+            }
+            let items = if op == "allOf" { super::lang::enum_constants(vm, c)?.into_iter().map(Value::Ref).collect() } else { Vec::new() };
+            new_enum_set(vm, mirror, items)
+        }
+        "of" | "ofArray" => {
+            let mut items: Vec<Value> = if op == "ofArray" {
+                let mut v = vec![arg(a, 0)];
+                v.extend(vm.array_values(arg(a, 1).r()));
+                v
+            } else {
+                a.to_vec()
+            };
+            if items.iter().any(|v| v.r() == 0) {
+                return Err(vm.npe(None));
+            }
+            let mirror = enum_class_of(vm, items[0].r())?;
+            items.retain(|v| v.r() != 0);
+            new_enum_set(vm, mirror, items)
+        }
+        "range" => {
+            let (from, to) = (arg(a, 0).r(), arg(a, 1).r());
+            if from == 0 || to == 0 {
+                return Err(vm.npe(None));
+            }
+            let mirror = enum_class_of(vm, from)?;
+            let (lo, hi) = (super::lang::enum_parts(vm, from).1, super::lang::enum_parts(vm, to).1);
+            if lo > hi {
+                let msg = format!("{} > {}", super::lang::enum_name(vm, from).unwrap_or_default(), super::lang::enum_name(vm, to).unwrap_or_default());
+                return Err(vm.throw_new("java/lang/IllegalArgumentException", Some(&msg)));
+            }
+            let c = vm.mirror_class(mirror).unwrap_or(0);
+            let items = super::lang::enum_constants(vm, c)?.into_iter().filter(|&e| (lo..=hi).contains(&super::lang::enum_parts(vm, e).1)).map(Value::Ref).collect();
+            new_enum_set(vm, mirror, items)
+        }
+        "copyOf" | "complementOf" => {
+            let src = arg(a, 0).r();
+            if src == 0 {
+                return Err(vm.npe(None));
+            }
+            let items = iterate(vm, src)?;
+            let mirror = match state(vm, src) {
+                Some(State::Tree(t)) => match state(vm, t.comparator) {
+                    Some(State::Generic(v)) if v.len() == 2 => v[1].r(),
+                    _ => 0,
+                },
+                _ => match items.first() {
+                    Some(v) => enum_class_of(vm, v.r())?,
+                    None => return Err(vm.throw_new("java/lang/IllegalArgumentException", Some("Collection is empty"))),
+                },
+            };
+            if op == "copyOf" {
+                return new_enum_set(vm, mirror, items);
+            }
+            let c = vm.mirror_class(mirror).unwrap_or(0);
+            let present: Vec<ObjId> = items.iter().map(|v| v.r()).collect();
+            let rest = super::lang::enum_constants(vm, c)?.into_iter().filter(|e| !present.contains(e)).map(Value::Ref).collect();
+            new_enum_set(vm, mirror, rest)
+        }
+        _ => Err(Exc::Unsupported(format!("EnumSet.{op}"))),
+    }
+}
+
 // ------------------------------------------------------------------ heap
 
 fn heap_sift_up(vm: &mut Vm, items: &mut [Value], mut k: usize, x: Value, cmp: ObjId) -> Res<()> {
@@ -2468,6 +2588,8 @@ pub enum Cmp {
     Comparing { key: ObjId, cmp: ObjId, kind: u8 },
     Then(ObjId, ObjId),
     Nulls { first: bool, cmp: ObjId },
+    /// Enum constants by ordinal (`EnumMap`, `EnumSet`): the enum's mirror.
+    Ordinal(ObjId),
 }
 
 pub fn native_comparator(vm: &mut Vm, c: Cmp) -> Res<ObjId> {
@@ -2476,6 +2598,7 @@ pub fn native_comparator(vm: &mut Vm, c: Cmp) -> Res<ObjId> {
         Cmp::Comparing { key, cmp, kind } => vec![Value::Ref(*key), Value::Ref(*cmp), Value::Int(*kind as i32)],
         Cmp::Then(x, y) => vec![Value::Ref(*x), Value::Ref(*y)],
         Cmp::Nulls { first, cmp } => vec![Value::Int(*first as i32), Value::Ref(*cmp)],
+        Cmp::Ordinal(mirror) => vec![Value::Ref(*mirror)],
         _ => Vec::new(),
     };
     let tag = match c {
@@ -2486,6 +2609,7 @@ pub fn native_comparator(vm: &mut Vm, c: Cmp) -> Res<ObjId> {
         Cmp::Comparing { .. } => 4,
         Cmp::Then(..) => 5,
         Cmp::Nulls { .. } => 6,
+        Cmp::Ordinal(_) => 7,
     };
     let mut items = vec![Value::Int(tag)];
     items.extend(refs);
@@ -2537,6 +2661,18 @@ fn comparator_compare(vm: &mut Vm, a: &[Value]) -> Res<Value> {
                 (false, true) => if first { 1 } else { -1 },
                 _ => if v[2].r() == 0 { 0 } else { compare(vm, x, y, v[2].r())? },
             }
+        }
+        7 => {
+            if x.r() == 0 || y.r() == 0 {
+                return Err(vm.npe(None));
+            }
+            let enum_class = vm.mirror_class(v[1].r()).unwrap_or(0);
+            if !vm.instance_of(x.r(), enum_class) || !vm.instance_of(y.r(), enum_class) {
+                let bad = if vm.instance_of(x.r(), enum_class) { y.r() } else { x.r() };
+                let msg = format!("{} != {}", vm.class_of(bad).map(|c| vm.class(c).java_name()).unwrap_or_default(), vm.class(enum_class).java_name());
+                return Err(vm.throw_new("java/lang/ClassCastException", Some(&msg)));
+            }
+            super::lang::enum_parts(vm, x.r()).1 - super::lang::enum_parts(vm, y.r()).1
         }
         _ => 0,
     };
@@ -4838,6 +4974,27 @@ static CLASSES: &[NativeClass] = &[
     collection("java/util/Collections$UnmodifiableSet", "java/util/AbstractSet", &["java/io/Serializable"], HASHSET_METHODS, || Data::None),
     collection("java/util/concurrent/CopyOnWriteArraySet", "java/util/AbstractSet", &["java/io/Serializable"], LINKEDHASHSET_METHODS, || { let mut m = JMap::new(); m.set = true; m.linked = true; Data::Jdk(Box::new(State::Map(Box::new(m)))) }),
     collection("java/util/TreeSet", "java/util/AbstractSet", &["java/util/NavigableSet", "java/lang/Cloneable", "java/io/Serializable"], TREESET_METHODS, || Data::Jdk(Box::new(State::Tree(Box::new(JTree { set: true, ..Default::default() }))))),
+    collection("java/util/EnumMap", "java/util/AbstractMap", &["java/io/Serializable", "java/lang/Cloneable"], TREEMAP_METHODS, || Data::Jdk(Box::new(State::Tree(Box::default())))),
+    class("java/util/EnumMap$Extra", None, &[], 0, natives![
+        "put" "(Ljava/lang/Enum;Ljava/lang/Object;)Ljava/lang/Object;" M => Some(|vm, a| map_op(vm, a, "put")),
+        "<init>" "(Ljava/lang/Class;)V" M => Some(|vm, a| enum_map_init(vm, a)),
+        "<init>" "(Ljava/util/EnumMap;)V" M => Some(|vm, a| enum_map_init(vm, a)),
+    ]),
+    collection("java/util/EnumSet", "java/util/AbstractSet", &["java/lang/Cloneable", "java/io/Serializable"], natives![
+        "noneOf" "(Ljava/lang/Class;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "noneOf")),
+        "allOf" "(Ljava/lang/Class;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "allOf")),
+        "of" "(Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "of")),
+        "of" "(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "of")),
+        "of" "(Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "of")),
+        "of" "(Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "of")),
+        "of" "(Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "of")),
+        "of" "(Ljava/lang/Enum;[Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "ofArray")),
+        "range" "(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "range")),
+        "copyOf" "(Ljava/util/Collection;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "copyOf")),
+        "copyOf" "(Ljava/util/EnumSet;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "copyOf")),
+        "complementOf" "(Ljava/util/EnumSet;)Ljava/util/EnumSet;" S => Some(|vm, a| enum_set(vm, a, "complementOf")),
+    ], || Data::None),
+    collection("java/util/RegularEnumSet", "java/util/EnumSet", &[], TREESET_METHODS, || Data::Jdk(Box::new(State::Tree(Box::new(JTree { set: true, ..Default::default() }))))),
     collection("java/util/TreeMap", "java/util/AbstractMap", &["java/util/NavigableMap", "java/lang/Cloneable", "java/io/Serializable"], TREEMAP_METHODS, || Data::Jdk(Box::new(State::Tree(Box::default())))),
     collection("java/util/concurrent/ConcurrentSkipListMap", "java/util/AbstractMap", &["java/util/NavigableMap"], TREEMAP_METHODS, || Data::Jdk(Box::new(State::Tree(Box::default())))),
     collection("java/util/PriorityQueue", "java/util/AbstractQueue", &["java/io/Serializable"], HEAP_METHODS, || Data::Jdk(Box::new(State::Heap(Box::default())))),

@@ -242,7 +242,7 @@ pub struct VmState {
     /// `new Properties(defaults)`: each Properties' defaults.
     pub property_defaults: HashMap<ObjId, ObjId>,
     /// `ScopedValue` bindings in force, innermost last.
-    pub scoped: Vec<(ObjId, Value)>,
+    pub scoped: Vec<(usize, ObjId, Value)>,
     pub default_assertions: Option<bool>,
     pub proxies: Vec<reflect::ProxyClass>,
 }

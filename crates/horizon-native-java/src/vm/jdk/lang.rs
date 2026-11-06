@@ -1160,11 +1160,21 @@ fn method_text(class: &str, name: &str, desc: &str) -> String {
     format!("{}.{name}({params})", short_class(class))
 }
 
+/// HotSpot's helpful NPE names `Object` and `String` short, every other
+/// class in full.
 fn short_class(class: &str) -> String {
     let java = class.replace('/', ".");
-    match java.strip_prefix("java.lang.") {
-        Some(rest) if !rest.contains('.') => rest.to_string(),
-        _ => java,
+    match java.as_str() {
+        "java.lang.Object" => "Object".to_string(),
+        "java.lang.String" => "String".to_string(),
+        _ => match java.strip_suffix("[]").map(|_| ()) {
+            Some(()) => {
+                let dims = java.matches("[]").count();
+                let base = java.trim_end_matches("[]");
+                format!("{}{}", short_class(base), "[]".repeat(dims))
+            }
+            None => java,
+        },
     }
 }
 
@@ -1215,7 +1225,7 @@ fn describe_push(vm: &Vm, m: MethodId, i: usize) -> Option<String> {
         0xb2 => {
             let index = u16::from_be_bytes([bytes[pc + 1], bytes[pc + 2]]);
             let (class, name, _, _) = d.cf.member_ref(index).ok()?;
-            Some(format!("{}.{name}", short_class(&class).rsplit('.').next().unwrap_or("")))
+            Some(format!("{}.{name}", class.rsplit('/').next().unwrap_or("")))
         }
         0xb4 => {
             let index = u16::from_be_bytes([bytes[pc + 1], bytes[pc + 2]]);
@@ -1235,6 +1245,8 @@ fn describe_push(vm: &Vm, m: MethodId, i: usize) -> Option<String> {
         }
         0x15 => Some(local(bytes[pc + 1] as usize)),
         0x1a..=0x1d => Some(local((opcode - 0x1a) as usize)),
+        // A cast passes its operand through.
+        0xc0 => describe_push_below(vm, m, i),
         _ => None,
     }
 }

@@ -176,7 +176,7 @@ pub enum CallSite {
     /// A record's `toString`, `equals` or `hashCode` (`ObjectMethods`).
     ObjectMethod { kind: u8, record: ClassId, getters: Arc<[MethodId]> },
     /// `SwitchBootstraps.typeSwitch` and `enumSwitch`.
-    TypeSwitch { labels: Arc<[super::indy::Label]>, enum_switch: bool },
+    TypeSwitch { labels: Arc<[super::indy::Label]>, enum_switch: bool, primitive: Option<u8> },
 }
 
 /// A lambda class's target: what its interface method calls.
