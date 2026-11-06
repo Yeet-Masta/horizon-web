@@ -2034,14 +2034,26 @@ impl StdHost {
         }
         if self.strict_unknown_host_calls {
             Err(NativeError::UnknownHostCall(r.clone()))
-        } else if let Some(kind) = empty_collection_kind(result_descriptor(&r.descriptor)) {
-            // A caller that gets null where Java returns a collection fails on
-            // the very next `Map.entrySet`/`Collection.iterator`; an empty
-            // modelled collection keeps the call chain on the bounded path.
-            Ok(self.empty_collection(kind))
         } else {
-            Ok(Value::default_for(&r.descriptor))
+            Ok(self.neutral_unmodelled_result(&r.descriptor))
         }
+    }
+
+    /// The neutral answer an unmodelled call gives for its declared result.
+    ///
+    /// Java never returns null from a method declared to return a collection or
+    /// an array, and the caller's very next `iterator()`/`arraylength` fails on
+    /// a null. Both answer an empty modelled value instead, so the call chain
+    /// stays on the bounded path; every other type keeps the neutral default
+    /// (null, 0, false) a handler can observe.
+    fn neutral_unmodelled_result(&mut self, descriptor: &str) -> Value {
+        if let Some(kind) = empty_collection_kind(result_descriptor(descriptor)) {
+            return self.empty_collection(kind);
+        }
+        if result_descriptor(descriptor).starts_with('[') {
+            return Value::Ref(Some("array/empty".into()));
+        }
+        Value::default_for(descriptor)
     }
 
     /// A distinct empty collection marker for one unmodelled call.
@@ -2963,12 +2975,30 @@ impl Host for StdHost {
                 | "DAYS",
                 "Ljava/util/concurrent/TimeUnit;",
             ) => Ok(Value::Ref(Some(format!("time-unit/{}", r.name)))),
-            ("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;") => {
-                Ok(Value::Ref(Some("true".into())))
-            }
-            ("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;") => {
-                Ok(Value::Ref(Some("false".into())))
-            }
+            ("java/lang/Boolean", "TRUE", "Ljava/lang/Boolean;") => Ok(boolean_value(true)),
+            ("java/lang/Boolean", "FALSE", "Ljava/lang/Boolean;") => Ok(boolean_value(false)),
+            // The wrapper's integer bounds and sizes. `Long`, `Float` and
+            // `Double` already answer theirs; without these a mod that compares
+            // against `Integer.MAX_VALUE` or allocates `Integer.SIZE` bits reads
+            // the neutral `0` the unmodelled-static fallback returns, which
+            // silently truncates every comparison.
+            ("java/lang/Integer", "MAX_VALUE", "I") => Ok(Value::Int(i32::MAX)),
+            ("java/lang/Integer", "MIN_VALUE", "I") => Ok(Value::Int(i32::MIN)),
+            ("java/lang/Integer", "SIZE", "I") => Ok(Value::Int(32)),
+            ("java/lang/Integer", "BYTES", "I") => Ok(Value::Int(4)),
+            ("java/lang/Short", "MAX_VALUE", "S") => Ok(Value::Int(i32::from(i16::MAX))),
+            ("java/lang/Short", "MIN_VALUE", "S") => Ok(Value::Int(i32::from(i16::MIN))),
+            ("java/lang/Short", "SIZE", "I") => Ok(Value::Int(16)),
+            ("java/lang/Short", "BYTES", "I") => Ok(Value::Int(2)),
+            ("java/lang/Byte", "MAX_VALUE", "B") => Ok(Value::Int(i32::from(i8::MAX))),
+            ("java/lang/Byte", "MIN_VALUE", "B") => Ok(Value::Int(i32::from(i8::MIN))),
+            ("java/lang/Byte", "SIZE", "I") => Ok(Value::Int(8)),
+            ("java/lang/Byte", "BYTES", "I") => Ok(Value::Int(1)),
+            // `char` is unsigned: `MIN_VALUE` is 0, not `i16::MIN`.
+            ("java/lang/Character", "MAX_VALUE", "C") => Ok(Value::Int(0xffff)),
+            ("java/lang/Character", "MIN_VALUE", "C") => Ok(Value::Int(0)),
+            ("java/lang/Character", "SIZE", "I") => Ok(Value::Int(16)),
+            ("java/lang/Character", "BYTES", "I") => Ok(Value::Int(2)),
             // `int.class` and its siblings compile to a `TYPE` read on the
             // wrapper, so the primitive's `Class` marker is the primitive name.
             // Without it a `getMethod(name, new Class[]{int.class})` call sees
@@ -7261,13 +7291,10 @@ impl Host for StdHost {
                 if r.name == "toString" && r.descriptor == "()Ljava/lang/String;" {
                     return Ok(Value::Ref(Some(value_text(receiver))));
                 }
-                // An unmodelled accessor that declares a collection answers an
-                // empty modelled collection: null would fail on the caller's
-                // very next `iterator()`/`entrySet()`.
-                match empty_collection_kind(result_descriptor(&r.descriptor)) {
-                    Some(kind) => Ok(self.empty_collection(kind)),
-                    None => Ok(Value::default_for(&r.descriptor)),
-                }
+                // An unmodelled accessor that declares a collection or an array
+                // answers an empty modelled value: a null would fail on the
+                // caller's very next `iterator()`/`arraylength`.
+                Ok(self.neutral_unmodelled_result(&r.descriptor))
             }
         }
     }
@@ -8279,6 +8306,8 @@ fn game_enum_constants(owner: &str) -> Option<&'static [&'static str]> {
             "COUNTERCLOCKWISE_90",
         ],
         "net/minecraft/world/level/block/Mirror" => &["NONE", "LEFT_RIGHT", "FRONT_BACK"],
+        // Mods iterate `PackType.values()` to register a pack for each side.
+        "net/minecraft/server/packs/PackType" => &["CLIENT_RESOURCES", "SERVER_DATA"],
         _ => return None,
     })
 }
@@ -8799,11 +8828,25 @@ fn expect_long(r: &MethodRef, value: &Value) -> Result<i64, NativeError> {
 fn boxed_boolean(value: &Value) -> Option<bool> {
     match value {
         Value::Int(value) => Some(*value != 0),
-        Value::Ref(Some(value)) => value
-            .strip_prefix("boolean:")
-            .and_then(|value| value.parse::<bool>().ok()),
+        // `boolean:true` is the canonical boxed marker. The bare `true`/`false`
+        // markers are still read: they are what the host answered for
+        // `Boolean.TRUE`/`FALSE` before the two forms converged, and a marker
+        // already inside a running jar keeps its meaning.
+        Value::Ref(Some(value)) => value.strip_prefix("boolean:").map_or_else(
+            || match value.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            |value| value.parse::<bool>().ok(),
+        ),
         _ => None,
     }
+}
+
+/// The canonical boxed-`Boolean` marker.
+fn boolean_value(value: bool) -> Value {
+    Value::Ref(Some(format!("boolean:{value}")))
 }
 
 fn parse_java_float(value: &Value) -> Result<f64, NativeError> {
@@ -10568,6 +10611,42 @@ impl std::fmt::Display for NativeError {
 }
 impl std::error::Error for NativeError {}
 
+impl NativeError {
+    /// The loader-side verdict for a failed native entrypoint, when the failure
+    /// itself says which loader could run it.
+    ///
+    /// `None` means the failure is the jar's own behaviour (a mod throwing, an
+    /// unsupported opcode) and not a property of the loader: the caller keeps
+    /// its own reason for that row.
+    pub fn entrypoint_skip(&self) -> Option<EntrypointSkip> {
+        match self {
+            // `execute` names a class it could not find in the jar this way, so
+            // the metadata and the packaged classes disagree.
+            Self::MissingMethod(member) if member.starts_with("class ") => {
+                Some(EntrypointSkip::MissingClass)
+            }
+            // The jar's own bytecode called into the Kotlin standard library.
+            // It is not packaged with the mod: fabric-language-kotlin loads it
+            // as a separate mod, which the native path cannot link.
+            Self::MissingMethod(member)
+            | Self::UnknownHostCall(MethodRef { owner: member, .. })
+                if member_is_kotlin_runtime(member) =>
+            {
+                Some(EntrypointSkip::KotlinRuntime)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Whether a member or owner names the Kotlin runtime rather than the jar.
+fn member_is_kotlin_runtime(member: &str) -> bool {
+    member
+        .split_once('#')
+        .map_or(member, |(owner, _)| owner)
+        .starts_with("kotlin/")
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NativeJar {
     classes: BTreeMap<String, ClassFile>,
@@ -10629,9 +10708,99 @@ const MAX_MIXIN_CONFIG_WARNINGS: usize = 64;
 pub struct Entrypoint {
     pub class: String,
     pub method: Option<String>,
-    /// Fabric entrypoint adapters change the invocation contract. They are
-    /// retained for diagnostics until a native adapter implementation exists.
+    /// The adapter the metadata declared, after [`NativeJar::discover_entrypoints`]
+    /// resolved the ones the host runs itself.
+    ///
+    /// A Fabric adapter changes the invocation contract: `{"value": ...,
+    /// "adapter": ...}` makes the loader build the object to call instead of
+    /// constructing the class. The host implements the adapters whose target
+    /// is plain JVM bytecode ([`EntrypointAdapter::Kotlin`]), so discovery
+    /// clears the field for those and sets the resolved invocation instead
+    /// (`Class::method`, or the kind's `onInitialize*`). Every other adapter
+    /// stays here for the caller to refuse and for loader diagnostics.
     pub adapter: Option<String>,
+}
+
+/// The language adapter one Fabric entrypoint declares.
+///
+/// `fabric.mod.json` accepts `{"value": ..., "adapter": ...}` where the adapter
+/// decides how the value becomes the object to call. Kotlin compiles to JVM
+/// bytecode, so the adapters whose target is a plain class, object or
+/// top-level function need no language runtime: the bounded host enters them
+/// directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrypointAdapter {
+    /// No adapter, or Fabric's own `default` adapter: construct the class and
+    /// call its `onInitialize*`, or the named `Class::method`.
+    Default,
+    /// `kotlin`, the fabric-language-kotlin adapter. The value is a Kotlin
+    /// `object` singleton, a class with a no-argument constructor, or a
+    /// top-level function written `Class::function`.
+    Kotlin,
+    /// An adapter only a real loader (or another language runtime) implements.
+    Unsupported,
+}
+
+impl EntrypointAdapter {
+    /// Classify one metadata entry by the adapter it declares.
+    pub fn of(entry: &Entrypoint) -> Self {
+        match entry.adapter.as_deref() {
+            None | Some("default") => Self::Default,
+            Some("kotlin") => Self::Kotlin,
+            Some(_) => Self::Unsupported,
+        }
+    }
+
+    /// Whether the native host runs this adapter's target itself.
+    pub fn is_native(&self) -> bool {
+        matches!(self, Self::Default | Self::Kotlin)
+    }
+}
+
+/// The loader-side verdict for an entrypoint the native path cannot run.
+///
+/// A refusal on its own does not say whether another loader setting could run
+/// the jar; the label does, in the vocabulary the ledger
+/// (`tools/java_mod_server_ledger.py`) and the launcher already print:
+/// `needs-loader` when a real loader applies the jar, `native-gap` when
+/// nothing native can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrypointSkip {
+    /// The entrypoint names a class the jar does not contain. Metadata and
+    /// classes disagree, so no loader can run it either.
+    MissingClass,
+    /// A Kotlin entrypoint reached the Kotlin runtime (`kotlin/*`), which ships
+    /// as its own mod jar (`fabric-language-kotlin`). The native path links one
+    /// jar's classes at a time, so only a loader that loads that jar applies
+    /// the entrypoint.
+    KotlinRuntime,
+    /// An entrypoint adapter the native path does not implement.
+    UnsupportedAdapter,
+}
+
+impl EntrypointSkip {
+    /// The ledger/launcher label for this verdict.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::KotlinRuntime => "needs-loader",
+            Self::MissingClass | Self::UnsupportedAdapter => "native-gap",
+        }
+    }
+
+    /// One sentence naming what stops the jar, for ledger rows and launcher UI.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::MissingClass => {
+                "the entrypoint names a class the jar does not contain; no loader setting can run it"
+            }
+            Self::KotlinRuntime => {
+                "the Kotlin entrypoint needs the Kotlin runtime, which ships as its own mod jar (fabric-language-kotlin); only a loader that loads that jar applies it"
+            }
+            Self::UnsupportedAdapter => {
+                "the Fabric entrypoint adapter is not implemented by the native path"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12866,7 +13035,21 @@ impl NativeJar {
     /// dropping everything after the first declaration.
     pub fn discover_entrypoints(&self, kind: &str) -> Vec<Entrypoint> {
         if let Some(entries) = self.fabric_entrypoints.get(kind) {
-            return entries.clone();
+            return entries
+                .iter()
+                .map(|entry| {
+                    let mut entry = entry.clone();
+                    // The host runs a native adapter's target with the default
+                    // invocation contract: a Kotlin `object` and a top-level
+                    // `Class::function` are entered exactly like a class and
+                    // its `onInitialize*`. Clearing the marker is what tells
+                    // callers the invocation is resolved.
+                    if EntrypointAdapter::of(&entry).is_native() {
+                        entry.adapter = None;
+                    }
+                    entry
+                })
+                .collect();
         }
         if kind == "neoforge" {
             return self
@@ -12880,6 +13063,45 @@ impl NativeJar {
                 .collect();
         }
         Vec::new()
+    }
+
+    /// The adapter the jar's metadata declared for `class` under `kind`.
+    ///
+    /// [`Self::discover_entrypoints`] resolves the adapters the host runs
+    /// itself and clears their marker, so this reads the declaration back from
+    /// the jar's metadata for diagnostics and ledger rows.
+    pub fn declared_entrypoint_adapter(&self, kind: &str, class: &str) -> Option<&str> {
+        self.fabric_entrypoints
+            .get(kind)?
+            .iter()
+            .find(|entry| entry.class == class)?
+            .adapter
+            .as_deref()
+    }
+
+    /// The class in the jar's superclass chain that declares one entrypoint
+    /// method.
+    ///
+    /// The JVM dispatches an inherited `onInitialize*` to the class that
+    /// declares it (DistantHorizons' `FabricMain` inherits both of its
+    /// `onInitialize*` from an abstract base in the same jar). Looking only at
+    /// the entry class reports a `MissingMethod` for a method the jar really
+    /// has, so the bounded host resolves the declaring class and keeps the
+    /// entry class as `this`. A chain that leaves the jar stops here: the host
+    /// cannot execute a class it does not hold.
+    fn entrypoint_method_owner(&self, class: &str, method: &str, desc: &str) -> Option<String> {
+        let mut current = class.to_owned();
+        for _ in 0..MAX_SUPERCLASS_WALK {
+            let file = self.classes.get(&current)?;
+            if file.method(method, desc).is_some() {
+                return Some(current);
+            }
+            if file.super_name == "java/lang/Object" {
+                return None;
+            }
+            current = file.super_name.clone();
+        }
+        None
     }
 
     /// Seed a host with the mod identity and required mod ids declared by
@@ -13039,11 +13261,20 @@ impl NativeJar {
         }
         let result = (|| -> Result<(), NativeError> {
             runtime.ensure_initialized(&class_name)?;
+            // An inherited entrypoint method belongs to the class that
+            // declares it; the entry class stays `this`.
+            let method_owner = self
+                .entrypoint_method_owner(&class_name, method, "()V")
+                .unwrap_or_else(|| class_name.clone());
             let file = runtime
                 .classes
                 .get(&class_name)
                 .ok_or_else(|| NativeError::MissingMethod(format!("class {class}")))?;
-            let is_static = file.method(method, "()V").is_some_and(Method::is_static);
+            let is_static = runtime
+                .classes
+                .get(&method_owner)
+                .and_then(|declaring| declaring.method(method, "()V"))
+                .is_some_and(Method::is_static);
             if !is_static {
                 let constructor = file
                     .methods
@@ -13069,7 +13300,7 @@ impl NativeJar {
                 // in an inner-class constructor (and any entrypoint reading its
                 // own instance fields) depends on.
                 runtime.invoke(
-                    &class_name,
+                    &method_owner,
                     method,
                     "()V",
                     Some(Value::Ref(Some(class_name.clone()))),
@@ -25066,6 +25297,324 @@ mandatory = true
                 },
             ]
         );
+    }
+
+    /// A tiny entrypoint class whose one method calls a bounded host method.
+    ///
+    /// `Boolean.valueOf(Z)` is modelled, so the host counts the call: a test can
+    /// tell "the entrypoint ran" from "the class was merely found".
+    fn entrypoint_probe_class(
+        name: &str,
+        super_name: &str,
+        method: &str,
+        access: u16,
+    ) -> ClassFile {
+        ClassFile {
+            name: name.into(),
+            super_name: super_name.into(),
+            pool: vec![
+                Cp::Empty,
+                Cp::Utf8("java/lang/Boolean".into()),
+                Cp::Class(1),
+                Cp::Utf8("valueOf".into()),
+                Cp::Utf8("(Z)Ljava/lang/Boolean;".into()),
+                Cp::NameType {
+                    name: 3,
+                    descriptor: 4,
+                },
+                Cp::MethodRef { class: 2, nt: 5 },
+            ],
+            bootstrap_methods: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![
+                entry_only_constructor(),
+                Method {
+                    name: method.into(),
+                    descriptor: "()V".into(),
+                    access,
+                    code: Some(vec![0x04, 0xb8, 0x00, 0x06, 0x57, 0xb1]),
+                    max_stack: 2,
+                    max_locals: 1,
+                    annotations: Vec::new(),
+                },
+            ],
+            annotations: Vec::new(),
+            raw: Vec::new(),
+        }
+    }
+
+    fn entry_only_constructor() -> Method {
+        Method {
+            name: "<init>".into(),
+            descriptor: "()V".into(),
+            access: 1,
+            code: Some(vec![0xb1]),
+            max_stack: 1,
+            max_locals: 1,
+            annotations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kotlin_entrypoint_object_runs_through_the_host() {
+        // fabric-language-kotlin's adapter is what fabric.mod.json names for a
+        // Kotlin `object`; the object compiles to a class whose `onInitialize`
+        // is plain JVM bytecode, so the bounded host runs it with the default
+        // invocation contract and the jar needs no loader.
+        let jar = NativeJar {
+            classes: BTreeMap::from([(
+                "demo/Main".to_owned(),
+                entrypoint_probe_class("demo/Main", "java/lang/Object", "onInitialize", 1),
+            )]),
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: Some("kotlin".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        // The declaration stays readable from metadata for ledger rows even
+        // though discovery resolves it.
+        assert_eq!(
+            jar.declared_entrypoint_adapter("main", "demo.Main"),
+            Some("kotlin")
+        );
+        let entries = jar.discover_entrypoints("main");
+        assert_eq!(
+            entries[0].adapter, None,
+            "the host implements the kotlin adapter itself"
+        );
+        let mut host = StdHost::new();
+        let report = jar
+            .execute("demo.Main", None, "main", &mut host)
+            .expect("a Kotlin object's onInitialize is plain bytecode");
+        assert_eq!(report.method, "onInitialize");
+        assert_eq!(report.calls, 1, "the object entrypoint ran");
+    }
+
+    #[test]
+    fn kotlin_entrypoint_without_its_class_reports_a_native_gap() {
+        // A jar can declare an adapter entrypoint it does not package. Nothing
+        // can run that (a loader reads the same metadata), so the refusal is a
+        // precise verdict rather than a crash or a generic adapter message.
+        let jar = NativeJar {
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Missing".into(),
+                    method: None,
+                    adapter: Some("kotlin".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let entries = jar.discover_entrypoints("main");
+        assert_eq!(entries[0].adapter, None);
+        let error = jar
+            .execute("demo.Missing", None, "main", &mut StdHost::new())
+            .expect_err("the class is not in the jar");
+        let skip = error.entrypoint_skip().expect("a named verdict");
+        assert_eq!(skip, EntrypointSkip::MissingClass);
+        assert_eq!(skip.label(), "native-gap");
+        assert!(skip.reason().contains("does not contain"), "{skip:?}");
+    }
+
+    #[test]
+    fn kotlin_runtime_reach_routes_to_the_loader_vocabulary() {
+        // The Kotlin standard library ships as its own mod jar; the native path
+        // links one jar at a time, so an entrypoint that reaches it is a job
+        // for a loader that loads fabric-language-kotlin.
+        let missing = NativeError::MissingMethod(
+            "kotlin/jvm/internal/Intrinsics#checkNotNullParameter(Ljava/lang/Object;Ljava/lang/String;)V"
+                .into(),
+        );
+        assert_eq!(
+            missing.entrypoint_skip(),
+            Some(EntrypointSkip::KotlinRuntime)
+        );
+        assert_eq!(missing.entrypoint_skip().unwrap().label(), "needs-loader");
+        let host_call = NativeError::UnknownHostCall(MethodRef {
+            owner: "kotlin/jvm/internal/Intrinsics".into(),
+            name: "stringPlus".into(),
+            descriptor: "(Ljava/lang/String;)Ljava/lang/String;".into(),
+        });
+        assert_eq!(
+            host_call.entrypoint_skip(),
+            Some(EntrypointSkip::KotlinRuntime)
+        );
+        // A jar's own missing member is not a Kotlin runtime question.
+        let theirs = NativeError::MissingMethod("demo/Main#onInitialize()V".into());
+        assert_eq!(theirs.entrypoint_skip(), None);
+    }
+
+    #[test]
+    fn unmodelled_entrypoint_adapter_keeps_the_refusal() {
+        // An adapter the native path does not implement stays on the entry, so
+        // no caller mistakes it for a default invocation, and its verdict is
+        // the ledger's `native-gap`.
+        let jar = NativeJar {
+            fabric_entrypoints: BTreeMap::from([(
+                "main".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: Some("some-language-adapter".into()),
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let entries = jar.discover_entrypoints("main");
+        let adapter = EntrypointAdapter::of(&entries[0]);
+        assert_eq!(adapter, EntrypointAdapter::Unsupported);
+        assert!(!adapter.is_native());
+        assert_eq!(entries[0].adapter.as_deref(), Some("some-language-adapter"));
+        assert_eq!(EntrypointSkip::UnsupportedAdapter.label(), "native-gap");
+        // Fabric's own `default` adapter is the default contract, not a gap.
+        let default_entry = Entrypoint {
+            class: "demo.Main".into(),
+            method: None,
+            adapter: Some("default".into()),
+        };
+        assert!(EntrypointAdapter::of(&default_entry).is_native());
+    }
+
+    #[test]
+    fn entrypoint_inherits_initialize_from_a_base_class() {
+        // DistantHorizons declares one class under both Fabric roles and
+        // inherits `onInitializeClient`/`onInitializeServer` from an abstract
+        // base in the same jar. The JVM dispatches to the declaring class; a
+        // lookup on the entry class alone refuses a method the jar really has.
+        let jar = NativeJar {
+            classes: BTreeMap::from([
+                (
+                    "demo/Base".to_owned(),
+                    entrypoint_probe_class(
+                        "demo/Base",
+                        "java/lang/Object",
+                        "onInitializeServer",
+                        1,
+                    ),
+                ),
+                (
+                    "demo/Main".to_owned(),
+                    ClassFile {
+                        name: "demo/Main".into(),
+                        super_name: "demo/Base".into(),
+                        pool: vec![Cp::Empty],
+                        bootstrap_methods: Vec::new(),
+                        fields: Vec::new(),
+                        methods: vec![entry_only_constructor()],
+                        annotations: Vec::new(),
+                        raw: Vec::new(),
+                    },
+                ),
+            ]),
+            fabric_entrypoints: BTreeMap::from([(
+                "server".to_owned(),
+                vec![Entrypoint {
+                    class: "demo.Main".into(),
+                    method: None,
+                    adapter: None,
+                }],
+            )]),
+            ..NativeJar::default()
+        };
+        let mut host = StdHost::new();
+        let report = jar
+            .execute("demo.Main", None, "server", &mut host)
+            .expect("an inherited onInitializeServer runs");
+        assert_eq!(report.class, "demo.Main");
+        assert_eq!(report.method, "onInitializeServer");
+        assert_eq!(report.calls, 1);
+    }
+
+    #[test]
+    fn wrapper_bounds_and_boxed_booleans_decode() {
+        let mut host = StdHost::new();
+        let statics = [
+            ("java/lang/Integer", "MAX_VALUE", "I", Value::Int(i32::MAX)),
+            ("java/lang/Integer", "MIN_VALUE", "I", Value::Int(i32::MIN)),
+            ("java/lang/Integer", "SIZE", "I", Value::Int(32)),
+            ("java/lang/Short", "MIN_VALUE", "S", Value::Int(-32768)),
+            ("java/lang/Byte", "MAX_VALUE", "B", Value::Int(127)),
+            ("java/lang/Character", "MAX_VALUE", "C", Value::Int(0xffff)),
+            ("java/lang/Character", "MIN_VALUE", "C", Value::Int(0)),
+        ];
+        for (owner, name, descriptor, expected) in statics {
+            let field = MethodRef {
+                owner: owner.into(),
+                name: name.into(),
+                descriptor: descriptor.into(),
+            };
+            assert_eq!(host.get_static(&field).unwrap(), expected, "{owner}#{name}");
+        }
+        // `Boolean.TRUE`/`FALSE` answer the same boxed marker `Boolean.valueOf`
+        // does, so `booleanValue`/`equals` decode them.
+        let true_field = MethodRef {
+            owner: "java/lang/Boolean".into(),
+            name: "TRUE".into(),
+            descriptor: "Ljava/lang/Boolean;".into(),
+        };
+        let true_value = host.get_static(&true_field).unwrap();
+        assert_eq!(true_value, Value::Ref(Some("boolean:true".into())));
+        let boolean_value = MethodRef {
+            owner: "java/lang/Boolean".into(),
+            name: "booleanValue".into(),
+            descriptor: "()Z".into(),
+        };
+        assert_eq!(
+            host.invoke_instance(&boolean_value, &true_value, &[])
+                .unwrap(),
+            Value::Int(1)
+        );
+        // The bare marker written before the two forms converged keeps working.
+        assert_eq!(
+            host.invoke_instance(&boolean_value, &Value::Ref(Some("true".into())), &[])
+                .unwrap(),
+            Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn pack_type_values_answer_their_constants() {
+        // `PackType.values()` is how a mod registers a resource pack for each
+        // side; an unknown enum answered null and the following `arraylength`
+        // refused the jar.
+        assert_eq!(
+            game_enum_constants("net/minecraft/server/packs/PackType"),
+            Some(&["CLIENT_RESOURCES", "SERVER_DATA"][..])
+        );
+    }
+
+    #[test]
+    fn unmodelled_array_returns_stay_non_null() {
+        // Java never answers null from a method declared to return an array,
+        // and a null costs the caller its very next `arraylength`. A class the
+        // jar does not ship therefore answers an empty owned array; other
+        // unmodelled returns keep their neutral value.
+        let mut host = StdHost::new();
+        let array_call = MethodRef {
+            owner: "some/library/Api".into(),
+            name: "values".into(),
+            descriptor: "()[Lsome/library/T;".into(),
+        };
+        assert_eq!(
+            host.unknown_host_call(&array_call).unwrap(),
+            Value::Ref(Some("array/empty".into()))
+        );
+        let reference_call = MethodRef {
+            owner: "some/library/Api".into(),
+            name: "create".into(),
+            descriptor: "()Lsome/library/T;".into(),
+        };
+        assert_eq!(
+            host.unknown_host_call(&reference_call).unwrap(),
+            Value::Ref(None)
+        );
+        assert_eq!(host.unknown_host_calls().len(), 2);
     }
 
     #[test]
