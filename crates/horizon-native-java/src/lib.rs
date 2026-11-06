@@ -6400,6 +6400,43 @@ impl Host for StdHost {
                     start,
                 )))
             }
+            // The `char` overloads take a code unit, so a scanner walking
+            // `indexOf('.', from)` must see the character, not a default.
+            ("java/lang/String", "indexOf", "(I)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                Ok(Value::Int(utf16_index_of(
+                    expect_string(receiver),
+                    &needle,
+                    0,
+                )))
+            }
+            ("java/lang/String", "indexOf", "(II)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                let start = expect_int(r, Self::argument(r, args, 1)?)?;
+                Ok(Value::Int(utf16_index_of(
+                    expect_string(receiver),
+                    &needle,
+                    start,
+                )))
+            }
+            ("java/lang/String", "lastIndexOf", "(I)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                Ok(Value::Int(utf16_last_index_of(
+                    expect_string(receiver),
+                    &needle,
+                )))
+            }
+            ("java/lang/String", "lastIndexOf", "(II)I") => {
+                let needle = string_from_char_code(expect_int(r, Self::argument(r, args, 0)?)?);
+                let from = expect_int(r, Self::argument(r, args, 1)?)?;
+                let value = expect_string(receiver);
+                let units = value.encode_utf16().collect::<Vec<_>>();
+                let end = usize::try_from(from)
+                    .map(|from| (from + needle.encode_utf16().count()).min(units.len()))
+                    .unwrap_or(0);
+                let prefix = String::from_utf16_lossy(&units[..end]);
+                Ok(Value::Int(utf16_last_index_of(&prefix, &needle)))
+            }
             ("java/lang/String", "lastIndexOf", "(Ljava/lang/String;)I") => {
                 Ok(Value::Int(utf16_last_index_of(
                     expect_string(receiver),
@@ -9596,6 +9633,11 @@ fn is_map_owner(owner: &str) -> bool {
 /// continuation line and a unicode escape are read literally: a metadata file
 /// built by the loader does not use them, and a bounded read must not turn a
 /// crafted file into host state.
+/// The one-character string a `String` char index names.
+fn string_from_char_code(code: i32) -> String {
+    char::from_u32(code as u32).map_or_else(String::new, String::from)
+}
+
 fn properties_entries(text: &str) -> Vec<(String, String)> {
     let mut entries = Vec::new();
     for line in text.lines() {
@@ -17552,10 +17594,16 @@ impl<H: Host> Runtime<'_, H> {
                 .ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
         let internal = binary.replace('.', "/");
-        Ok(if self.has_class(&internal) {
-            Value::Ref(Some(internal))
-        } else {
-            Value::Ref(None)
+        if self.has_class(&internal) {
+            return Ok(Value::Ref(Some(internal)));
+        }
+        // The JVM throws for an absent class, and a platform probe relies on
+        // its `catch (ClassNotFoundException)` to try the next loader. A null
+        // answer would turn the probe's `getConstructor` into an NPE.
+        Err(NativeError::UncaughtException {
+            class: "java/lang/ClassNotFoundException".into(),
+            message: Some(binary.to_owned()),
+            frame: None,
         })
     }
 
@@ -21419,7 +21467,7 @@ impl<H: Host> Runtime<'_, H> {
                         && r.name == "forName"
                         && r.descriptor.ends_with(")Ljava/lang/Class;")
                     {
-                        self.class_for_name(&args)?
+                        invoke_or_catch!(at, self.class_for_name(&args))
                     } else if let Some(value) = self.invoke_class_interfaces(&r, receiver.as_ref())
                     {
                         value
@@ -33232,12 +33280,16 @@ mandatory = true
                 .unwrap(),
             Value::Ref(Some("demo/Reflective".into()))
         );
-        assert_eq!(
-            runtime
-                .class_for_name(&[Value::Ref(Some("demo.Missing".into()))])
-                .unwrap(),
-            Value::Ref(None)
-        );
+        // The JVM throws for an absent class; a platform probe catches the
+        // exception and tries its next loader.
+        let missing = runtime
+            .class_for_name(&[Value::Ref(Some("demo.Missing".into()))])
+            .unwrap_err();
+        assert!(matches!(
+            missing,
+            NativeError::UncaughtException { class, .. }
+                if class == "java/lang/ClassNotFoundException"
+        ));
     }
 
     #[test]
