@@ -90,6 +90,13 @@ class RealModFixtureTest(unittest.TestCase):
                 return path
         return ROOT / "target" / "debug"
 
+    def require_probes(self) -> None:
+        """The corpus builds both probes up front; without them a Fabric jar is only metadata-only."""
+        missing = [tool for tool in ("horizon-native-java", "horizon-jvm")
+                   if not (self.bin_dir / tool).is_file()]
+        if missing:
+            self.skipTest(f"not built in {self.bin_dir.relative_to(ROOT)}: {', '.join(missing)}")
+
     def class_retention_jar(self) -> Path:
         """Compile a jar whose `@Mixin` annotation has CLASS retention, as sponge-mixin's does."""
         work = Path(self.temp.name) / "class-retention"
@@ -130,9 +137,8 @@ class RealModFixtureTest(unittest.TestCase):
         return jar
 
     def test_class_retention_mixin_reports_a_plan(self) -> None:
+        self.require_probes()
         probe = self.bin_dir / "horizon-native-java"
-        if not probe.is_file():
-            self.skipTest("horizon-native-java is not built")
         jar = self.class_retention_jar()
         result = subprocess.run(
             [str(probe), "--mixin-plans", str(jar)],
@@ -158,6 +164,7 @@ class RealModFixtureTest(unittest.TestCase):
         self.assertEqual(row["configs"], 1)
 
     def test_manifest_is_deterministic_and_fabric_nested_probe_is_folded(self) -> None:
+        self.require_probes()
         self.assertEqual(set(self.manifest), {"fabric-fixture.jar", "forge-fixture.jar", "neoforge-fixture.jar"})
         report = self.corpus("--fabric-jars")
         self.assertEqual(report["counts"]["total"], 1)
@@ -180,6 +187,7 @@ class RealModFixtureTest(unittest.TestCase):
         server = Path.home() / "horizon-corpus" / "nf263"
         if not (server / "libraries").is_dir():
             self.skipTest("no local NeoForge server install")
+        self.require_probes()
         report = self.corpus("--neoforge-jars", server=server)
         rows = {row["file"]: row for row in report["jars"]}
         self.assertIn(rows["neoforge-fixture.jar"]["verdict"], {"ok", "fallback", "unsupported"})
