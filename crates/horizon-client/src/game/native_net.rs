@@ -89,6 +89,15 @@ impl Game<'_> {
                 );
             }
         }
+        // Java mod payload frames a server tick broadcasts: the same bound as
+        // the client window's pump, so one tick's work stays small. A frame a
+        // guest cannot receive (the hub is not a client of itself) is dropped
+        // by `broadcast`.
+        for frame in
+            super::java_payloads::take_java_to_clients(super::java_payloads::PAYLOAD_TICK_CAP)
+        {
+            super::java_payloads::broadcast(host, &frame);
+        }
         // The allowance is a server tick's, not a level pass's: it starts over
         // after the last level.
         if self.level_pass.last {
