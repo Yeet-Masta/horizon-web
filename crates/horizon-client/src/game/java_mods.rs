@@ -15,11 +15,22 @@
 //! (`horizon_threads::jobs`); the rows, reports and declarations one jar
 //! produced merge back in path order, and the payload adoption that touches
 //! shared state happens only there, one jar at a time.
+//!
+//! Before any jar starts, the batch builds one linked class table from every
+//! supplied jar and the jars each nests in `META-INF/jars`/`META-INF/jarjar`:
+//! that is the class path a loader gives the pack, and it is what lets one
+//! jar's bytecode name a sibling library's class. The opt-in game-hook tier
+//! (`HORIZON_JAVA_GAME_HOOKS`) binds game-class `@Inject` plans to the runtime's
+//! host hook sites and keeps the callbacks for the game to fire.
 use super::execution_role::ExecutionRole;
 use horizon_client::mod_content::ContentMod;
 use horizon_mods::native::NativeDeclarations;
+use horizon_native_java::{GameHookRegistrations, LinkedClassTable, NativeJar, StdHost, Value};
 use std::{
-    path::PathBuf,
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::{Cursor, Read},
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -377,6 +388,10 @@ struct JavaJarRun {
     content: Vec<ContentMod>,
     report: JavaCompatibilityReport,
     declarations: NativeDeclarations,
+    /// The game-class callbacks the opt-in hook tier bound, kept with the jar
+    /// so a host hook point can run them. `None` when the tier is off, or when
+    /// the jar maps no plan onto a hook site.
+    game_hooks: Option<GameHookRegistrations>,
 }
 
 /// Wall-clock time one jar's entrypoints may consume before the runner treats
@@ -412,6 +427,132 @@ fn first_game_skip_reason(skipped: &[horizon_native_java::SkippedMixinPlan]) -> 
             }
             reason
         })
+}
+
+/// One jar whose game-class callbacks the opt-in hook tier bound.
+///
+/// The jar and its host stay alive because [`NativeJar::run_game_hook`] resolves
+/// a callback from the jar's own classes and lets it write through the host's
+/// persistent class state, so a later firing sees what an earlier one wrote.
+// A host hook point calls `run_java_game_hook` once the game's own sites are
+// wired to this module (native_hooks.rs); until then the store has no reader.
+#[allow(dead_code)]
+struct JavaGameHookJar {
+    jar: Arc<NativeJar>,
+    registrations: GameHookRegistrations,
+    host: StdHost,
+}
+
+/// The game-class callbacks one execution role's batch bound, in path order.
+/// Keyed by role because the window and its server thread run different jars in
+/// the same process, exactly as the payload handler jars are.
+static JAVA_GAME_HOOKS: Mutex<BTreeMap<super::java_payloads::HandlerRole, Vec<JavaGameHookJar>>> =
+    Mutex::new(BTreeMap::new());
+
+/// What one firing of a host hook point did.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct JavaGameHookOutcome {
+    /// How many callbacks ran; a cancellation stops the ones after it.
+    pub(super) ran: usize,
+    /// Whether a callback cancelled the vanilla work at this point.
+    pub(super) cancelled: bool,
+}
+
+/// The environment variable that turns the game-class hook tier on. It is off
+/// by default: the default weave keeps every game-class plan a skip, because a
+/// host that does not fire the point must not claim it.
+pub(super) const GAME_HOOKS_ENV: &str = "HORIZON_JAVA_GAME_HOOKS";
+
+/// Whether the game-class hook tier is opted in.
+pub(super) fn game_hook_tier_enabled() -> bool {
+    game_hook_flag(std::env::var_os(GAME_HOOKS_ENV))
+}
+
+/// The spelling the flag accepts; unset, empty or any other value is off.
+fn game_hook_flag(value: Option<std::ffi::OsString>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        )
+    })
+}
+
+/// Forgets the game-class callbacks of a previous bootstrap for one role.
+pub(super) fn clear_java_game_hooks_as(role: super::java_payloads::HandlerRole) {
+    JAVA_GAME_HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&role);
+}
+
+/// Keeps one jar's bound callbacks for its role's host hook points.
+///
+/// The host is cloned after the entrypoints ran, so persistent class state and
+/// the seeded mod class path travel with the jar. Only a jar that bound a plan
+/// reaches here, so a pack without game-class mixins keeps nothing.
+pub(super) fn publish_java_game_hooks(
+    role: super::java_payloads::HandlerRole,
+    jar: Arc<NativeJar>,
+    registrations: GameHookRegistrations,
+    host: &StdHost,
+) {
+    if registrations.is_empty() {
+        return;
+    }
+    JAVA_GAME_HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(role)
+        .or_default()
+        .push(JavaGameHookJar {
+            jar,
+            registrations,
+            host: host.clone(),
+        });
+}
+
+/// Runs every callback the role bound at one host hook point, in registration
+/// order (Mixin apply order).
+///
+/// A point no jar registered at is `Ok(0)` rather than an error: the game may
+/// fire a hook no mod uses. A callback that cancels stops the ones after it,
+/// including those of later jars, which is what Mixin's `CallbackInfo.cancel`
+/// does at one injection point.
+#[allow(dead_code)]
+pub(super) fn run_java_game_hook(
+    role: super::java_payloads::HandlerRole,
+    hook: &str,
+    receiver: Option<Value>,
+    args: &[Value],
+) -> Result<JavaGameHookOutcome, String> {
+    let mut store = JAVA_GAME_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(jars) = store.get_mut(&role) else {
+        return Ok(JavaGameHookOutcome::default());
+    };
+    let mut outcome = JavaGameHookOutcome::default();
+    for entry in jars
+        .iter_mut()
+        .filter(|entry| !entry.registrations.entries(hook).is_empty())
+    {
+        let run = entry
+            .jar
+            .run_game_hook(
+                &entry.registrations,
+                hook,
+                receiver.clone(),
+                args,
+                &mut entry.host,
+            )
+            .map_err(|error| error.to_string())?;
+        outcome.ran += run.ran;
+        if run.cancelled {
+            outcome.cancelled = true;
+            break;
+        }
+    }
+    Ok(outcome)
 }
 
 /// The declaration rows of a cache entry, as the converter takes them.
@@ -469,6 +610,9 @@ fn run_from_cache(path: &std::path::Path, entry: &java_cache::Entry) -> Result<J
         content,
         report,
         declarations,
+        // A cache entry carries rows, not the jar's game-class callbacks: a
+        // jar that bound any is not stored (`cacheable`).
+        game_hooks: None,
     })
 }
 
@@ -508,7 +652,21 @@ fn cache_entry(
     }
 }
 
-fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, String> {
+/// The batch's per-jar step with the pack's linked class table.
+fn run_one_linked(
+    path: &Path,
+    role: ExecutionRole,
+    table: &Arc<LinkedClassTable>,
+) -> Result<JavaJarRun, String> {
+    run_one_on(path, role, table, game_hook_tier_enabled())
+}
+
+fn run_one_on(
+    path: &Path,
+    role: ExecutionRole,
+    table: &Arc<LinkedClassTable>,
+    game_hooks: bool,
+) -> Result<JavaJarRun, String> {
     // Decide from loader metadata whether this jar can run in this role at
     // all. Most jars in a real pack are client-only and never start on a
     // server; parsing their classes first was 6.5 s of an 11.2 s batch. Only
@@ -545,12 +703,62 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
     // replays the rows it declared instead of being parsed and interpreted
     // again. The lookup is keyed by the jar's sha256 and length, both taken
     // from the file itself; failures fall through to the live path.
-    let cached = java_cache::lookup(path, role);
+    //
+    // The cache carries rows, not game-class callbacks, and an entry written
+    // with the hook tier off says nothing about the plans it would bind. With
+    // the tier on the jar is interpreted every start instead.
+    let cached = if game_hooks {
+        None
+    } else {
+        java_cache::lookup(path, role)
+    };
     if let Some((_, Some(entry))) = &cached
         && let Ok(run) = run_from_cache(path, entry)
     {
         return Ok(run);
     }
+    let run = bootstrap_jar(path, role, table, game_hooks)?;
+    // Store the rows for the next start, unless the jar announced payload
+    // channels or bound game-class callbacks: both live in the bootstrapped
+    // host, which a later start cannot rebuild from rows.
+    if let Some((identity, _)) = &cached
+        && cacheable(&run)
+    {
+        let typed: Vec<horizon_native_java::RegistryEntry> =
+            run.host.as_ref().map_or_else(Vec::new, |host| {
+                host.registrations()
+                    .iter()
+                    .filter(|entry| entry.declaration.is_some())
+                    .cloned()
+                    .collect()
+            });
+        let entry = cache_entry(
+            identity,
+            role,
+            &typed,
+            &run.jar.as_ref().expect("just built").native_declarations,
+            &run.report,
+        );
+        java_cache::remember(&entry);
+    }
+    Ok(run)
+}
+
+/// Reads, weaves and runs one jar against the pack's class path.
+///
+/// Separate from [`run_one_on`] so a test can exercise linking without the
+/// on-disk cache, and so the cache decision stays a property of the run.
+fn bootstrap_jar(
+    path: &Path,
+    role: ExecutionRole,
+    table: &Arc<LinkedClassTable>,
+    game_hooks: bool,
+) -> Result<JavaJarRun, String> {
+    let kinds = if role.is_client() {
+        ["client", "main", "neoforge"]
+    } else {
+        ["server", "main", "neoforge"]
+    };
     let jar = horizon_native_java::NativeJar::from_path(path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let (kind, entries) = kinds
@@ -566,19 +774,44 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
             path.display()
         ));
     }
-    let weave = jar.plan_load_time_weave(if role.is_client() {
+    let side = if role.is_client() {
         horizon_native_java::MixinSide::Client
     } else {
         horizon_native_java::MixinSide::Server
-    });
+    };
+    // The opt-in tier claims a game-class `@Inject` only when a host hook point
+    // will fire it; the default weave keeps every such plan a skip.
+    let weave = if game_hooks {
+        jar.plan_load_time_weave_with_game_hooks(side)
+    } else {
+        jar.plan_load_time_weave(side)
+    };
     let jar = jar
         .with_woven_classes(&weave.classes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut host = horizon_native_java::StdHost::new().with_environment_type(if role.is_client() {
-        "CLIENT"
+    let game_hook_registrations = if game_hooks {
+        let registrations = jar
+            .register_game_hooks(&weave)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        if registrations.is_empty() {
+            None
+        } else {
+            log::info!(
+                "Horizon: Java mod {} binds {} game hook callback(s)",
+                path.display(),
+                registrations.len()
+            );
+            Some(registrations)
+        }
     } else {
-        "SERVER"
-    });
+        None
+    };
+    // The pack's class path, shared by every host: a sibling jar's library is a
+    // symbol this jar's bytecode may name. It is installed before `seed_host`
+    // so the host's own seeding layers on top instead of replacing it.
+    let mut host = horizon_native_java::StdHost::new()
+        .with_environment_type(if role.is_client() { "CLIENT" } else { "SERVER" })
+        .with_linked_class_table(Arc::clone(table));
     if let Some(id) = mod_id(&jar, path) {
         host = host.with_mod(id, mod_version(&jar));
     }
@@ -658,38 +891,25 @@ fn run_one(path: &std::path::Path, role: ExecutionRole) -> Result<JavaJarRun, St
     // publishes its payload channels and keeps the host only if it declared
     // any. Nothing here touches process-wide state, so jars bootstrap in
     // parallel.
-    let run = JavaJarRun {
+    Ok(JavaJarRun {
         jar: Some(jar),
         host: Some(host),
         content,
         report,
         declarations,
-    };
-    // Store the rows for the next start, unless the jar announced payload
-    // channels: those live in the bootstrapped host, which a later start cannot
-    // rebuild from rows, so such a jar keeps being interpreted every time.
-    if let Some((identity, _)) = &cached
-        && cacheable(&run)
-    {
-        let entry = cache_entry(
-            identity,
-            role,
-            &typed,
-            &run.jar.as_ref().expect("just built").native_declarations,
-            &run.report,
-        );
-        java_cache::remember(&entry);
-    }
-    Ok(run)
+        game_hooks: game_hook_registrations,
+    })
 }
 
 /// Whether a run may be stored for the next start. A jar that announced payload
-/// channels needs the bootstrapped host for dispatch, not just its rows, so
-/// only a run without any is replayed.
+/// channels or bound game-class callbacks needs the bootstrapped host, not just
+/// its rows, so only a run without either is replayed.
 fn cacheable(run: &JavaJarRun) -> bool {
-    run.host
-        .as_ref()
-        .is_some_and(|host| host.payload_registrations().is_empty())
+    run.game_hooks.is_none()
+        && run
+            .host
+            .as_ref()
+            .is_some_and(|host| host.payload_registrations().is_empty())
 }
 
 /// The opt-in real-loader preflight (`fml`), logged once under the Java
@@ -731,6 +951,184 @@ fn jar_failure(path: &std::path::Path, error: String) -> JavaJarFailure {
     }
 }
 
+/// Nested jars one outer jar may contribute to the pack class path.
+const MAX_NESTED_JARS_PER_OUTER: usize = 64;
+/// Uncompressed bytes one nested jar may occupy.
+const MAX_NESTED_JAR_BYTES: u64 = 16 << 20;
+/// Uncompressed bytes the whole batch's nested jars may occupy, matching the
+/// resource budget a single jar's read already applies.
+const MAX_NESTED_TOTAL_BYTES: u64 = 256 << 20;
+
+/// The class path a loader gives one pack: every supplied jar's classes, plus
+/// the classes of the jars each one nests in `META-INF/jars` (Fabric) or
+/// `META-INF/jarjar` (NeoForge).
+///
+/// A pack keeps a mod's library in a separate jar — `xaerolib` beside the Xaero
+/// maps, a config library beside the mod that names it — and Fabric's JiJ puts
+/// it *inside* the mod jar. The native runtime never reads a process class path
+/// or the filesystem, so this table is the class path: the first jar that
+/// declares a name keeps it, exactly as a JVM's class path resolves a symbol.
+///
+/// One table is built per batch, before any jar bootstraps, because a jar may
+/// name a sibling that appears later in path order.
+fn pack_class_table(paths: &[PathBuf]) -> Arc<LinkedClassTable> {
+    let mut table = LinkedClassTable::default();
+    let mut linked = BTreeSet::new();
+    let mut nested_total = 0u64;
+    for path in paths {
+        // The jar's file name is its class-path identity, so two copies of one
+        // library keep one entry, as a class path would.
+        let Some(id) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        if !linked.insert(id.clone()) {
+            continue;
+        }
+        let jar = match NativeJar::from_path(path) {
+            Ok(jar) => jar,
+            Err(error) => {
+                log::debug!(
+                    "Horizon: Java class path skipped {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if let Err(error) = table.link_jar(id.clone(), &jar) {
+            log::debug!("Horizon: Java class path skipped {id}: {error}");
+            continue;
+        }
+        link_nested_jars(&mut table, path, &id, &mut nested_total);
+    }
+    log::info!(
+        "Horizon: Java class path: {} class(es) from {} jar(s)",
+        table.class_count(),
+        table.jar_count()
+    );
+    Arc::new(table)
+}
+
+/// Adds the classes of the jars nested inside `path` to `table`.
+///
+/// The outer jar is already linked under `outer_id`; a nested jar is registered
+/// as `outer_id!/<entry>`, so the table still names which jar supplied a class
+/// for an error message. A bundled jar is a library: its `META-INF/services`
+/// rows are not read (the interpreter resolves its classes, not its service
+/// list), and it is never bootstrapped as a mod of its own.
+fn link_nested_jars(
+    table: &mut LinkedClassTable,
+    path: &Path,
+    outer_id: &str,
+    nested_total: &mut u64,
+) {
+    let Ok(file) = File::open(path) else {
+        return;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return;
+    };
+    let mut found = 0usize;
+    for index in 0..archive.len() {
+        let Ok(entry) = archive.by_index(index) else {
+            continue;
+        };
+        let Ok(name) = entry.name() else {
+            continue;
+        };
+        let name = name.into_owned();
+        if !is_nested_jar_entry(&name) {
+            continue;
+        }
+        if found >= MAX_NESTED_JARS_PER_OUTER {
+            log::warn!(
+                "Horizon: Java class path: {} nests more than {MAX_NESTED_JARS_PER_OUTER} jars; the rest are not linked",
+                path.display()
+            );
+            break;
+        }
+        if entry.size() > MAX_NESTED_JAR_BYTES {
+            log::warn!(
+                "Horizon: Java class path: nested jar {name} in {} is larger than {MAX_NESTED_JAR_BYTES} bytes",
+                path.display()
+            );
+            continue;
+        }
+        if nested_total.saturating_add(entry.size()) > MAX_NESTED_TOTAL_BYTES {
+            log::warn!(
+                "Horizon: Java class path: nested jars past the {MAX_NESTED_TOTAL_BYTES}-byte budget are not linked"
+            );
+            return;
+        }
+        let mut bytes = Vec::with_capacity(entry.size() as usize);
+        if std::io::Read::take(entry, MAX_NESTED_JAR_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_NESTED_JAR_BYTES
+        {
+            continue;
+        }
+        *nested_total = nested_total.saturating_add(bytes.len() as u64);
+        found += 1;
+        if let Err(error) =
+            table.link_classes(format!("{outer_id}!/{name}"), nested_classes(&bytes))
+        {
+            log::debug!(
+                "Horizon: Java class path skipped nested jar {name} in {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Whether a zip entry is a jar a loader puts on the class path for this one:
+/// Fabric's `META-INF/jars/` or NeoForge's `META-INF/jarjar/`.
+fn is_nested_jar_entry(name: &str) -> bool {
+    name.ends_with(".jar")
+        && (name.starts_with("META-INF/jars/") || name.starts_with("META-INF/jarjar/"))
+}
+
+/// Whether a zip entry is a class the native runtime loads, matching the
+/// entries a jar read parses.
+fn is_java_class_entry(name: &str) -> bool {
+    name.ends_with(".class")
+        && !name.ends_with("module-info.class")
+        && !name.ends_with("package-info.class")
+        && !name.starts_with("META-INF/versions/")
+}
+
+/// The classes of one nested jar, parsed without its metadata: a bundled
+/// library is linked for its bytecode, and one class this build cannot read is
+/// skipped rather than losing the whole bundle.
+fn nested_classes(bytes: &[u8]) -> Vec<horizon_native_java::ClassFile> {
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(bytes)) else {
+        return Vec::new();
+    };
+    let mut classes = Vec::new();
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        let Ok(name) = entry.name() else {
+            continue;
+        };
+        let name = name.into_owned();
+        if !is_java_class_entry(&name) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        if let Ok(class) = horizon_native_java::ClassFile::parse(&bytes) {
+            classes.push(class);
+        }
+    }
+    classes
+}
+
 /// Runs one batch of jars and keeps every jar's outcome, including why a jar
 /// that never started was skipped ([`JavaBatchOutcome::failures`]). A caller
 /// logs those under its own role's prefix, or a strict startup returns them so
@@ -739,7 +1137,10 @@ pub(super) fn run_java_mods_batch(
     paths: &[PathBuf],
     role: ExecutionRole,
 ) -> Result<JavaBatchOutcome, String> {
-    run_java_mods_batch_with(paths, role, run_one)
+    let table = pack_class_table(paths);
+    run_java_mods_batch_with(paths, role, move |path, role| {
+        run_one_linked(path, role, &table)
+    })
 }
 
 /// At most this many jars bootstrap at once. A started jar holds several times
@@ -917,6 +1318,7 @@ fn adopt_run(
         content,
         report,
         declarations,
+        game_hooks,
     } = match outcome {
         Ok(run) => run,
         Err(failure) => {
@@ -931,12 +1333,6 @@ fn adopt_run(
         let adopted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::java_payloads::adopt_host(id, &jar, &mut host, payload_declarations);
         }));
-        // Dispatch keeps the hosts that declared payload channels
-        // (`java_payloads::store_handler_host_as`); no other consumer needs the
-        // parsed jar or its resources after its entrypoints ran, so do not hold
-        // them for the process lifetime.
-        drop(jar);
-        drop(host);
         if adopted.is_err() {
             batch.failures.push(JavaJarFailure {
                 jar: report.jar.clone(),
@@ -944,6 +1340,15 @@ fn adopt_run(
             });
             return;
         }
+        // Dispatch keeps the hosts that declared payload channels
+        // (`java_payloads::store_handler_host_as`); the hook tier keeps the
+        // jars that bound game-class callbacks. No other consumer needs the
+        // parsed jar or its resources after its entrypoints ran, so do not hold
+        // them for the process lifetime.
+        if let Some(registrations) = game_hooks {
+            publish_java_game_hooks(id, Arc::new(jar), registrations, &host);
+        }
+        drop(host);
     }
     batch.content.extend(content);
     batch.reports.push(report);
@@ -962,6 +1367,7 @@ where
     F: Fn(&std::path::Path, ExecutionRole) -> Result<JavaJarRun, String> + Send + Sync + 'static,
 {
     super::java_payloads::clear_handler_jars_as(handler_role(role));
+    clear_java_game_hooks_as(handler_role(role));
     let cache_before = java_cache::stats();
     let mut batch = JavaBatchOutcome::default();
     // The shared adoption step is serial, in path order: `adopt_host` mutates
@@ -1137,6 +1543,7 @@ mod tests {
                         mixin: Default::default(),
                     },
                     declarations,
+                    game_hooks: None,
                 })
             })
             .unwrap();
@@ -1199,6 +1606,7 @@ mod tests {
                     mixin: Default::default(),
                 },
                 declarations,
+                game_hooks: None,
             })
         })
         .unwrap();
@@ -1449,6 +1857,7 @@ mod tests {
                 content,
                 report: report_for("/mods/fixture.jar"),
                 declarations,
+                game_hooks: None,
             }
         };
         assert!(cacheable(&run(horizon_native_java::StdHost::new())));
@@ -1471,6 +1880,346 @@ mod tests {
         assert!(
             !cacheable(&run(host)),
             "a jar with payload channels keeps being interpreted"
+        );
+    }
+
+    /// The flag is opt-in: only an explicit yes turns the game-class hook tier
+    /// on, so an unset or misspelled value keeps the default weave's refusals.
+    #[test]
+    fn the_game_hook_flag_accepts_only_an_explicit_yes() {
+        for yes in ["1", "true", "on", "yes", " TRUE "] {
+            assert!(
+                game_hook_flag(Some(yes.into())),
+                "{yes:?} should enable the tier"
+            );
+        }
+        for no in ["", "0", "false", "off", "maybe"] {
+            assert!(
+                !game_hook_flag(Some(no.into())),
+                "{no:?} should keep the tier off"
+            );
+        }
+        assert!(!game_hook_flag(None), "unset is off");
+    }
+
+    /// Scratch stays under `~/horizon-corpus`, never the system temporary
+    /// directory, so a test never touches a player's files.
+    fn scratch_root(name: &str) -> PathBuf {
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("horizon-corpus")
+            .join("opencode");
+        let root = base.join(format!("java-mods-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch root");
+        root
+    }
+
+    fn javac() -> Option<PathBuf> {
+        let candidate = std::env::var_os("JAVA_HOME")
+            .map(|home| PathBuf::from(home).join("bin/javac"))
+            .unwrap_or_else(|| PathBuf::from("javac"));
+        if candidate.is_absolute() {
+            return candidate.is_file().then_some(candidate);
+        }
+        let paths = std::env::var_os("PATH")?;
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(&candidate))
+            .find(|path| path.is_file())
+    }
+
+    /// Compiles `sources` into `<root>/<name>/classes`, answering that
+    /// directory. `None` when no JDK is installed, so a checkout without one
+    /// still runs the rest of the suite.
+    fn compile_java_classes(
+        root: &Path,
+        name: &str,
+        sources: &[(&str, &str)],
+        classpath: &[&Path],
+    ) -> Option<PathBuf> {
+        let javac = javac()?;
+        let base = root.join(name);
+        let classes = base.join("classes");
+        std::fs::create_dir_all(&classes).ok()?;
+        let mut files = Vec::new();
+        for (relative, body) in sources {
+            let path = base.join("src").join(relative);
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::write(&path, body).ok()?;
+            files.push(path);
+        }
+        let mut command = std::process::Command::new(javac);
+        command.arg("--release").arg("17").arg("-d").arg(&classes);
+        if !classpath.is_empty() {
+            command
+                .arg("-classpath")
+                .arg(std::env::join_paths(classpath).ok()?);
+        }
+        let output = command.args(&files).output().ok()?;
+        assert!(
+            output.status.success(),
+            "javac failed for {name}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(classes)
+    }
+
+    /// The `.class` entries under `dir`, named relative to it, sorted so a jar
+    /// is byte-identical for the same sources.
+    fn class_entries(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "class")
+                {
+                    let name = path
+                        .strip_prefix(dir)
+                        .expect("a descendant")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((name, std::fs::read(&path).expect("a class file")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, &mut out);
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn write_jar(path: &Path, entries: &[(String, Vec<u8>)]) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(File::create(path).expect("a scratch jar file"));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            zip.start_file(name.as_str(), options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// A library jar and a mod jar compiled separately: the mod's bytecode
+    /// names the library's class, and only the pack's linked table makes that
+    /// symbol resolve. Without it the entrypoint reads `null/0/false`, the
+    /// corpus's cross-jar symptom.
+    const CROSS_JAR_LIBRARY: &[(&str, &str)] = &[(
+        "lib/Config.java",
+        "package lib;\n\
+         public final class Config {\n\
+             public static String name = \"linked\";\n\
+             public static int number() { return 41; }\n\
+             public static boolean flag = true;\n\
+         }\n",
+    )];
+
+    const CROSS_JAR_MOD: &[(&str, &str)] = &[(
+        "demo/Entry.java",
+        "package demo;\n\
+         import lib.Config;\n\
+         public class Entry {\n\
+             public static void onInitialize() {\n\
+                 String seen = Config.name + \"/\" + Config.number() + \"/\" + Config.flag;\n\
+                 if (seen.startsWith(\"null\") || seen.endsWith(\"false\")) {\n\
+                     throw new IllegalStateException(seen);\n\
+                 }\n\
+             }\n\
+         }\n",
+    )];
+
+    fn fabric_metadata(id: &str) -> Vec<u8> {
+        format!(
+            "{{\"schemaVersion\":1,\"id\":\"{id}\",\"version\":\"1.0.0\",\"entrypoints\":{{\"main\":\"demo.Entry\"}}}}"
+        )
+        .into_bytes()
+    }
+
+    /// Two supplied jars are one class path: the mod jar's entrypoint resolves
+    /// the library jar's static field and method.
+    #[test]
+    fn two_jars_link_through_one_pack_table() {
+        let root = scratch_root("two-jars");
+        let Some(library) = compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[]) else {
+            return;
+        };
+        let Some(app) = compile_java_classes(&root, "app", CROSS_JAR_MOD, &[&library]) else {
+            return;
+        };
+        let library_jar = root.join("lib.jar");
+        write_jar(&library_jar, &class_entries(&library));
+        let app_jar = root.join("app.jar");
+        let mut entries = class_entries(&app);
+        entries.push(("fabric.mod.json".to_owned(), fabric_metadata("linked_app")));
+        write_jar(&app_jar, &entries);
+
+        let table = pack_class_table(&[library_jar.clone(), app_jar.clone()]);
+        assert_eq!(table.jar_count(), 2, "both supplied jars are linked");
+        assert!(table.contains_key("lib/Config"));
+        assert!(table.contains_key("demo/Entry"));
+
+        let unlinked = Arc::new(LinkedClassTable::default());
+        let failure =
+            match bootstrap_jar(&app_jar, ExecutionRole::DedicatedServer, &unlinked, false) {
+                Ok(_) => panic!("the unlinked run must not see the library"),
+                Err(failure) => failure,
+            };
+        assert!(
+            failure.contains("IllegalStateException"),
+            "the entrypoint must fail on the unlinked library: {failure}"
+        );
+
+        let run = bootstrap_jar(&app_jar, ExecutionRole::DedicatedServer, &table, false)
+            .expect("the linked library must satisfy the entrypoint");
+        assert_eq!(run.report.entrypoints, 1);
+        assert_eq!(run.report.engine, JavaEngine::Native);
+        assert!(run.game_hooks.is_none(), "the tier is off by default");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A jar bundled in `META-INF/jars` is on the pack class path too: the
+    /// outer jar's bytecode resolves a library the outer jar only carries as a
+    /// nested entry.
+    #[test]
+    fn a_nested_jar_joins_the_pack_class_table() {
+        let root = scratch_root("nested-jar");
+        let Some(library) = compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[]) else {
+            return;
+        };
+        let Some(app) = compile_java_classes(&root, "app", CROSS_JAR_MOD, &[&library]) else {
+            return;
+        };
+        let nested = root.join("lib.jar");
+        write_jar(&nested, &class_entries(&library));
+        let nested_bytes = std::fs::read(&nested).expect("the nested jar");
+
+        let app_jar = root.join("app.jar");
+        let mut entries = class_entries(&app);
+        entries.push(("fabric.mod.json".to_owned(), fabric_metadata("bundle_app")));
+        entries.push(("META-INF/jars/lib.jar".to_owned(), nested_bytes));
+        write_jar(&app_jar, &entries);
+
+        let table = pack_class_table(std::slice::from_ref(&app_jar));
+        assert_eq!(table.jar_count(), 2, "the outer jar and its nested jar");
+        assert!(
+            table.contains_key("lib/Config"),
+            "the nested library joins the class path"
+        );
+        let ids: Vec<_> = table.jar_ids().collect();
+        assert!(ids.iter().any(|id| id.ends_with("!/META-INF/jars/lib.jar")));
+
+        let unlinked = Arc::new(LinkedClassTable::default());
+        assert!(
+            bootstrap_jar(&app_jar, ExecutionRole::DedicatedServer, &unlinked, false).is_err(),
+            "the outer jar alone does not carry the library"
+        );
+        bootstrap_jar(&app_jar, ExecutionRole::DedicatedServer, &table, false)
+            .expect("the nested library must satisfy the entrypoint");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The measured question this wiring asks: of a real corpus, how many jars
+    /// does the pack class path move from a refused entrypoint to a successful
+    /// native one, and how many game-class plans does the hook tier bind to a
+    /// host site instead of refusing?
+    ///
+    /// ```sh
+    /// HORIZON_JAVA_CORPUS_DIR=~/horizon-corpus/corpus-xl \
+    ///   cargo test -p horizon-client --lib -- --ignored game_hook_tier_measures --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads a real mod corpus outside the repository"]
+    fn game_hook_tier_measures_the_needs_loader_set() {
+        let Ok(dir) = std::env::var("HORIZON_JAVA_CORPUS_DIR") else {
+            eprintln!("skipping: set HORIZON_JAVA_CORPUS_DIR");
+            return;
+        };
+        let root = PathBuf::from(dir);
+        let kind = std::env::var("HORIZON_JAVA_CORPUS_KIND").unwrap_or_else(|_| "server".into());
+        let client = kind == "client";
+        let side = if client {
+            horizon_native_java::MixinSide::Client
+        } else {
+            horizon_native_java::MixinSide::Server
+        };
+        // The same entrypoint kinds `bootstrap_jar` tries for the role: a
+        // Fabric jar commonly declares only `main`, which both roles run.
+        let kinds = if client {
+            ["client", "main", "neoforge"]
+        } else {
+            ["server", "main", "neoforge"]
+        };
+        let mut jars = std::fs::read_dir(&root)
+            .expect("list the corpus")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+            .collect::<Vec<_>>();
+        jars.sort();
+        let table = pack_class_table(&jars);
+        let empty = Arc::new(LinkedClassTable::default());
+        let role = if client {
+            ExecutionRole::Client
+        } else {
+            ExecutionRole::DedicatedServer
+        };
+        let mut considered = 0usize;
+        let mut needs_loader = 0usize;
+        let mut still_needs_loader = 0usize;
+        let mut bound_callbacks = 0usize;
+        let mut newly_runs = 0usize;
+        let mut still_refused = 0usize;
+        let mut lost = 0usize;
+        for path in &jars {
+            let Ok(jar) = NativeJar::from_path(path) else {
+                continue;
+            };
+            if !kinds
+                .iter()
+                .any(|kind| !jar.discover_entrypoints(kind).is_empty())
+            {
+                continue;
+            }
+            considered += 1;
+            let before = jar.plan_load_time_weave(side);
+            let after = jar.plan_load_time_weave_with_game_hooks(side);
+            bound_callbacks += after.game_hooks.len();
+            let was = first_game_skip_reason(&before.skipped).is_some();
+            let now = first_game_skip_reason(&after.skipped).is_some();
+            if was {
+                needs_loader += 1;
+            }
+            if now {
+                still_needs_loader += 1;
+            }
+            // A jar the loader had to carry because its entrypoint named a
+            // sibling library's class starts on the pack class path instead.
+            let unlinked = bootstrap_jar(path, role, &empty, false);
+            match (unlinked, bootstrap_jar(path, role, &table, false)) {
+                (Err(_), Ok(_)) => newly_runs += 1,
+                (Ok(_), Ok(_)) => {}
+                (Ok(_), Err(error)) => {
+                    lost += 1;
+                    eprintln!(
+                        "{} ran alone but not linked: {error}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                (Err(_), Err(_)) => still_refused += 1,
+            }
+        }
+        println!(
+            "{considered} jar(s) with a {kind} entrypoint; {} of {considered} now start on the pack \
+             class path that did not alone, {still_refused} still refuse, {lost} regressed; \
+             {needs_loader} needed the loader by weave before, {still_needs_loader} still do, \
+             {bound_callbacks} callback(s) bound to a host site; {} moved off the weave set",
+            newly_runs,
+            needs_loader.saturating_sub(still_needs_loader)
         );
     }
 }
