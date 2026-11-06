@@ -216,8 +216,10 @@
 //!   declare it runs above the field operands the write already pushed.
 //! - `@Redirect` at `FIELD` replaces a read with the callback's return value
 //!   (the receiver is popped first) and a write with a callback that takes the
-//!   target arguments followed by the value and returns `void`.  A `@Redirect`
-//!   at `HEAD` is the whole-body [`weave_overwrite`].
+//!   target arguments followed by the value and returns `void`.  `@Redirect` at
+//!   `INVOKE` saves the call's arguments in fresh locals, pops the receiver and
+//!   calls the callback with the target's arguments; the original call becomes
+//!   `nop`s.  A `@Redirect` at `HEAD` is the whole-body [`weave_overwrite`].
 //! - [`weave_overwrite`] replaces a method body with one `invokestatic` and the
 //!   matching `xreturn`.  The original exception table, debug tables and
 //!   stack-map frames are dropped with the body; a constructor or static
@@ -251,9 +253,9 @@
 //!   original constructor call and leave no uninitialized reference behind.
 //! - `@Redirect` at `JUMP`: replacing a branch rewrites control flow; no
 //!   stack-neutral insert expresses it.
-//! - `@Redirect` at `INVOKE`: the insert would have to pop the receiver and
-//!   every argument into locals (including the uninitialized object of an
-//!   `invokespecial`) and rebuild the call behind the callback.
+//! - `@Redirect` at `invokespecial` (a constructor or private call): the
+//!   receiver may be an uninitialized object, so saving it in a local and
+//!   replacing the call would not verify.
 //! - A cancellable `@Inject` at `FIELD`/`NEW`/`JUMP`: cancellation needs a
 //!   branch and a value in the target's shape, which those anchors do not have.
 //! - `@ModifyVariable` at `LOAD` with a captured argument list when a later
@@ -5671,6 +5673,16 @@ enum AnchorHitKind {
     Jump {
         opcode: u8,
     },
+    Invoke {
+        owner: String,
+        name: String,
+        descriptor: String,
+        /// Whether the call pushes a receiver below its arguments.
+        receiver: bool,
+        /// `invokespecial`, which a redirect cannot replace because the
+        /// receiver may be an uninitialized object.
+        special: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -5726,6 +5738,19 @@ fn scan_anchor_hits(
                 }
             }
             0x99..=0xa7 | 0xc6 | 0xc7 => AnchorHitKind::Jump { opcode },
+            0xb6..=0xb9 => {
+                let index = code_u2(code.code, instruction.at + 1)?;
+                let Some((owner, name, descriptor)) = invoke_method_ref(target.pool, index) else {
+                    continue;
+                };
+                AnchorHitKind::Invoke {
+                    owner: owner.to_owned(),
+                    name: name.to_owned(),
+                    descriptor: descriptor.to_owned(),
+                    receiver: opcode != 0xb8,
+                    special: opcode == 0xb7,
+                }
+            }
             _ => continue,
         };
         hits.push(AnchorHit {
@@ -5755,6 +5780,19 @@ fn anchor_hit_matches(hit: &AnchorHitKind, site: &AnchorSite) -> bool {
                 opcode: expected, ..
             }),
         ) => expected.is_none_or(|expected| expected == *opcode),
+        (
+            AnchorHitKind::Invoke {
+                owner,
+                name,
+                descriptor,
+                ..
+            },
+            AnchorSite::Invoke(selector),
+        ) => {
+            owner == &selector.owner
+                && name == &selector.name
+                && (selector.descriptor.is_empty() || descriptor == &selector.descriptor)
+        }
         _ => false,
     }
 }
@@ -6225,13 +6263,17 @@ fn weave_anchor_inject(
     })
 }
 
-/// Apply one bounded `@Redirect` at a FIELD site.
+/// Apply one bounded `@Redirect` at a FIELD or non-special INVOKE site.
 ///
 /// A read redirect removes the receiver the original access would have
 /// consumed, then calls the callback, which returns the field's value.  A write
 /// redirect stores the written value in a fresh local, removes the receiver,
 /// and calls the callback with the target arguments followed by the value; the
-/// callback's `void` return means the original write does not happen.
+/// callback's `void` return means the original write does not happen.  An
+/// INVOKE redirect saves the call's arguments, pops the receiver, calls the
+/// callback with the target's arguments, and leaves the original call as
+/// `nop`s.  The reads/writes and calls are nop-ed out because an insert cannot
+/// remove the bytes that performed them.
 fn weave_anchor_redirect(
     class: &ClassFile,
     target_ref: &MethodRef,
@@ -6245,12 +6287,21 @@ fn weave_anchor_redirect(
         ));
     }
     apply_anchor_inserts(class, target_ref, request, |_class, target, hit, pool| {
+        if let AnchorHitKind::Invoke {
+            descriptor,
+            receiver,
+            special,
+            ..
+        } = &hit.kind
+        {
+            return redirect_invoke_insert(target, callback, descriptor, *receiver, *special, pool);
+        }
         let AnchorHitKind::Field {
             access, descriptor, ..
         } = &hit.kind
         else {
             return Err(format!(
-                "{}: @Redirect at {} is not a bounded anchor; redirects replace FIELD reads/writes and a HEAD body",
+                "{}: @Redirect at {} is not a bounded anchor; redirects replace FIELD reads/writes, INVOKE calls and a HEAD body",
                 target.label(),
                 request.site.label()
             ));
@@ -6346,12 +6397,104 @@ fn weave_anchor_redirect(
     })
 }
 
+/// The insert that replaces one non-special `INVOKE` call.
+///
+/// The call's arguments are saved in fresh locals (the last one is on top, so
+/// the stores run in reverse), the receiver is popped, the callback runs with
+/// the *target method's* arguments, and the original call is left as `nop`s.
+/// The callback's return type is the call's return type, so the stack carries
+/// the callback's result exactly where the call's result would have gone.
+fn redirect_invoke_insert(
+    target: &Target<'_>,
+    callback: &MethodRef,
+    descriptor: &str,
+    receiver: bool,
+    special: bool,
+    pool: &mut PoolBuilder<'_>,
+) -> Result<SiteInsert, String> {
+    if special {
+        return Err(format!(
+            "{}: @Redirect at INVOKE cannot replace an invokespecial call; its receiver may be an uninitialized object",
+            target.label()
+        ));
+    }
+    if crate::return_desc(&callback.descriptor) != crate::return_desc(descriptor) {
+        return Err(format!(
+            "{}: @Redirect at INVOKE callback {} returns {}, but the call {descriptor} returns {}",
+            target.label(),
+            callback.descriptor,
+            crate::return_desc(&callback.descriptor),
+            crate::return_desc(descriptor)
+        ));
+    }
+    let target_arguments = crate::descriptor_arguments(&target.descriptor);
+    let shape = callback_shape_for(
+        target,
+        &target_arguments,
+        &callback.descriptor,
+        "@Redirect at INVOKE",
+        false,
+    )?;
+    if shape.takes_receiver && target.name == "<init>" {
+        return Err(format!(
+            "{}: @Redirect at INVOKE taking the target receiver would pass an uninitialized `this`",
+            target.label()
+        ));
+    }
+    let call_arguments = crate::descriptor_arguments(descriptor);
+    let mut bytes = Vec::new();
+    let mut frame_locals = Vec::new();
+    let mut local_slots = argument_slots(target)?;
+    let mut slot = target.code()?.max_locals;
+    let mut captured = Vec::new();
+    for argument in &call_arguments {
+        let (_, width) = store_opcode(argument)?;
+        captured.push((slot, argument.clone()));
+        slot = slot.checked_add(width).ok_or("local slot overflow")?;
+    }
+    // The last call argument is on top: store in reverse, keep each slot.
+    for (captured_slot, argument) in captured.iter().rev() {
+        let (opcode, _) = store_opcode(argument)?;
+        local_opcode(&mut bytes, opcode, *captured_slot);
+    }
+    if receiver {
+        bytes.push(0x57); // pop the call receiver
+    }
+    let (call, slots, locals) = emit_callback(target, callback, shape, None, pool)?;
+    bytes.extend(call);
+    for (captured_slot, argument) in &captured {
+        local_slots = local_slots.max(
+            captured_slot
+                .checked_add(store_opcode(argument)?.1)
+                .ok_or("local slot overflow")?,
+        );
+        frame_locals.push((*captured_slot, ValueType::from_descriptor(argument)?));
+    }
+    local_slots = local_slots.max(locals);
+    let call_slots = descriptor_argument_slots(descriptor)?
+        .checked_add(u16::from(receiver))
+        .ok_or("argument slot overflow")?;
+    Ok(SiteInsert {
+        bytes,
+        stack_extra: slots
+            .checked_add(call_slots)
+            .and_then(|value| value.checked_add(2))
+            .ok_or("argument slot overflow")?,
+        local_slots,
+        frame_locals,
+        entry: TargetEntry::Enter,
+        frames: FrameSites::InsertOnly,
+        replace_instruction: true,
+    })
+}
+
 /// Apply one [`AnchorRequest`] to `class`.
 ///
-/// `INVOKE` delegates to the existing call-site weaver (including its
-/// ordinal/slice/shift handling), `HEAD` with `redirect` replaces the body, and
-/// every other site is a FIELD, NEW or JUMP insert or redirect as documented
-/// on [`weave_anchor_inject`] and [`weave_anchor_redirect`].
+/// `INVOKE` without `redirect` delegates to the existing call-site weaver
+/// (including its ordinal/slice/shift handling); `HEAD` with `redirect`
+/// replaces the body; and every other combination is a FIELD/NEW/JUMP insert or
+/// a FIELD/INVOKE redirect as documented on [`weave_anchor_inject`] and
+/// [`weave_anchor_redirect`].
 pub fn weave_anchor(
     class: &ClassFile,
     target: &MethodRef,
@@ -6369,10 +6512,7 @@ pub fn weave_anchor(
         }
         AnchorSite::Invoke(selector) => {
             if request.redirect {
-                return Err(format!(
-                    "{}.{}: @Redirect at INVOKE is not emitted by the bounded weaver; the interpreter executes it and a jar rewrite would have to replace the call and its arguments",
-                    target.owner, target.name
-                ));
+                return weave_anchor_redirect(class, target, callback, request);
             }
             let mut selector = selector.clone();
             selector.ordinal = request.ordinal;
@@ -10686,6 +10826,7 @@ public class Anchors {
     public static int localWithArg(int x) { int y = x + 1; if (x > 0) { return y * 3; } return 0; }
     public static int redirectedRead(int x) { if (x > 0) { x = 1; } else { x = 2; } return value; }
     public static void redirectedWrite(int x) { value = x; }
+    public static int redirectCall(int x) { return twice(x); }
 }
 "#,
                 ),
@@ -10708,6 +10849,7 @@ public class Cb {
     public static int valuePlusArg(int value, int x) { return value * 10 + x; }
     public static int readValue(int x) { return 99; }
     public static void dropWrite(int targetArg, int written) { Anchors.value = 42; }
+    public static int fakeTwice(int x) { return x * 5; }
 }
 "#,
                 ),
@@ -10786,6 +10928,14 @@ public class Cb {
                 "FIELD",
                 Some("demo/Anchors#value:I"),
                 Some(0xb3),
+                true,
+            ),
+            anchor_plan(
+                method_ref("demo/Anchors", "redirectCall", "(I)I"),
+                method_ref("demo/Cb", "fakeTwice", "(I)I"),
+                "INVOKE",
+                Some("demo/Anchors#twice(I)I"),
+                None,
                 true,
             ),
         ];
@@ -10895,6 +11045,7 @@ public final class Driver {
                 + "," + target.getMethod("fullMod", int.class, int.class).invoke(null, Integer.valueOf(3), Integer.valueOf(4))
                 + "," + target.getMethod("localWithArg", int.class).invoke(null, Integer.valueOf(2))
                 + "," + target.getMethod("redirectedRead", int.class).invoke(null, Integer.valueOf(1))
+                + "," + target.getMethod("redirectCall", int.class).invoke(null, Integer.valueOf(3))
                 + "," + target.getField("hits").getInt(null));
             target.getMethod("redirectedWrite", int.class).invoke(null, Integer.valueOf(8));
             System.out.println(target.getField("value").getInt(null));
@@ -10937,11 +11088,11 @@ public final class Driver {
         let stdout = String::from_utf8_lossy(&output.stdout);
         // read 5, make 1, branch 10, overwritten 40, call 8, store 30, load 12,
         // shifted 6, sliced 6, join 44, fullMod 134, localWithArg 96,
-        // redirectedRead 99.  hits: 100 + 1000 + (10000+3) + (100000+2) +
+        // redirectedRead 99, redirectCall 15.  hits: 100 + 1000 + (10000+3) + (100000+2) +
         // (1000000+2) before the first print, then +1 (write), +6 (valued
         // write) and +7 (a valued write with a stack-map frame after it).
         assert!(
-            stdout.contains("5,1,10,40,8,30,12,6,6,44,134,96,99,1111107"),
+            stdout.contains("5,1,10,40,8,30,12,6,6,44,134,96,99,15,1111107"),
             "{stdout}"
         );
         assert!(stdout.contains("42"), "{stdout}");
