@@ -1392,6 +1392,16 @@ impl Vm {
             return Ok((nd, 0, Some(target)));
         }
         let Some(target) = self.resolve_method(c, nd) else {
+            // The JDK's native classes do not list every abstract method their
+            // interfaces declare (`IntStream.filter`...): select on the
+            // receiver at the call, where the implementing class has it.
+            if matches!(self.class(c).kind, super::ClassKind::Native(_)) {
+                let Some((params, _)) = super::classfile::parse_method_desc(&desc) else {
+                    return Err(self.no_such_method(&class, &name, &desc));
+                };
+                let slots = super::classfile::arg_slots(&params) as u16;
+                return Ok((nd, slots, None));
+            }
             return Err(self.no_such_method(&class, &name, &desc));
         };
         if self.method(target).is_static() {

@@ -239,6 +239,39 @@ impl JMap {
         slot
     }
 
+    /// Adds a new mapping at the head of its bin, as `HashMap.compute`,
+    /// `computeIfAbsent` and `merge` do (growing first when over the threshold).
+    pub fn insert_front(&mut self, hash: i32, key: Value, value: Value) -> u32 {
+        if self.table.is_empty() || self.size > self.threshold {
+            self.resize();
+        }
+        let slot = match self.free.pop() {
+            Some(s) => s,
+            None => {
+                self.entries.push(None);
+                self.entries.len() as u32 - 1
+            }
+        };
+        self.entries[slot as usize] = Some(MapEntry {
+            hash,
+            key,
+            value,
+            before: NIL,
+            after: NIL,
+        });
+        let bin = (hash as u32 as usize) & (self.table.len() - 1);
+        self.table[bin].insert(0, slot);
+        if self.linked {
+            self.link_last(slot);
+        }
+        if self.table[bin].len() >= 8 && self.table.len() < 64 {
+            self.resize();
+        }
+        self.mod_count += 1;
+        self.size += 1;
+        slot
+    }
+
     pub fn set_value(&mut self, slot: u32, value: Value) -> Value {
         let e = self.entries[slot as usize].as_mut().unwrap();
         std::mem::replace(&mut e.value, value)
@@ -1251,6 +1284,28 @@ pub fn map_put(vm: &mut Vm, m: ObjId, key: Value, value: Value) -> Res<Option<Va
     Ok(None)
 }
 
+/// `put` as `compute`, `computeIfAbsent` and `merge` do it: a new key goes
+/// to the head of its bin.
+fn map_put_computed(vm: &mut Vm, m: ObjId, key: Value, value: Value) -> Res<()> {
+    let plain = matches!(state(vm, m), Some(State::Map(map)) if !map.immutable && !map.check_eldest);
+    if !plain {
+        map_put(vm, m, key, value)?;
+        return Ok(());
+    }
+    if let Some(slot) = map_find(vm, m, key)? {
+        if let Some(State::Map(map)) = state_mut(vm, m) {
+            map.set_value(slot, value);
+            map.touch(slot);
+        }
+        return Ok(());
+    }
+    let h = map_hash(vm, m, key)?;
+    if let Some(State::Map(map)) = state_mut(vm, m) {
+        map.insert_front(h, key, value);
+    }
+    Ok(())
+}
+
 pub fn map_remove(vm: &mut Vm, m: ObjId, key: Value) -> Res<Option<Value>> {
     match state(vm, m) {
         Some(State::Tree(_)) => return tree_remove(vm, m, key),
@@ -1448,7 +1503,7 @@ fn map_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
                         return Err(cme(vm));
                     }
                     if v.r() != 0 {
-                        map_put(vm, t, key, v)?;
+                        map_put_computed(vm, t, key, v)?;
                     }
                     Ok(v)
                 }
@@ -1462,7 +1517,7 @@ fn map_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
                     if v.r() == 0 {
                         map_remove(vm, t, key)?;
                     } else {
-                        map_put(vm, t, key, v)?;
+                        map_put_computed(vm, t, key, v)?;
                     }
                     Ok(v)
                 }
@@ -1476,7 +1531,7 @@ fn map_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             if v.r() == 0 {
                 map_remove(vm, t, key)?;
             } else {
-                map_put(vm, t, key, v)?;
+                map_put_computed(vm, t, key, v)?;
             }
             Ok(v)
         }
@@ -1492,7 +1547,7 @@ fn map_op(vm: &mut Vm, a: &[Value], op: &str) -> Res<Value> {
             if v.r() == 0 {
                 map_remove(vm, t, key)?;
             } else {
-                map_put(vm, t, key, v)?;
+                map_put_computed(vm, t, key, v)?;
             }
             Ok(v)
         }
