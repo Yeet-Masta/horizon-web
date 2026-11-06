@@ -1,0 +1,55 @@
+name: real-mod-corpus
+# Build the source-only Fabric/NeoForge/legacy-Forge fixtures and exercise the native probe. The workflow never
+# downloads or runs third-party mods, and it does not require a prepared vanilla installation.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/horizon-native-java/**'
+      - 'crates/horizon-jvm/**'
+      - 'tools/real_mod_corpus.py'
+      - 'tools/real_mod_fixtures/**'
+      - 'tests/test_real_mod_corpus.py'
+      - 'tests/test_real_mod_fixtures.py'
+      - '.github/workflows/real-mod-corpus.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/horizon-native-java/**'
+      - 'crates/horizon-jvm/**'
+      - 'tools/real_mod_corpus.py'
+      - 'tools/real_mod_fixtures/**'
+      - 'tests/test_real_mod_corpus.py'
+      - 'tests/test_real_mod_fixtures.py'
+      - '.github/workflows/real-mod-corpus.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: real-mod-corpus
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the native probe
+        run: cargo +stable build --locked --profile fast -p horizon-native-java -p horizon-jvm
+      - name: Run real-mod corpus tests
+        run: python3 -m unittest tests.test_real_mod_corpus tests.test_real_mod_fixtures
+      - name: Run corpus harness self-test
+        run: python3 tools/real_mod_corpus.py --self-test
