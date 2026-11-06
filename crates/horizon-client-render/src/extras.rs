@@ -166,10 +166,10 @@ pub struct Extras {
     /// Cosmetics (`horizon_cosmetics`, off unless enabled), the lines `horizon_cosmetics::prefs`
     /// shares with the launcher's Wardrobe: Show my cosmetics (the account's, sent to the service;
     /// on by default), how much of other players' to show (no line until chosen:
-    /// `effective_others`), and their auras and trails (off by default).
+    /// `effective_others`), and whether their trails and auras are hidden (off by default).
     pub cosmetics_mine: bool,
     pub cosmetics_others: Option<horizon_cosmetics::prefs::Others>,
-    pub cosmetics_auras: bool,
+    pub cosmetics_hide_fx: bool,
     /// My cosmetics in single player too (`cosmeticsSolo`, off by default): the window's own server
     /// names the player by their offline profile, which the service doesn't know, so their own
     /// cosmetics and name tag style show only with this on.
@@ -232,12 +232,12 @@ impl Default for Extras {
             splitscreen_two: 0,
             splitscreen_three: 0,
             splitscreen_names: true,
-            wheel_cycles_settings: true,
+            wheel_cycles_settings: false,
             music_off: Vec::new(),
             music_page: false,
             cosmetics_mine: true,
             cosmetics_others: None,
-            cosmetics_auras: false,
+            cosmetics_hide_fx: false,
             cosmetics_solo: false,
             cosmetics_owner: false,
             horizon_marks: true,
@@ -336,7 +336,11 @@ impl Extras {
                 "splitscreenTwo" => e.splitscreen_two = value.parse().unwrap_or(0).min(2),
                 "splitscreenThree" => e.splitscreen_three = value.parse().unwrap_or(0).min(2),
                 "splitscreenNames" => e.splitscreen_names = flag(e.splitscreen_names),
-                "wheelCyclesSettings" => e.wheel_cycles_settings = flag(e.wheel_cycles_settings),
+                // A new name: `wheelCyclesSettings` was written as true by every
+                // install while it was the default, so it says nothing of a choice.
+                "wheelCyclesListSettings" => {
+                    e.wheel_cycles_settings = flag(e.wheel_cycles_settings)
+                }
                 "musicOff" => {
                     e.music_off = value
                         .split(',')
@@ -351,7 +355,7 @@ impl Extras {
                     e.cosmetics_others =
                         horizon_cosmetics::prefs::Others::parse(value).or(e.cosmetics_others)
                 }
-                "cosmeticsAuras" => e.cosmetics_auras = flag(e.cosmetics_auras),
+                "cosmeticsHideFx" => e.cosmetics_hide_fx = flag(e.cosmetics_hide_fx),
                 "cosmeticsSolo" => e.cosmetics_solo = flag(e.cosmetics_solo),
                 horizon_cosmetics::prefs::MARKS => e.horizon_marks = flag(e.horizon_marks),
                 horizon_cosmetics::prefs::LISTED => e.horizon_listed = flag(e.horizon_listed),
@@ -365,7 +369,7 @@ impl Extras {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "packBrowser:{}\npregen:{}\nfullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nlodZoomDetail:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nuiSoundReserve:{}\nownNameTag:{}\nhideBlockParticles:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\nchatAnimation:{}\nchatIndicator:{}\n{}:{}\nagentControl:{}\nreproKeys:{}\ndiscordPresence:{}\nsplitscreen:{}\nsplitscreenTwo:{}\nsplitscreenThree:{}\nsplitscreenNames:{}\nwheelCyclesSettings:{}\nmusicOff:{}\nmusicPage:{}\ncosmeticsMine:{}\n{}cosmeticsAuras:{}\ncosmeticsSolo:{}\n{}:{}\n{}:{}\n{}:{}\n",
+            "packBrowser:{}\npregen:{}\nfullbright:{}\ndynamicLights:{}\nzoom:{}\nzoomKey:{}\nzoomLevel:{}\nzoomSmooth:{}\nzoomSensitivity:{}\nlodZoomDetail:{}\nfps:{}\nfpsCorner:{}\nfpsLows:{}\nkeystrokes:{}\nkeystrokesCorner:{}\nkeystrokesCps:{}\nmovedToMods:{}\nminimap:{}\nminimapCorner:{}\nminimapSize:{}\nminimapShape:{}\nminimapZoom:{}\nminimapRotate:{}\nautoReconnect:{}\nuiSoundReserve:{}\nownNameTag:{}\nhideBlockParticles:{}\nmouseTweaks:{}\nmouseTweaksWheel:{}\nsort:{}\nsortKey:{}\nchatAnimation:{}\nchatIndicator:{}\n{}:{}\nagentControl:{}\nreproKeys:{}\ndiscordPresence:{}\nsplitscreen:{}\nsplitscreenTwo:{}\nsplitscreenThree:{}\nsplitscreenNames:{}\nwheelCyclesListSettings:{}\nmusicOff:{}\nmusicPage:{}\ncosmeticsMine:{}\n{}cosmeticsHideFx:{}\ncosmeticsSolo:{}\n{}:{}\n{}:{}\n{}:{}\n",
             bool_text(self.pack_browser),
             bool_text(self.pregen),
             bool_text(self.fullbright),
@@ -419,7 +423,7 @@ impl Extras {
             // Written once the player chose.
             self.cosmetics_others
                 .map_or(String::new(), |o| format!("cosmeticsOthers:{}\n", o.name())),
-            bool_text(self.cosmetics_auras),
+            bool_text(self.cosmetics_hide_fx),
             bool_text(self.cosmetics_solo),
             horizon_cosmetics::prefs::MARKS,
             bool_text(self.horizon_marks),
@@ -454,6 +458,7 @@ impl Extras {
     pub fn set_key(&mut self, name: &str, value: String) -> bool {
         match name {
             SORT_KEY => self.sort_key = value,
+            crate::pvp::HUD_EDITOR_KEY => self.pvp.editor_key = value,
             _ => return false,
         }
         true
@@ -600,7 +605,7 @@ pub enum Item {
     /// Shown only while cosmetics are enabled (`horizon_cosmetics::enabled`).
     CosmeticsMine,
     CosmeticsOthers,
-    CosmeticsAuras,
+    CosmeticsHideFx,
     CosmeticsSolo,
     HorizonMarks,
     HorizonMe,
@@ -640,7 +645,7 @@ pub fn rows() -> Vec<Result<Item, &'static str>> {
             Ok(CosmeticsMine),
             Ok(CosmeticsSolo),
             Ok(CosmeticsOthers),
-            Ok(CosmeticsAuras),
+            Ok(CosmeticsHideFx),
             Ok(HorizonMarks),
             Ok(HorizonMe),
         ]);
@@ -674,7 +679,7 @@ impl Item {
             Item::Pregen => "horizon.extras.pregen",
             Item::CosmeticsMine => "horizon.extras.cosmetics_mine",
             Item::CosmeticsOthers => "horizon.extras.cosmetics_others",
-            Item::CosmeticsAuras => "horizon.extras.cosmetics_auras",
+            Item::CosmeticsHideFx => "horizon.extras.cosmetics_hide_fx",
             Item::CosmeticsSolo => "horizon.extras.cosmetics_solo",
             Item::HorizonMarks => "horizon.extras.horizon_marks",
             Item::HorizonMe => "horizon.extras.horizon_me",
@@ -702,12 +707,12 @@ impl Item {
             Item::Splitscreen => "horizon.extras.splitscreen.tooltip",
             Item::ChatAnimation => "horizon.extras.chat_animation.tooltip",
             Item::ChatIndicator => "horizon.extras.chat_indicator.tooltip",
-            Item::WheelCyclesSettings => "horizon.extras.wheel_cycles_settings.tooltip",
+            Item::WheelCyclesSettings => "horizon.extras.wheel_cycles_list_settings.tooltip",
             Item::PackBrowser => "horizon.extras.pack_browser.tooltip",
             Item::Pregen => "horizon.extras.pregen.tooltip",
             Item::CosmeticsMine => "horizon.extras.cosmetics_mine.tooltip",
             Item::CosmeticsOthers => "horizon.extras.cosmetics_others.tooltip",
-            Item::CosmeticsAuras => "horizon.extras.cosmetics_auras.tooltip",
+            Item::CosmeticsHideFx => "horizon.extras.cosmetics_hide_fx.tooltip",
             Item::CosmeticsSolo => "horizon.extras.cosmetics_solo.tooltip",
             Item::HorizonMarks => "horizon.extras.horizon_marks.tooltip",
             Item::HorizonMe => "horizon.extras.horizon_me.tooltip",
@@ -749,7 +754,7 @@ impl Item {
             Item::Pregen => "Chunk pregeneration",
             Item::CosmeticsMine => "My cosmetics",
             Item::CosmeticsOthers => "Other players' cosmetics",
-            Item::CosmeticsAuras => "Others' auras and trails",
+            Item::CosmeticsHideFx => "Hide other players' trails and auras",
             Item::CosmeticsSolo => "In single player",
             Item::HorizonMarks => "Horizon logos",
             Item::HorizonMe => "Show me as Horizon",
@@ -768,7 +773,7 @@ impl Item {
             Fullbright | DynamicLights | OwnNameTag | HideBlockParticles | MouseTweaks | Sort
             | AutoReconnect | NoAi | AgentControl | ReproKeys | DiscordPresence | Splitscreen
             | ChatAnimation | WheelCyclesSettings | MusicPage | PackBrowser | CosmeticsMine
-            | CosmeticsOthers | CosmeticsAuras | CosmeticsSolo | HorizonMarks | HorizonMe
+            | CosmeticsOthers | CosmeticsHideFx | CosmeticsSolo | HorizonMarks | HorizonMe
             | Pregen => {
                 return None;
             }
@@ -836,7 +841,9 @@ impl Item {
             Item::CosmeticsOthers => {
                 "What other Horizon players wear: everything, only their name tag styles, or nothing. Hidden unless you own cosmetics, until you choose. Hidden, the game never asks what they wear."
             }
-            Item::CosmeticsAuras => "Auras and trails other players wear. Off by default.",
+            Item::CosmeticsHideFx => {
+                "Other players' trails and auras stay hidden; their other cosmetics still show. Off by default."
+            }
             Item::CosmeticsSolo => {
                 "Show your cosmetics and your name tag's badge in your single-player worlds too (your name tag with Own name tag). Off: only on servers."
             }
@@ -874,7 +881,7 @@ impl Item {
             | Item::PackBrowser => Some(Cost::None),
             Item::CosmeticsMine
             | Item::CosmeticsOthers
-            | Item::CosmeticsAuras
+            | Item::CosmeticsHideFx
             | Item::CosmeticsSolo
             | Item::HorizonMarks
             | Item::HorizonMe => Some(Cost::Low),
@@ -904,7 +911,7 @@ impl Item {
             Item::WheelCyclesSettings => e.wheel_cycles_settings,
             Item::PackBrowser => e.pack_browser,
             Item::Pregen => e.pregen,
-            Item::CosmeticsAuras => e.cosmetics_auras,
+            Item::CosmeticsHideFx => e.cosmetics_hide_fx,
             Item::CosmeticsSolo => e.cosmetics_solo,
             Item::HorizonMarks => e.horizon_marks,
             Item::HorizonMe => e.horizon_listed,
@@ -969,7 +976,7 @@ impl Item {
                 let o = e.effective_others();
                 e.cosmetics_others = Some(if back { o.next().next() } else { o.next() });
             }
-            Item::CosmeticsAuras => e.cosmetics_auras = !e.cosmetics_auras,
+            Item::CosmeticsHideFx => e.cosmetics_hide_fx = !e.cosmetics_hide_fx,
             Item::CosmeticsSolo => e.cosmetics_solo = !e.cosmetics_solo,
             Item::HorizonMarks => e.horizon_marks = !e.horizon_marks,
             Item::HorizonMe => e.horizon_listed = !e.horizon_listed,
@@ -981,6 +988,7 @@ impl Item {
     pub fn key_name(self) -> Option<&'static str> {
         match self {
             Item::SortKey => Some(SORT_KEY),
+            Item::Pvp(crate::pvp::Opt::HudEditorKey) => Some(crate::pvp::HUD_EDITOR_KEY),
             _ => None,
         }
     }
@@ -998,7 +1006,7 @@ mod tests {
             ..Extras::default()
         };
         assert_eq!(
-            (e.effective_others(), e.cosmetics_auras, e.cosmetics_mine),
+            (e.effective_others(), e.cosmetics_hide_fx, e.cosmetics_mine),
             (Others::Shown, false, true)
         );
         Item::CosmeticsOthers.cycle(&mut e, false);
@@ -1058,6 +1066,16 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_wheel_setting_from_before_the_default_changed_is_dropped() {
+        assert!(!Extras::parse("wheelCyclesSettings:true\n").wheel_cycles_settings);
+        let on = Extras {
+            wheel_cycles_settings: true,
+            ..Extras::default()
+        };
+        assert!(Extras::parse(&on.serialize()).wheel_cycles_settings);
+    }
+
+    #[test]
     fn everything_is_off_by_default_and_round_trips() {
         let d = Extras::default();
         assert!(!d.fullbright && !d.dynamic_lights);
@@ -1065,7 +1083,7 @@ mod tests {
         assert!(!d.mouse_tweaks && !d.sort && !d.own_name_tag && !d.ui_sound_reserve);
         assert!(!d.hide_block_particles && !d.pregen);
         assert!(!d.music_page && d.music_off.is_empty());
-        assert!(d.discord_presence && d.wheel_cycles_settings);
+        assert!(d.discord_presence && !d.wheel_cycles_settings);
         assert_eq!(Extras::parse(""), d);
         assert_eq!(Extras::parse(&d.serialize()), d);
         let mut e = d.clone();
@@ -1109,7 +1127,7 @@ mod tests {
         Item::Splitscreen.cycle(&mut e, false);
         assert_eq!(Item::Splitscreen.switch(&e), Some(true));
         Item::WheelCyclesSettings.cycle(&mut e, false);
-        assert_eq!(Item::WheelCyclesSettings.switch(&e), Some(false));
+        assert_eq!(Item::WheelCyclesSettings.switch(&e), Some(true));
         e.music_off = vec![
             "minecraft:music/game/calm1".into(),
             "minecraft:music.menu".into(),

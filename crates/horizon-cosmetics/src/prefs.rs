@@ -18,8 +18,10 @@ pub const FILE: &str = "horizon-extras.txt";
 /// Other players' cosmetics: `shown`, `name_tags` or `hidden` (`true` and `false` from before);
 /// no line, not chosen yet (`effective`).
 pub const OTHERS: &str = "cosmeticsOthers";
-/// Other players' auras and trails: `true` or `false` (the default).
-pub const AURAS: &str = "cosmeticsAuras";
+/// Hide other players' trails and auras: `true` or `false` (the default).
+pub const HIDE_FX: &str = "cosmeticsHideFx";
+/// The line before trails and auras existed ("show them", off): dropped when the file is saved.
+const OLD_AURAS: &str = "cosmeticsAuras";
 /// Show my cosmetics: `true` (the default) or `false`.
 pub const MINE: &str = "cosmeticsMine";
 /// Horizon's mark by other Horizon players' names: `true` (the default) or `false`. The game's.
@@ -83,7 +85,8 @@ pub struct Prefs {
     pub mine: bool,
     /// None until the player chooses (`Others::effective`).
     pub others: Option<Others>,
-    pub auras: bool,
+    /// Hide other players' trails and auras.
+    pub hide_fx: bool,
 }
 
 impl Default for Prefs {
@@ -91,7 +94,7 @@ impl Default for Prefs {
         Self {
             mine: true,
             others: None,
-            auras: false,
+            hide_fx: false,
         }
     }
 }
@@ -103,7 +106,7 @@ impl Prefs {
         for (key, value) in text.lines().filter_map(|l| l.split_once(':')) {
             match key.trim() {
                 OTHERS => prefs.others = Others::parse(value).or(prefs.others),
-                AURAS => prefs.auras = value.trim() == "true",
+                HIDE_FX => prefs.hide_fx = value.trim() == "true",
                 MINE => prefs.mine = value.trim() != "false",
                 _ => {}
             }
@@ -122,7 +125,7 @@ impl Prefs {
             .lines()
             .filter(|l| {
                 l.split_once(':')
-                    .is_none_or(|(k, _)| ![MINE, OTHERS, AURAS].contains(&k.trim()))
+                    .is_none_or(|(k, _)| ![MINE, OTHERS, HIDE_FX, OLD_AURAS].contains(&k.trim()))
             })
             .flat_map(|l| [l, "\n"])
             .collect();
@@ -130,7 +133,7 @@ impl Prefs {
         if let Some(others) = self.others {
             out.push_str(&format!("{OTHERS}:{}\n", others.name()));
         }
-        out.push_str(&format!("{AURAS}:{}\n", self.auras));
+        out.push_str(&format!("{HIDE_FX}:{}\n", self.hide_fx));
         out
     }
 
@@ -212,7 +215,11 @@ mod tests {
     #[test]
     fn reads_the_old_switch_and_keeps_the_other_settings() {
         assert_eq!(Prefs::parse(""), Prefs::default());
-        assert!(!Prefs::default().auras);
+        assert!(!Prefs::default().hide_fx);
+        // The line from before trails and auras ("show them") hides nothing and goes on save.
+        let old = "cosmeticsAuras:true\n";
+        assert!(!Prefs::parse(old).hide_fx);
+        assert!(!Prefs::default().write_into(old).contains("cosmeticsAuras"));
         // The game's earlier on/off line still means what it meant.
         assert_eq!(
             Prefs::parse("cosmeticsOthers:false").others,
@@ -226,12 +233,12 @@ mod tests {
         let prefs = Prefs {
             mine: false,
             others: Some(Others::NameTags),
-            auras: true,
+            hide_fx: true,
         };
         let written = prefs.write_into(text);
         assert_eq!(
             written,
-            "zoom:true\nnoAi:true\ncosmeticsMine:false\ncosmeticsOthers:name_tags\ncosmeticsAuras:true\n"
+            "zoom:true\nnoAi:true\ncosmeticsMine:false\ncosmeticsOthers:name_tags\ncosmeticsHideFx:true\n"
         );
         assert_eq!(Prefs::parse(&written), prefs);
     }
@@ -244,7 +251,7 @@ mod tests {
         let written = Prefs::default().write_into("zoom:true\n");
         assert_eq!(
             written,
-            "zoom:true\ncosmeticsMine:true\ncosmeticsAuras:false\n"
+            "zoom:true\ncosmeticsMine:true\ncosmeticsHideFx:false\n"
         );
         assert_eq!(Prefs::parse(&written), Prefs::default());
         // Not chosen: everything for an owner, a vanilla game for anyone else.

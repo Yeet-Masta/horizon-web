@@ -9,6 +9,7 @@ use super::{
     native_mob_draw::NativePlayerRender, native_projectiles::Impact, view_vector,
 };
 use horizon_assets::item_model::DisplayContext;
+use horizon_client::actions::Action;
 use horizon_client::{
     Result,
     arrows::EntityHit,
@@ -322,7 +323,7 @@ impl Game<'_> {
             alive: !p.health.dead_or_dying(),
             // EntitySelector.NO_CREATIVE_OR_SPECTATOR.
             creative: self.creative || self.spectator(),
-            sneaking: self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft),
+            sneaking: self.keys.held(Action::Sneak),
             swimming: p.swimming,
             look: view_vector(self.yaw, self.pitch),
             main_hand: self.held().map(|s| s.item.clone()),
@@ -963,6 +964,8 @@ impl Game<'_> {
     /// The entity phase of `tick_creatures`: every mob's tick, deaths, and the
     /// projectiles and effects that follow from them.
     pub(super) fn tick_creature_entities(&mut self) -> Result<()> {
+        // Its steps as spans for `horizon-report` (nothing is read while spans are off).
+        let mut laps = horizon_client::spans::laps();
         // LivingEntity.die runs when the killing blow lands: mobs killed
         // since the last tick (by the player, explosions...) die first.
         let killed: Vec<Mob> = self
@@ -994,6 +997,7 @@ impl Game<'_> {
             }
         }
         let uuid = self.level.player_uuid;
+        let level_id = self.dim.id();
         let mut snapshot: Vec<Seen> = self.mobs.iter().map(|m| seen(m, uuid)).collect();
         let mut events = Vec::new();
         let mut mobs = std::mem::take(&mut self.mobs);
@@ -1002,7 +1006,10 @@ impl Game<'_> {
         let mut died = std::mem::take(&mut self.died);
         let ticking = self.entity_ticking_area();
         // With guests on, each mob sees its nearest player (game/lan_mobs.rs).
-        let guests = self.lan_guest_views();
+        let mut guests = self.lan_guest_views();
+        // What stands in a guest's slot while a mob holds that guest's view for
+        // its tick (see `lent` below).
+        let mut spare = guests.first().map(|g| g.1.clone());
         let players = self.level_players();
         let nearest = super::natural_spawning::NearestPlayers::new(&players);
         let mut bindings = match self.lan.as_mut() {
@@ -1057,6 +1064,7 @@ impl Game<'_> {
                     villager_slots.push(i as u32);
                 }
             }
+            laps.lap("creature_prepare");
             let mut cached_difficulty: Option<((i32, i32), spawning::LocalDifficulty)> = None;
             for i in 0..mobs.len() {
                 let m = &mut mobs[i];
@@ -1083,6 +1091,29 @@ impl Game<'_> {
                 let nearest_player = nearest
                     .nearest(m.position.x, m.position.y, m.position.z)
                     .map(|p| p.position);
+                // ServerLevel.tick: every loaded entity checks despawning, but
+                // only those in entity-ticking chunks (within the simulation
+                // distance) tick. The despawn check reads the nearest player
+                // and the difficulty, not the player the mob sees.
+                if !ticking(bx, bz) {
+                    let w = MobWorld {
+                        others: &snapshot,
+                        others_grid: Some(&grid),
+                        others_index: Some(&index),
+                        others_villagers: Some(&villager_slots),
+                        nearest_player,
+                        player: None,
+                        teams: std::sync::Arc::clone(&base.teams),
+                        ..base
+                    };
+                    let kept = horizon_client::mobs::ai::despawn_check(m, &w);
+                    if !kept {
+                        died.remove(&m.id);
+                        snapshot[i].alive = false;
+                    }
+                    keep.push(kept);
+                    continue;
+                }
                 let controlling_player_movement = horizon_client::mobs::equine::controlled(m)
                     .then(|| {
                         base.player
@@ -1097,36 +1128,6 @@ impl Game<'_> {
                             })
                     })
                     .flatten();
-                // ServerLevel.tick: every loaded entity checks despawning, but
-                // only those in entity-ticking chunks (within the simulation
-                // distance) tick.
-                if !ticking(bx, bz) {
-                    let active_player = match seen_guest {
-                        Some(conn) => guests.iter().find(|g| g.0 == conn).map(|g| g.1.clone()),
-                        None => base.player.take(),
-                    };
-                    let mut w = MobWorld {
-                        others: &snapshot,
-                        others_grid: Some(&grid),
-                        others_index: Some(&index),
-                        others_villagers: Some(&villager_slots),
-                        nearest_player,
-                        player: active_player,
-                        teams: std::sync::Arc::clone(&base.teams),
-                        ..base
-                    };
-                    w.controlling_player_movement = controlling_player_movement;
-                    let kept = horizon_client::mobs::ai::despawn_check(m, &w);
-                    if seen_guest.is_none() {
-                        base.player = w.player;
-                    }
-                    if !kept {
-                        died.remove(&m.id);
-                        snapshot[i].alive = false;
-                    }
-                    keep.push(kept);
-                    continue;
-                }
                 // A mod canceled its tick: it stays as it is.
                 if round.canceled(m.id) {
                     keep.push(true);
@@ -1147,9 +1148,16 @@ impl Game<'_> {
                 horizon_client::mobs::apply_mob_pushes(m, &mut pushes);
                 horizon_client::mobs::blocks_changed(m, &path_changes);
                 let from = events.len();
-                let active_player = match seen_guest {
-                    Some(conn) => guests.iter().find(|g| g.0 == conn).map(|g| g.1.clone()),
-                    None => base.player.take(),
+                // The guest's view is lent to the mob for its tick, not copied:
+                // the tick only reads it (`&MobWorld`), and it goes back to the
+                // guest's slot straight after.
+                let lent = seen_guest.and_then(|conn| guests.iter().position(|g| g.0 == conn));
+                let active_player = match (seen_guest, lent) {
+                    (None, _) => base.player.take(),
+                    (Some(_), Some(k)) => spare
+                        .take()
+                        .map(|stand_in| std::mem::replace(&mut guests[k].1, stand_in)),
+                    (Some(_), None) => None,
                 };
                 let mut w = MobWorld {
                     others: &snapshot,
@@ -1163,11 +1171,18 @@ impl Game<'_> {
                     ..base
                 };
                 w.controlling_player_movement = controlling_player_movement;
+                // `horizon-report`'s cost by mob type (tick_profile.rs).
+                let sampled = super::tick_profile::start().map(|t| (t, mobs[i].kind.clone()));
                 let kept =
                     horizon_client::mobs::riders::tick(&mut mobs, i, &w, &mut scratch, &mut events);
+                if let Some((started, kind)) = sampled {
+                    super::tick_profile::add(level_id, &kind, started);
+                }
                 let m = &mut mobs[i];
                 if seen_guest.is_none() {
                     base.player = w.player;
+                } else if let Some(k) = lent {
+                    spare = w.player.map(|v| std::mem::replace(&mut guests[k].1, v));
                 }
                 // A killed mob's body is removed: its effects that act on
                 // death run (`LivingEntity.remove` with KILLED).
@@ -1218,6 +1233,7 @@ impl Game<'_> {
                 grid.update(i, snapshot[i].bounds);
                 horizon_client::mobs::apply_brain_events(&mut mobs, &mut events, from);
             }
+            laps.lap("creature_loop");
             let mut flags = keep.into_iter();
             mobs.retain(|_| flags.next().unwrap_or(true));
             for m in &mut mobs {
@@ -1252,6 +1268,7 @@ impl Game<'_> {
             self.lan_entity_event(id as i32, 60, at);
             self.death_poof(at, width, height);
         }
+        laps.lap("creature_retain");
         self.tick_boarding();
         self.sync_riders();
         self.tick_skeleton_traps();
@@ -1260,6 +1277,7 @@ impl Game<'_> {
         self.villager_reputation_tick();
         self.villager_item_sense();
         self.villager_pickups();
+        laps.lap("creature_villagers");
         for m in dead {
             self.mob_died(&m);
         }
@@ -1275,9 +1293,11 @@ impl Game<'_> {
         }
         self.handle_mob_events(events)?;
         self.lan_guest_mob_events(guest_events);
+        laps.lap("creature_events");
         self.ordered_before(super::ordered_tick::Batch::Projectiles)?;
         self.tick_projectiles()?;
         self.tick_fangs();
+        laps.lap("creature_projectiles");
         self.tick_allays();
         self.tick_pandas();
         self.tick_foxes();
@@ -1288,12 +1308,14 @@ impl Game<'_> {
         self.piglin_pickups();
         self.sulfur_cube_pickups();
         self.sulfur_cube_power_priming();
+        laps.lap("creature_systems");
         // Hurt and death sounds of damage dealt outside the mob ticks.
         let mut queued = Vec::new();
         for m in &mut self.mobs {
             queued.append(&mut m.outbox);
         }
         self.handle_mob_events(queued)?;
+        laps.lap("creature_outbox");
         Ok(())
     }
     /// `LivingEntity.makePoofParticles` (entity event 60) about a mob's box.
@@ -2329,11 +2351,13 @@ impl Game<'_> {
                     });
                     // Only a creeper or a wither empties the hives it blows up.
                     // The creeper is already gone from the list, so the event
-                    // carries its kind.
-                    let result = if matches!(species, Species::Creeper | Species::Wither) {
-                        self.with_hive_emptying_blast(|g| g.explode(at, radius))
-                    } else {
-                        self.explode(at, radius)
+                    // carries its kind. A sulfur cube's blast is TNT's.
+                    let result = match species {
+                        Species::Creeper | Species::Wither => {
+                            self.with_hive_emptying_blast(|g| g.explode(at, radius))
+                        }
+                        Species::SulfurCube => self.explode_sulfur_cube(at, radius),
+                        _ => self.explode(at, radius),
                     };
                     self.combat.explosion_source = None;
                     self.combat.explosion_source_named = false;
@@ -3847,8 +3871,9 @@ impl Game<'_> {
             0 => credit,
             attacker => attacker,
         });
+        let legacy = self.legacy_rules();
         if let Some(p) = self.player.as_mut() {
-            knock_back(p, &mut self.world.random, power, (xd, zd), source);
+            knock_back(p, &mut self.world.random, power, (xd, zd), source, legacy);
         }
     }
     /// A status effect from a mob, arrow or splash potion (`addEffect`).
@@ -5784,8 +5809,8 @@ impl Game<'_> {
             .as_ref()
             .map(|p| [p.position.x, p.position.y, p.position.z]);
         let acting = self.acting_player_uuid();
-        let sneaking = self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft)
-            || self.keys.contains(&winit::keyboard::KeyCode::ShiftRight);
+        let sneaking =
+            self.keys.held(Action::Sneak) || self.keys.raw(&winit::keyboard::KeyCode::ShiftRight);
         let held_damage = held.as_ref().map_or(0, |h| h.damage as i32);
         let held_extra = held.as_ref().and_then(|h| h.extra.clone());
         let m = &mut self.mobs[index];
@@ -7259,9 +7284,16 @@ impl Game<'_> {
                 let mark = self.skin_frame.borrow().mark();
                 let base = horizon_client::mobs::render::base_transform(mob, alpha as f32, camera);
                 let gpu = skinning;
-                if let Some((lo, hi)) =
-                    self.cosmetics_geometry(mob, false, base, alpha as f32, packed, gpu, out)
-                {
+                if let Some((lo, hi)) = self.cosmetics_geometry(
+                    mob,
+                    false,
+                    base,
+                    Some(camera),
+                    alpha as f32,
+                    packed,
+                    gpu,
+                    out,
+                ) {
                     skinned = Some(match skinned {
                         Some((first, Some((l, h)))) => (first, Some((l.min(lo), h.max(hi)))),
                         Some((first, None)) => (first, Some((lo, hi))),
@@ -7808,13 +7840,15 @@ impl Game<'_> {
         }
     }
 }
-/// `LivingEntity.knockback` on `p`: [`Game::knock_back_player`].
+/// `LivingEntity.knockback` on `p`: [`Game::knock_back_player`]; 1.8.9's
+/// `EntityLivingBase.knockBack` under `legacy` rules.
 fn knock_back(
     p: &mut horizon_client::motion::PlayerMotion,
     random: &mut horizon_core::random::LegacyRandom,
     power: f64,
     (xd, zd): (f64, f64),
     source: HurtSource<'_>,
+    legacy: bool,
 ) {
     let resistance = p.attribute("minecraft:knockback_resistance").unwrap_or(0.0);
     // The native hook runs first, on the raw strength (`LivingKnockBackEvent`), then the
@@ -7832,13 +7866,26 @@ fn knock_back(
         x: mut xd,
         z: mut zd,
     } = knock;
-    let power = power * (1.0 - resistance);
+    if legacy && horizon_client::legacy_combat::resists(resistance, random.next_double()) {
+        return;
+    }
+    let power = if legacy {
+        power
+    } else {
+        power * (1.0 - resistance)
+    };
     if power <= 0.0 {
         return;
     }
     while xd * xd + zd * zd < f64::from(1.0e-5_f32) {
         xd = (random.next_double() - random.next_double()) * 0.01;
         zd = (random.next_double() - random.next_double()) * 0.01;
+    }
+    if legacy {
+        let v = p.velocity;
+        let [x, y, z] = horizon_client::legacy_combat::knockback([v.x, v.y, v.z], power, (xd, zd));
+        p.velocity = Vec3::new(x, y, z);
+        return;
     }
     let l = (xd * xd + zd * zd).sqrt();
     let v = p.velocity;
@@ -8341,7 +8388,7 @@ mod knockback_tests {
                 let set = p.set_modifier(attribute, "horizon:test", resistance, "add_value", true);
                 set.unwrap();
             }
-            knock_back(&mut p, &mut random, 0.4, (0.0, 3.0), hit);
+            knock_back(&mut p, &mut random, 0.4, (0.0, 3.0), hit, false);
             (p.velocity.x, p.velocity.y, p.velocity.z)
         };
         // No mod in the way: vanilla's push, away from z = 3.
