@@ -1294,6 +1294,105 @@ worse than a native mod, which at least passed a human.
   declarations is refused during the normal content/registry compatibility check, as with other content.
 - Mods that change packets outside their own channel: reported, not emulated.
 
+## Hybrid sessions: a native half and a loader half
+
+The tier is chosen per jar, so a pack does not have to pick one engine. The server ledger already labels
+every jar; `tools/hybrid_pack.py` turns those labels into two launch commands and a static compatibility
+check, and `--measure` runs both ways.
+
+| Ledger label | Where it runs | Why |
+|---|---|---|
+| `native-ok` | native half | the dedicated server ran it and its skipped plans stayed inside the jar (or it has no server-role entrypoint) |
+| `needs-loader` | loader half | it ran, but the plans it skipped target game classes, which only a real loader applies |
+| `native-gap` | neither by default; the loader with `--gap-to-loader` | native execution refuses it, so the loader is the other path that can carry it |
+
+The halves are separate processes. The native half is one `horizon-client --java-mod` run (the window, the
+integrated server or `--dedicated`); the loader half is `horizon-jvm --real-loader --launch-game` booting
+the pinned 26.3 server with Fabric Loader. They share a world folder, not a class loader or a registry —
+which is why the partition has to respect declared dependencies.
+
+### The partition and the two commands
+
+The input is the same text ledger as [java-mod-compat-status.md](java-mod-compat-status.md) (`--ledger`,
+repeatable). A pack folder keeps the pack's filenames while the corpus ledger may hold the identical bytes
+under another pack's name after deduplication, so `--match-by-hash` falls back to SHA-256 when the name
+does not match.
+
+Each half is closed over the pack's declared `depends`. A jar whose required dependency sits in the other
+half is added to this half too; the dependency is not moved out of the half that already had it, so a
+library both sides need (typically `fabric-api`) is passed to both and reported as `shared`. This is the
+first thing a naive partition gets wrong: a loader-only jar that depends on a native-only library fails at
+class-load time, even though each half is individually healthy.
+
+```sh
+python3 tools/hybrid_pack.py ~/horizon-corpus/corpus-helix \
+  --ledger tools/real_mod_fixtures/LAST_SERVER_LEDGER_223.txt \
+  --ledger ~/horizon-corpus/ledger-mega-classified.txt --match-by-hash --commands
+```
+
+The native command puts every `--java-mod` before `--dedicated` (everything after it is the server's own
+argv). The loader command carries the pinned loader, libraries and game jar on the command line and the
+same values in `HORIZON_REAL_LAUNCH`, `HORIZON_LAUNCH_STOP_AT_DONE`, `HORIZON_MINECRAFT_JAR`,
+`FABRIC_LOADER_JAR` and `FABRIC_LIBS_DIR`; it also passes `--mixin-audit`, so Mixin's own record of what it
+applied comes back with the result.
+
+### The declared-content check
+
+Before either command runs, the tool checks the pack's own declarations rather than the runtime's:
+
+- duplicate mod ids across the pack (conflict);
+- the same `registry:id` declared by two jars in `META-INF/horizon-native.json` (conflict);
+- a required id the half that runs the jar does not contain (conflict — the failure the closure prevents);
+- `breaks`/`conflicts` against a pack member (warning: Fabric's field is a version range, and the checker
+  does not evaluate semver);
+- `native-gap` and unlabelled jars left out of both halves (warning, with their ledger reason).
+
+### Results: Helix (112 jars)
+
+The pack is the Helix client pack used by the loader ledger (112 jars). Labels come from the two corpus
+ledger runs by content match: 89 `native-ok`, 1 `needs-loader` (`baguettelib`), 15 `native-gap`, and 7
+jars with no ledger row. The ledger's own split puts 2 jars in the loader half: `baguettelib` and the
+`fabric-api` its closure requires (which also stays in the native half as `shared`). The full variant,
+`--gap-to-loader`, has 26 loader jars: the 16 non-native jars plus ten libraries they require, 10 of them
+shared with the native half.
+
+| Run | Jars | Mods that executed | Mixin plans applied | Wall |
+|---|---:|---:|---:|---:|
+| native-only (native half) | 89 | 33 | 0 (1,836 skipped) | 2.4 s |
+| hybrid — native half | 89 | 33 | 0 (1,836 skipped) | 2.4 s |
+| hybrid — loader half | 2 | 1 (`baguettelib`) | 257 (34 configs, 170 targets) | 11.1 s |
+| **hybrid total** | | **34** | **257** | |
+
+What the table says, and what it does not:
+
+- The native half is unchanged between the two runs: 2.4 s to `Done`, 33 entrypoints, and 1,836 mixin
+  plans still skipped because they target Minecraft classes. Those plans are the ledger's `needs-loader`
+  signal, and they are 0 applied.
+- The loader half carries the one jar the ledger said needs it. Fabric loads 43 mods (baguettelib,
+  Fabric API and its modules), applies 257 mixins from 34 configs over 170 targets with 0 failures, and
+  reaches `Done` in the same bounded fashion. The count is larger than baguettelib's own 19 skipped plans
+  because Fabric API's own mixins now apply too.
+- The hybrid therefore moves 33 mods to 34, and — the part the count hides — takes the pack from 0 applied
+  mixins to 257. The mod count barely moves because this pack is client-heavy: the native half already
+  runs most of it and the ledger finds one jar whose mixins need the loader.
+- The 15 `native-gap` jars stay out of the measured hybrid. `--gap-to-loader` puts them in the loader half,
+  and that full variant (26 jars) loaded 78 mods but did not reach `Done`: 13 of its jars appear in the
+  listing, the audit records 0 applied and 4 failed mixins, and `fabric-data-attachment-api-v1`'s
+  `AttachmentSync` entrypoint throws `NoSuchMethodError: getMaxPayloadSize…` before server start. That is
+  a Fabric API/26.3 mismatch in this tree, not a partition bug, and it is why the status page keeps
+  `native-gap` separate from `needs-loader`: the second is a routing decision, the first is still a gap.
+- The static check reports 9 conflicts, all `cross-partition-dependency`, and 42 warnings (mostly
+  `declared-break`). The conflicts are real: `itemscroller`, `litematica`, `litematica-printer`,
+  `tweakeroo` and `minihud` need `malilib`, `subtle_effects` needs `fzzy_config`, `particular` and `wakes`
+  need `baguettelib`, and `pickupnotifier` needs `puzzleslib`. Every one is a native jar whose dependency
+  the native process cannot load (the dependency is `native-gap` or sits in the loader half), so moving
+  the dependent jar to the loader would hide the gap, not close it.
+
+The experiment's own limit is the work bound: each half is one process with a 240 s ceiling, the native
+run stops at `Done (` and the loader run stops at the same line through
+`HORIZON_LAUNCH_STOP_AT_DONE=1`. Neither number is a claim about a pack where the native half is the
+client window; the server role is the one both ledgers measure.
+
 ## How it is tested
 
 The repo already has the right machine: a Java oracle, run against the real jars, compared with the Rust
