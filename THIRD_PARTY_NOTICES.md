@@ -34,6 +34,15 @@ contributors, under the Apache License 2.0 (`third_party/winit/LICENSE`). Its we
 made with wasm-bindgen's `own_assert_unwind_safe` / `once_assert_unwind_safe`, so the web build
 compiles with panics that unwind (web/unwind.toml).
 
+## wasm-bindgen
+
+`third_party/wasm-bindgen` is the `wasm-bindgen` crate of
+[wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) at commit 39ae823 by the wasm-bindgen
+developers, under the MIT License or the Apache License 2.0 (`third_party/wasm-bindgen/LICENSE-MIT`,
+`third_party/wasm-bindgen/LICENSE-APACHE`). Its closures require `UnwindSafe` functions on every
+wasm target with panics that unwind, as its `MaybeUnwindSafe` marker does, so the web build
+compiles for wasm64 with them (`src/convert/closures.rs` named wasm32 only).
+
 ## xxhash-rust
 
 `third_party/xxhash-rust` is [xxhash-rust](https://github.com/DoumanAsh/xxhash-rust) 0.8.19 by Douman,

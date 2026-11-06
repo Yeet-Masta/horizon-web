@@ -4711,7 +4711,6 @@ dependencies = [
 [[package]]
 name = "wasm-bindgen"
 version = "0.2.129"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
 dependencies = [
  "cfg-if",
  "rustversion",

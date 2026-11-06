@@ -1,0 +1,52 @@
+# wasm-bindgen at 39ae823 (as the rest of it, from git: Cargo.toml's [patch]), whose closures
+# take `UnwindSafe` functions on every wasm target with panic=unwind, as its `MaybeUnwindSafe`
+# does: on wasm32 only, the wasm64 build with unwinding panics didn't compile
+# (src/convert/closures.rs; THIRD_PARTY_NOTICES.md). Drop this and the folder once a release has
+# the fix.
+[package]
+authors = ["The wasm-bindgen Developers"]
+categories = ["wasm"]
+description = "Easy support for interacting between JS and Rust."
+edition = "2021"
+license = "MIT OR Apache-2.0"
+name = "wasm-bindgen"
+repository = "https://github.com/wasm-bindgen/wasm-bindgen"
+rust-version = "1.81"
+version = "0.2.129"
+
+[lib]
+test = false
+
+[features]
+default = ["std"]
+enable-interning = ["std"]
+serde-serialize = ["serde", "serde_json", "std"]
+spans = []
+std = []
+strict-macro = ["wasm-bindgen-macro/strict-macro"]
+msrv = []
+rustversion = []
+xxx_debug_only_print_generated_code = []
+
+[dependencies]
+cfg-if = "1.0.0"
+serde = { version = "1.0", optional = true }
+serde_json = { version = "1.0", optional = true }
+wasm-bindgen-macro = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
+wasm-bindgen-shared = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
+
+[build-dependencies]
+rustversion-compat = { package = "rustversion", version = "1.0.6" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(wasm_bindgen_unstable_test_coverage)',
+  'cfg(wasm_bindgen_use_js_sys)',
+  'cfg(xxx_debug_only_print_generated_code)',
+  'cfg(legacy_eh)',
+  'cfg(tokio_unstable)',
+  'cfg(wasm_bindgen_unstable_tokio)',
+  'cfg(wasm_bindgen_unstable_jspi)',
+  'cfg(wasm_bindgen_unstable_strict_option)',
+  'cfg(wasm_bindgen_unstable_try_trait)',
+] }
