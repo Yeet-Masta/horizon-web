@@ -114,3 +114,33 @@ highest sample, taken every 20 ms while the server starts or at the few points a
 is the reading at ready (server) or at the end (client). `threads` is a hint about pool changes, not a threshold.
 Memory comes from `/proc` on Linux and from `ps` on macOS; elsewhere there is no figure, and the smoke then fails
 its memory ceilings rather than passing them.
+
+## The nightly Java-mod corpus
+
+Not an efficiency figure, but the other scheduled job that needs what a machine already holds rather than what it
+can download: [`.github/workflows/nightly-java-corpus.yml`](../.github/workflows/nightly-java-corpus.yml) runs
+`tools/real_mod_corpus.py` (one role-agnostic verdict per jar) and `tools/java_mod_server_ledger.py` (one fresh
+dedicated server per jar, verdict from its log) over a real jar set. Those are the numbers
+[the Java port status](java-mod-compat-status.md) reports.
+
+```sh
+gh workflow run nightly-java-corpus
+gh workflow run nightly-java-corpus -f probe_limit=200 -f ledger_limit=40 -f timeout=90
+gh workflow run nightly-java-corpus -f cache_restore_key=2026-11-07   # a jar set staged in the Actions cache
+```
+
+It runs nightly at 02:43 UTC and by hand. The jar set is one of these, first with a jar in it: the `corpus`
+input, `.local/java-corpus` (restored from the Actions cache under `cache_restore_key`), the
+`HORIZON_JAVA_CORPUS` repository variable, then `~/horizon-corpus/corpus-xl`. `neoforge` adds a second folder of
+NeoForge jars and `server` an installed NeoForge server, whose libraries let the probe ask the real FML which mods
+a jar declares.
+
+As with `smoke.py`, a machine that has neither a jar set nor a prepared install is a skip rather than a failure:
+the job prints a notice and runs only the harness self-tests (the synthetic corpus and the fixture metadata), so
+GitHub's runners still check that the harness works. Nothing downloads a mod, a game jar or an asset, and no pull
+request job ever sees a third-party jar — the fixture workflow (`real-mod-corpus.yml`) stays what a pull request
+runs. Each run's `probe.json`, `ledger.json` and `ledger.txt` land in `.local/java-corpus-reports/` as the
+`java-corpus-reports` artifact, with the counts and the top refusal causes in the job's summary.
+
+To stage a jar set in the Actions cache, put the jars in `.local/java-corpus` on a runner that keeps its checkout
+and dispatch with `cache_save_key`; a key is immutable, so a refresh takes a new one.

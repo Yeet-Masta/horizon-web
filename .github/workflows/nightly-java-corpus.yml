@@ -1,0 +1,258 @@
+name: nightly java corpus
+# How much of the real Java mod ecosystem the native port actually runs, measured instead of assumed: the
+# role-agnostic probe (tools/real_mod_corpus.py) and one real dedicated server per jar
+# (tools/java_mod_server_ledger.py) over a jar set the machine already holds.
+#
+# Nothing here downloads a mod, a game jar or an asset. The jar folder and a prepared install
+# (.local/horizon-client/<version>) must already be on the machine; when either is missing the job says so and
+# skips, so a runner that holds neither is a no-op rather than a failure. The fixture workflow
+# (real-mod-corpus.yml) stays what a pull request sees: source-only fixtures, never a third-party jar.
+#
+#   gh workflow run nightly-java-corpus
+#   gh workflow run nightly-java-corpus -f probe_limit=200 -f ledger_limit=40 -f timeout=90
+#   gh workflow run nightly-java-corpus -f cache_restore_key=2026-11-07   # a jar set staged in the Actions cache
+#
+# Where the jars come from, in order: the `corpus` input, `.local/java-corpus` (restored by `cache_restore_key`),
+# $HORIZON_JAVA_CORPUS (a repository variable), then ~/horizon-corpus/corpus-xl. The numbers they produce are the
+# ones docs/java-mod-compat-status.md reports; docs/efficiency.md says how to read a run.
+on:
+  schedule:
+    # 02:43 UTC (03:43/04:43 in Paris): the night, between pull requests on the checks runners.
+    - cron: '43 2 * * *'
+  workflow_dispatch:
+    inputs:
+      corpus:
+        description: Folder of mod jars (empty resolves the cached and default folders)
+        default: ''
+      neoforge:
+        description: Folder of NeoForge jars, when they are not in `corpus`
+        default: ''
+      server:
+        description: An installed NeoForge server (its libraries enable --list-fml-mods)
+        default: ''
+      probe_limit:
+        description: Unique jars the probe reads
+        default: '64'
+      ledger_limit:
+        description: Jars that get their own dedicated server (0 means every jar)
+        default: '64'
+      timeout:
+        description: Seconds per jar, for both tools
+        default: '60'
+      cache_restore_key:
+        description: Restore .local/java-corpus from the Actions cache as java-corpus-<key>
+        default: ''
+      cache_save_key:
+        description: Save .local/java-corpus to the Actions cache as java-corpus-<key>
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: nightly-java-corpus
+  cancel-in-progress: false
+env:
+  # Test runs never reach the telemetry server (docs/telemetry.md), and the ledger starts hundreds of servers.
+  HORIZON_TELEMETRY_URL: "off"
+  CARGO_TERM_COLOR: never
+  # The jar set a machine keeps, beside ~/horizon-corpus/corpus-xl (docs/java-mod-compat-status.md).
+  HORIZON_JAVA_CORPUS: ${{ vars.HORIZON_JAVA_CORPUS }}
+
+jobs:
+  corpus:
+    # Our checks runners (docs/ci-runners.md): the machine holds the maintainer's Minecraft and its jar sets.
+    # GitHub's runners hold neither, so there the run below skips after the self-tests.
+    runs-on: >-
+      ${{ vars.SELF_HOSTED_CI != 'off' && vars.SELF_HOSTED_CI != 'light' &&
+      fromJSON('["self-hosted", "linux", "horizon-checks"]') || 'ubuntu-latest' }}
+    timeout-minutes: 180  # 64 jars at 60 s each, plus the fast-profile build
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # Keeps .local/java-corpus (a staged jar set) and target/ between runs on a runner that stays.
+          clean: false
+      - uses: actions/setup-python@v7
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v6
+        if: runner.environment == 'github-hosted'
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Install Rust and the ALSA and udev headers the client links against
+        env:
+          HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          if [ "$HOSTED" = true ]; then
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
+            rustup toolchain install stable --profile minimal
+          fi
+      - name: Tools from the runner
+        if: runner.environment == 'self-hosted'
+        run: bash tools/ci/runner-env.sh
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          shared-key: java-corpus
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Vanilla data, when this runner has it
+        # A runner without the maintainer's own files cannot run a jar: that is a skip, not a failure.
+        if: runner.environment == 'self-hosted'
+        continue-on-error: true
+        run: bash tools/ci/vanilla-data.sh
+      - name: The jar set from the Actions cache
+        if: inputs.cache_restore_key != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: .local/java-corpus
+          key: java-corpus-${{ inputs.cache_restore_key }}
+      - name: The jar set this machine already holds
+        id: corpus
+        env:
+          INPUT_CORPUS: ${{ inputs.corpus }}
+          INPUT_NEOFORGE: ${{ inputs.neoforge }}
+          INPUT_SERVER: ${{ inputs.server }}
+          CACHE_KEY: ${{ inputs.cache_restore_key }}
+        run: |
+          set -euo pipefail
+          ready=0
+          dir=""
+          for candidate in "$INPUT_CORPUS" "${CACHE_KEY:+.local/java-corpus}" \
+                           "${HORIZON_JAVA_CORPUS:-}" "$HOME/horizon-corpus/corpus-xl"; do
+            [ -n "$candidate" ] || continue
+            [ -d "$candidate" ] || continue
+            [ -n "$(find "$candidate" -maxdepth 1 -name '*.jar' -print -quit)" ] || continue
+            dir=$(realpath "$candidate")
+            ready=1
+            break
+          done
+          # A second folder only: the probe reads every jar under `dir` anyway, and passing $dir/neoforge as well
+          # would report those jars as duplicates of themselves.
+          neoforge=""
+          if [ -n "$INPUT_NEOFORGE" ] && [ -d "$INPUT_NEOFORGE" ]; then
+            neoforge=$(realpath "$INPUT_NEOFORGE")
+          fi
+          server=""
+          if [ -n "$INPUT_SERVER" ] && [ -d "$INPUT_SERVER/libraries/net/neoforged" ]; then
+            server=$(realpath "$INPUT_SERVER")
+          fi
+          {
+            echo "ready=$ready"
+            echo "dir=$dir"
+            echo "neoforge=$neoforge"
+            echo "server=$server"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$ready" = 1 ]; then
+            echo "Jar set: $dir ($(find "$dir" -maxdepth 1 -name '*.jar' | wc -l) jar(s))"
+          else
+            echo "::notice::No mod jars in .local/java-corpus, HORIZON_JAVA_CORPUS or ~/horizon-corpus/corpus-xl: no jar set on this machine, so the corpus run skips."
+          fi
+      - name: Is a prepared install here?
+        id: install
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' research-lock.json | head -1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -f ".local/horizon-client/$version/horizon-resources.json" ]; then
+            echo "ready=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::No prepared install in .local/horizon-client/$version: no game files on this machine, so the corpus run skips."
+          fi
+      - name: Harness self-tests, with no jars and no game files
+        # The synthetic corpus and the fixture metadata: cheap, and they still say the harness works on a runner
+        # that cannot run a real jar.
+        run: |
+          python3 tools/real_mod_corpus.py --self-test
+          python3 -m unittest tests.test_real_mod_corpus tests.test_real_mod_fixtures
+      - name: Build the probe and the dedicated server
+        if: steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        run: cargo build --locked --profile fast -p horizon-client -p horizon-native-java -p horizon-jvm
+      - name: Probe every jar for a role-agnostic verdict
+        if: steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        env:
+          CORPUS: ${{ steps.corpus.outputs.dir }}
+          NEOFORGE: ${{ steps.corpus.outputs.neoforge }}
+          SERVER: ${{ steps.corpus.outputs.server }}
+          LIMIT: ${{ inputs.probe_limit || '64' }}
+          TIMEOUT: ${{ inputs.timeout || '60' }}
+        run: |
+          set -euo pipefail
+          mkdir -p .local/java-corpus-reports
+          args=(--fabric-jars "$CORPUS" --bin-dir target/fast --json
+                --limit "$LIMIT" --timeout "$TIMEOUT" --build-timeout 1200)
+          if [ -n "$NEOFORGE" ]; then args+=(--neoforge-jars "$NEOFORGE"); fi
+          if [ -n "$SERVER" ]; then args+=(--server "$SERVER"); fi
+          python3 tools/real_mod_corpus.py "${args[@]}" > .local/java-corpus-reports/probe.json
+      - name: One real dedicated server per jar
+        if: steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        env:
+          CORPUS: ${{ steps.corpus.outputs.dir }}
+          LIMIT: ${{ inputs.ledger_limit || '64' }}
+          TIMEOUT: ${{ inputs.timeout || '60' }}
+          RESOURCES: .local/horizon-client/${{ steps.install.outputs.version }}
+        run: |
+          set -euo pipefail
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir -p .local/java-corpus-reports
+          # Each jar gets its own scratch game home, XDG folders and port (the ledger's own rule), under $scratch.
+          TMPDIR=$scratch HORIZON_NO_AUDIO=1 python3 tools/java_mod_server_ledger.py "$CORPUS" \
+            --binary target/fast/horizon-client --resources "$RESOURCES" \
+            --limit "$LIMIT" --timeout "$TIMEOUT" \
+            --json --output .local/java-corpus-reports/ledger.txt \
+            > .local/java-corpus-reports/ledger.json
+      - name: The run in this job's summary
+        if: always() && steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+
+          reports = Path(".local/java-corpus-reports")
+          lines = ["## Java mod corpus", ""]
+          probe = reports / "probe.json"
+          if probe.is_file():
+              counts = {"total": 0, "ok": 0, "fallback": 0, "unsupported": 0, "metadata-only": 0}
+              counts.update(json.loads(probe.read_text()).get("counts") or {})
+              lines.append(
+                  "- probe: {total} jars, {ok} ok, {fallback} fallback, {unsupported} unsupported, "
+                  "{metadata-only} metadata-only".format(**counts)
+              )
+          else:
+              lines.append("- probe: no report")
+          ledger = reports / "ledger.json"
+          if ledger.is_file():
+              summary = json.loads(ledger.read_text()).get("summary") or {}
+              reasons = summary.get("reason_categories") or {}
+              # "none" is the jars that ran: not a cause.
+              top = sorted(((name, count) for name, count in reasons.items() if name != "none"),
+                           key=lambda item: -item[1])[:3]
+              lines.append(
+                  "- dedicated server: {total} jars, {ran} ran, {refused} refused, {skipped} skipped".format(
+                      total=summary.get("total", 0), ran=summary.get("ran", 0),
+                      refused=summary.get("refused", 0), skipped=summary.get("skipped", 0)
+                  )
+              )
+              if top:
+                  lines.append("- causes: " + ", ".join(f"{name} {count}" for name, count in top))
+          else:
+              lines.append("- dedicated server: no report")
+          lines.append("")
+          print("\n".join(lines))
+          PY
+      - name: The jar set back into the Actions cache
+        if: inputs.cache_save_key != '' && steps.corpus.outputs.ready == '1'
+        continue-on-error: true  # a key is immutable: a reused one is a skip, not a failed run
+        uses: actions/cache/save@v4
+        with:
+          path: .local/java-corpus
+          key: java-corpus-${{ inputs.cache_save_key }}
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.corpus.outputs.ready == '1' && steps.install.outputs.ready == '1'
+        with:
+          name: java-corpus-reports
+          path: .local/java-corpus-reports/
+          if-no-files-found: warn
+          retention-days: 14
