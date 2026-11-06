@@ -10,6 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
     path::Path,
+    sync::Arc,
 };
 
 pub mod weaver;
@@ -1726,6 +1727,16 @@ pub trait Host {
         Vec::new()
     }
 
+    /// Sibling-jar classes this host lets the executing jar link against.
+    ///
+    /// `None` keeps single-jar behavior exactly as before: a symbol the
+    /// running jar does not declare stays on the host path. A host that holds
+    /// parsed library jars answers `Some`, and the interpreter resolves the
+    /// symbol against those jars before falling back to the host.
+    fn linked_class_table(&self) -> Option<&Arc<LinkedClassTable>> {
+        None
+    }
+
     /// Message a host recorded for one bounded Throwable marker.
     ///
     /// The interpreter keeps objects as markers, so a host that answers
@@ -1855,6 +1866,10 @@ pub struct StdHost {
     /// Values are class markers, and no host classpath or filesystem lookup is
     /// ever attempted.
     classes: BTreeMap<String, String>,
+    /// Sibling jars this host lets the executing jar link against. Shared by
+    /// `Arc` so a pack can build one table and every mod's host uses it
+    /// without copying the class bytes again.
+    linked_classes: Arc<LinkedClassTable>,
     /// Explicitly seeded Java service providers. Native execution never scans
     /// the host classpath; callers must supply the service and provider class
     /// names they want visible to `ServiceLoader`.
@@ -1964,6 +1979,7 @@ impl StdHost {
             resource_streams: BTreeMap::new(),
             resource_marks: BTreeMap::new(),
             classes: BTreeMap::new(),
+            linked_classes: Arc::default(),
             service_providers: BTreeMap::new(),
             current_time_millis: 0,
             mods: BTreeMap::new(),
@@ -2206,6 +2222,43 @@ impl StdHost {
             .map(String::as_str)
     }
 
+    /// Link the classes of another jar so this jar's symbols resolve against
+    /// them.
+    ///
+    /// This is the native path's class path: the caller parses the library jar
+    /// it already holds, and the interpreter may then run that jar's bytecode
+    /// for a static field, a static call or a `Class.forName`. Nothing here
+    /// reads the process class path or the filesystem.
+    pub fn link_jar(
+        &mut self,
+        id: impl Into<String>,
+        jar: &NativeJar,
+    ) -> Result<usize, NativeError> {
+        Arc::make_mut(&mut self.linked_classes).link_jar(id, jar)
+    }
+
+    /// [`Self::link_jar`] for a caller that already parsed the library's
+    /// classes.
+    pub fn link_classes(
+        &mut self,
+        id: impl Into<String>,
+        classes: impl IntoIterator<Item = ClassFile>,
+    ) -> Result<usize, NativeError> {
+        Arc::make_mut(&mut self.linked_classes).link_classes(id, classes)
+    }
+
+    /// Share one linked table across many hosts (`Self::link_jar` clones it
+    /// per host otherwise, which doubles the class bytes of a whole pack).
+    pub fn with_linked_class_table(mut self, table: Arc<LinkedClassTable>) -> Self {
+        self.linked_classes = table;
+        self
+    }
+
+    /// The sibling jars this host links against.
+    pub fn linked_classes(&self) -> &LinkedClassTable {
+        &self.linked_classes
+    }
+
     /// Seed one deterministic provider for a Java service. Provider discovery
     /// remains explicit and invocation-local; no JDK or host classpath lookup
     /// is performed.
@@ -2225,6 +2278,26 @@ impl StdHost {
     /// Return the explicitly seeded providers for a service, if any.
     pub fn service_providers(&self, service: &str) -> Option<&[String]> {
         self.service_providers.get(service).map(Vec::as_slice)
+    }
+
+    /// The providers of one service across this host's own seeds and the
+    /// linked jars' `META-INF/services` files.
+    ///
+    /// A linked jar is part of the caller-supplied class path, so code the
+    /// interpreter runs from that link sees the providers it declares. The
+    /// host still never scans a process class path.
+    fn merged_service_providers(&self, service: &str) -> Vec<String> {
+        let mut providers = self
+            .service_providers
+            .get(service)
+            .cloned()
+            .unwrap_or_default();
+        for provider in self.linked_classes.service_providers(service) {
+            if !providers.contains(provider) {
+                providers.push(provider.clone());
+            }
+        }
+        providers
     }
 
     /// Set the deterministic value returned by `System.currentTimeMillis`.
@@ -2942,10 +3015,11 @@ impl Host for StdHost {
     }
 
     fn service_providers(&self, service: &str) -> Vec<String> {
-        self.service_providers
-            .get(service)
-            .cloned()
-            .unwrap_or_default()
+        self.merged_service_providers(service)
+    }
+
+    fn linked_class_table(&self) -> Option<&Arc<LinkedClassTable>> {
+        Some(&self.linked_classes)
     }
 
     /// Read back what the bounded `Throwable.<init>` surface recorded, so an
@@ -3117,7 +3191,7 @@ impl Host for StdHost {
                 if descriptor.starts_with("(Ljava/lang/Class;") =>
             {
                 let service = expect_string(Self::argument(r, args, 0)?).replace('.', "/");
-                if self.service_providers.contains_key(&service) {
+                if !self.merged_service_providers(&service).is_empty() {
                     Ok(Value::Ref(Some(format!("service-loader/{service}"))))
                 } else {
                     Err(NativeError::Metadata(format!(
@@ -5356,16 +5430,14 @@ impl Host for StdHost {
                 NativeError::Metadata("unsupported java/util/ServiceLoader marker".into())
             })?;
             if r.name == "iterator" && r.descriptor == "()Ljava/util/Iterator;" {
-                let values = self
-                    .service_providers
-                    .get(service)
-                    .ok_or_else(|| {
-                        NativeError::Metadata(format!(
-                            "unknown seeded ServiceLoader service {service}"
-                        ))
-                    })?
-                    .iter()
-                    .cloned()
+                let providers = self.merged_service_providers(service);
+                if providers.is_empty() {
+                    return Err(NativeError::Metadata(format!(
+                        "unknown seeded ServiceLoader service {service}"
+                    )));
+                }
+                let values = providers
+                    .into_iter()
                     .map(|provider| Value::Ref(Some(provider)))
                     .collect::<Vec<_>>();
                 let iterator = format!("iterator/{}", self.next_iterator);
@@ -5375,10 +5447,7 @@ impl Host for StdHost {
             }
             if r.name == "findFirst"
                 && r.descriptor == "()Ljava/util/Optional;"
-                && let Some(provider) = self
-                    .service_providers
-                    .get(service)
-                    .and_then(|providers| providers.first())
+                && let Some(provider) = self.merged_service_providers(service).first()
             {
                 return Ok(Value::Ref(Some(format!("optional/{provider}"))));
             }
@@ -8381,8 +8450,14 @@ fn jdk_exception_superclass(owner: &str) -> Option<&'static str> {
 }
 
 /// Whether a thrown class is caught by one exception-table entry, walking the
-/// jar's own superclasses first and the bounded JDK table after them.
-fn exception_is_subtype(classes: &BTreeMap<String, ClassFile>, thrown: &str, catch: &str) -> bool {
+/// jar's own superclasses first, then the sibling jars the host linked, then
+/// the bounded JDK table.
+fn exception_is_subtype(
+    classes: &BTreeMap<String, ClassFile>,
+    linked: &LinkedClassTable,
+    thrown: &str,
+    catch: &str,
+) -> bool {
     if catch == "java/lang/Object" {
         return true;
     }
@@ -8393,6 +8468,7 @@ fn exception_is_subtype(classes: &BTreeMap<String, ClassFile>, thrown: &str, cat
         }
         let next = classes
             .get(&current)
+            .or_else(|| linked.get(&current))
             .map(|file| file.super_name.clone())
             .or_else(|| jdk_exception_superclass(&current).map(str::to_owned));
         match next {
@@ -9818,8 +9894,12 @@ fn generic_type_instance_of(marker: &str, class: &str) -> bool {
 /// without a runtime tag. A jar's own classes are in `classes`; a JDK or game
 /// class is a slash-qualified name; and the interpreter's other marker
 /// namespaces (`@fn`, `list/`, `type/`, ...) are not classes.
-fn class_marker_like(marker: &str, classes: &BTreeMap<String, ClassFile>) -> bool {
-    if classes.contains_key(marker) {
+fn class_marker_like(
+    marker: &str,
+    classes: &BTreeMap<String, ClassFile>,
+    linked: &LinkedClassTable,
+) -> bool {
+    if classes.contains_key(marker) || linked.contains_key(marker) {
         return true;
     }
     if matches!(
@@ -10033,6 +10113,22 @@ fn array_index(value: i32) -> Result<usize, NativeError> {
     usize::try_from(value).map_err(|_| NativeError::Metadata("array index is negative".into()))
 }
 
+/// The throwable a Java array access raises for an index outside the array.
+///
+/// `ArrayIndexOutOfBoundsException` is a catchable `RuntimeException`, and
+/// javac's synthetic `$SwitchMap` initialisers (and any generated switch over
+/// an enum from another jar) rely on that: a bounds error inside a `try` block
+/// must reach the frame's handler instead of failing the whole invocation. The
+/// message matches the JDK's so a mod that prints or parses it sees the same
+/// text.
+fn array_index_out_of_bounds(index: i32, length: usize) -> NativeError {
+    NativeError::UncaughtException {
+        class: "java/lang/ArrayIndexOutOfBoundsException".into(),
+        message: Some(format!("Index {index} out of bounds for length {length}")),
+        frame: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Method {
     pub name: String,
@@ -10164,6 +10260,37 @@ impl ClassFile {
         self.methods
             .iter()
             .find(|m| m.name == name && m.descriptor == desc)
+    }
+
+    /// The internal names of the interfaces this class declares, in
+    /// class-file order.
+    ///
+    /// `Class#getInterfaces` answers from this model, so a mod that reflects on
+    /// a linked library's class sees the same list a JVM would. The parser
+    /// skips the table for every other use, so it is read back from the class
+    /// bytes instead of widening every `ClassFile`; unreadable bytes answer an
+    /// empty list, which cannot happen for a class this crate parsed.
+    pub fn interface_names(&self) -> Vec<String> {
+        self.read_interface_names().unwrap_or_default()
+    }
+
+    fn read_interface_names(&self) -> Result<Vec<String>, NativeError> {
+        let mut r = Reader::new(&self.raw);
+        if r.u4()? != 0xCAFE_BABE {
+            return Err(NativeError::InvalidClass("bad magic"));
+        }
+        r.skip(4)?;
+        let pool = read_pool(&mut r)?;
+        r.u2()?; // access flags
+        r.u2()?; // this class
+        r.u2()?; // super class
+        let count = r.u2()? as usize;
+        let mut interfaces = Vec::new();
+        for _ in 0..count {
+            let index = r.u2()?;
+            interfaces.push(class_name(&pool, index)?);
+        }
+        Ok(interfaces)
     }
 
     /// The exception-table rows of one method's `Code` attribute.
@@ -10645,6 +10772,191 @@ fn member_is_kotlin_runtime(member: &str) -> bool {
         .split_once('#')
         .map_or(member, |(owner, _)| owner)
         .starts_with("kotlin/")
+}
+
+/// The sibling-jar class sources one execution may link against.
+///
+/// A Fabric or Forge pack puts a mod's library on the same class path as a
+/// second jar (`xaerolib` beside the Xaero maps, a config library beside the
+/// mod that declares it), so bytecode in one jar names classes the other jar
+/// declares. The native runtime never reads the process class path or the
+/// filesystem: the caller that already holds both jars registers the library
+/// here, and the interpreter resolves a symbol against the running jar's own
+/// classes first, then these tables in jar-id order.
+///
+/// Bounds: [`Self::MAX_JARS`] registered jars and [`Self::MAX_CLASSES`] class
+/// names across them. A name another jar already supplied keeps that jar's
+/// class, which is the class-path precedence a JVM applies.
+#[derive(Debug, Clone, Default)]
+pub struct LinkedClassTable {
+    /// Every linked class in class-path order: the first jar that declares a
+    /// name keeps it, which is the precedence a JVM class path applies.
+    classes: BTreeMap<String, ClassFile>,
+    /// The class names each jar declared, kept so a jar stays a named row
+    /// even when every class it holds is shadowed by an earlier jar.
+    jars: BTreeMap<String, BTreeSet<String>>,
+    /// Service providers the linked jars' own `META-INF/services` files
+    /// declare, keyed by service. A real class path exposes them to
+    /// `ServiceLoader`; the bounded host still never scans the process class
+    /// path, it only answers what a supplied jar declared.
+    services: BTreeMap<String, Vec<String>>,
+    providers: usize,
+}
+
+impl LinkedClassTable {
+    /// Sibling jars one table may hold. A pack links the libraries its mods
+    /// declare, not every jar, and one table can be shared by all of them.
+    pub const MAX_JARS: usize = 256;
+    /// Class names across every linked jar. A 500-jar client pack carries
+    /// roughly 40k classes; this caps a crafted input while leaving a whole
+    /// pack representable.
+    pub const MAX_CLASSES: usize = 131_072;
+    /// Providers across every linked jar's `META-INF/services` files, matching
+    /// the bound a single jar's seeding already applies.
+    pub const MAX_PROVIDERS: usize = 4_096;
+
+    /// Register every class `jar` declares under `id`, answering how many
+    /// class names the table took.
+    ///
+    /// The jar's `META-INF/services` files come with it: code the interpreter
+    /// runs from the link asks `ServiceLoader` for the providers its class
+    /// path declares, and the host still answers only explicitly supplied
+    /// names.
+    pub fn link_jar(
+        &mut self,
+        id: impl Into<String>,
+        jar: &NativeJar,
+    ) -> Result<usize, NativeError> {
+        let added = self.link_classes(id, jar.classes.values().cloned())?;
+        self.link_services(jar);
+        Ok(added)
+    }
+
+    /// Seed the providers one jar's `META-INF/services` files declare.
+    ///
+    /// Past [`Self::MAX_PROVIDERS`] the table stops seeding instead of
+    /// failing the link: a service list is metadata, and one oversized file
+    /// must not cost the whole jar its classes.
+    fn link_services(&mut self, jar: &NativeJar) {
+        for name in jar.resources.keys() {
+            let Some(service) = name.strip_prefix("META-INF/services/") else {
+                continue;
+            };
+            if service.is_empty() || service.contains('/') {
+                continue;
+            }
+            let Some(bytes) = jar.resource_bytes.get(name) else {
+                continue;
+            };
+            let service = service.replace('.', "/");
+            for line in String::from_utf8_lossy(bytes).lines() {
+                if self.providers >= Self::MAX_PROVIDERS {
+                    return;
+                }
+                let provider = line.split_once('#').map_or(line, |(line, _)| line).trim();
+                if provider.is_empty() {
+                    continue;
+                }
+                let providers = self.services.entry(service.clone()).or_default();
+                let provider = provider.replace('.', "/");
+                if !providers.contains(&provider) {
+                    providers.push(provider);
+                    self.providers += 1;
+                }
+            }
+        }
+    }
+
+    /// Register already-parsed classes under `id`, answering how many class
+    /// names the table took.
+    ///
+    /// A caller that parsed classes without their jar has no
+    /// `META-INF/services` to offer, so [`Self::link_jar`] is the entry point
+    /// for a real library jar.
+    pub fn link_classes(
+        &mut self,
+        id: impl Into<String>,
+        classes: impl IntoIterator<Item = ClassFile>,
+    ) -> Result<usize, NativeError> {
+        let id = id.into();
+        if self.jars.contains_key(&id) {
+            return Err(NativeError::Metadata(format!(
+                "linked jar {id} is already registered; register each jar once"
+            )));
+        }
+        let table = classes
+            .into_iter()
+            .map(|class| (class.name.clone(), class))
+            .collect::<BTreeMap<_, _>>();
+        let added = table
+            .keys()
+            .filter(|name| !self.classes.contains_key(*name))
+            .count();
+        if self.jars.len() + 1 > Self::MAX_JARS {
+            return Err(NativeError::Metadata(format!(
+                "linked class table cannot hold more than {} jars",
+                Self::MAX_JARS
+            )));
+        }
+        if self.classes.len() + added > Self::MAX_CLASSES {
+            return Err(NativeError::Metadata(format!(
+                "linked class table cannot hold more than {} classes",
+                Self::MAX_CLASSES
+            )));
+        }
+        self.jars
+            .insert(id, table.keys().cloned().collect::<BTreeSet<_>>());
+        for (name, class) in table {
+            // An earlier jar's class keeps the name; later jars only add what
+            // the class path has not resolved yet.
+            self.classes.entry(name).or_insert(class);
+        }
+        Ok(added)
+    }
+
+    /// Resolve one class by its internal name, or `None` when no linked jar
+    /// declares it.
+    pub fn get(&self, name: &str) -> Option<&ClassFile> {
+        self.classes.get(name)
+    }
+
+    /// Whether any linked jar declares `name`.
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.classes.contains_key(name)
+    }
+
+    /// The jar identities this table holds, in registration order.
+    pub fn jar_ids(&self) -> impl Iterator<Item = &str> {
+        self.jars.keys().map(String::as_str)
+    }
+
+    /// How many jars are registered.
+    pub fn jar_count(&self) -> usize {
+        self.jars.len()
+    }
+
+    /// How many distinct class names the table holds.
+    pub fn class_count(&self) -> usize {
+        self.classes.len()
+    }
+
+    /// Whether no jar is registered.
+    pub fn is_empty(&self) -> bool {
+        self.jars.is_empty()
+    }
+
+    /// The provider classes the linked jars declare for one service.
+    pub fn service_providers(&self, service: &str) -> &[String] {
+        self.services
+            .get(service)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// How many providers the linked jars declare.
+    pub fn provider_count(&self) -> usize {
+        self.providers
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -13233,6 +13545,7 @@ impl NativeJar {
             host.persistent_class_state();
         let mut runtime = Runtime {
             classes: &self.classes,
+            linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -13451,6 +13764,7 @@ impl NativeJar {
         let class_name = class.replace('.', "/");
         let mut runtime = Runtime {
             classes: &self.classes,
+            linked: host.linked_class_table().cloned().unwrap_or_default(),
             host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -13782,6 +14096,7 @@ impl NativeJar {
         {
             let mut runtime = Runtime {
                 classes: &self.classes,
+                linked: host.linked_class_table().cloned().unwrap_or_default(),
                 host,
                 calls: 0,
                 fields: BTreeMap::new(),
@@ -15888,6 +16203,9 @@ fn gson_json_escape(text: &str) -> String {
 
 struct Runtime<'a, H> {
     classes: &'a BTreeMap<String, ClassFile>,
+    /// Sibling-jar tables this execution may link, snapshotted from the host
+    /// so a frame that keeps a class reference does not borrow the host.
+    linked: Arc<LinkedClassTable>,
     host: &'a mut H,
     calls: usize,
     fields: BTreeMap<String, Value>,
@@ -15942,6 +16260,20 @@ impl<H: Host> Runtime<'_, H> {
         format!("{}#{}{}", field.owner, field.name, field.descriptor)
     }
 
+    /// Resolve a class this execution may link: the running jar's own classes
+    /// first, then the host's sibling-jar tables in jar-id order.
+    ///
+    /// This is the native path's class path. A class neither source declares
+    /// stays unknown, so the caller keeps the host fallback it always had.
+    fn class(&self, name: &str) -> Option<&ClassFile> {
+        self.classes.get(name).or_else(|| self.linked.get(name))
+    }
+
+    /// Whether this execution can link `name` from its own or a sibling jar.
+    fn has_class(&self, name: &str) -> bool {
+        self.classes.contains_key(name) || self.linked.contains_key(name)
+    }
+
     /// Run a jar-owned class initializer once before the first active use.
     ///
     /// Fabric and NeoForge entrypoints commonly keep identifiers, registry
@@ -15950,12 +16282,11 @@ impl<H: Host> Runtime<'_, H> {
     /// bootstrap into a no-op, so the bounded runtime models only this JVM
     /// initialization rule while retaining its per-invocation lifetime.
     fn ensure_initialized(&mut self, class: &str) -> Result<(), NativeError> {
-        if !self.classes.contains_key(class) || !self.initialized_classes.insert(class.to_owned()) {
+        if !self.has_class(class) || !self.initialized_classes.insert(class.to_owned()) {
             return Ok(());
         }
         if self
-            .classes
-            .get(class)
+            .class(class)
             .and_then(|file| file.method("<clinit>", "()V"))
             .is_some()
         {
@@ -16383,7 +16714,7 @@ impl<H: Host> Runtime<'_, H> {
         base_args: &[Value],
         marker: &str,
     ) -> Result<(bool, Vec<Value>), NativeError> {
-        let callback_class = self.classes.get(&callback.owner).ok_or_else(|| {
+        let callback_class = self.class(&callback.owner).ok_or_else(|| {
             NativeError::MissingMethod(format!(
                 "{}#{}{}",
                 callback.owner, callback.name, callback.descriptor
@@ -16632,18 +16963,26 @@ impl<H: Host> Runtime<'_, H> {
         let Ok(callback) = parse_callback_marker(marker) else {
             return Ok(None);
         };
-        let Some(class) = self.classes.get(&callback.target.owner) else {
+        // The callback target may live in a linked library jar, so resolve it
+        // the same way a frame resolves its own class.
+        let linked = Arc::clone(&self.linked);
+        let Some(class) = self
+            .classes
+            .get(&callback.target.owner)
+            .or_else(|| linked.get(&callback.target.owner))
+        else {
             return Ok(None);
         };
         let Some(method) = class.method(&callback.target.name, &callback.target.descriptor) else {
             return Ok(None);
         };
+        let target_is_static = method.is_static();
         // A constructor reference (`Type::new`) is a factory: the lambda has no
         // receiver to capture, so the runtime owns the object it constructs and
         // answers the lambda's own call with it.
         let mut constructed = None;
         let mut args_consumed = false;
-        let (receiver, mut target_args) = if method.is_static() {
+        let (receiver, mut target_args) = if target_is_static {
             (None, callback.captures.clone())
         } else if callback.target.name == "<init>" && callback.captures.is_empty() {
             let object = self.new_object(&callback.target.owner);
@@ -16805,20 +17144,56 @@ impl<H: Host> Runtime<'_, H> {
         Value::Ref(Some(marker))
     }
 
-    /// Resolve `Class.forName` only against classes already loaded from the
-    /// current jar. This keeps reflection useful for bootstrap code without
-    /// permitting arbitrary classpath or filesystem loading.
+    /// Resolve `Class.forName` against the running jar's classes and the
+    /// sibling jars the host linked. This keeps reflection useful for
+    /// bootstrap code without permitting arbitrary classpath or filesystem
+    /// loading: a class neither source declares still answers `null`.
     fn class_for_name(&self, args: &[Value]) -> Result<Value, NativeError> {
         let binary = expect_string(
             args.first()
                 .ok_or_else(|| NativeError::Metadata("Class.forName needs a class name".into()))?,
         );
         let internal = binary.replace('.', "/");
-        Ok(if self.classes.contains_key(&internal) {
+        Ok(if self.has_class(&internal) {
             Value::Ref(Some(internal))
         } else {
             Value::Ref(None)
         })
+    }
+
+    /// `Class#getInterfaces` from the class model.
+    ///
+    /// A class the model holds — the running jar's own or a linked library's —
+    /// answers the interfaces it declares, in class-file order. A class
+    /// outside the model (a game or JDK class) answers an empty array, the
+    /// same bounded answer the rest of the reflection surface gives instead of
+    /// inventing a hierarchy. The answer is a runtime-owned `Class[]`, so a
+    /// caller can index it, ask its length, or ask each element's name.
+    fn invoke_class_interfaces(
+        &mut self,
+        r: &MethodRef,
+        receiver: Option<&Value>,
+    ) -> Option<Value> {
+        if r.owner != "java/lang/Class"
+            || r.name != "getInterfaces"
+            || r.descriptor != "()[Ljava/lang/Class;"
+        {
+            return None;
+        }
+        let name = receiver
+            .and_then(expect_ref)
+            .map(|marker| marker.replace('.', "/"))?;
+        let interfaces = self
+            .class(&name)
+            .map(ClassFile::interface_names)
+            .unwrap_or_default();
+        let marker = self.new_array("java/lang/Class", &r.name);
+        let values = interfaces
+            .into_iter()
+            .map(|interface| Value::Ref(Some(interface)))
+            .collect();
+        self.arrays.insert(marker.clone(), values);
+        Some(Value::Ref(Some(marker)))
     }
 
     /// Execute the small reflective-array surface used by Fabric API helpers.
@@ -16998,7 +17373,7 @@ impl<H: Host> Runtime<'_, H> {
             let descriptor = declared
                 .map(|(descriptor, _)| descriptor.to_owned())
                 .or_else(|| {
-                    self.classes.get(class).and_then(|file| {
+                    self.class(class).and_then(|file| {
                         file.fields
                             .iter()
                             .find(|field| field.name == name)
@@ -17006,8 +17381,7 @@ impl<H: Host> Runtime<'_, H> {
                     })
                 });
             let signature = descriptor.as_deref().and_then(|descriptor| {
-                self.classes
-                    .get(class)
+                self.class(class)
                     .and_then(|file| file.field_signature(name, descriptor))
             });
             let value = signature
@@ -17120,8 +17494,7 @@ impl<H: Host> Runtime<'_, H> {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let declared = r.name == "getDeclaredFields";
             let fields = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .map(|file| {
                     file.fields
                         .iter()
@@ -17146,8 +17519,7 @@ impl<H: Host> Runtime<'_, H> {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let name = expect_string(StdHost::argument(r, args, 0)?);
             let marker = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .and_then(|file| {
                     file.fields.iter().find(|field| {
                         field.name == name
@@ -17169,8 +17541,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             let class = reflection_class_name(receiver, r)?.to_owned();
             let methods = self
-                .classes
-                .get(&class)
+                .class(&class)
                 .map(|file| {
                     file.methods
                         .iter()
@@ -17230,7 +17601,7 @@ impl<H: Host> Runtime<'_, H> {
         {
             let class = expect_string(receiver.unwrap_or(&Value::Ref(None)));
             let wanted = expect_string(StdHost::argument(r, args, 0)?);
-            let found = self.classes.get(class).and_then(|file| {
+            let found = self.class(class).and_then(|file| {
                 file.annotations
                     .iter()
                     .find(|annotation| annotation_is(annotation, wanted))
@@ -17251,7 +17622,7 @@ impl<H: Host> Runtime<'_, H> {
                     let (name, descriptor) = member
                         .find('(')
                         .map_or((member, None), |at| (&member[..at], Some(&member[at..])));
-                    let file = self.classes.get(class)?;
+                    let file = self.class(class)?;
                     let method = file.methods.iter().find(|candidate| {
                         candidate.name == name
                             && descriptor
@@ -17279,7 +17650,7 @@ impl<H: Host> Runtime<'_, H> {
             let declared = declared
                 .map(|(descriptor, access)| (descriptor.to_owned(), access))
                 .or_else(|| {
-                    self.classes.get(class).and_then(|file| {
+                    self.class(class).and_then(|file| {
                         file.fields
                             .iter()
                             .find(|field| field.name == name)
@@ -17345,7 +17716,7 @@ impl<H: Host> Runtime<'_, H> {
                     return Ok(Some(Value::Int(arg_count(descriptor) as i32)));
                 }
                 ("newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;") => {
-                    if !self.classes.contains_key(class) {
+                    if !self.has_class(class) {
                         return Err(NativeError::MissingMethod(format!(
                             "{class}#<init>{descriptor}"
                         )));
@@ -17390,8 +17761,7 @@ impl<H: Host> Runtime<'_, H> {
                 self.array(invocation_args)?.clone()
             };
             let class_file = self
-                .classes
-                .get(owner)
+                .class(owner)
                 .ok_or_else(|| NativeError::MissingMethod(format!("{owner}#{name}")))?;
             let target = class_file
                 .methods
@@ -17443,7 +17813,7 @@ impl<H: Host> Runtime<'_, H> {
         parameters: &[Value],
     ) -> Option<String> {
         if parameters.is_empty() {
-            return self.classes.get(class).and_then(|file| {
+            return self.class(class).and_then(|file| {
                 file.methods
                     .iter()
                     .find(|candidate| {
@@ -17458,8 +17828,7 @@ impl<H: Host> Runtime<'_, H> {
         }
         descriptor.push(')');
         Some(
-            self.classes
-                .get(class)
+            self.class(class)
                 .and_then(|file| {
                     file.methods
                         .iter()
@@ -18035,8 +18404,7 @@ impl<H: Host> Runtime<'_, H> {
         // which avoids re-running an override whose class state the bounded
         // interpreter may not have initialized.
         let symbolic_is_abstract = self
-            .classes
-            .get(&r.owner)
+            .class(&r.owner)
             .and_then(|file| file.method(&r.name, &r.descriptor))
             .is_some_and(|method| method.code.is_none());
         if symbolic_is_abstract
@@ -18059,13 +18427,13 @@ impl<H: Host> Runtime<'_, H> {
         if let Some((class, _)) = marker.split_once('#') {
             return Some(class);
         }
-        self.classes.contains_key(marker).then_some(marker.as_str())
+        self.has_class(marker).then_some(marker.as_str())
     }
 
     fn member_owner(&self, class: &str, name: &str, descriptor: &str) -> Option<(String, bool)> {
         let mut current = class.to_owned();
         for _ in 0..MAX_SUPERCLASS_WALK {
-            let Some(file) = self.classes.get(&current) else {
+            let Some(file) = self.class(&current) else {
                 return Some((current, false));
             };
             if file.method(name, descriptor).is_some() {
@@ -18101,7 +18469,7 @@ impl<H: Host> Runtime<'_, H> {
             }
             let delivers = match handler.catch_type.as_deref() {
                 None => true,
-                Some(catch) => exception_is_subtype(self.classes, thrown, catch),
+                Some(catch) => exception_is_subtype(self.classes, &self.linked, thrown, catch),
             };
             if delivers {
                 return Ok(Some(handler.handler_pc as usize));
@@ -18496,10 +18864,15 @@ impl<H: Host> Runtime<'_, H> {
         if method != "<clinit>" {
             self.ensure_initialized(class)?;
         }
-        let file = self
-            .classes
-            .get(class)
-            .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?;
+        // Snapshot the table so the frame's class reference outlives the
+        // `&mut self` calls the instruction loop makes.
+        let linked = Arc::clone(&self.linked);
+        let file = match self.classes.get(class) {
+            Some(file) => file,
+            None => linked
+                .get(class)
+                .ok_or_else(|| NativeError::MissingMethod(format!("{class}#{method}{desc}")))?,
+        };
         let target = file
             .method(method, desc)
             .cloned()
@@ -19246,30 +19619,49 @@ impl<H: Host> Runtime<'_, H> {
                     stack.push(Value::Int(values.len() as i32));
                 }
                 0x2e..=0x35 => {
-                    let index = array_index(pop_int(&mut stack, class, method, at)?)?;
+                    let index = pop_int(&mut stack, class, method, at)?;
                     let array = pop(&mut stack, class, method, at)?;
                     let values = self
                         .array(&array)
                         .map_err(|error| array_operand_error(error, "xaload", class, method, at))?;
-                    let value = values.get(index).cloned().ok_or_else(|| {
-                        NativeError::Metadata(format!("array index {index} out of bounds"))
-                    })?;
-                    stack.push(value);
+                    let length = values.len();
+                    let loaded = match usize::try_from(index)
+                        .ok()
+                        .and_then(|index| values.get(index).cloned())
+                    {
+                        Some(value) => Ok(value),
+                        None => Err(array_index_out_of_bounds(index, length)),
+                    };
+                    // A Java bounds error is a catchable exception, so the
+                    // frame's own table decides where it lands.
+                    stack.push(invoke_or_catch!(at, loaded));
                 }
                 0x4f..=0x56 => {
                     let value = pop(&mut stack, class, method, at)?;
-                    let index = array_index(pop_int(&mut stack, class, method, at)?)?;
+                    let index = pop_int(&mut stack, class, method, at)?;
                     let array = pop(&mut stack, class, method, at)?;
                     let marker = expect_array_marker(&array).map_err(|error| {
                         array_operand_error(error, "xastore", class, method, at)
                     })?;
+                    let length = self.arrays.get(marker).map_or(0, Vec::len);
+                    let in_bounds = usize::try_from(index).is_ok_and(|index| index < length);
+                    invoke_or_catch!(
+                        at,
+                        if in_bounds {
+                            Ok(())
+                        } else {
+                            Err(array_index_out_of_bounds(index, length))
+                        }
+                    );
                     let values = self.arrays.get_mut(marker).ok_or_else(|| {
                         NativeError::Metadata("array is not owned by this invocation".into())
                     })?;
-                    let slot = values.get_mut(index).ok_or_else(|| {
-                        NativeError::Metadata(format!("array index {index} out of bounds"))
-                    })?;
-                    *slot = value;
+                    if let Some(slot) = usize::try_from(index)
+                        .ok()
+                        .and_then(|index| values.get_mut(index))
+                    {
+                        *slot = value;
+                    }
                 }
                 0xc5 => {
                     // multianewarray: one dimension count per bracket group,
@@ -19319,7 +19711,7 @@ impl<H: Host> Runtime<'_, H> {
                     let matches = expect_ref(&value).is_some_and(|marker| {
                         generic_type_instance_of(marker, &wanted)
                             || (wanted == "java/lang/Class"
-                                && class_marker_like(marker, self.classes))
+                                && class_marker_like(marker, self.classes, &self.linked))
                     });
                     stack.push(Value::Int(i32::from(matches)));
                 }
@@ -19513,6 +19905,9 @@ impl<H: Host> Runtime<'_, H> {
                         && r.descriptor.ends_with(")Ljava/lang/Class;")
                     {
                         self.class_for_name(&args)?
+                    } else if let Some(value) = self.invoke_class_interfaces(&r, receiver.as_ref())
+                    {
+                        value
                     } else if let Some(value) = self.invoke_array_clone(&r, receiver.as_ref()) {
                         value
                     } else if let Some(value) =
@@ -23688,6 +24083,7 @@ mod tests {
         let mut host = NullHost;
         let runtime = Runtime {
             classes: &BTreeMap::new(),
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -23736,6 +24132,7 @@ mod tests {
         let mut host = NullHost;
         let runtime = Runtime {
             classes: &BTreeMap::new(),
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -30471,6 +30868,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -30621,6 +31019,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -30824,6 +31223,7 @@ mandatory = true
             .unwrap();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -31123,6 +31523,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -31358,6 +31759,7 @@ mandatory = true
         let mut host = NullHost;
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -32760,31 +33162,665 @@ mandatory = true
         assert_eq!(game_enum_constants("demo/Unknown"), None);
     }
 
+    /// A scratch tree for a test that has to run `javac`.
+    fn scratch_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("horizon-native-java-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        root
+    }
+
+    /// Compile `sources` into `root/<name>/classes`, answering the classes
+    /// directory and every parsed class. `None` when no JDK is installed, so a
+    /// checkout without one still runs the rest of the suite. `classpath`
+    /// names directories an earlier call produced, which is how one jar's
+    /// sources compile against another jar's classes.
+    fn compile_java_classes(
+        root: &Path,
+        name: &str,
+        sources: &[(&str, &str)],
+        classpath: &[&Path],
+    ) -> Option<(PathBuf, Vec<ClassFile>)> {
+        let javac = javac()?;
+        let base = root.join(name);
+        let classes = base.join("classes");
+        std::fs::create_dir_all(&classes).unwrap();
+        let mut paths = Vec::new();
+        for (relative, body) in sources {
+            let path = base.join("src").join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            paths.push(path);
+        }
+        let mut command = Command::new(javac);
+        command.arg("--release").arg("17").arg("-d").arg(&classes);
+        if !classpath.is_empty() {
+            command
+                .arg("-classpath")
+                .arg(std::env::join_paths(classpath).unwrap());
+        }
+        let status = command.args(&paths).status().unwrap();
+        assert!(status.success(), "javac failed for {name}");
+        Some((classes.clone(), class_files_under(&classes)))
+    }
+
+    fn class_files_under(root: &Path) -> Vec<ClassFile> {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path
+                    .extension()
+                    .is_some_and(|extension| extension == "class")
+                {
+                    out.push(path);
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        walk(root, &mut paths);
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| ClassFile::parse(&std::fs::read(path).unwrap()).unwrap())
+            .collect()
+    }
+
+    /// One library jar and one mod jar, compiled separately: the mod's bytecode
+    /// names the library's class, and only the host's linked table makes that
+    /// symbol resolve.
+    const CROSS_JAR_LIBRARY: &[(&str, &str)] = &[(
+        "lib/Config.java",
+        "package lib;\n\
+         public final class Config {\n\
+             public static String name = \"linked\";\n\
+             public static int number() { return 41; }\n\
+         }\n",
+    )];
+
+    const CROSS_JAR_MOD: &[(&str, &str)] = &[(
+        "demo/Entry.java",
+        "package demo;\n\
+         import lib.Config;\n\
+         public class Entry {\n\
+             public static String probe() {\n\
+                 boolean found;\n\
+                 try {\n\
+                     found = Class.forName(\"lib.Config\") != null;\n\
+                 } catch (ClassNotFoundException e) {\n\
+                     found = false;\n\
+                 }\n\
+                 return Config.name + \"/\" + Config.number() + \"/\" + found;\n\
+             }\n\
+             public static void onInitialize() {\n\
+                 String seen = probe();\n\
+                 if (seen.startsWith(\"null\")) {\n\
+                     throw new IllegalStateException(seen);\n\
+                 }\n\
+             }\n\
+         }\n",
+    )];
+
+    #[test]
+    fn a_linked_jar_supplies_another_jars_static_symbols() {
+        let root = scratch_root("cross-jar-static");
+        let Some((library_dir, library)) =
+            compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[])
+        else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(&root, "app", CROSS_JAR_MOD, &[&library_dir])
+        else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let probe = |host: &mut StdHost| {
+            entry
+                .invoke_method("demo/Entry", "probe", "()Ljava/lang/String;", None, host)
+                .unwrap()
+        };
+
+        // Without a linked jar the library is foreign: a static field reads
+        // null, a static call answers the descriptor's default, and
+        // `Class.forName` does not see the class. This is the corpus symptom
+        // the linked table removes.
+        let mut unlinked = StdHost::new();
+        assert_eq!(
+            probe(&mut unlinked),
+            Value::Ref(Some("null/0/false".into()))
+        );
+        // The entrypoint path sees the same values, and the fixture turns them
+        // into a failure a loader would report.
+        let unlinked_error = entry
+            .execute("demo/Entry", None, "main", &mut unlinked)
+            .expect_err("the unlinked run must not see the library");
+        assert!(
+            unlinked_error
+                .to_string()
+                .contains("java/lang/IllegalStateException: null/0/false"),
+            "{unlinked_error}"
+        );
+
+        let mut linked = StdHost::new();
+        assert_eq!(linked.link_classes("lib", library).unwrap(), 1);
+        assert_eq!(linked.linked_classes().class_count(), 1);
+        assert_eq!(
+            linked.linked_classes().jar_ids().collect::<Vec<_>>(),
+            ["lib"]
+        );
+        assert_eq!(
+            probe(&mut linked),
+            Value::Ref(Some("linked/41/true".into()))
+        );
+        entry
+            .execute("demo/Entry", None, "main", &mut linked)
+            .expect("the linked library must satisfy the entrypoint");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_linked_jar_is_shared_by_copy_and_still_links() {
+        // A caller that runs many jars builds one table and shares it, so the
+        // class bytes are parsed and copied once.
+        let root = scratch_root("cross-jar-shared");
+        let Some((_, library)) = compile_java_classes(&root, "lib", CROSS_JAR_LIBRARY, &[]) else {
+            return;
+        };
+        let mut table = LinkedClassTable::default();
+        assert_eq!(table.link_classes("lib", library).unwrap(), 1);
+        let table = Arc::new(table);
+        let first = StdHost::new().with_linked_class_table(Arc::clone(&table));
+        let second = StdHost::new().with_linked_class_table(Arc::clone(&table));
+        assert_eq!(table.class_count(), 1);
+        // Both hosts answer from the same table and neither owns a second copy.
+        assert_eq!(Arc::strong_count(&table), 3);
+        assert_eq!(first.linked_classes().class_count(), 1);
+        assert_eq!(second.linked_classes().class_count(), 1);
+        drop(first);
+        drop(second);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_linked_table_bounds_its_jars_and_refuses_repeats() {
+        let mut table = LinkedClassTable::default();
+        let class = ClassFile::parse(&weavable_class_bytes("demo/One")).unwrap();
+        assert_eq!(
+            table.link_classes("first", [class.clone()]).unwrap(),
+            1,
+            "a new jar adds its names"
+        );
+        assert_eq!(
+            table.link_classes("second", [class]).unwrap(),
+            0,
+            "a name another jar supplied keeps the first jar's class"
+        );
+        assert_eq!(table.class_count(), 1);
+        let repeat = table
+            .link_classes("first", Vec::new())
+            .expect_err("one jar identity cannot be registered twice");
+        assert!(
+            repeat.to_string().contains("already registered"),
+            "{repeat}"
+        );
+
+        let mut full = LinkedClassTable::default();
+        for index in 0..LinkedClassTable::MAX_JARS {
+            full.link_classes(format!("jar-{index}"), Vec::new())
+                .unwrap();
+        }
+        let overflow = full
+            .link_classes("one-too-many", Vec::new())
+            .expect_err("the jar bound must hold");
+        assert!(overflow.to_string().contains("256 jars"), "{overflow}");
+        assert_eq!(full.jar_count(), LinkedClassTable::MAX_JARS);
+    }
+
+    #[test]
+    fn a_linked_jar_brings_its_service_providers() {
+        let path = std::env::temp_dir().join(format!(
+            "horizon-native-java-linked-services-{}.jar",
+            std::process::id()
+        ));
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("META-INF/services/demo.Service", options)
+            .unwrap();
+        zip.write_all(b"lib/Provider\nlib/Other # the rest of the line is a comment\n")
+            .unwrap();
+        zip.finish().unwrap();
+        let jar = NativeJar::from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let mut host = StdHost::new();
+        host.link_jar("lib", &jar).unwrap();
+        // Code the interpreter runs from the link asks `ServiceLoader` for the
+        // providers its class path declares; the host answers the linked jar's
+        // own `META-INF/services` rows and still never scans a process
+        // class path.
+        assert_eq!(
+            Host::service_providers(&host, "demo/Service"),
+            ["lib/Provider", "lib/Other"]
+        );
+        assert!(
+            Host::service_providers(&host, "demo/Unknown").is_empty(),
+            "an unseeded service keeps its empty answer"
+        );
+        assert_eq!(host.linked_classes().provider_count(), 2);
+        assert_eq!(
+            host.linked_classes().service_providers("demo/Service"),
+            ["lib/Provider", "lib/Other"]
+        );
+    }
+
+    /// A `switch` over an enum from another jar makes javac emit a synthetic
+    /// `$SwitchMap` holder class whose `<clinit>` sizes the map from the
+    /// library enum's `values()` and indexes it by `ordinal()`.
+    #[test]
+    fn a_switch_map_over_a_linked_enum_initialises_from_the_library() {
+        let root = scratch_root("cross-jar-switch");
+        let Some((library_dir, library)) = compile_java_classes(
+            &root,
+            "lib",
+            &[(
+                "lib/Color.java",
+                "package lib;\npublic enum Color { RED, GREEN, BLUE }\n",
+            )],
+            &[],
+        ) else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[(
+                "demo/Entry.java",
+                "package demo;\n\
+                 public class Entry {\n\
+                     public static String probe() {\n\
+                         switch (lib.Color.GREEN) {\n\
+                             case RED: return \"red\";\n\
+                             case GREEN: return \"green\";\n\
+                             default: return \"other\";\n\
+                         }\n\
+                     }\n\
+                 }\n",
+            )],
+            &[&library_dir],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        // The synthetic holder is part of the mod jar, so the switch itself is
+        // local; only the enum it maps lives in the library.
+        let mut unlinked = StdHost::new();
+        let unlinked_error = entry
+            .invoke_method(
+                "demo/Entry",
+                "probe",
+                "()Ljava/lang/String;",
+                None,
+                &mut unlinked,
+            )
+            .expect_err("the map cannot be sized without the enum's values");
+        // The unmodelled `values()` answers an empty array, so the synthetic
+        // `$SwitchMap` store is out of bounds; the holder's `try` only catches
+        // `NoSuchFieldError`, so the throw leaves the invocation as the JDK
+        // exception it is.
+        assert!(
+            unlinked_error
+                .to_string()
+                .contains("ArrayIndexOutOfBoundsException"),
+            "{unlinked_error}"
+        );
+
+        let mut linked = StdHost::new();
+        linked.link_classes("lib", library).unwrap();
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "probe",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut linked
+                )
+                .unwrap(),
+            Value::Ref(Some("green".into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn class_get_interfaces_answers_from_the_class_model() {
+        let root = scratch_root("class-interfaces");
+        let Some((library_dir, library)) = compile_java_classes(
+            &root,
+            "lib",
+            &[
+                (
+                    "lib/Marker.java",
+                    "package lib;\npublic interface Marker {}\n",
+                ),
+                (
+                    "lib/Linked.java",
+                    "package lib;\npublic class Linked implements Marker {}\n",
+                ),
+            ],
+            &[],
+        ) else {
+            return;
+        };
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[
+                (
+                    "demo/Alpha.java",
+                    "package demo;\npublic interface Alpha {}\n",
+                ),
+                (
+                    "demo/Beta.java",
+                    "package demo;\npublic interface Beta {}\n",
+                ),
+                (
+                    "demo/Impl.java",
+                    "package demo;\npublic class Impl implements Alpha, Beta {}\n",
+                ),
+                (
+                    "demo/Entry.java",
+                    "package demo;\n\
+                     public class Entry {\n\
+                         public static String own() {\n\
+                             Class<?>[] direct = Impl.class.getInterfaces();\n\
+                             return direct.length + \":\" + direct[0].getName()\n\
+                                 + \":\" + direct[1].getName();\n\
+                         }\n\
+                         public static String linked() throws Exception {\n\
+                             Class<?>[] direct = Class.forName(\"lib.Linked\").getInterfaces();\n\
+                             return direct.length + \":\" + direct[0].getName();\n\
+                         }\n\
+                     }\n",
+                ),
+            ],
+            &[&library_dir],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let mut host = StdHost::new();
+        host.link_classes("lib", library).unwrap();
+        assert_eq!(
+            entry
+                .invoke_method("demo/Entry", "own", "()Ljava/lang/String;", None, &mut host)
+                .unwrap(),
+            Value::Ref(Some("2:demo.Alpha:demo.Beta".into()))
+        );
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "linked",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut host
+                )
+                .unwrap(),
+            Value::Ref(Some("1:lib.Marker".into()))
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn class_file_keeps_declared_interfaces_in_class_file_order() {
+        let root = scratch_root("interface-order");
+        let Some((_, classes)) = compile_java_classes(
+            &root,
+            "app",
+            &[
+                (
+                    "demo/Alpha.java",
+                    "package demo;\npublic interface Alpha {}\n",
+                ),
+                (
+                    "demo/Beta.java",
+                    "package demo;\npublic interface Beta {}\n",
+                ),
+                (
+                    "demo/Impl.java",
+                    "package demo;\npublic class Impl implements Alpha, Beta {}\n",
+                ),
+                ("demo/Plain.java", "package demo;\npublic class Plain {}\n"),
+            ],
+            &[],
+        ) else {
+            return;
+        };
+        let by_name = |name: &str| {
+            classes
+                .iter()
+                .find(|class| class.name == name)
+                .unwrap()
+                .interface_names()
+        };
+        assert_eq!(by_name("demo/Impl"), vec!["demo/Alpha", "demo/Beta"]);
+        assert!(by_name("demo/Plain").is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn array_bounds_errors_are_catchable_jdk_exceptions() {
+        let root = scratch_root("array-bounds");
+        let Some((_, app)) = compile_java_classes(
+            &root,
+            "app",
+            &[(
+                "demo/Entry.java",
+                "package demo;\n\
+                 public class Entry {\n\
+                     public static int caughtByType() {\n\
+                         int[] values = new int[2];\n\
+                         try { return values[5]; }\n\
+                         catch (ArrayIndexOutOfBoundsException e) { return 7; }\n\
+                     }\n\
+                     public static int caughtBySupertype() {\n\
+                         int[] values = new int[2];\n\
+                         try { values[3] = 1; return 0; }\n\
+                         catch (IndexOutOfBoundsException e) { return 8; }\n\
+                     }\n\
+                     public static String message() {\n\
+                         int[] values = new int[2];\n\
+                         try { return \"\" + values[4]; }\n\
+                         catch (RuntimeException e) { return e.getMessage(); }\n\
+                     }\n\
+                     public static int uncaught() {\n\
+                         int[] values = new int[2];\n\
+                         return values[-1];\n\
+                     }\n\
+                 }\n",
+            )],
+            &[],
+        ) else {
+            return;
+        };
+        let entry = NativeJar::from_classes(app);
+        let mut host = StdHost::new();
+        let call = |name: &str, host: &mut StdHost| {
+            entry.invoke_method("demo/Entry", name, "()I", None, host)
+        };
+        assert_eq!(call("caughtByType", &mut host).unwrap(), Value::Int(7));
+        assert_eq!(call("caughtBySupertype", &mut host).unwrap(), Value::Int(8));
+        assert_eq!(
+            entry
+                .invoke_method(
+                    "demo/Entry",
+                    "message",
+                    "()Ljava/lang/String;",
+                    None,
+                    &mut host
+                )
+                .unwrap(),
+            Value::Ref(Some("Index 4 out of bounds for length 2".into()))
+        );
+        match call("uncaught", &mut host) {
+            Err(NativeError::UncaughtException { class, message, .. }) => {
+                assert_eq!(class, "java/lang/ArrayIndexOutOfBoundsException");
+                assert_eq!(
+                    message.as_deref(),
+                    Some("Index -1 out of bounds for length 2")
+                );
+            }
+            other => panic!("uncaught bounds error reported {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The class path a loader gives the jars of one pack: every jar in
+    /// `root`, keyed by file name.
+    fn pack_class_table(root: &Path) -> LinkedClassTable {
+        let mut table = LinkedClassTable::default();
+        let mut jars = std::fs::read_dir(root)
+            .expect("list the pack")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+            .collect::<Vec<_>>();
+        jars.sort();
+        for path in jars {
+            let id = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let Ok(jar) = NativeJar::from_path(&path) else {
+                eprintln!("skipped {id}: the jar could not be read");
+                continue;
+            };
+            // A pack past the table's bound is one this probe cannot
+            // represent; the bound itself has a unit test.
+            if let Err(error) = table.link_jar(id.clone(), &jar) {
+                eprintln!("skipped {id}: {error}");
+            }
+        }
+        table
+    }
+
+    /// Run the corpus rows of one real mod pack twice: alone, then with every
+    /// other jar in the directory linked, which is the class path a loader
+    /// gives them. This is the refused-row check for the cross-jar bucket; the
+    /// corpus lives outside this repository, so the paths come from the
+    /// environment and the test is ignored by default. `HORIZON_JAVA_CORPUS_JAR`
+    /// narrows the run to one row.
+    ///
+    /// ```sh
+    /// HORIZON_JAVA_CORPUS_DIR=~/horizon-corpus/corpus-xl     /// HORIZON_JAVA_CORPUS_KIND=client     /// cargo test -p horizon-native-java --lib -- --ignored corpus_rows_link --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads a real mod pack outside the repository"]
+    fn corpus_rows_link_the_library_jars_beside_them() {
+        let Ok(dir) = std::env::var("HORIZON_JAVA_CORPUS_DIR") else {
+            eprintln!(
+                "skipping: set HORIZON_JAVA_CORPUS_DIR (and optionally HORIZON_JAVA_CORPUS_JAR)"
+            );
+            return;
+        };
+        let root = PathBuf::from(dir);
+        let kind = std::env::var("HORIZON_JAVA_CORPUS_KIND").unwrap_or_else(|_| "client".into());
+        let only = std::env::var("HORIZON_JAVA_CORPUS_JAR").ok();
+        let budget = ExecutionBudget::within(std::time::Duration::from_secs(60));
+        // One table: a loader hands every row the same class path, and parsing
+        // the directory once keeps a pack-sized report quick.
+        let shared = Arc::new(pack_class_table(&root));
+        let mut rows = std::fs::read_dir(&root)
+            .expect("list the pack")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|extension| extension == "jar"))
+            .filter(|path| {
+                only.as_deref()
+                    .is_none_or(|only| path.file_name() == Some(only.as_ref()))
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        let mut ran = 0_usize;
+        let mut moved = 0_usize;
+        for path in rows {
+            let Ok(jar) = NativeJar::from_path(&path) else {
+                continue;
+            };
+            let Some(entry) = jar.discover_entrypoints(&kind).into_iter().next() else {
+                continue;
+            };
+            if entry.adapter.is_some() {
+                continue;
+            }
+            let run = |linked: Option<Arc<LinkedClassTable>>| {
+                let mut host = jar.seed_host(
+                    StdHost::new()
+                        .with_environment_type(if kind == "client" { "CLIENT" } else { "SERVER" })
+                        .with_linked_class_table(linked.unwrap_or_default()),
+                );
+                jar.execute_with_budget(
+                    &entry.class,
+                    entry.method.as_deref(),
+                    &kind,
+                    &mut host,
+                    &budget,
+                )
+                .map(|report| report.calls)
+            };
+            let unlinked = run(None);
+            let linked = run(Some(Arc::clone(&shared)));
+            let outcome = |result: &Result<usize, NativeError>| match result {
+                Ok(calls) => format!("ok ({calls} host calls)"),
+                Err(error) => bounded_weave_reason(&error.to_string()),
+            };
+            ran += 1;
+            if format!("{:?}", unlinked) != format!("{:?}", linked) {
+                moved += 1;
+            }
+            println!(
+                "{} [{kind}] | unlinked: {} | linked: {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                outcome(&unlinked),
+                outcome(&linked)
+            );
+        }
+        eprintln!(
+            "{ran} row(s) ran, {moved} changed with {} linked jar(s)",
+            shared.jar_count()
+        );
+    }
+
     #[test]
     fn exception_catch_types_walk_the_bounded_jdk_hierarchy() {
         let classes = BTreeMap::new();
+        let linked = LinkedClassTable::default();
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/Exception"
         ));
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/RuntimeException"
         ));
         assert!(exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/lang/Throwable"
         ));
         assert!(!exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/NullPointerException",
             "java/io/IOException"
         ));
         assert!(!exception_is_subtype(
             &classes,
+            &linked,
             "java/lang/IllegalStateException",
             "java/lang/IllegalArgumentException"
         ));
@@ -35678,6 +36714,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
@@ -35720,6 +36757,7 @@ mandatory = true
         let classes = BTreeMap::new();
         let mut runtime = Runtime {
             classes: &classes,
+            linked: Arc::default(),
             host: &mut host,
             calls: 0,
             fields: BTreeMap::new(),
