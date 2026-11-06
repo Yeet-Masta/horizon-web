@@ -36,6 +36,10 @@ of skipping it. A jar that panics in its entrypoint is isolated; the remaining j
   `selector-modifier`, `not-in-config`, `other-side`, `config-plugin`, `constructor-target`, `unresolved`,
   `target-missing`, `ambiguous-target`, `listed-without-plan`, `weaver-rejected`). The game uses the load-time weave
   only. A jar is labelled `native` only when nothing was skipped, otherwise `native-qualified`.
+
+  The fixture family matrix is **4 applied / 7 missing**: `HEAD`, cancellable `HEAD`, `RETURN` and `TAIL` apply;
+  `INVOKE` is skipped as `non-head-anchor`; `FIELD`, `NEW`, `JUMP`, `@Overwrite`, `@ModifyArg` and `@ModifyVariable`
+  are skipped as `unsupported-family`. These are the exact load-time labels, not a claim that game-class mixins work.
 - **Payloads.** Declared payload channels, codecs (`minecraft:raw`/`byte_array`, `minecraft:string`,
   `minecraft:empty`, opaque fallback), sender/receiver hosts and dispatch of a received frame to the jar's handler.
 - **Probe.** `horizon-native-java [--json] [--mixin-plans] [--weave <out.jar>] <jar> [kind] [class]` reports
@@ -86,8 +90,10 @@ loader and libraries are supplied), `tools/native_java_smoke.py`, and the effici
 
 Two Fabric 26.3 corpora, each jar run once through the real dedicated server
 (`horizon-client --java-mod <jar> --dedicated`, fresh scratch home, flat world, `online-mode=false`, 60 s bound, one
-process group killed after `Done (`). Raw reports: `~/horizon-corpus/{ledger-wide,ledger-mega}(-classified).{txt,json}`,
-analysed in `ledger-wide-report.md` and `mega-report.md`.
+process group killed after `Done (`). The [nightly Java corpus workflow](../.github/workflows/nightly-java-corpus.yml)
+runs this same probe and ledger over jars already held by its runner. Raw reports:
+`~/horizon-corpus/{ledger-wide,ledger-mega}(-classified).{txt,json}`, analysed in `ledger-wide-report.md` and
+`mega-report.md`.
 
 | Corpus | Jars | Ran | Refused (native gap) | Skipped | Wall to `Done` per jar |
 |---|---:|---:|---:|---:|---|
@@ -97,8 +103,9 @@ analysed in `ledger-wide-report.md` and `mega-report.md`.
 Skipped jars are out of scope for a server, not failures: 69 are client-only and 32 are libraries in the wide
 corpus, 179 and 54 in mega. Of the jars that ran, 11 (wide) and 28 (mega) ran with engine `native` (no skipped plan);
 the rest ran `native-qualified`. **No mixin was woven in either corpus**: 2,178 plans were skipped in the wide corpus
-and 5,689 in mega. The dominant reason is `target-outside-jar`: real mods' plans target `net/minecraft` classes, which
-Horizon has no Java class for.
+and 5,689 in mega. Every `ran` row therefore has `woven=0`: the load-time weaver only rewrites targets found in the
+same jar, while real mods' plans target `net/minecraft` classes and Horizon has no Java class for those targets. The
+dominant skip reason is `target-outside-jar`.
 
 Refusals split by cause (the ledger's own categories): 16 wide / 58 mega fail decoding class metadata (bounded
 collection markers, `Integer.parseInt`, `String.split` with a null receiver, malformed `fabric.mod.json`), and
@@ -162,6 +169,14 @@ tax is startup (the Java entrypoint plus its share of resource work, ~60 ms per 
 Only 52 of the 89 natively-runnable jars declare a dedicated-server entrypoint, so the 74-jar point is 51 executed
 mods and time/RSS flatten past 50. There were zero fallbacks to the JVM and zero startup failures in any run.
 
+### 500-jar native profile
+
+The 500-jar profile reaches `Done` in **13.7 s** at **833 MiB peak RSS**. **6.5 s** of that run is parse work for
+jars that are later skipped or otherwise do not execute. RSS follows a parse-count model: a fixed process baseline
+plus the classfile and metadata retained for every jar parsed, so filtering a jar after parsing does not reclaim its
+share of the peak. The profile is therefore a parser/loader measurement, not a claim that 500 effective server mods
+ran.
+
 Caveats: the host was loaded (absolute fps is depressed and noisy); vanilla ran `-Xmx2G` and RSS is measured at
 `Done`; the client ran offscreen with `maxFps=260` because the default 120 fps cap hides all frame differences.
 
@@ -177,9 +192,9 @@ Caveats: the host was loaded (absolute fps is depressed and noisy); vanilla ran 
    is not run, and an unmodelled Fabric entrypoint adapter (Kotlin) is refused.
 4. **Callbacks.** Only entrypoints and received-payload handlers execute. Event listeners (`ServerTickEvent`,
    Fabric lifecycle/tick events, client tick/render events) are recorded by the host but the game never dispatches
-   them; there is also no compiled HUD, key-binding, tooltip, screen, renderer or model façade in this branch (the
-   generator that emits those stubs lives in `crates/horizon-port-pack/src/facade.rs`, which is not a module of the
-   crate here), so client jars register content but do not draw.
+   them; there is also no compiled HUD, key-binding, tooltip, screen, renderer or model façade in this branch. The
+   former façade and census sources were deleted; they are recoverable from commit `be8567b9a`, so client jars
+   register content but do not draw.
 5. **Content consumption.** Blocks, items, effects, entities and menus reach the content model. Block entities,
    recipes and ingredients are recorded and warned as not expressible; data components and attachments have a
    manifest section but no declaration table; a guest stores the login manifest, but local command and content
