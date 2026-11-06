@@ -261,11 +261,23 @@ mods and time/RSS flatten past 50. There were zero fallbacks to the JVM and zero
 
 ### 500-jar native profile
 
-The 500-jar profile reaches `Done` in **13.7 s** at **833 MiB peak RSS**. **6.5 s** of that run is parse work for
-jars that are later skipped or otherwise do not execute. RSS follows a parse-count model: a fixed process baseline
-plus the classfile and metadata retained for every jar parsed, so filtering a jar after parsing does not reclaim its
-share of the peak. The profile is therefore a parser/loader measurement, not a claim that 500 effective server mods
-ran.
+Measured on 2026-11-06 (16 CPUs) over the same 500 jars, one flat-world dedicated run per point, `Done (N.NNNs)!`
+and peak RSS; a 0-jar run takes 2.2-2.4 s, so "jar work" is wall time over that same binary's baseline. Both rows
+use **one binary**, and only `HORIZON_WORKER_THREADS` differs (`1` against the machine's 16): the difference is the
+bootstrap pool, not another change landing between runs.
+
+| 500 jars | Wall to `Done` | Jar work | Peak RSS | Started |
+|---|---:|---:|---:|---:|
+| serial (`HORIZON_WORKER_THREADS=1`) | 15.90 s | 13.5 s | 828 MiB | 191 |
+| parallel (default pool) | **10.46 s** | 8.2 s | 859 MiB | 191 |
+| bootstrap batch, serial | 10.22 s | — | — | 191 |
+| bootstrap batch, parallel | **5.14 s** | — | — | 191 |
+
+The batch is most of the run and the pool takes 5.1 s off it (10.22 -> 5.14); the rest of startup is unchanged, so
+the whole run drops 5.4 s. Peak RSS grows 31 MiB, because up to eight jars are parsed and bootstrapped at once.
+**191 of the 500 now start** (an earlier ledger run over this corpus started 168); 5,689 plans are still skipped
+because they target game classes, so the profile remains a parser/loader measurement, not a claim that 500 effective
+server mods run.
 
 Caveats: the host was loaded (absolute fps is depressed and noisy); vanilla ran `-Xmx2G` and RSS is measured at
 `Done`; the client ran offscreen with `maxFps=260` because the default 120 fps cap hides all frame differences.
@@ -293,8 +305,9 @@ Caveats: the host was loaded (absolute fps is depressed and noisy); vanilla ran 
 6. **No JVM fallback in the game.** `horizon-jvm` is a standalone reference runner; a jar the native runtime refuses
    is skipped, so the `jvm`/`sidecar` counts in `server-status` are structurally zero.
 7. **Diagnostics are partial.** Refused jars are logged but absent from the `server-status` rows (it answers for the
-   jars that started); `java-runtime.json` writes its `woven` and `skipped` fields as `0`/`None`, so the launcher's
-   runtime panel labels a jar `needs-loader` from its skip reason but cannot yet list the plans behind it.
+   jars that started); `java-runtime.json` carries each jar's woven/skipped counts and the first game-class or
+   unsupported skip reason, so the launcher's runtime panel can label a jar `needs-loader`, but it does not list the
+   plans behind that reason.
 8. **NeoForge.** Native metadata and `@Mod` bootstrap work. The real FML lifecycle is a bounded, opt-in child
    process (`horizon-jvm --real-loader`) used as a preflight on the integrated server, not the path a mod's code
    takes; the dedicated role does not preflight yet, there is no in-game loader selection, and no automatic
