@@ -21,12 +21,12 @@ use std::{
 
 /// Where overlay roots are built (beside options.txt).
 pub fn cache_dir() -> PathBuf {
-    horizon_platform::env::current_dir()
+    horizon_std::env::current_dir()
         .unwrap_or_default()
         .join(".horizon-cache/resourcepacks")
 }
 pub fn packs_dir() -> PathBuf {
-    horizon_platform::env::current_dir()
+    horizon_std::env::current_dir()
         .unwrap_or_default()
         .join("resourcepacks")
 }
@@ -37,11 +37,11 @@ mod folder;
 pub fn open_folder(dir: &Path) {
     #[cfg(target_family = "wasm")]
     {
-        if horizon_platform::fs::metadata(dir).is_ok_and(|m| m.is_file())
-            && let Ok(bytes) = horizon_platform::fs::read(dir)
+        if horizon_std::fs::metadata(dir).is_ok_and(|m| m.is_file())
+            && let Ok(bytes) = horizon_std::fs::read(dir)
         {
             let name = dir.file_name().unwrap_or_default().to_string_lossy();
-            horizon_platform::web::save_file(&name, &bytes);
+            horizon_std::web::save_file(&name, &bytes);
         }
         return;
     }
@@ -53,7 +53,7 @@ pub fn open_folder(dir: &Path) {
 /// `Util.getPlatform().openUri`: the system browser on the link.
 pub fn open_uri(uri: &str) {
     #[cfg(target_family = "wasm")]
-    return horizon_platform::web::open_url(uri);
+    return horizon_std::web::open_url(uri);
     // URLs need Windows' registered protocol handler, not Explorer's path
     // handling. ShellExecute also preserves the URL as one Unicode value,
     // without interpolating its query string into a command interpreter.
@@ -129,7 +129,7 @@ fn vanilla_info(vanilla: &Path) -> PackInfo {
         description_style: Style::default(),
         source: PackSource::BuiltIn,
         compat: Compat::Compatible,
-        icon: horizon_platform::fs::read(vanilla.join("pack.png"))
+        icon: horizon_std::fs::read(vanilla.join("pack.png"))
             .ok()
             .as_deref()
             .and_then(pack_screen::load_icon),
@@ -519,7 +519,7 @@ pub(super) fn stage_pack(
     // The sound events, the GUI sprites' metadata and the language are read here too, not in
     // the frame that applies the reload (about 20 ms of it).
     let (render, atlas, panorama, (sounds, ui_metadata, language)) =
-        horizon_platform::thread::scope(|s| {
+        horizon_std::thread::scope(|s| {
             let atlas = s.spawn(|| {
                 HudAtlas::build_over_with_image(&root, vanilla_root, mod_image)
                     .map_err(|e| e.to_string())
@@ -623,7 +623,7 @@ type StageResult = std::result::Result<StagedPack, String>;
 pub(super) struct PackReload {
     pub(super) progress: super::Progress,
     kind: ReloadKind,
-    handle: Option<horizon_platform::thread::JoinHandle<StageResult>>,
+    handle: Option<horizon_std::thread::JoinHandle<StageResult>>,
 }
 impl PackReload {
     /// Starts `stage` on its own thread and returns at once.
@@ -633,7 +633,7 @@ impl PackReload {
     ) -> std::io::Result<Self> {
         let progress = super::Progress::with(&RELOAD_LINES);
         let worker = progress.clone();
-        let handle = horizon_platform::thread::Builder::new()
+        let handle = horizon_std::thread::Builder::new()
             .name("pack-reload".into())
             .spawn(move || stage(&worker))?;
         Ok(Self {
@@ -662,7 +662,7 @@ impl PackReload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::time::Duration;
+    use horizon_std::time::Duration;
     use std::sync::mpsc;
 
     fn wait(reload: &mut PackReload) -> (ReloadKind, StageResult) {
@@ -670,7 +670,7 @@ mod tests {
             if let Some(done) = reload.finished() {
                 return done;
             }
-            horizon_platform::thread::sleep(Duration::from_millis(10));
+            horizon_std::thread::sleep(Duration::from_millis(10));
         }
         panic!("the reload worker never finished");
     }
@@ -685,11 +685,7 @@ mod tests {
             blocked.recv().unwrap();
             progress.set(2);
             thread
-                .send(
-                    horizon_platform::thread::current()
-                        .name()
-                        .map(str::to_owned),
-                )
+                .send(horizon_std::thread::current().name().map(str::to_owned))
                 .unwrap();
             Err("staged".into())
         })

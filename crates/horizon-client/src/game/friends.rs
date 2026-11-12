@@ -23,9 +23,9 @@ use horizon_friends::host::HostState;
 #[cfg(not(target_family = "wasm"))]
 use horizon_friends::{Host, HostConfig, PathMode, host::DEFAULT_PORT, stun};
 use horizon_friends::{HostEvent, reach};
-use horizon_platform::time::{Duration, Instant};
 #[cfg(not(target_family = "wasm"))]
 use horizon_protocol::{GAME_VERSION, PROTOCOL_VERSION};
+use horizon_std::time::{Duration, Instant};
 
 #[cfg(target_family = "wasm")]
 type Host = WebHost;
@@ -35,10 +35,10 @@ type Host = WebHost;
 /// `guests` for the LAN to take them.
 #[cfg(target_family = "wasm")]
 pub(super) struct WebHost {
-    room: horizon_platform::web::rtc::Host,
+    room: horizon_std::web::rtc::Host,
     state: HostState,
     sessions: u64,
-    guests: Vec<horizon_platform::web::socket::Socket>,
+    guests: Vec<horizon_std::web::socket::Socket>,
     /// The integrated server's LAN, on its worker: friends' data channels
     /// stay on the page's thread, and their connections run beside it.
     door: Option<horizon_client::lan::Door>,
@@ -47,7 +47,7 @@ pub(super) struct WebHost {
 impl WebHost {
     fn start(relay: &str, door: Option<horizon_client::lan::Door>) -> Self {
         Self {
-            room: horizon_platform::web::rtc::Host::start(
+            room: horizon_std::web::rtc::Host::start(
                 relay,
                 &horizon_client::net::web_stun_servers(),
             ),
@@ -58,7 +58,7 @@ impl WebHost {
         }
     }
     fn poll(&mut self) -> Vec<HostEvent> {
-        use horizon_platform::web::rtc::HostEvent as Room;
+        use horizon_std::web::rtc::HostEvent as Room;
         let mut events = Vec::new();
         for event in self.room.poll() {
             match event {
@@ -116,10 +116,10 @@ pub const HELP: &[&str] = &[
 /// `HORIZON_STUN_SERVERS`, else `friendsStun` in horizon.txt, else the defaults.
 #[cfg(not(target_family = "wasm"))]
 fn stun_servers() -> Vec<String> {
-    if horizon_platform::env::var_os("HORIZON_STUN_SERVERS").is_some() {
+    if horizon_std::env::var_os("HORIZON_STUN_SERVERS").is_some() {
         return stun::servers_from_env();
     }
-    let dir = horizon_platform::env::current_dir().unwrap_or_default();
+    let dir = horizon_std::env::current_dir().unwrap_or_default();
     match horizon_client::ui_theme::preference(&dir, "friendsStun") {
         Some(list) => stun::parse_servers(&list),
         None => stun::servers_from_env(),
@@ -128,7 +128,7 @@ fn stun_servers() -> Vec<String> {
 
 #[cfg(not(target_family = "wasm"))]
 fn env_flag(name: &str, default: bool) -> bool {
-    horizon_platform::env::var(name).map_or(default, |v| v != "0")
+    horizon_std::env::var(name).map_or(default, |v| v != "0")
 }
 
 impl Game<'_> {
@@ -176,7 +176,7 @@ impl Game<'_> {
             game: GAME_VERSION.to_owned(),
             relay: horizon_client::net::friends_relay_setting(),
             path: PathMode::from_env(),
-            port: horizon_platform::env::var("HORIZON_FRIENDS_PORT")
+            port: horizon_std::env::var("HORIZON_FRIENDS_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(DEFAULT_PORT),
@@ -382,7 +382,7 @@ impl Game<'_> {
         }
         // A browser's friends come through the relay's room: nothing to
         // troubleshoot on this side.
-        let reachable = horizon_platform::WEB
+        let reachable = horizon_std::WEB
             || matches!(
                 state.verdict,
                 Some(reach::Verdict::Mapped(_) | reach::Verdict::Public)

@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn benchmark_fill_noise() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         let registry = test_registry();
 
         let volume = DensityVolume::new([16, 384, 16], [0, -64, 0], [1, 1, 1]).unwrap();

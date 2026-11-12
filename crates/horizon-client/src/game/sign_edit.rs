@@ -199,7 +199,7 @@ impl Game<'_> {
         } else {
             self.message = Some((
                 self.translate(KEY, "Click actions are disabled for this sign"),
-                horizon_platform::time::Instant::now(),
+                horizon_std::time::Instant::now(),
             ));
         }
     }

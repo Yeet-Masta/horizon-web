@@ -136,7 +136,7 @@ pub(super) struct EndState {
     /// `TicketType.PORTAL`, so that it can come down and take its owner there.
     tickets: Vec<((i32, i32), u32)>,
     /// The Overworld generator, for stronghold positions (ServerLevel.findNearestMapStructure).
-    locator: horizon_platform::sync::Mutex<Option<Arc<VanillaTerrain>>>,
+    locator: horizon_std::sync::Mutex<Option<Arc<VanillaTerrain>>>,
     /// Thrown eyes of ender in flight.
     eyes: Vec<EyeOfEnder>,
     flash: EndFlash,

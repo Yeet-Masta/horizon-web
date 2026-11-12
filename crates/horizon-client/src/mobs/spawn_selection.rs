@@ -20,7 +20,7 @@ use horizon_core::{
     geometry::{Aabb, Vec3},
     random::RandomSource,
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{borrow::Cow, collections::HashMap, path::Path};
 

@@ -121,7 +121,7 @@ mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn benchmark_legacy_positional_at() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         let s = 123456789i64;
         let factory = LegacyPositionalRandom::new(s);
         let positions: Vec<BlockPos> = (0..10_000)

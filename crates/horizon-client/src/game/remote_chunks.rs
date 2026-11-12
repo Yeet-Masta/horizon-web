@@ -214,8 +214,8 @@ impl ChunkDecoder {
         };
         // A Web Worker on the web build with threads; the one-thread build
         // has none to decode on, so its chunks decode in the frame.
-        if horizon_platform::THREADS
-            && let Err(e) = horizon_platform::thread::spawn_worker("Chunk decoder", work)
+        if horizon_std::THREADS
+            && let Err(e) = horizon_std::thread::spawn_worker("Chunk decoder", work)
         {
             log::warn!("Horizon: no chunk decoder thread ({e}); chunks decode in the frame");
         }
@@ -418,7 +418,7 @@ mod tests {
             let (packet, column) = loop {
                 match decoder.next() {
                     Next::Ready(decoded) => break decoded,
-                    Next::Decoding => horizon_platform::thread::yield_now(),
+                    Next::Decoding => horizon_std::thread::yield_now(),
                     Next::Lost => panic!("the decoder stopped"),
                 }
             };

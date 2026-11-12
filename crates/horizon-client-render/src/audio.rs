@@ -12,8 +12,8 @@ use crate::sound_events::{Sound, SoundRegistry};
 #[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use horizon_core::random::{LegacyRandom, RandomSource};
-use horizon_platform::fs;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::sync::Mutex;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -45,7 +45,7 @@ struct Channel {
     /// Its world (`Mixer::world_id`; 0 none).
     world: u32,
     /// The sound file it started and when, to tell another player's copy of it.
-    started: Option<(String, horizon_platform::time::Instant)>,
+    started: Option<(String, horizon_std::time::Instant)>,
 }
 #[derive(Default)]
 struct Mixer {
@@ -141,8 +141,7 @@ impl Drop for MixerBackend {
 /// still attach to. The game's own backend counts from 0, as before.
 static SHARED_CHANNELS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Two players' copies of one sound: started within this of each other.
-const SAME_SOUND: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_millis(150);
+const SAME_SOUND: horizon_std::time::Duration = horizon_std::time::Duration::from_millis(150);
 /// Decoded samples and their rate (`None`: the file did not load).
 type Samples = Option<(Arc<Vec<f32>>, u32)>;
 /// Decoded static sounds (`SoundBufferLibrary`'s buffers), dropped least
@@ -365,7 +364,7 @@ impl MixerBackend {
             if twin {
                 c.state = State::Stopped;
             } else {
-                c.started = Some((key.to_owned(), horizon_platform::time::Instant::now()));
+                c.started = Some((key.to_owned(), horizon_std::time::Instant::now()));
             }
         }
         twin
@@ -445,7 +444,7 @@ impl Backend for MixerBackend {
                 let streams = self.streams.get_or_insert_with(|| {
                     let (send, receive) = std::sync::mpsc::channel::<(PathBuf, ChannelId, bool)>();
                     let mixer = self.mixer.clone();
-                    let _ = horizon_platform::thread::spawn_worker("sound streams", move || {
+                    let _ = horizon_std::thread::spawn_worker("sound streams", move || {
                         for (file, channel, looping) in receive {
                             let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
                             attach(&mixer, channel, samples, looping);
@@ -458,7 +457,7 @@ impl Backend for MixerBackend {
             #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
             {
                 let mixer = self.mixer.clone();
-                horizon_platform::thread::spawn(move || {
+                horizon_std::thread::spawn(move || {
                     let samples = decode(&file).map(|(s, r)| (Arc::new(s), r));
                     attach(&mixer, channel, samples, looping);
                 });
@@ -485,7 +484,7 @@ impl Backend for MixerBackend {
             let decoder = self.decoder.get_or_insert_with(|| {
                 let (send, receive) = std::sync::mpsc::channel::<Decode>();
                 let (mixer, cache) = (self.mixer.clone(), self.cache.clone());
-                horizon_platform::thread::spawn_worker("sound decoder", move || {
+                horizon_std::thread::spawn_worker("sound decoder", move || {
                     for job in receive {
                         // Queued twice before the first decode finished.
                         let cached = cache.lock().ok().and_then(|mut c| c.get(&job.key));
@@ -822,7 +821,7 @@ fn default_output_name() -> Option<String> {
 fn card_fingerprint() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        horizon_platform::fs::read_to_string("/proc/asound/cards").ok()
+        horizon_std::fs::read_to_string("/proc/asound/cards").ok()
     }
     #[cfg(target_os = "macos")]
     {
@@ -912,7 +911,7 @@ fn build_stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 /// Available audio output device names.
 #[cfg(feature = "audio")]
 pub fn output_devices() -> Vec<String> {
-    if output_disabled(|name| horizon_platform::env::var_os(name)).is_some() {
+    if output_disabled(|name| horizon_std::env::var_os(name)).is_some() {
         return Vec::new();
     }
     let host = cpal::default_host();
@@ -1038,7 +1037,7 @@ impl Audio {
     }
     #[cfg(all(feature = "audio", not(target_family = "wasm")))]
     fn open_named(mixer: Arc<Mutex<Mixer>>, target: &str) -> Result<Stream> {
-        if let Some(reason) = output_disabled(|name| horizon_platform::env::var_os(name)) {
+        if let Some(reason) = output_disabled(|name| horizon_std::env::var_os(name)) {
             return Err(reason.into());
         }
         let host = cpal::default_host();
@@ -1093,7 +1092,7 @@ impl Audio {
     }
     #[cfg(all(feature = "audio", not(target_family = "wasm")))]
     fn open(mixer: Arc<Mutex<Mixer>>) -> Result<Stream> {
-        if let Some(reason) = output_disabled(|name| horizon_platform::env::var_os(name)) {
+        if let Some(reason) = output_disabled(|name| horizon_std::env::var_os(name)) {
             return Err(reason.into());
         }
         let host = cpal::default_host();
@@ -2125,7 +2124,7 @@ mod tests {
 #[cfg(target_family = "wasm")]
 mod web_output {
     use super::{Mixer, Result, mix};
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
     use std::{cell::RefCell, rc::Rc, sync::Arc};
     use wasm_bindgen::{JsCast, closure::Closure, prelude::*};
 
@@ -2283,7 +2282,7 @@ mod web_output {
     #[cfg(target_feature = "atomics")]
     mod worklet {
         use super::{Mixer, Node, Result, js, mix};
-        use horizon_platform::sync::Mutex;
+        use horizon_std::sync::Mutex;
         use std::{
             cell::RefCell,
             rc::Rc,
@@ -2380,9 +2379,9 @@ mod web_output {
                 .map_err(js)?;
             let rate = context.sample_rate() as u32;
             let worker = ring.clone();
-            if let Err(e) = horizon_platform::thread::spawn_worker("Audio mixer", move || {
-                run(&worker, &mixer, rate)
-            }) {
+            if let Err(e) =
+                horizon_std::thread::spawn_worker("Audio mixer", move || run(&worker, &mixer, rate))
+            {
                 let _ = node.disconnect();
                 return Err(format!("the mixer worker did not start: {e}").into());
             }
@@ -2399,9 +2398,7 @@ mod web_output {
                 let queued = write.wrapping_sub(read);
                 if queued >= AHEAD {
                     // 4 ms is under 200 frames at 48 kHz.
-                    horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(
-                        4,
-                    ));
+                    horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(4));
                     continue;
                 }
                 let frames = CHUNK.min(AHEAD - queued);

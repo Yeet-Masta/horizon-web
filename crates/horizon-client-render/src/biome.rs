@@ -2,7 +2,7 @@
 //! (`Biome.getGrassColor`/`getFoliageColor`/..., `BlockTintSources`).
 use crate::Result;
 use horizon_core::{noise::SimplexNoise, position::BlockPos, random::LegacyRandom};
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},

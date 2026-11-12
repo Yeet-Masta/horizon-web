@@ -2,7 +2,7 @@
 //! same files zipped as a `.hshader` (what the registry and the launcher
 //! carry). Both read into one [`Pack`].
 use crate::manifest::{MANIFEST, Manifest};
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -62,7 +62,7 @@ impl Pack {
         if path.fs_is_dir() {
             read_dir(path, "", &mut files)?;
         } else {
-            let file = horizon_platform::fs::File::open(path)
+            let file = horizon_std::fs::File::open(path)
                 .map_err(|e| format!("{}: {e}", path.display()))?;
             let mut zip = zip::ZipArchive::new(file)
                 .map_err(|e| format!("{}: not a .{EXTENSION} (zip): {e}", path.display()))?;
@@ -190,8 +190,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn read_dir(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
-    let entries =
-        horizon_platform::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let entries = horizon_std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -207,7 +206,7 @@ fn read_dir(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Vec<u8>>) -> 
             if size > MAX_TOTAL {
                 return Err(format!("{rel} is over {} MiB", MAX_TOTAL >> 20));
             }
-            let bytes = horizon_platform::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
+            let bytes = horizon_std::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
             files.insert(rel, bytes);
         }
     }

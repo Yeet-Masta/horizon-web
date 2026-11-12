@@ -12,7 +12,7 @@
 //! (`game/mod_browser.rs`).
 use crate::mod_browser::Listing;
 use horizon_mods::index::{self, Index, Kind, Project, Trust, Version};
-use horizon_platform::fs::{self, PathExt as _};
+use horizon_std::fs::{self, PathExt as _};
 #[cfg(not(target_family = "wasm"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ const AGENT: &str = concat!(
 /// Where the index comes from: `HORIZON_MOD_INDEX` (a file or an `https://`
 /// address, for a test registry), else [`INDEX_URL`]; as the launcher reads it.
 pub fn location() -> String {
-    horizon_platform::env::var("HORIZON_MOD_INDEX")
+    horizon_std::env::var("HORIZON_MOD_INDEX")
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| INDEX_URL.to_owned())
@@ -280,11 +280,11 @@ fn get_capped(url: &str, max: u64) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 /// [`get_capped`] on the web build: the page's fetch, or the relay's tunnel when the
-/// registry doesn't let pages read it (horizon-platform's web/http.rs); from a worker, as
+/// registry doesn't let pages read it (horizon-std's web/http.rs); from a worker, as
 /// the mod browser's jobs are, which waits for the page's thread to make it.
 #[cfg(target_family = "wasm")]
 fn get_capped(url: &str, max: u64) -> Result<Vec<u8>, String> {
-    use horizon_platform::web::http::{Request, request};
+    use horizon_std::web::http::{Request, request};
     let response = request(Request::get(url).header("User-Agent", AGENT))?;
     if !(200..300).contains(&response.status) {
         return Err(format!("the mod registry answered {}", response.status));

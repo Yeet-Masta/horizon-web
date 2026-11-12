@@ -10,8 +10,8 @@
 //! `[transfer]` is off.
 use crate::game::{Dim, Game, lan::LanHost};
 use horizon_client::lan::arrivals;
-use horizon_platform::time::Instant;
 use horizon_protocol::packets::play::{self, Clientbound as C};
+use horizon_std::time::Instant;
 use serde_json::{Value, json};
 
 impl Game<'_> {

@@ -204,16 +204,15 @@ mod client_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn a_client_reads_the_entities_and_menu_the_server_shows_it() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -401,16 +400,15 @@ mod client_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn a_villager_raid_sweat_event_draws_particles() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

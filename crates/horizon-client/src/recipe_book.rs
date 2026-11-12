@@ -1052,10 +1052,10 @@ mod tests {
 
     #[test]
     fn mod_category_mapping_validates_ids_icons_and_conflicts() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-book-categories-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&root).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&root).unwrap();
+        horizon_std::fs::write(
             root.join("items.json"),
             r#"{"minecraft:stone":{},"mymod:crusher":{},"minecraft:air":{}}"#,
         )
@@ -1124,7 +1124,7 @@ mod tests {
         assert!(mod_categories(Vec::new(), &recipes, &items).is_empty());
         let vanilla = Recipes::from_sources(&root, &items, &PackOverlay::NONE, Vec::new()).unwrap();
         assert!(mod_categories(vec![crusher], &vanilla, &items).is_empty());
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     fn ing(items: &[&str]) -> Ingredient {
@@ -1132,10 +1132,10 @@ mod tests {
     }
     #[test]
     fn the_index_knows_each_recipes_toast_station_and_result() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-toast-index-{}", std::process::id()));
         let dir = root.join("data/minecraft/recipe");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         for (name, json) in [
             (
                 "stick",
@@ -1158,10 +1158,10 @@ mod tests {
                 r#"{"type":"minecraft:smithing_trim","pattern":"minecraft:coast"}"#,
             ),
         ] {
-            horizon_platform::fs::write(dir.join(format!("{name}.json")), json).unwrap();
+            horizon_std::fs::write(dir.join(format!("{name}.json")), json).unwrap();
         }
         let index = RecipeIndex::load(&root, &PackOverlay::NONE);
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         let toast = |id: &str| (index.toast_station(id), index.result(id));
         assert_eq!(
             toast("minecraft:stick"),
@@ -1288,12 +1288,12 @@ mod tests {
     }
     #[test]
     fn a_knowledge_book_unlocks_its_recipes_and_is_used_up() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-knowledge-book-{}", std::process::id()));
         let dir = root.join("data/minecraft/recipe");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         for name in ["stick", "crafting_table", "torch"] {
-            horizon_platform::fs::write(
+            horizon_std::fs::write(
                 dir.join(format!("{name}.json")),
                 format!(
                     r#"{{"type":"minecraft:crafting_shaped","result":{{"id":"minecraft:{name}"}}}}"#
@@ -1302,7 +1302,7 @@ mod tests {
             .unwrap();
         }
         let index = RecipeIndex::load(&root, &PackOverlay::NONE);
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         let book = |recipes: &[&str], count: u32| {
             let ids = recipes.iter().map(|id| Tag::String((*id).into())).collect();
             let mut stack = ItemStack::new("minecraft:knowledge_book", count);
@@ -1358,20 +1358,20 @@ mod tests {
     /// order: the file's path (with `.json`) first, then its namespace.
     #[test]
     fn display_ids_follow_registration_order() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-display-order-{}", std::process::id()));
         let dir = root.join("data/minecraft/recipe");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let recipe = r#"{"type":"minecraft:crafting_shapeless","result":{"id":"minecraft:stick"}}"#;
         for name in ["z_pick", "prefix", "prefix-early"] {
-            horizon_platform::fs::write(dir.join(format!("{name}.json")), recipe).unwrap();
+            horizon_std::fs::write(dir.join(format!("{name}.json")), recipe).unwrap();
         }
         let packs = [(
             "recipe/parity:a_pick".to_owned(),
             vec![recipe.as_bytes().to_vec()],
         )];
         let index = RecipeIndex::load(&root, &PackOverlay { files: &packs });
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         let ids = [
             "parity:a_pick",
             "minecraft:prefix-early",

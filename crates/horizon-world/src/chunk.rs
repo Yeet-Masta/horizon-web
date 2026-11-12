@@ -889,7 +889,7 @@ mod tests {
     #[test]
     #[ignore = "microbenchmark; run with --ignored --nocapture"]
     fn benchmark_section_get_set() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         const OPS: usize = 50_000;
         const ROUNDS: u32 = 51;

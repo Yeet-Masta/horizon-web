@@ -16,9 +16,9 @@ use client::{
     RealmsClient, RealmsError, RegionDataDto, RegionSelectionPreferenceDto, Subscription,
 };
 use horizon_client_render::auth::{self, AuthSession};
-use horizon_platform::sync::Mutex;
-use horizon_platform::thread;
-use horizon_platform::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use horizon_std::sync::Mutex;
+use horizon_std::thread;
+use horizon_std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -66,7 +66,7 @@ type Job<T> = Arc<Mutex<Option<T>>>;
 fn spawn<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Job<T> {
     let job = Arc::new(Mutex::new(None));
     let out = Arc::clone(&job);
-    // A Web Worker on the web build, whose requests wait there (horizon_platform's HTTP).
+    // A Web Worker on the web build, whose requests wait there (horizon_std's HTTP).
     let started = thread::spawn_worker("Realms", move || {
         let result = work();
         if let Ok(mut slot) = out.lock() {

@@ -1756,10 +1756,10 @@ mod tests {
     fn fishing_retrieve_reference() {
         use horizon_core::random::{LegacyRandom, RandomSource};
         use horizon_world::loot::{LootData, PackOverlay};
-        let resources = horizon_platform::env::var_os("HORIZON_FISHING_RESOURCES").unwrap();
-        let path = horizon_platform::env::var_os("HORIZON_FISHING_REFERENCE").unwrap();
+        let resources = horizon_std::env::var_os("HORIZON_FISHING_RESOURCES").unwrap();
+        let path = horizon_std::env::var_os("HORIZON_FISHING_REFERENCE").unwrap();
         let rows: Vec<serde_json::Value> =
-            serde_json::from_slice(&horizon_platform::fs::read(path).unwrap()).unwrap();
+            serde_json::from_slice(&horizon_std::fs::read(path).unwrap()).unwrap();
         assert_eq!(rows.len(), 5, "missing vanilla retrieval cases");
         let loot = LootData::load(std::path::Path::new(&resources), &PackOverlay::NONE).unwrap();
         for row in rows {
@@ -1808,8 +1808,8 @@ mod tests {
             );
         }
         let casts: Vec<serde_json::Value> = serde_json::from_slice(
-            &horizon_platform::fs::read(
-                horizon_platform::env::var_os("HORIZON_FISHING_CAST_REFERENCE").unwrap(),
+            &horizon_std::fs::read(
+                horizon_std::env::var_os("HORIZON_FISHING_CAST_REFERENCE").unwrap(),
             )
             .unwrap(),
         )
@@ -1878,12 +1878,12 @@ mod tests {
     fn breeze_hook_parity_fixture() {
         use super::{EntityCollision, Hook, State};
         use std::io::Write;
-        let input = horizon_platform::fs::read_to_string(
-            horizon_platform::env::var("HORIZON_BREEZE_HOOK_INPUT").unwrap(),
+        let input = horizon_std::fs::read_to_string(
+            horizon_std::env::var("HORIZON_BREEZE_HOOK_INPUT").unwrap(),
         )
         .unwrap();
-        let mut out = horizon_platform::fs::File::create(
-            horizon_platform::env::var("HORIZON_BREEZE_HOOK_OUTPUT").unwrap(),
+        let mut out = horizon_std::fs::File::create(
+            horizon_std::env::var("HORIZON_BREEZE_HOOK_OUTPUT").unwrap(),
         )
         .unwrap();
         for line in input.lines() {

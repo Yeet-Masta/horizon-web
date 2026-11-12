@@ -119,7 +119,7 @@ pub trait Clipboard {
     fn set(&mut self, text: &str);
 }
 
-/// The web build's system clipboard is the page's (`horizon_platform::web`):
+/// The web build's system clipboard is the page's (`horizon_std::web`):
 /// text copied goes to it where the browser lets the page write it, and a
 /// paste is the text the browser's paste event gave (web/horizon.js holds
 /// Ctrl+V back from the game until then).
@@ -136,10 +136,10 @@ mod arboard {
             Ok(Self)
         }
         pub fn get_text(&mut self) -> Result<String, Error> {
-            horizon_platform::web::clipboard_text().ok_or(Error::ContentNotAvailable)
+            horizon_std::web::clipboard_text().ok_or(Error::ContentNotAvailable)
         }
         pub fn set_text(&mut self, text: String) -> Result<(), Error> {
-            horizon_platform::web::set_clipboard_text(&text);
+            horizon_std::web::set_clipboard_text(&text);
             Ok(())
         }
     }

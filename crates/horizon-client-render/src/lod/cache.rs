@@ -4,8 +4,8 @@
 //! or format is cleared on first use.
 use super::{Column, Span, Surface};
 use crate::fast_hash::FxHashMap;
-use horizon_platform::fs::{File, OpenOptions};
-use horizon_platform::sync::Mutex;
+use horizon_std::fs::{File, OpenOptions};
+use horizon_std::sync::Mutex;
 use horizon_world::registry::BlockStateId;
 use std::{
     io::{Read, Seek, SeekFrom, Write},
@@ -127,7 +127,7 @@ impl DiskCache {
             return None;
         }
         if create {
-            horizon_platform::fs::create_dir_all(&self.dir).ok()?;
+            horizon_std::fs::create_dir_all(&self.dir).ok()?;
         }
         let mut file = OpenOptions::new()
             .read(true)
@@ -183,7 +183,7 @@ pub fn build_key(states: usize, biomes: usize) -> u64 {
     env!("CARGO_PKG_VERSION").hash(&mut hasher);
     match option_env!("HORIZON_COMMIT") {
         Some(commit) => commit.hash(&mut hasher),
-        None => horizon_platform::env::current_exe()
+        None => horizon_std::env::current_exe()
             .and_then(|exe| exe.metadata()?.modified())
             .ok()
             .hash(&mut hasher),
@@ -311,19 +311,19 @@ mod tests {
 
     #[test]
     fn chunks_survive_reopening_and_a_torn_last_record() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-lod-cache-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-lod-cache-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let cache = DiskCache::new(dir.clone(), 7);
         assert!(cache.get(3, -40).is_none(), "nothing cached yet");
         cache.put(3, -40, &columns(0));
         cache.put(4, -40, &columns(1));
         let path = dir.join("r.0.-2.hlod");
-        let size = horizon_platform::fs::metadata(&path).unwrap().len();
+        let size = horizon_std::fs::metadata(&path).unwrap().len();
         // A chunk cached already is not appended again.
         cache.put(3, -40, &columns(2));
         assert_eq!(*cache.get(3, -40).unwrap(), columns(0));
-        assert_eq!(horizon_platform::fs::metadata(&path).unwrap().len(), size);
+        assert_eq!(horizon_std::fs::metadata(&path).unwrap().len(), size);
         drop(cache);
 
         let file = OpenOptions::new().write(true).open(&path).unwrap();
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(*cache.get(3, -40).unwrap(), columns(0));
         assert_eq!(*cache.get(4, -40).unwrap(), columns(1));
         assert_eq!(
-            horizon_platform::fs::metadata(&path).unwrap().len(),
+            horizon_std::fs::metadata(&path).unwrap().len(),
             size,
             "torn tail cut"
         );
@@ -345,7 +345,7 @@ mod tests {
         cache.put(5, -40, &columns(3));
         assert!(cache.get(4, -40).is_none());
         assert_eq!(*cache.get(5, -40).unwrap(), columns(3));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]

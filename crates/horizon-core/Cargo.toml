@@ -12,8 +12,8 @@ rng-trace = []
 
 [dependencies]
 libm = "=0.2.16"
-# std's locks, or ones the web build's page thread may take (horizon_platform::sync).
-horizon-platform = { path = "../horizon-platform" }
+# std's locks, or ones the web build's page thread may take (horizon_std::sync).
+horizon-std = { path = "../horizon-std" }
 
 [[bin]]
 name = "horizon-parity"

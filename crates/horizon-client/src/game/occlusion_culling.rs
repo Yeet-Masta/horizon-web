@@ -12,7 +12,7 @@ use horizon_client::{
     world::World,
 };
 use horizon_core::geometry::Aabb;
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::{
     cell::{Cell, RefCell},
     sync::{
@@ -101,7 +101,7 @@ enum CacheMissReason {
 #[derive(Clone, Copy)]
 struct TimingStart {
     wall: Instant,
-    thread_cpu: Option<horizon_platform::time::Duration>,
+    thread_cpu: Option<horizon_std::time::Duration>,
 }
 
 #[derive(Default)]
@@ -725,9 +725,9 @@ impl PlaneWorkerScratch {
 /// survive camera movement because they can only reduce culling.
 pub(super) struct AsyncOcclusionCuller {
     jobs: SyncSender<CullJob>,
-    _ray_thread: horizon_platform::thread::ThreadHandle<()>,
+    _ray_thread: horizon_std::thread::ThreadHandle<()>,
     results_rx: Receiver<CullResults>,
-    _thread: horizon_platform::thread::ThreadHandle<()>,
+    _thread: horizon_std::thread::ThreadHandle<()>,
     job_generation: Arc<AtomicU64>,
     snapshot: Option<(SnapshotKey, ChunkBounds, Arc<OcclusionSnapshot>)>,
     snapshot_epoch: u64,
@@ -809,20 +809,19 @@ impl AsyncOcclusionCuller {
         let job_generation = Arc::new(AtomicU64::new(0));
         let worker_generation = Arc::clone(&job_generation);
         let plane_generation = Arc::clone(&job_generation);
-        let thread =
-            horizon_platform::thread::spawn_thread("world-occlusion-culling", move || {
-                let mut scratch = PlaneWorkerScratch::default();
-                while let Ok(job) = plane_rx.recv() {
-                    if result_tx
-                        .send(cull_job(job, &plane_generation, &mut scratch))
-                        .is_err()
-                    {
-                        break;
-                    }
+        let thread = horizon_std::thread::spawn_thread("world-occlusion-culling", move || {
+            let mut scratch = PlaneWorkerScratch::default();
+            while let Ok(job) = plane_rx.recv() {
+                if result_tx
+                    .send(cull_job(job, &plane_generation, &mut scratch))
+                    .is_err()
+                {
+                    break;
                 }
-            })?;
+            }
+        })?;
         let ray_plane_tx = plane_tx.clone();
-        let ray_thread = horizon_platform::thread::spawn_thread("entity-ray-cull", move || {
+        let ray_thread = horizon_std::thread::spawn_thread("entity-ray-cull", move || {
             let mut scratch = RayWorkerScratch::default();
             while let Ok(mut job) = job_rx.recv() {
                 filter_rays(&mut job, &worker_generation, &mut scratch);
@@ -849,7 +848,7 @@ impl AsyncOcclusionCuller {
             stats: RefCell::new(AsyncCullingStats::default()),
             proof_validation_cache: RefCell::new(FrameProofValidationCache::default()),
             measure_bounds_timing: Cell::new(
-                horizon_platform::env::var("HORIZON_OCCLUSION_PROFILE").is_ok_and(|v| v == "1"),
+                horizon_std::env::var("HORIZON_OCCLUSION_PROFILE").is_ok_and(|v| v == "1"),
             ),
             query_cache_stamp: None,
             query_cache_camera_cell: None,

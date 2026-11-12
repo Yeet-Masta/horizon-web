@@ -14,7 +14,7 @@ use super::{
     },
 };
 use horizon_core::{density::Beardifier, position::ChunkPos};
-use horizon_platform::sync::{Mutex, RwLock};
+use horizon_std::sync::{Mutex, RwLock};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::{
@@ -991,7 +991,7 @@ mod tests {
                 (2, ring_searches(seed.wrapping_add(1), 20, 5, 40)),
             ]);
             let sets = [&preferred, &none, &preferred];
-            horizon_platform::thread::scope(|scope| {
+            horizon_std::thread::scope(|scope| {
                 for _ in 0..4 {
                     scope.spawn(|| work.help(|set| sets[set], &mut { biomes }));
                 }

@@ -4,7 +4,7 @@ use super::{Game, Screen};
 use horizon_client::held::Source;
 use horizon_client::{Result, items::ItemStack};
 use horizon_core::geometry::Vec3;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::sync::mpsc::Sender;
 use winit::{event::MouseButton, keyboard::KeyCode};
@@ -514,7 +514,7 @@ impl Game<'_> {
                 if millis > 5000 {
                     return Err("stall is limited to 5000 milliseconds".into());
                 }
-                horizon_platform::thread::sleep(Duration::from_millis(millis));
+                horizon_std::thread::sleep(Duration::from_millis(millis));
                 ok()
             }
             "simulation" => {

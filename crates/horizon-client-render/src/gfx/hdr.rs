@@ -50,9 +50,7 @@ const NAMES: [(Output, &str); 2] = [(Output::Pq, "pq"), (Output::ScRgb, "scrgb")
 pub fn output(caps: &wgpu::SurfaceCapabilities) -> Option<Output> {
     pick(
         caps,
-        horizon_platform::env::var("HORIZON_HDR_OUTPUT")
-            .ok()
-            .as_deref(),
+        horizon_std::env::var("HORIZON_HDR_OUTPUT").ok().as_deref(),
     )
 }
 fn pick(caps: &wgpu::SurfaceCapabilities, only: Option<&str>) -> Option<Output> {
@@ -65,11 +63,7 @@ fn pick(caps: &wgpu::SurfaceCapabilities, only: Option<&str>) -> Option<Output> 
 /// The HDR output an offscreen renderer (`--offscreen`) offers: it has no display to ask, so
 /// only the one `HORIZON_HDR_OUTPUT` names, for HDR screenshots without an HDR display.
 pub fn offscreen_output() -> Option<Output> {
-    named(
-        horizon_platform::env::var("HORIZON_HDR_OUTPUT")
-            .ok()
-            .as_deref(),
-    )
+    named(horizon_std::env::var("HORIZON_HDR_OUTPUT").ok().as_deref())
 }
 fn named(name: Option<&str>) -> Option<Output> {
     NAMES
@@ -317,7 +311,7 @@ impl Hdr {
             output,
             format,
             targets: None,
-            debug: horizon_platform::env::var_os("HORIZON_HDR_DEBUG").is_some_and(|v| v == "1"),
+            debug: horizon_std::env::var_os("HORIZON_HDR_DEBUG").is_some_and(|v| v == "1"),
             paper_white: 200.0,
             peak: 1000.0,
             black: 0.0,

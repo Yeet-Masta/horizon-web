@@ -5,7 +5,7 @@
 //! `UnderLiquidAmbientSoundInstance` loop), played through the sound engine.
 use crate::sound_engine::{AMBIENT, InstanceId, PLAYERS, SoundEngine, SoundInstance, Sounds};
 use horizon_core::random::{LegacyRandom, RandomSource};
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 

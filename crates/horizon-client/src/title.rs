@@ -8,7 +8,7 @@ use crate::{
     save::Level,
     text::{Text, format_translation},
 };
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use horizon_world::datafix::world_upgrader::{self, WorldUpgrader};
 use std::path::{Path, PathBuf};
 use std::{
@@ -58,9 +58,9 @@ fn recover_info(dir: &Path, old: bool, issue: Option<&crate::save::DatIssue>) ->
         return None;
     }
     let file = dir.join(if old { "level.dat_old" } else { "level.dat" });
-    let date = match horizon_platform::fs::metadata(file).and_then(|m| m.modified()) {
+    let date = match horizon_std::fs::metadata(file).and_then(|m| m.modified()) {
         Ok(time) => {
-            let date: chrono::DateTime<chrono::Local> = horizon_platform::time::to_std(time).into();
+            let date: chrono::DateTime<chrono::Local> = horizon_std::time::to_std(time).into();
             date.format("%d/%m/%Y, %H:%M").to_string()
         }
         Err(_) => lang::get_or("recover_world.state_entry.unknown", "unknown"),
@@ -196,7 +196,7 @@ pub struct WorldEntry {
     /// `GameType`: 0 survival, 1 creative, 2 adventure, 3 spectator.
     pub game_mode: i32,
     pub hardcore: bool,
-    pub modified: horizon_platform::time::SystemTime,
+    pub modified: horizon_std::time::SystemTime,
     pub commands: bool,
     pub version: String,
     /// `LevelSummary.isLocked`: another running copy has the world open.
@@ -235,7 +235,7 @@ impl WorldEntry {
         self.file_fixing || self.downgrade
     }
     /// `CorruptedLevelSummary`: named after its folder, nothing else known.
-    fn corrupted(folder: String, modified: horizon_platform::time::SystemTime) -> Self {
+    fn corrupted(folder: String, modified: horizon_std::time::SystemTime) -> Self {
         Self {
             name: folder.clone(),
             folder,
@@ -408,7 +408,7 @@ pub struct Title {
     pub saves: PathBuf,
     /// The prepared resource root: the flat preset list and block registry.
     resources: PathBuf,
-    pub started: horizon_platform::time::Instant,
+    pub started: horizon_std::time::Instant,
     search: String,
     search_focused: bool,
     /// The focused text field's cursor, selection and scroll.
@@ -448,13 +448,13 @@ pub struct Title {
     /// EditWorldScreen's and WorldOpenFlows' `SystemToast` and its slide.
     toast: Option<(crate::toasts::Slide, WorldToast)>,
     icons: RefCell<
-        std::collections::HashMap<PathBuf, (horizon_platform::time::SystemTime, Option<Vec<u8>>)>,
+        std::collections::HashMap<PathBuf, (horizon_std::time::SystemTime, Option<Vec<u8>>)>,
     >,
     splash: Option<String>,
     /// `SplashManager.getSplash` rolled the player's own name instead of a list entry.
     splash_you: bool,
     /// The saves listed for Home, re-read every couple of seconds.
-    recent: std::cell::RefCell<Option<(horizon_platform::time::Instant, Vec<WorldEntry>)>>,
+    recent: std::cell::RefCell<Option<(horizon_std::time::Instant, Vec<WorldEntry>)>>,
     /// WorldCreationGameRulesScreen, over Create New World while it is open.
     rules: RefCell<Option<RulesScreen>>,
     /// The onboarding screen has run out: the owner saves `onboardAccessibility` as false.
@@ -549,17 +549,17 @@ pub fn parse_seed(text: &str) -> Option<i64> {
     }))
 }
 pub fn list_worlds(saves: &Path) -> Vec<WorldEntry> {
-    let mut worlds: Vec<WorldEntry> = horizon_platform::fs::read_dir(saves)
+    let mut worlds: Vec<WorldEntry> = horizon_std::fs::read_dir(saves)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let path = e.path();
             // findLevelCandidates: a folder with a level.dat or a level.dat_old.
-            let file = |name: &str| horizon_platform::fs::metadata(path.join(name)).ok().filter(|m| m.is_file());
+            let file = |name: &str| horizon_std::fs::metadata(path.join(name)).ok().filter(|m| m.is_file());
             // getFileModificationTime: level.dat's, else level.dat_old's.
             let file = file("level.dat").or_else(|| file("level.dat_old"))?;
-            let modified = file.modified().unwrap_or(horizon_platform::time::UNIX_EPOCH);
+            let modified = file.modified().unwrap_or(horizon_std::time::UNIX_EPOCH);
             let folder = e.file_name().to_string_lossy().into_owned();
             // readLevelSummary reads level.dat alone; when it fails the world is
             // still listed, as a CorruptedLevelSummary named after its folder.
@@ -570,7 +570,7 @@ pub fn list_worlds(saves: &Path) -> Vec<WorldEntry> {
             };
             let data = root.get("Data")?;
             let modified = match data.get("LastPlayed") {
-                Some(horizon_world::nbt::Tag::Long(millis)) if *millis >= 0 => horizon_platform::time::UNIX_EPOCH + horizon_platform::time::Duration::from_millis(*millis as u64),
+                Some(horizon_world::nbt::Tag::Long(millis)) if *millis >= 0 => horizon_std::time::UNIX_EPOCH + horizon_std::time::Duration::from_millis(*millis as u64),
                 _ => modified,
             };
             Some(WorldEntry {
@@ -668,8 +668,7 @@ pub(crate) fn narration_text(key: &str, args: &[&str]) -> String {
 /// `WorldListEntry.getNarration`: "Selected: Selected <name>, last played:
 /// <date>, <info>" (the date as `Date.toString` writes it).
 fn world_narration(world: &WorldEntry) -> String {
-    let date: chrono::DateTime<chrono::Local> =
-        horizon_platform::time::to_std(world.modified).into();
+    let date: chrono::DateTime<chrono::Local> = horizon_std::time::to_std(world.modified).into();
     let date = date.format("%a %b %d %H:%M:%S %Z %Y").to_string();
     let info = world_info(world).plain();
     let entry = narration_text("narrator.select.world_info", &[&world.name, &date, &info]);
@@ -761,12 +760,11 @@ impl Title {
     pub fn new(saves: PathBuf, resources: &Path) -> Self {
         use chrono::Datelike;
         let today = crate::logging::local_now();
-        let splashes = horizon_platform::fs::read_to_string(
-            resources.join("assets/minecraft/texts/splashes.txt"),
-        )
-        .unwrap_or_default();
-        let seed = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let splashes =
+            horizon_std::fs::read_to_string(resources.join("assets/minecraft/texts/splashes.txt"))
+                .unwrap_or_default();
+        let seed = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos() as usize;
         let splash_you = rolls_user_splash(
@@ -775,7 +773,7 @@ impl Title {
             (today.month(), today.day()),
         );
         let mode = Mode::Main;
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         Self {
             mode,
             last_server: String::new(),
@@ -885,7 +883,7 @@ impl Title {
         if let Mode::Create { options, .. } = &self.mode
             && let Some(dir) = &options.pack_dir
         {
-            let _ = horizon_platform::fs::remove_dir_all(dir);
+            let _ = horizon_std::fs::remove_dir_all(dir);
         }
         if self.create_return_to_main {
             self.mode = Mode::Main;
@@ -1244,7 +1242,7 @@ impl Title {
     /// Polling is done once per rendered frame so filesystem work never blocks drawing.
     pub fn poll_backup(&mut self) {
         self.poll_realms();
-        self.poll_onboarding(horizon_platform::time::Instant::now());
+        self.poll_onboarding(horizon_std::time::Instant::now());
         self.poll_account();
         self.poll_optimize();
         if !self.backup_shown.get() {
@@ -1351,7 +1349,7 @@ impl Title {
             .into_iter()
             .find(|w| w.folder == folder)
             .unwrap_or_else(|| {
-                WorldEntry::corrupted(folder.to_owned(), horizon_platform::time::SystemTime::now())
+                WorldEntry::corrupted(folder.to_owned(), horizon_std::time::SystemTime::now())
             });
         let issues = [Some(issue), crate::save::level_dat_issue(&dir, true)];
         self.mode = Mode::Recover { world, issues };
@@ -1636,7 +1634,7 @@ impl Title {
         let (send, receive) = mpsc::channel();
         let saves = self.saves.clone();
         let folder = world.folder.clone();
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let _ = send.send(world_management::backup(&saves, &folder).map_err(|e| e.to_string()));
         });
         self.backup_shown.set(false);
@@ -1654,25 +1652,24 @@ impl Title {
     ) {
         let path = self.saves.join(&world.folder).join("icon.png");
         let mut icons = self.icons.borrow_mut();
-        let pixels = if let Ok(modified) =
-            horizon_platform::fs::metadata(&path).and_then(|m| m.modified())
-        {
-            let cached = icons
-                .entry(path.clone())
-                .or_insert_with(|| (horizon_platform::time::UNIX_EPOCH, None));
-            if cached.0 != modified {
-                *cached = (
-                    modified,
-                    crate::hud::decode(&path)
-                        .ok()
-                        .filter(|(w, h, _)| *w == 64 && *h == 64)
-                        .map(|(_, _, p)| p),
-                );
-            }
-            cached.1.as_ref()
-        } else {
-            None
-        };
+        let pixels =
+            if let Ok(modified) = horizon_std::fs::metadata(&path).and_then(|m| m.modified()) {
+                let cached = icons
+                    .entry(path.clone())
+                    .or_insert_with(|| (horizon_std::time::UNIX_EPOCH, None));
+                if cached.0 != modified {
+                    *cached = (
+                        modified,
+                        crate::hud::decode(&path)
+                            .ok()
+                            .filter(|(w, h, _)| *w == 64 && *h == 64)
+                            .map(|(_, _, p)| p),
+                    );
+                }
+                cached.1.as_ref()
+            } else {
+                None
+            };
         let sprite = format!("horizon/world-icon{slot}");
         if let Some(pixels) = pixels
             && let Some(rect) = atlas.sprites.get(&sprite)
@@ -1704,7 +1701,7 @@ impl Title {
             Some((at, worlds)) if at.elapsed().as_secs() < 2 => worlds.clone(),
             _ => {
                 let worlds = list_worlds(&self.saves);
-                *recent = Some((horizon_platform::time::Instant::now(), worlds.clone()));
+                *recent = Some((horizon_std::time::Instant::now(), worlds.clone()));
                 worlds
             }
         }
@@ -2700,7 +2697,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
                     }
                     batch.text(atlas, &world.name, x + 35.0, y + 1.0, u32::MAX, true);
                     let date: chrono::DateTime<chrono::Local> =
-                        horizon_platform::time::to_std(world.modified).into();
+                        horizon_std::time::to_std(world.modified).into();
                     let line = format!("{} ({})", world.folder, date.format("%d/%m/%Y, %H:%M"));
                     batch.text(
                         atlas,
@@ -4620,7 +4617,7 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
         };
         if !STARTED.swap(true, Ordering::Relaxed) {
             let session = session.clone();
-            let spawned = horizon_platform::thread::Builder::new()
+            let spawned = horizon_std::thread::Builder::new()
                 .name("Account status".into())
                 .spawn(move || {
                     let _ = STATUS.set(crate::auth::fetch_account_status(&session));

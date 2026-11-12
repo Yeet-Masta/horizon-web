@@ -22,7 +22,7 @@ pub fn load(root: &Path, sprites: &mut Sprites) {
     names.sort();
     for name in names {
         let file = crate::atlas_sources::texture_path(root, &name, "textures");
-        if horizon_platform::fs::metadata(file).is_ok_and(|m| m.len() <= 1 << 20) {
+        if horizon_std::fs::metadata(file).is_ok_and(|m| m.len() <= 1 << 20) {
             let _ = sprites.insert(root, &name);
         }
     }
@@ -77,7 +77,7 @@ pub fn load_optifine(root: &Path, sprites: &mut Sprites) -> Vec<(String, String)
                 (overlay, file)
             }
         };
-        if !horizon_platform::fs::metadata(&file).is_ok_and(|m| m.is_file()) {
+        if !horizon_std::fs::metadata(&file).is_ok_and(|m| m.is_file()) {
             continue;
         }
         if pairs.len() == MAX - NATIVE {
@@ -87,7 +87,7 @@ pub fn load_optifine(root: &Path, sprites: &mut Sprites) -> Vec<(String, String)
             );
             break;
         }
-        if horizon_platform::fs::metadata(&file).is_ok_and(|m| m.len() > 1 << 20) {
+        if horizon_std::fs::metadata(&file).is_ok_and(|m| m.len() > 1 << 20) {
             log::warn!("Horizon: emissive overlay {overlay} is over 1 MiB, skipped");
             continue;
         }
@@ -149,8 +149,8 @@ mod tests {
     /// A 16x16 image of one colour, `shade` its red (images of different shades never share a
     /// sprite layer).
     fn png(path: &Path, shade: u8) {
-        horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let file = std::io::BufWriter::new(horizon_platform::fs::File::create(path).unwrap());
+        horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::io::BufWriter::new(horizon_std::fs::File::create(path).unwrap());
         let mut encoder = png::Encoder::new(file, 16, 16);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
@@ -161,9 +161,9 @@ mod tests {
 
     #[test]
     fn optifine_overlays_pair_with_their_loaded_blocks() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-block-emissive-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let block = root.join("assets/minecraft/textures/block");
         let names = [
             "stone",
@@ -182,7 +182,7 @@ mod tests {
         png(&block.join("diorite.png"), 6 * 20);
         png(&block.join("diorite_e.png"), 200);
         // A broken overlay: skipped, not drawn as the missing texture.
-        horizon_platform::fs::write(block.join("granite_e.png"), b"not a png").unwrap();
+        horizon_std::fs::write(block.join("granite_e.png"), b"not a png").unwrap();
         png(&root.join("assets/minecraft/textures/item/stick.png"), 210);
         png(
             &root.join("assets/minecraft/textures/item/stick_e.png"),
@@ -216,8 +216,8 @@ mod tests {
         assert!(!sprites.layers.contains_key("minecraft:block/granite_e"));
         // The pack's own suffix.
         let props = root.join("assets/minecraft/optifine/emissive.properties");
-        horizon_platform::fs::create_dir_all(props.parent().unwrap()).unwrap();
-        horizon_platform::fs::write(&props, "suffix.emissive=_glow").unwrap();
+        horizon_std::fs::create_dir_all(props.parent().unwrap()).unwrap();
+        horizon_std::fs::write(&props, "suffix.emissive=_glow").unwrap();
         // Connected-texture tiles pair with the overlay beside them.
         let tiles = root.join("assets/minecraft/optifine/ctm/lamp");
         png(&tiles.join("0.png"), 230);
@@ -253,7 +253,7 @@ mod tests {
                 ),
             ]
         );
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

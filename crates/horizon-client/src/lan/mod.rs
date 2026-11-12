@@ -37,15 +37,15 @@ pub mod tracking;
 pub mod waypoints;
 
 pub use conn::{Holding, PlayerSender, flush_all};
-use horizon_platform::sync::Mutex;
-use horizon_platform::{
-    thread::JoinHandle,
-    time::{Duration, Instant},
-};
 use horizon_protocol::packets::play;
 use horizon_protocol::{
     GAME_VERSION, PROTOCOL_VERSION, crypto::uuid_string, packets::configuration::ClientInformation,
     text::translatable,
+};
+use horizon_std::sync::Mutex;
+use horizon_std::{
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 use std::{
     collections::HashMap,
@@ -193,7 +193,7 @@ pub struct NetConfig {
     /// `[transfer]` on: the players a proxy said would arrive
     /// (`arrivals::Transfers`), shared with the hub. A login uses its
     /// expectation up as it starts, once the bans and the whitelist let it in.
-    pub arrivals: Option<Arc<horizon_platform::sync::Mutex<arrivals::Expectations>>>,
+    pub arrivals: Option<Arc<horizon_std::sync::Mutex<arrivals::Expectations>>>,
     pub log: Option<NetLog>,
     /// server.properties `resource-pack`: offered to every player during
     /// configuration (a dedicated server's; MinecraftServer.getServerResourcePack).
@@ -251,8 +251,8 @@ impl NetConfig {
             accepts_transfers: false,
             // The web build has no sockets to listen on: friends' browsers
             // come in through Play with Friends (`Lan::accept_web`).
-            announce: !horizon_platform::WEB,
-            listen: !horizon_platform::WEB,
+            announce: !horizon_std::WEB,
+            listen: !horizon_std::WEB,
             bypasses_limit: None,
             gate: None,
             online: None,
@@ -286,7 +286,7 @@ impl OwnerProfile {
         fetch: impl FnOnce() -> Vec<horizon_protocol::packets::login::Property> + Send + 'static,
     ) -> Self {
         let (send, receive) = channel();
-        let _ = horizon_platform::thread::Builder::new()
+        let _ = horizon_std::thread::Builder::new()
             .name("Profile fetcher".into())
             .spawn(move || {
                 let _ = send.send(fetch());
@@ -330,7 +330,7 @@ impl SecureChat {
         enforce: bool,
         fetch: impl FnOnce() -> Vec<horizon_protocol::rsa::RsaPublicKey> + Send + 'static,
     ) -> Self {
-        let handle = horizon_platform::thread::Builder::new()
+        let handle = horizon_std::thread::Builder::new()
             .name("Services keys".into())
             .spawn(fetch)
             .ok();
@@ -420,12 +420,12 @@ impl Shared {
         }
         if self.is_online(uuid) {
             let _ = self.events.send(NetEvent::Duplicate(uuid));
-            let deadline = horizon_platform::time::Instant::now() + Duration::from_secs(30);
+            let deadline = horizon_std::time::Instant::now() + Duration::from_secs(30);
             while self.is_online(uuid) {
-                if horizon_platform::time::Instant::now() > deadline {
+                if horizon_std::time::Instant::now() > deadline {
                     return Some(translatable("multiplayer.disconnect.slow_login", &[]));
                 }
-                horizon_platform::thread::sleep(Duration::from_millis(10));
+                horizon_std::thread::sleep(Duration::from_millis(10));
             }
         }
         self.online.lock().unwrap().push((uuid, name.to_owned()));
@@ -672,7 +672,7 @@ impl Lan {
         let port = listener.local_addr()?.port();
         let stop = Arc::new(AtomicBool::new(false));
         let (accept_shared, accept_stop) = (self.shared.clone(), stop.clone());
-        let thread = horizon_platform::thread::Builder::new()
+        let thread = horizon_std::thread::Builder::new()
             .name("horizon-lan-accept".into())
             .spawn(move || accept_loop(listener, accept_shared, &accept_stop))?;
         self._pinger = if announce && !test_loopback() {
@@ -712,9 +712,9 @@ impl Lan {
     /// Worker on the web build).
     pub fn serve_local(&self, server: horizon_protocol::connection::Pipe) -> io::Result<()> {
         let shared = self.shared.clone();
-        horizon_platform::thread::spawn_worker("horizon-local-conn", move || {
+        horizon_std::thread::spawn_worker("horizon-local-conn", move || {
             if let Err(e) = conn::serve_local(server, shared)
-                && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+                && horizon_std::env::var_os("HORIZON_NET_DEBUG").is_some()
             {
                 log::warn!("[lan] local: {e}");
             }
@@ -724,7 +724,7 @@ impl Lan {
     /// one (the web build's Play with Friends). It joins from the loopback
     /// address, as friends through a tunnel do.
     #[cfg(target_family = "wasm")]
-    pub fn accept_web(&self, socket: horizon_platform::web::socket::Socket) {
+    pub fn accept_web(&self, socket: horizon_std::web::socket::Socket) {
         self.door().accept_web(socket);
     }
     /// [`Self::accept_web`] for another thread: the window's, whose friends'
@@ -937,7 +937,7 @@ pub struct Door(Arc<Shared>);
 #[cfg(target_family = "wasm")]
 impl Door {
     /// Its data channel stays beside the page (conn.rs's `serve_web`).
-    pub fn accept_web(&self, socket: horizon_platform::web::socket::Socket) {
+    pub fn accept_web(&self, socket: horizon_std::web::socket::Socket) {
         let address = SocketAddr::from(([127, 0, 0, 1], 0));
         if let Err(e) = conn::serve_web(socket, address, self.0.clone()) {
             log::warn!("[lan] friend: {e}");
@@ -959,7 +959,7 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: &AtomicBool) {
                     continue;
                 };
                 shared.wait(&counted, &stream);
-                let _ = horizon_platform::thread::Builder::new()
+                let _ = horizon_std::thread::Builder::new()
                     .name("horizon-lan-conn".into())
                     .spawn(move || {
                         WAITING.set(Some(counted.2));
@@ -967,9 +967,9 @@ fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: &AtomicBool) {
                     });
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                horizon_platform::thread::sleep(Duration::from_millis(25));
+                horizon_std::thread::sleep(Duration::from_millis(25));
             }
-            Err(_) => horizon_platform::thread::sleep(Duration::from_millis(100)),
+            Err(_) => horizon_std::thread::sleep(Duration::from_millis(100)),
         }
     }
 }
@@ -977,7 +977,7 @@ fn handle(stream: TcpStream, addr: SocketAddr, counted: Counted) {
     let _ = stream.set_nonblocking(false);
     let shared = counted.0.clone();
     if let Err(e) = conn::serve(stream, addr, shared, counted)
-        && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+        && horizon_std::env::var_os("HORIZON_NET_DEBUG").is_some()
     {
         log::warn!("[lan] {addr}: {e}");
     }
@@ -997,7 +997,7 @@ pub fn available_port() -> u16 {
 
 /// Same-machine harnesses opt in; real LAN runs keep the normal network interfaces.
 pub(super) fn test_loopback() -> bool {
-    horizon_platform::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1")
+    horizon_std::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1")
 }
 
 #[cfg(test)]
@@ -1014,7 +1014,7 @@ mod tests {
         assert!(
             std::net::TcpStream::connect_timeout(
                 &std::net::SocketAddr::new(other, lan.port),
-                horizon_platform::time::Duration::from_millis(500),
+                horizon_std::time::Duration::from_millis(500),
             )
             .is_err()
         );
@@ -1022,7 +1022,7 @@ mod tests {
     }
     use super::conn::MEMORY_ADDRESS;
     use super::*;
-    use horizon_platform::time::Instant;
+    use horizon_std::time::Instant;
     use std::io::Read;
 
     /// Sockets that never say a word each hold a connection thread until their read times out: past
@@ -1046,7 +1046,7 @@ mod tests {
                 Instant::now() < deadline,
                 "the held sockets were not all accepted"
             );
-            horizon_platform::thread::sleep(Duration::from_millis(10));
+            horizon_std::thread::sleep(Duration::from_millis(10));
         }
         let mut late = TcpStream::connect(address).unwrap();
         late.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -1068,7 +1068,7 @@ mod tests {
                 Instant::now() < deadline,
                 "the closed sockets' threads did not end"
             );
-            horizon_platform::thread::sleep(Duration::from_millis(10));
+            horizon_std::thread::sleep(Duration::from_millis(10));
         }
     }
 

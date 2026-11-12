@@ -78,7 +78,7 @@ use super::{
 };
 use crate::{graphics::GpuCullingOffer, mesher::Sides};
 use glam::{DVec3, DVec4, Mat4, Vec3};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
@@ -933,8 +933,8 @@ impl BoxTest {
             })
         });
         // The web build can't wait for the scopes (its page's thread may not): no error.
-        let internal = horizon_platform::block_on_or(internal.pop(), None);
-        if let Some(e) = internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             log::warn!("Horizon renderer: GPU culling's occlusion test unavailable ({e})");
             return None;
         }
@@ -1072,8 +1072,8 @@ impl GpuCulling {
                 cache: None,
             })
         });
-        let internal = horizon_platform::block_on_or(internal.pop(), None);
-        if let Some(e) = internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             log::warn!("Horizon renderer: GPU culling unavailable ({e})");
             return None;
         }

@@ -5,7 +5,7 @@
 //! thread's CPU time inside it, so a span that waited (for a lock, the GPU
 //! or a core on a busy machine) shows apart from one that worked. Costs two
 //! clock reads per span when enabled and a relaxed load otherwise.
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::{
     cell::{Cell, RefCell},
     sync::atomic::{AtomicBool, Ordering},
@@ -278,8 +278,8 @@ pub fn describe(spans: &[Span]) -> String {
 /// Perfetto opens it). Times are microseconds since the process started. Off,
 /// a step costs one relaxed load.
 pub mod startup {
-    use horizon_platform::sync::Mutex;
-    use horizon_platform::time::Instant;
+    use horizon_std::sync::Mutex;
+    use horizon_std::time::Instant;
     use std::{
         io::Write as _,
         sync::{
@@ -289,7 +289,7 @@ pub mod startup {
     };
 
     static ON: AtomicBool = AtomicBool::new(false);
-    static SINK: OnceLock<Option<Mutex<horizon_platform::fs::File>>> = OnceLock::new();
+    static SINK: OnceLock<Option<Mutex<horizon_std::fs::File>>> = OnceLock::new();
     static ORIGIN: OnceLock<Instant> = OnceLock::new();
     static NEXT_THREAD: AtomicU32 = AtomicU32::new(1);
     thread_local! {
@@ -302,10 +302,8 @@ pub mod startup {
     pub fn init(origin: Instant) {
         ORIGIN.get_or_init(|| origin);
         let sink = SINK.get_or_init(|| {
-            let path = horizon_platform::env::var_os("HORIZON_STARTUP_TRACE")?;
-            horizon_platform::fs::File::create(&path)
-                .ok()
-                .map(Mutex::new)
+            let path = horizon_std::env::var_os("HORIZON_STARTUP_TRACE")?;
+            horizon_std::fs::File::create(&path).ok().map(Mutex::new)
         });
         ON.store(sink.is_some(), Ordering::Relaxed);
     }
@@ -329,7 +327,7 @@ pub mod startup {
         let tid = THREAD.with(|id| {
             if id.get() == 0 {
                 id.set(NEXT_THREAD.fetch_add(1, Ordering::Relaxed));
-                let name = horizon_platform::thread::current()
+                let name = horizon_std::thread::current()
                     .name()
                     .unwrap_or("unnamed")
                     .replace(['"', '\\'], "_");
@@ -465,7 +463,7 @@ pub mod startup {
 #[cfg(test)]
 mod tests {
     use super::Span;
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
     use std::sync::MutexGuard;
 
     /// Spans on for every thread ([`super::enable`]) is process-wide: a test that turns them on
@@ -553,7 +551,7 @@ mod tests {
     /// spans it ran inside, after them.
     #[test]
     fn a_recording_thread_keeps_its_spans_and_their_nesting() {
-        horizon_platform::thread::spawn(|| {
+        horizon_std::thread::spawn(|| {
             super::record_here(true);
             super::time("tick", || {
                 super::time("tick_mobs", || ());
@@ -589,7 +587,7 @@ mod tests {
             super::time("open_maps", || ());
             2
         }
-        horizon_platform::thread::spawn(|| {
+        horizon_std::thread::spawn(|| {
             super::record_here(true);
             assert_eq!(step(true), 1);
             assert_eq!(step(false), 2);
@@ -654,7 +652,7 @@ mod tests {
         off.lap("unseen");
         super::enable(true);
         let mut laps = super::laps();
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(2));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(2));
         laps.lap("first");
         laps.lap("second");
         super::enable(false);
@@ -671,12 +669,12 @@ mod tests {
     #[test]
     fn thread_cpu_counts_work_not_sleep() {
         let start = super::thread_cpu().unwrap();
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(50));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(50));
         let slept = super::thread_cpu().unwrap() - start;
         // Busy until the clock shows 10 ms of work (a loaded machine gives
         // the thread less than its wall time).
         let mut x = 0u64;
-        let busy = horizon_platform::time::Instant::now();
+        let busy = horizon_std::time::Instant::now();
         let worked = loop {
             x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
             let worked = super::thread_cpu().unwrap() - start - slept;

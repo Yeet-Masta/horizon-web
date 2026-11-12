@@ -4,7 +4,7 @@ use crate::{
     loot::PackOverlay,
     worldgen::tags::{TagDefinitions, identifier},
 };
-use horizon_platform::fs::{self, PathExt as _};
+use horizon_std::fs::{self, PathExt as _};
 use serde_json::Value;
 use std::{collections::BTreeMap, io, path::Path};
 

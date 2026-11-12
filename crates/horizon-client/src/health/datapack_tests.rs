@@ -7,8 +7,8 @@ fn datapack_damage_new_world_drops_a_removed_resource_root_definition() {
     let prepared = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../.local/horizon-client")
         .join(horizon_core::VANILLA_VERSION);
-    let root = horizon_platform::env::temp_dir()
-        .join(format!("horizon-damage-root-{}", std::process::id()));
+    let root =
+        horizon_std::env::temp_dir().join(format!("horizon-damage-root-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(root.join("data/demo/damage_type")).unwrap();
     for file in [
@@ -50,7 +50,7 @@ fn datapack_damage_initial_snapshot_uses_the_prepared_worlds_features() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../.local/horizon-client")
         .join(horizon_core::VANILLA_VERSION);
-    let world = horizon_platform::env::temp_dir()
+    let world = horizon_std::env::temp_dir()
         .join(format!("horizon-damage-features-{}", std::process::id()));
     let pack = world.join("datapacks/feature_damage");
     let _ = fs::remove_dir_all(&world);

@@ -205,8 +205,8 @@ impl Post {
                 cache: None,
             });
             // The web build's device answers later: no error is taken as none.
-            let internal = horizon_platform::block_on_or(internal.pop(), None);
-            match internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+            let internal = horizon_std::block_on_or(internal.pop(), None);
+            match internal.or(horizon_std::block_on_or(validation.pop(), None)) {
                 None => {
                     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("Horizon TAA"),
@@ -340,8 +340,8 @@ impl Post {
             let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
             let target = self.build_target(device, size, history_size);
-            let error = horizon_platform::block_on_or(memory.pop(), None)
-                .or(horizon_platform::block_on_or(validation.pop(), None));
+            let error = horizon_std::block_on_or(memory.pop(), None)
+                .or(horizon_std::block_on_or(validation.pop(), None));
             if error.is_none() {
                 // New textures: no history yet.
                 self.taa_this_frame.jitter[2] = 1.0;

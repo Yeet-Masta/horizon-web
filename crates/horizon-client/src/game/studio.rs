@@ -121,7 +121,7 @@ impl Game<'_> {
             return Ok(json!({ "ok": false, "error": "recording already active" }));
         }
         let recordings = PathBuf::from("recordings");
-        horizon_platform::fs::create_dir_all(&recordings)?;
+        horizon_std::fs::create_dir_all(&recordings)?;
         let path = recordings.join(generate_recording_filename(name));
         let is_singleplayer =
             remote.session.address.is_empty() || remote.session.address == "local";

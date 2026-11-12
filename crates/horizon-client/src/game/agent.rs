@@ -21,7 +21,7 @@ use horizon_client::{
     widgets,
 };
 use horizon_core::geometry::Vec3;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use horizon_world::registry::BlockStateId;
 use navigation::{Cell, Node, Plan, Progress};
 use serde_json::{Value, json};

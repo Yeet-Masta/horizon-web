@@ -7,7 +7,7 @@ rust-version = "1.85"
 description = "Horizon's own shader packs (WGSL, docs/shaders.md): the format, the stages, the check, and the horizon-shader tool"
 
 [dependencies]
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 bytemuck = { version = "1.24", features = ["derive"] }
 # Parses and validates a pack's WGSL, and translates it as wgpu does for Vulkan, Metal and DirectX 12.
 png = "0.18"

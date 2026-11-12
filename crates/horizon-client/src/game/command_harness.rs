@@ -13,7 +13,7 @@
 //! blocks by dimension, block and gravity.
 use super::Game;
 use horizon_client::{Result, text::Text};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -49,7 +49,7 @@ impl Game<'_> {
     /// boundary through Integrated::stop, including script and save failures.
     pub(super) fn wait_command_harness(&mut self) -> Result<()> {
         let server = self.integrated.take().ok_or("command harness: no server")?;
-        let client_config = horizon_platform::env::var_os("HORIZON_HARNESS_CLIENT_CONFIG");
+        let client_config = horizon_std::env::var_os("HORIZON_HARNESS_CLIENT_CONFIG");
         let mut wrote_config = false;
         while !server.stopped() {
             self.poll_stationary_client()?;
@@ -57,7 +57,7 @@ impl Game<'_> {
                 && let Some(path) = &client_config
                 && let Some(remote) = self.remote.as_ref().filter(|r| r.logged_in && r.joined)
             {
-                horizon_platform::fs::write(
+                horizon_std::fs::write(
                     path,
                     json!({
                         "view_distance": remote.view_distance,
@@ -70,7 +70,7 @@ impl Game<'_> {
                 )?;
                 wrote_config = true;
             }
-            horizon_platform::thread::sleep(Duration::from_millis(2));
+            horizon_std::thread::sleep(Duration::from_millis(2));
         }
         server.stop()
     }
@@ -184,7 +184,7 @@ impl Game<'_> {
                 );
                 // Finish requested terrain before inspecting it, so worker
                 // timing cannot change which command positions are loaded.
-                if (horizon_platform::env::var_os("HORIZON_HARNESS_TERRAIN_ONLY").is_some()
+                if (horizon_std::env::var_os("HORIZON_HARNESS_TERRAIN_ONLY").is_some()
                     || !self.streaming.busy())
                     && required.and_then(Value::as_array).map_or_else(
                         || {
@@ -209,7 +209,7 @@ impl Game<'_> {
                     return Ok(());
                 }
             }
-            if horizon_platform::env::var_os("HORIZON_HARNESS_DEBUG").is_some() {
+            if horizon_std::env::var_os("HORIZON_HARNESS_DEBUG").is_some() {
                 eprintln!(
                     "settle: player {:?} center {:?} chunks {} pending {}",
                     self.player.as_ref().map(|p| p.position),
@@ -221,13 +221,13 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("command harness: terrain did not load".into());
             }
-            horizon_platform::thread::sleep(Duration::from_millis(2));
+            horizon_std::thread::sleep(Duration::from_millis(2));
         }
     }
     pub(super) fn run_command_harness(&mut self, script: &Path, output: &Path) -> Result<()> {
         let deadline = Instant::now()
             + Duration::from_secs(
-                horizon_platform::env::var("HORIZON_HARNESS_TIMEOUT")
+                horizon_std::env::var("HORIZON_HARNESS_TIMEOUT")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(600),
@@ -242,23 +242,23 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("command harness: owner did not connect".into());
             }
-            horizon_platform::thread::sleep(Duration::from_millis(2));
+            horizon_std::thread::sleep(Duration::from_millis(2));
         }
         self.harness_owner(|g| g.harness_settle(deadline, None))?;
-        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_TICK_REFERENCE") {
+        if let Some(path) = horizon_std::env::var_os("HORIZON_FISHING_TICK_REFERENCE") {
             let rows = self.harness_owner(|g| Ok(g.fishing_tick_reference()))?;
-            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+            horizon_std::fs::write(path, serde_json::to_vec(&rows)?)?;
         }
-        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_BOBBING_REFERENCE") {
+        if let Some(path) = horizon_std::env::var_os("HORIZON_FISHING_BOBBING_REFERENCE") {
             let rows = self.harness_owner(|g| Ok(g.fishing_bobbing_reference()))?;
-            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+            horizon_std::fs::write(path, serde_json::to_vec(&rows)?)?;
         }
-        if let Some(path) = horizon_platform::env::var_os("HORIZON_FISHING_FALLBACK_REFERENCE") {
+        if let Some(path) = horizon_std::env::var_os("HORIZON_FISHING_FALLBACK_REFERENCE") {
             let rows = self.harness_owner(|g| Ok(g.fishing_fallback_reference()))?;
-            horizon_platform::fs::write(path, serde_json::to_vec(&rows)?)?;
+            horizon_std::fs::write(path, serde_json::to_vec(&rows)?)?;
         }
         let mut out = String::new();
-        for line in horizon_platform::fs::read_to_string(script)?.lines() {
+        for line in horizon_std::fs::read_to_string(script)?.lines() {
             if line.trim().is_empty() {
                 continue;
             }
@@ -419,7 +419,7 @@ impl Game<'_> {
                             if Instant::now() > deadline {
                                 return Err("initial target readiness timed out".into());
                             }
-                            horizon_platform::thread::sleep(Duration::from_millis(2));
+                            horizon_std::thread::sleep(Duration::from_millis(2));
                         }
                         Ok(())
                     })?;
@@ -503,11 +503,11 @@ impl Game<'_> {
                         while self.profile_fetches_pending()
                             && asked.elapsed() < Duration::from_secs(10)
                         {
-                            horizon_platform::thread::sleep(Duration::from_millis(1));
+                            horizon_std::thread::sleep(Duration::from_millis(1));
                         }
                         self.tick_server(false)?;
                         if let Some(ms) = op["pace_ms"].as_u64() {
-                            horizon_platform::thread::sleep(
+                            horizon_std::thread::sleep(
                                 Duration::from_millis(ms * (i + 1))
                                     .saturating_sub(paced_start.elapsed()),
                             );
@@ -538,7 +538,7 @@ impl Game<'_> {
                         if Instant::now() > deadline {
                             return Err("command harness: portal did not arrive".into());
                         }
-                        horizon_platform::thread::sleep(Duration::from_millis(2));
+                        horizon_std::thread::sleep(Duration::from_millis(2));
                     }
                     self.harness_owner(|g| g.harness_settle(deadline, op.get("required_chunks")))?;
                 }
@@ -842,7 +842,7 @@ impl Game<'_> {
                 other => return Err(format!("command harness: unknown op {other}").into()),
             }
         }
-        horizon_platform::fs::write(output, out)?;
+        horizon_std::fs::write(output, out)?;
         Ok(())
     }
 }

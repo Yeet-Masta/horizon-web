@@ -1946,7 +1946,7 @@ mod allay_owner_damage_tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

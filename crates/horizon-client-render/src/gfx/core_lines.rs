@@ -139,8 +139,8 @@ impl CoreLines {
         };
         let lines = pipeline("Resource pack block outline", true);
         let secondary = pipeline("Resource pack block outline secondary", false);
-        let internal = horizon_platform::block_on_or(internal.pop(), None);
-        if let Some(e) = internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             log::warn!("the resource pack's rendertype_lines shader is not used: {e}");
             return None;
         }
@@ -450,14 +450,14 @@ mod tests {
     /// fragment shader.
     #[test]
     fn vanillas_lines_vertex_shader_takes_a_packs_fragment_shader() {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../../.local/horizon-client")
                     .join(horizon_core::VANILLA_VERSION)
             });
-        let Ok(vertex) = horizon_platform::fs::read_to_string(
+        let Ok(vertex) = horizon_std::fs::read_to_string(
             root.join("assets/minecraft/shaders/core/rendertype_lines.vsh"),
         ) else {
             eprintln!(
@@ -468,8 +468,7 @@ mod tests {
         };
         let include = |id: &str| {
             let (namespace, path) = id.split_once(':')?;
-            horizon_platform::fs::read_to_string(root.join(format!("assets/{namespace}/{path}")))
-                .ok()
+            horizon_std::fs::read_to_string(root.join(format!("assets/{namespace}/{path}"))).ok()
         };
         let program = horizon_shaders::translate_core(&vertex, RGB_FSH, &[], &include, &GLUE)
             .expect("vanilla's vertex shader translates");

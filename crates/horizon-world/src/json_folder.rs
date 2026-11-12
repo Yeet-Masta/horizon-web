@@ -5,8 +5,8 @@
 //! costs. The first reader lists and reads the folder; later readers share
 //! those bytes for as long as one of them holds the [`Folder`], then it is
 //! gone (nothing is kept past the load).
-use horizon_platform::fs;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::sync::Mutex;
 use std::{
     io,
     path::{Path, PathBuf},
@@ -148,7 +148,7 @@ mod tests {
     use super::*;
 
     fn folder(tag: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-json-folder-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("brewing")).unwrap();
@@ -179,7 +179,7 @@ mod tests {
     /// from it: the same files, names and order as the folder's.
     #[test]
     fn a_prepared_root_reads_the_folder_from_its_data_file() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-json-folder-root-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let recipes = root.join("data/minecraft/recipe");
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn a_folder_that_cannot_be_listed_is_an_error() {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-json-folder-none-{}", std::process::id()));
         assert!(read(&dir).is_err());
     }

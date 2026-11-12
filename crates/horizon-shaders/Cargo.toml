@@ -7,7 +7,7 @@ rust-version = "1.85"
 description = "Shader packs (the shaders/ folder format): reading packs, their .properties and .lang files, and later their GLSL"
 
 [dependencies]
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 horizon-core = { path = "../horizon-core" }
 naga = { version = "30.0.1", features = ["glsl-in", "wgsl-in"] }
 half = "2"

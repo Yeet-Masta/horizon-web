@@ -1217,16 +1217,15 @@ mod wolf_live_anger_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn live_wolf_anger_writes_use_the_level_clock_and_keep_bee_state() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -1356,16 +1355,15 @@ mod loot_table_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn data_commands_on_an_unopened_loaded_chest_survive_a_save_and_reload() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

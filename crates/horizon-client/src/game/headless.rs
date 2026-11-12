@@ -8,7 +8,7 @@
 
 use super::Game;
 use super::event_loop::EventLoopCtl;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::cell::Cell;
 use winit::event_loop::ControlFlow;
 
@@ -60,7 +60,7 @@ impl Game<'_> {
                 .next_step(started)
                 .checked_duration_since(Instant::now())
             {
-                horizon_platform::thread::sleep(wait);
+                horizon_std::thread::sleep(wait);
             }
         }
         self.shut_down();

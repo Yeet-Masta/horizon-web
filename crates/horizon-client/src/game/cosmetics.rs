@@ -18,7 +18,7 @@ use horizon_cosmetics::follow::Follow;
 use horizon_cosmetics::prefs::{self, Others};
 use horizon_cosmetics::trail::{Budget, Emitter};
 use horizon_cosmetics::{Item, Slot};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
@@ -83,12 +83,12 @@ struct EmoteOut {
     again: Option<Instant>,
     sending: Option<Receiver<Result<(), String>>>,
     retry: Option<(Instant, Duration)>,
-    kept: Arc<horizon_platform::sync::Mutex<horizon_cosmetics::account::Kept>>,
+    kept: Arc<horizon_std::sync::Mutex<horizon_cosmetics::account::Kept>>,
 }
 
 /// Tells the service the player plays `emote` (`None`: stopped).
 fn send_emote(
-    kept: &horizon_platform::sync::Mutex<horizon_cosmetics::account::Kept>,
+    kept: &horizon_std::sync::Mutex<horizon_cosmetics::account::Kept>,
     emote: Option<&str>,
 ) -> Result<(), String> {
     let Some(session) = horizon_client::auth::current() else {
@@ -108,7 +108,7 @@ fn send_emote(
 
 /// The emotes the signed-in account owns, for the wheel (none signed in: none).
 fn load_owned_emotes(
-    kept: &horizon_platform::sync::Mutex<horizon_cosmetics::account::Kept>,
+    kept: &horizon_std::sync::Mutex<horizon_cosmetics::account::Kept>,
 ) -> Result<Vec<horizon_cosmetics::account::OwnedEmote>, String> {
     let Some(session) = horizon_client::auth::current() else {
         return Ok(Vec::new());
@@ -198,7 +198,7 @@ fn account() -> Option<(
 )> {
     let session = horizon_client::auth::current()?;
     let uuid = format!("{:032x}", session.uuid);
-    Some((session, uuid, horizon_platform::env::current_dir().ok()?))
+    Some((session, uuid, horizon_std::env::current_dir().ok()?))
 }
 
 /// Asks the service whether the signed-in account owns a cosmetic and keeps the answer in the
@@ -217,7 +217,7 @@ fn check_owner() -> Result<bool, String> {
 }
 
 fn http() -> horizon_cosmetics::Http {
-    let api = horizon_platform::env::var("HORIZON_COSMETICS_API")
+    let api = horizon_std::env::var("HORIZON_COSMETICS_API")
         .unwrap_or_else(|_| horizon_cosmetics::API.into());
     horizon_cosmetics::Http::new(&api, &format!("Horizon/{}", env!("CARGO_PKG_VERSION")))
 }
@@ -265,7 +265,7 @@ impl AccountSync {
         self.again = None;
         let (tx, rx) = channel();
         self.sending = Some(rx);
-        horizon_platform::thread::spawn_worker("Cosmetics account", move || {
+        horizon_std::thread::spawn_worker("Cosmetics account", move || {
             let _ = tx.send(send(wish));
         })
         .ok();
@@ -307,15 +307,15 @@ fn send_mine(wish: bool) -> Result<(), String> {
 
 impl Cosmetics {
     fn client() -> (horizon_cosmetics::Cosmetics, bool) {
-        if let Some(dir) = horizon_platform::env::var_os("HORIZON_COSMETICS_LOCAL") {
+        if let Some(dir) = horizon_std::env::var_os("HORIZON_COSMETICS_LOCAL") {
             let local = horizon_cosmetics::Local::new(dir.into());
             return (horizon_cosmetics::Cosmetics::new(local, None), true);
         }
-        let api = horizon_platform::env::var("HORIZON_COSMETICS_API")
+        let api = horizon_std::env::var("HORIZON_COSMETICS_API")
             .unwrap_or_else(|_| horizon_cosmetics::API.to_owned());
         let agent = format!("Horizon/{}", env!("CARGO_PKG_VERSION"));
         // Beside the downloaded skins (`assets/skins` in the game folder).
-        let cache = horizon_platform::env::current_dir()
+        let cache = horizon_std::env::current_dir()
             .unwrap_or_default()
             .join("assets/cosmetics");
         let http = horizon_cosmetics::Http::new(&api, &agent);
@@ -474,7 +474,7 @@ impl Game<'_> {
                 let (tx, rx) = channel();
                 o.asking = Some(rx);
                 // A Web Worker on the web build, whose requests wait there.
-                horizon_platform::thread::spawn_worker("Cosmetics account", move || {
+                horizon_std::thread::spawn_worker("Cosmetics account", move || {
                     let _ = tx.send(check_owner());
                 })
                 .ok();
@@ -528,7 +528,7 @@ impl Game<'_> {
                 o.sending = Some(rx);
                 let kept = o.kept.clone();
                 // A worker on the web build: `Builder` would make the request there and then.
-                horizon_platform::thread::spawn_worker("Cosmetics emote", move || {
+                horizon_std::thread::spawn_worker("Cosmetics emote", move || {
                     let _ = tx.send(send_emote(&kept, wish.as_deref()));
                 })
                 .ok();
@@ -650,7 +650,7 @@ impl Game<'_> {
         let (tx, rx) = channel();
         e.loading = Some(rx);
         let kept = self.cosmetics.emote_out.kept.clone();
-        horizon_platform::thread::spawn_worker("Cosmetics emotes owned", move || {
+        horizon_std::thread::spawn_worker("Cosmetics emotes owned", move || {
             let _ = tx.send(load_owned_emotes(&kept));
         })
         .ok();
@@ -940,7 +940,7 @@ impl Game<'_> {
 mod tests {
     use super::*;
     use horizon_client::extras::Extras;
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
 
     /// A name tag style with a 1×1 mark.
     const TAG: &str = r##"{"format": 1, "id": "tag", "slot": "name_tag", "parts": [],
@@ -1021,7 +1021,7 @@ mod tests {
             if worn.is_some() || Instant::now() >= deadline {
                 break worn;
             }
-            horizon_platform::thread::sleep(Duration::from_millis(20));
+            horizon_std::thread::sleep(Duration::from_millis(20));
         };
         let asked = service.0.lock().unwrap().clone();
         (worn, asked)
@@ -1082,7 +1082,7 @@ mod tests {
                 if worn.is_some() || Instant::now() >= deadline {
                     break worn;
                 }
-                horizon_platform::thread::sleep(Duration::from_millis(20));
+                horizon_std::thread::sleep(Duration::from_millis(20));
             };
             let asked = service.0.lock().unwrap().clone();
             (worn.is_some(), asked)

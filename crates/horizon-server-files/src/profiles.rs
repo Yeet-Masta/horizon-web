@@ -6,9 +6,9 @@ use crate::{
     json::{self, Json},
     user_lists::NameAndId,
 };
-#[cfg(not(target_family = "wasm"))]
-use horizon_platform::time::Duration;
 use horizon_protocol::rsa::RsaPublicKey;
+#[cfg(not(target_family = "wasm"))]
+use horizon_std::time::Duration;
 
 /// Mojang's services discovery document.
 pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/minecraft/client";
@@ -16,7 +16,7 @@ pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/min
 /// The discovery document's URL: `HORIZON_API_DISCOVERY` overrides it like
 /// authlib's `-Dminecraft.api.discovery.host`.
 pub fn discovery_url() -> String {
-    horizon_platform::env::var("HORIZON_API_DISCOVERY")
+    horizon_std::env::var("HORIZON_API_DISCOVERY")
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_DISCOVERY.to_owned())

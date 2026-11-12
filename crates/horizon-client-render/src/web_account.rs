@@ -2,7 +2,7 @@
 //! the launcher's flow (`launcher/src/account.rs`), from the page. The
 //! device-code flow, then Xbox Live, XSTS and the Minecraft services, the
 //! ownership check and the profile, each request through the relay with TLS
-//! in this module (horizon-platform's `web::https`), so the relay never sees
+//! in this module (horizon-std's `web::https`), so the relay never sees
 //! a token.
 //!
 //! The page (`web/horizon.js`) calls the two functions below and keeps the
@@ -11,7 +11,7 @@
 //! and hands the game its session (`auth::set_current`), which online-mode
 //! servers need. Tokens never reach the console or an error.
 use crate::auth::{AuthSession, parse_uuid, set_current};
-use horizon_platform::{
+use horizon_std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
     web::https,
 };
@@ -439,7 +439,7 @@ async fn sign_in(
     );
     let ms = loop {
         for _ in 0..interval * 4 {
-            horizon_platform::thread::sleep_task(Duration::from_millis(250)).await;
+            horizon_std::thread::sleep_task(Duration::from_millis(250)).await;
             if aborted(signal) {
                 return Err("Sign-in cancelled.".into());
             }

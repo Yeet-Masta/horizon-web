@@ -4,7 +4,7 @@ use horizon_assets::{
     model::CuboidModel,
     resolve::{AssetReader, ModelLibrary},
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn shared_views_preserve_resolution_errors_builtins_and_reload() -> Result<()> {
         let fixture = Fixture(
-            horizon_platform::env::temp_dir()
+            horizon_std::env::temp_dir()
                 .join(format!("horizon-shared-models-{}", std::process::id())),
         );
         fixture.write("horizon:parent", r##"{"textures":{"side":"#all","all":"block/stone"},"elements":[{"from":[0,0,0],"to":[16,8,16],"faces":{"up":{"texture":"#side"}}}]}"##);
@@ -277,7 +277,7 @@ mod tests {
     /// file outside the content root.
     #[test]
     fn root_assets_stay_inside_the_content_root() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-root-assets-{}", std::process::id()));
         let inside = root.join("content");
         fs::create_dir_all(inside.join("assets/m/models")).unwrap();

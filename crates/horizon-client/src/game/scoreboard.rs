@@ -18,7 +18,7 @@ use horizon_client::{
     tab_list::TabPlayer,
     text::Text,
 };
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use horizon_world::nbt::Tag;
 use std::collections::{HashMap, HashSet};
 

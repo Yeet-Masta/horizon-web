@@ -14,8 +14,8 @@ use horizon_client::{
     text::Text,
 };
 use horizon_core::random::RandomSource;
-use horizon_platform::fs::PathExt as _;
 use horizon_protocol::packets::play::{self, BossAction, Clientbound as C};
+use horizon_std::fs::PathExt as _;
 use horizon_world::{identifier::Identifier, java_hash_map::JavaHashMap, nbt::Tag};
 use std::collections::{HashMap, HashSet};
 

@@ -1,7 +1,7 @@
 //! Key display names (`InputConstants.Key.getDisplayName`), shared by key
 //! mappings and `keybind` text components.
 use crate::text::Text;
-use horizon_platform::sync::RwLock;
+use horizon_std::sync::RwLock;
 use std::collections::BTreeMap;
 
 /// The keys that write a symbol, with what they write on a US layout.

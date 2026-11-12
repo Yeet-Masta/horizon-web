@@ -190,7 +190,7 @@ fn total_time(time: u32, speed: f32) -> i32 {
 mod tests {
     use super::*;
     use crate::{containers::FurnaceKind, items::Items};
-    use horizon_platform::fs;
+    use horizon_std::fs;
     use horizon_world::loot::PackOverlay;
     use std::collections::HashMap;
 
@@ -219,7 +219,7 @@ mod tests {
     /// with two fuels: `test:coal` (no remainder) and `test:cell` (a content mod's item
     /// that leaves `test:husk`). The folder is gone when this returns.
     fn data(name: &str) -> (Items, Recipes, Providers) {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-furnace-{name}-{}", std::process::id(),));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("data/minecraft/recipe")).unwrap();

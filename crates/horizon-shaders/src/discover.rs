@@ -1,7 +1,7 @@
 //! The packs in the game's `shaderpacks` folder: every folder and `.zip` in it (spec 1.1).
 
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::Pack;

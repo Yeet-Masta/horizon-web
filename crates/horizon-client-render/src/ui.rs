@@ -5,8 +5,8 @@ use crate::{
     hud::{HudAtlas, HudBatch, Rect, rgba},
     text::Text,
 };
-use horizon_platform::sync::RwLock;
-use horizon_platform::time::Instant;
+use horizon_std::sync::RwLock;
+use horizon_std::time::Instant;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -81,7 +81,7 @@ pub fn read_metadata(root: &Path) -> UiMetadata {
             let mut files = Vec::new();
             let mut stack = vec![sprites];
             while let Some(dir) = stack.pop() {
-                let Ok(entries) = horizon_platform::fs::read_dir(&dir) else {
+                let Ok(entries) = horizon_std::fs::read_dir(&dir) else {
                     continue;
                 };
                 for e in entries.flatten() {

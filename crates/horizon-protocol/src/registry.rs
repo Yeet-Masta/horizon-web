@@ -7,7 +7,7 @@ use crate::{
     Error, Result,
     packets::configuration::{RegistryData, UpdateTags},
 };
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use horizon_world::nbt::{JavaString, Tag};
 use std::{collections::HashMap, path::Path};
 
@@ -65,7 +65,7 @@ impl crate::item::Names for SyncedNames<'_> {
 
 impl Builtin {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = horizon_platform::fs::read_to_string(path)
+        let text = horizon_std::fs::read_to_string(path)
             .map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
         Self::parse(&text)
     }

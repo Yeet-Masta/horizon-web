@@ -316,8 +316,7 @@ mod tests {
         };
         use std::sync::Arc;
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         let assets = Arc::new(Assets::load(&root)?);
         let render = Arc::new(assets.reload(&root)?);

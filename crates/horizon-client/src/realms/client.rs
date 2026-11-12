@@ -5,7 +5,7 @@
 //! `x-mojangauth` header vanilla adds for the invite-code service); it is never logged, never
 //! put in an error and never sent anywhere else.
 use horizon_core::version;
-use horizon_platform::time::Duration;
+use horizon_std::time::Duration;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// `RealmsClient.Environment.PRODUCTION`'s base URL.
@@ -98,11 +98,11 @@ pub struct Ops {
     pub ops: Vec<String>,
 }
 
-/// What [`RealmsClient::request`] makes on the web build: horizon_platform's HTTP, whose
+/// What [`RealmsClient::request`] makes on the web build: horizon_std's HTTP, whose
 /// requests with the session cookie go through the relay's TLS tunnel (a browser won't send a
 /// cookie a page sets, and the relay sees only ciphertext).
 #[cfg(target_family = "wasm")]
-struct WebRequest(horizon_platform::web::http::Request);
+struct WebRequest(horizon_std::web::http::Request);
 #[cfg(target_family = "wasm")]
 impl WebRequest {
     fn set(self, header: &str, value: &str) -> Self {
@@ -628,10 +628,10 @@ impl RealmsClient {
         ]
     }
 
-    /// The web build's request (horizon_platform's HTTP): the same headers, through the relay.
+    /// The web build's request (horizon_std's HTTP): the same headers, through the relay.
     #[cfg(target_family = "wasm")]
     fn request(&self, method: &str, url: &str, read_timeout: Duration) -> WebRequest {
-        let mut request = horizon_platform::web::http::Request::get(url)
+        let mut request = horizon_std::web::http::Request::get(url)
             .header("User-Agent", &user_agent())
             .timeout(CONNECT_TIMEOUT + read_timeout);
         request.method = method.to_owned();
@@ -640,7 +640,7 @@ impl RealmsClient {
             .into_iter()
             .fold(WebRequest(request), |r, (k, v)| r.set(k, &v))
     }
-    /// [`Self::execute`] for the web build: the same answers, from horizon_platform's HTTP.
+    /// [`Self::execute`] for the web build: the same answers, from horizon_std's HTTP.
     #[cfg(target_family = "wasm")]
     fn execute(request: WebRequest, body: Option<&str>) -> Result<String, RealmsError> {
         let mut request = request.0;
@@ -648,7 +648,7 @@ impl RealmsClient {
             request.body = body.as_bytes().to_vec();
         }
         let response =
-            horizon_platform::web::http::request(request).map_err(RealmsError::Connectivity)?;
+            horizon_std::web::http::request(request).map_err(RealmsError::Connectivity)?;
         let status = response.status;
         if status == 503 || status == 277 {
             let pause = response
@@ -925,10 +925,10 @@ mod tests {
     const UUID: u128 = 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef;
 
     /// One HTTP exchange on a local port: the request as the server read it.
-    fn serve_once(answer: &'static str) -> (String, horizon_platform::thread::JoinHandle<String>) {
+    fn serve_once(answer: &'static str) -> (String, horizon_std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let handle = horizon_platform::thread::spawn(move || {
+        let handle = horizon_std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut seen = Vec::new();
             let mut buf = [0u8; 4096];

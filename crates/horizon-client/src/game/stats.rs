@@ -110,7 +110,7 @@ impl Stats {
     }
     /// `ServerStatsCounter.parseLocal`: the counters of a stats file.
     pub(super) fn read(path: &Path) -> Self {
-        let json = horizon_platform::fs::read_to_string(path)
+        let json = horizon_std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
             .unwrap_or_default();
@@ -159,10 +159,10 @@ impl Stats {
     pub(super) fn write(&self, path: &Path) {
         let json = self.to_json();
         if let Some(dir) = path.parent() {
-            let _ = horizon_platform::fs::create_dir_all(dir);
+            let _ = horizon_std::fs::create_dir_all(dir);
         }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = horizon_platform::fs::write(path, text);
+            let _ = horizon_std::fs::write(path, text);
         }
     }
 }

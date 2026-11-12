@@ -119,7 +119,7 @@ impl Game<'_> {
             .join("test_instance")
             .join(format!("{path}.json"));
         let json: serde_json::Value =
-            serde_json::from_slice(&horizon_platform::fs::read(file).ok()?).ok()?;
+            serde_json::from_slice(&horizon_std::fs::read(file).ok()?).ok()?;
         let string = |key: &str| json.get(key).and_then(|v| v.as_str());
         let structure = string("structure")?.to_owned();
         let environment = string("environment")?.to_owned();
@@ -223,8 +223,8 @@ impl Game<'_> {
     /// seconds with its position relative to the test.
     pub(super) fn highlight_test_pos(&mut self, absolute: [i32; 3], relative: [i32; 3]) {
         let text = format!("{}, {}, {}", relative[0], relative[1], relative[2]);
-        let until = horizon_platform::time::Instant::now()
-            + horizon_platform::time::Duration::from_millis(10_000);
+        let until =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_millis(10_000);
         self.test_highlights
             .insert((absolute[0], absolute[1], absolute[2]), (text, until));
     }
@@ -242,7 +242,7 @@ impl Game<'_> {
         use horizon_client::gizmos as g;
         // `GameTestBlockHighlightRenderer.emitGizmos`: expired highlights go,
         // the rest are a green box with the relative position over it.
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         self.test_highlights.retain(|_, (_, until)| now <= *until);
         let mut markers: Vec<(_, _, u32)> = self
             .test_highlights

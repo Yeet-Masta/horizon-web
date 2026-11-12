@@ -1,5 +1,5 @@
 use crate::Result;
-use horizon_platform::fs::File;
+use horizon_std::fs::File;
 use horizon_world::{
     DATA_VERSION,
     heightmap::HeightmapState,
@@ -125,7 +125,7 @@ struct PixelStore {
     /// Set by the first `pack`: later calls cost one atomic read.
     packing: std::sync::atomic::AtomicBool,
     /// As built; dropped once `packed` holds them.
-    raw: horizon_platform::sync::Mutex<Option<Arc<Vec<u8>>>>,
+    raw: horizon_std::sync::Mutex<Option<Arc<Vec<u8>>>>,
     packed: std::sync::OnceLock<Vec<u8>>,
 }
 impl SpritePixels {
@@ -133,7 +133,7 @@ impl SpritePixels {
         Self(Arc::new(PixelStore {
             len: pixels.len(),
             packing: std::sync::atomic::AtomicBool::new(false),
-            raw: horizon_platform::sync::Mutex::new(Some(Arc::new(pixels))),
+            raw: horizon_std::sync::Mutex::new(Some(Arc::new(pixels))),
             packed: std::sync::OnceLock::new(),
         }))
     }
@@ -174,7 +174,7 @@ impl SpritePixels {
             }
         };
         let fallback = job.clone();
-        if horizon_platform::thread::Builder::new()
+        if horizon_std::thread::Builder::new()
             .name("Sprite packing".into())
             .spawn(job)
             .is_err()
@@ -514,10 +514,10 @@ mod tests {
         stored.pack();
         stored.pack();
         // The packing thread drops the raw copy once the compressed one is set.
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         while stored.0.raw.lock().unwrap().is_some() {
             assert!(started.elapsed().as_secs() < 10, "packing never finished");
-            horizon_platform::thread::yield_now();
+            horizon_std::thread::yield_now();
         }
         assert!(
             stored

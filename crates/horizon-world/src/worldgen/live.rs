@@ -17,7 +17,7 @@ use super::{
 };
 use crate::block_placement::BlockPlacementBindings;
 use horizon_core::random::RandomSource;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap},

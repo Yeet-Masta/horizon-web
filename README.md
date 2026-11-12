@@ -7,7 +7,7 @@ the game rebuilt in Rust, compiled to WebAssembly, drawn with WebGPU and run on 
 
 This is the `web` branch: the same game code as the native client, merged with upstream
 Horizon regularly. What's browser-specific lives in [`web/`](web/) (the page, build scripts,
-tools) and in `horizon-platform` (files, threads, clocks, HTTP and the allocator for the web).
+tools) and in `horizon-std` (files, threads, clocks, HTTP and the allocator for the web).
 
 > **You need your own copy of Minecraft: Java Edition.** The page never downloads game files:
 > it plays on resources prepared from your own install. Never put those resources, or a page

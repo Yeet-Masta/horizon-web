@@ -298,7 +298,7 @@ impl Gpu {
         };
         // `HORIZON_SHADER_PACK_WITHOUT=compute,fragment-storage,vertex-storage,clear` tries the
         // fallbacks on a device that has it all.
-        let without = horizon_platform::env::var("HORIZON_SHADER_PACK_WITHOUT").unwrap_or_default();
+        let without = horizon_std::env::var("HORIZON_SHADER_PACK_WITHOUT").unwrap_or_default();
         for w in without.split(',') {
             match w.trim() {
                 "compute" => gpu.compute = false,
@@ -914,8 +914,8 @@ fn checked<T>(device: &wgpu::Device, create: impl FnOnce() -> T) -> Result<T, St
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let value = crate::crash::contain(create);
-    let internal = horizon_platform::block_on_or(internal.pop(), None);
-    match horizon_platform::block_on_or(validation.pop(), None).or(internal) {
+    let internal = horizon_std::block_on_or(internal.pop(), None);
+    match horizon_std::block_on_or(validation.pop(), None).or(internal) {
         Some(e) => {
             // The details are in the error's description or its sources.
             let mut message = match &e {
@@ -2458,7 +2458,7 @@ impl PackPost {
         };
         let lines = post.lines.and_then(|p| build(p, Some(&line_geometry)));
         // Developers' aid: `HORIZON_SHADER_PACK_SKIP=composite,final` leaves programs out.
-        let skip = horizon_platform::env::var("HORIZON_SHADER_PACK_SKIP").unwrap_or_default();
+        let skip = horizon_std::env::var("HORIZON_SHADER_PACK_SKIP").unwrap_or_default();
         let passes: Vec<Pass> = post
             .programs
             .into_iter()
@@ -5416,12 +5416,12 @@ mod tests {
         let Ok((device, queue)) = pollster::block_on(adapter.request_device(&desc)) else {
             return;
         };
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("hz-composite-blend-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("hz-composite-blend-{}", std::process::id()));
         let shaders = dir.join("shaders");
-        horizon_platform::fs::create_dir_all(&shaders).unwrap();
+        horizon_std::fs::create_dir_all(&shaders).unwrap();
         let file =
-            |name: &str, text: &str| horizon_platform::fs::write(shaders.join(name), text).unwrap();
+            |name: &str, text: &str| horizon_std::fs::write(shaders.join(name), text).unwrap();
         file(
             "composite.vsh",
             "#version 120\nvoid main() { gl_Position = ftransform(); }\n",
@@ -5443,7 +5443,7 @@ mod tests {
             &horizon_shaders::Macros::standard(),
             &Default::default(),
         );
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
         let program = post.programs.remove(0);
         let buffers = pack_images::Buffers::new(
             &device,

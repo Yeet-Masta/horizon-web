@@ -5,12 +5,12 @@ The std calls the web build can't make are routed by tools/web_rewrite.py and ca
 tools/web_hazards.py. What neither can decide is listed here, from the lines a range of upstream
 commits (or an open pull request) adds to the crates the web build compiles:
 
-- spawns through `thread::Builder`: horizon_platform's runs in place on the web, so a loop there
+- spawns through `thread::Builder`: horizon_std's runs in place on the web, so a loop there
   hangs the thread that started it (`spawn_thread` / `spawn_worker` start a Web Worker);
 - `pollster::block_on`: on the page's thread it waits with Atomics.wait, which a browser refuses
-  (`horizon_platform::block_on_or` doesn't wait there);
+  (`horizon_std::block_on_or` doesn't wait there);
 - `ureq`, `std::net`, `mio`: no sockets or HTTP client of the game's own in a browser;
-- chrono's or std's clocks in a crate that doesn't go through horizon_platform;
+- chrono's or std's clocks in a crate that doesn't go through horizon_std;
 - new crates in Cargo.lock, which may not build for wasm32 or wasm64.
 
     python3 tools/upstream_watch.py --base A --head B           # a merge's range, as Markdown
@@ -33,11 +33,11 @@ CHECKS = [
     ("spawn", re.compile(r"thread::Builder::new\(\)|std::thread::spawn\(|thread::spawn\("),
      "a thread spawn: a loop must go through spawn_thread / spawn_worker on the web"),
     ("block_on", re.compile(r"pollster::block_on\("),
-     "pollster::block_on: blocks the page (Atomics.wait); horizon_platform::block_on_or doesn't"),
+     "pollster::block_on: blocks the page (Atomics.wait); horizon_std::block_on_or doesn't"),
     ("network", re.compile(r"\bureq::|std::net::(TcpStream|TcpListener|UdpSocket)|\bmio::"),
      "a socket or HTTP client the browser build doesn't have"),
     ("clock", re.compile(r"std::time::(Instant|SystemTime)::now|chrono::(Utc|Local)::now"),
-     "a clock std or chrono reads natively; horizon_platform::time's works on the web"),
+     "a clock std or chrono reads natively; horizon_std::time's works on the web"),
     ("wait", re.compile(r"\.recv\(\)|\.wait\(|wait_timeout|wait_while|park\(\)"),
      "a blocking wait: fine on a worker, an Atomics.wait trap on the page's thread"),
 ]
@@ -73,7 +73,7 @@ def web_dirs(cache=[]):
                      if any(k["kind"] is None for k in d["dep_kinds"])]
         for node in seen:
             folder = pathlib.Path(packages[node]["manifest_path"]).parent
-            if folder.is_relative_to(ROOT / "crates") and folder.name != "horizon-platform":
+            if folder.is_relative_to(ROOT / "crates") and folder.name != "horizon-std":
                 dirs.append(str(folder.relative_to(ROOT) / "src"))
     if not dirs:
         dirs = [str(m.parent.relative_to(ROOT) / "src")

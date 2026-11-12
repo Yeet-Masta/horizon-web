@@ -9,8 +9,8 @@ use crate::{
 };
 pub mod cache;
 mod mesh;
-use horizon_platform::sync::Mutex;
-use horizon_platform::thread;
+use horizon_std::sync::Mutex;
+use horizon_std::thread;
 use horizon_world::registry::BlockStateId;
 use std::{
     collections::VecDeque,
@@ -28,8 +28,7 @@ const MAX_SAVED: usize = 1024;
 pub const OBSERVE_AHEAD: usize = 8;
 /// How long a tile whose sample waited for data (`Lod::finish_waited`) waits
 /// before it is sampled again without word of it.
-const WAIT_RETRY: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(10);
+const WAIT_RETRY: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(10);
 const SAMPLE_JOBS: usize = 4;
 /// Sample jobs queued per sampling thread once the near terrain is in.
 /// Results are taken and jobs started once a frame: with four in flight, a
@@ -62,7 +61,7 @@ const MAX_REFRESHED: usize = 64;
 /// The web build's Web Workers share the cores with the page's thread and the
 /// browser's: at most 2 there.
 fn sampling_threads(cores: usize) -> usize {
-    if horizon_platform::WEB {
+    if horizon_std::WEB {
         (cores / 4).clamp(1, 2)
     } else if cores >= 8 {
         (cores * 2 / 3).min(8)
@@ -80,11 +79,10 @@ fn meshing_threads(cores: usize) -> usize {
 /// While the near terrain loads on a machine with four threads or fewer, far
 /// terrain starts one sample job at most this often and no detail: it would
 /// otherwise take the cores the near chunks and the frame need.
-const HELD_SAMPLE_STEP: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_millis(500);
+const HELD_SAMPLE_STEP: horizon_std::time::Duration = horizon_std::time::Duration::from_millis(500);
 /// How long a tile whose sampling failed (`LodSampler::grid` gave no
 /// columns: a server refused or lost it) waits before it is asked again.
-const RETRY: horizon_platform::time::Duration = horizon_platform::time::Duration::from_secs(2);
+const RETRY: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(2);
 /// The most a tile a zoomed view magnifies may split past the plan it would
 /// have had ([`ZoomAim`]): cells three times smaller, so nine times the tiles
 /// where it applies. A spyglass covers about a sixteenth of the circle, so at
@@ -220,8 +218,7 @@ const DETAIL_REQUEST: usize = 512;
 /// terrain at `lodDistance` 256: 18 FPS average, 482 ms at the 99th
 /// percentile, where the median frame was 6 ms. What the budget leaves waits
 /// in `Lod::detail_backlog` for the frames after it.
-const DETAIL_BUDGET: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_millis(3);
+const DETAIL_BUDGET: horizon_std::time::Duration = horizon_std::time::Duration::from_millis(3);
 /// Top solid face and optional fluid face, in absolute block coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Surface {
@@ -1252,7 +1249,7 @@ pub struct Lod {
     /// ones, each with its number.
     refreshes: u64,
     refreshed: VecDeque<(u64, [i32; 4])>,
-    detail_request_at: horizon_platform::time::Instant,
+    detail_request_at: horizon_std::time::Instant,
     /// Four threads or fewer: far work waits for the near terrain (`hold`).
     small: bool,
     /// Sample jobs that may be queued or running at once.
@@ -1260,9 +1257,9 @@ pub struct Lod {
     /// The near terrain is loading (`set_near_loading`).
     near_loading: bool,
     /// When `request_samples` last started a job while held.
-    held_sample_at: horizon_platform::time::Instant,
+    held_sample_at: horizon_std::time::Instant,
     /// Tiles whose sampling failed, and when they may be asked again.
-    retry: FxHashMap<TileKey, horizon_platform::time::Instant>,
+    retry: FxHashMap<TileKey, horizon_std::time::Instant>,
     /// Each tile's samples, shared with mesh jobs in flight.
     ready: FxHashMap<TileKey, Arc<Vec<Column>>>,
     /// Fully covered subtrees, by tile.
@@ -1548,7 +1545,7 @@ impl Lod {
                                     .wake
                                     .wait_timeout(
                                         jobs,
-                                        horizon_platform::time::Duration::from_millis(100),
+                                        horizon_std::time::Duration::from_millis(100),
                                     )
                                     .unwrap()
                                     .0;
@@ -1638,11 +1635,11 @@ impl Lod {
             detail_backlog: std::collections::VecDeque::new(),
             refreshes: 0,
             refreshed: VecDeque::new(),
-            detail_request_at: horizon_platform::time::Instant::now(),
+            detail_request_at: horizon_std::time::Instant::now(),
             small: cores <= 4,
             sample_jobs: sampling_threads(cores) * QUEUED_PER_SAMPLER,
             near_loading: false,
-            held_sample_at: horizon_platform::time::Instant::now(),
+            held_sample_at: horizon_std::time::Instant::now(),
             retry: FxHashMap::default(),
             ready: FxHashMap::default(),
             complete: FxHashMap::default(),
@@ -2217,7 +2214,7 @@ impl Lod {
             self.wanted_stale = true;
         } else if self.plan.nodes.contains(&key) {
             self.retry
-                .insert(key, horizon_platform::time::Instant::now() + WAIT_RETRY);
+                .insert(key, horizon_std::time::Instant::now() + WAIT_RETRY);
         }
     }
     /// A sample in: thrown away when a cell of it is a hole, its data on its
@@ -2233,7 +2230,7 @@ impl Lod {
     fn finish_sample(&mut self, key: TileKey, samples: Vec<Column>) {
         self.pending.remove(&key);
         if samples.len() != CELLS * CELLS {
-            let now = horizon_platform::time::Instant::now();
+            let now = horizon_std::time::Instant::now();
             if self.retry.len() > 4096 {
                 self.retry.retain(|_, at| *at > now);
             }
@@ -2319,7 +2316,7 @@ impl Lod {
                 })
             }));
             // A sample may still be running: the held pace starts from now.
-            self.held_sample_at = horizon_platform::time::Instant::now();
+            self.held_sample_at = horizon_std::time::Instant::now();
         }
         self.near_loading = loading;
         self.shared.near_loading.store(loading, Ordering::Relaxed);
@@ -2347,11 +2344,11 @@ impl Lod {
             // backlog grew by a request every 250 ms and never drained --
             // 0.5 FPS, with `update` averaging 9.7 s a frame.
             || !self.detail_backlog.is_empty()
-            || self.detail_request_at.elapsed() < horizon_platform::time::Duration::from_millis(250)
+            || self.detail_request_at.elapsed() < horizon_std::time::Duration::from_millis(250)
         {
             return;
         }
-        self.detail_request_at = horizon_platform::time::Instant::now();
+        self.detail_request_at = horizon_std::time::Instant::now();
         let mut keys: Vec<_> = self
             .active
             .iter()
@@ -2573,7 +2570,7 @@ impl Lod {
         self.wanted_stale = true;
     }
     fn receive(&mut self, meshes: &mut Vec<(TileKey, SectionMesh)>) {
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         // What an earlier frame left, before anything new: a chunk's detail
         // must not overtake the detail of a chunk that arrived before it.
         while started.elapsed() < DETAIL_BUDGET {
@@ -2925,7 +2922,7 @@ impl Lod {
         if free == 0 {
             return;
         }
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         if self.held() {
             self.held_sample_at = now;
         }
@@ -3789,8 +3786,8 @@ mod tests {
         // `request_detail` records once it is past its guards: a test
         // scheduler has no active tile wanting detail, so `pending` would
         // stay false either way and prove nothing.
-        let long_ago = horizon_platform::time::Instant::now()
-            - horizon_platform::time::Duration::from_secs(10);
+        let long_ago =
+            horizon_std::time::Instant::now() - horizon_std::time::Duration::from_secs(10);
         lod.detail_request_at = long_ago;
         lod.detail_request_pending = false;
         lod.request_detail([0, 0]);
@@ -3990,8 +3987,7 @@ mod tests {
             testgen::TestTerrain,
         };
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         let assets = Arc::new(Assets::load(&root)?);
         let render = Arc::new(assets.reload(&root)?);
@@ -4118,7 +4114,7 @@ mod tests {
         let receive_observed = |lod: &mut Lod| {
             let Done::Observed(key, columns) = lod
                 .results
-                .recv_timeout(horizon_platform::time::Duration::from_secs(5))
+                .recv_timeout(horizon_std::time::Duration::from_secs(5))
                 .unwrap()
             else {
                 panic!("expected the observed chunk's summary");
@@ -4270,8 +4266,8 @@ mod tests {
         // As a replan does (`update` only selects after a change).
         lod.reselect = true;
         let await_meshes = |lod: &mut Lod, count: usize| {
-            let deadline = horizon_platform::time::Instant::now()
-                + horizon_platform::time::Duration::from_secs(5);
+            let deadline =
+                horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(5);
             let mut uploaded = Vec::new();
             loop {
                 uploaded.extend(lod.update(camera, 2, 64, None, None));
@@ -4283,10 +4279,10 @@ mod tests {
                     "retired before replacement meshes"
                 );
                 assert!(
-                    horizon_platform::time::Instant::now() < deadline,
+                    horizon_std::time::Instant::now() < deadline,
                     "mesh worker stalled"
                 );
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(1));
             }
         };
         let uploaded = await_meshes(&mut lod, 1);
@@ -4321,17 +4317,17 @@ mod tests {
         lod.covered.insert((-1, -2));
         lod.reselect = true;
         let deadline =
-            horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(5);
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(5);
         loop {
             lod.update(camera, 2, 64, None, None);
             if lod.outstanding_meshes == 0 && lod.active.is_empty() {
                 break;
             }
             assert!(
-                horizon_platform::time::Instant::now() < deadline,
+                horizon_std::time::Instant::now() < deadline,
                 "covered normal chunk remained an active LOD mask"
             );
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(1));
         }
         assert_eq!(lod.progress(), (1, 1));
 
@@ -4433,7 +4429,7 @@ mod tests {
         lod.full = lod.covered.clone();
         lod.detail_request_pending = false;
         lod.detail_request_at =
-            horizon_platform::time::Instant::now() - horizon_platform::time::Duration::from_secs(1);
+            horizon_std::time::Instant::now() - horizon_std::time::Duration::from_secs(1);
         lod.request_detail([0, 0]);
         let Some(Job::RequestDetail { chunks, .. }) = lod.shared.jobs.lock().unwrap().pop_front()
         else {
@@ -5313,8 +5309,7 @@ mod tests {
     fn test_context() -> crate::Result<(Arc<WorkerContext>, BlockFacts)> {
         use crate::{assets::Assets, biome::Biomes, light::LightTables, mesher::MeshTables};
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         let assets = Arc::new(Assets::load(&root)?);
         let render = Arc::new(assets.reload(&root)?);
@@ -5359,9 +5354,9 @@ mod tests {
                 .registry
                 .default_state("minecraft:stone")
                 .unwrap();
-            let dir = horizon_platform::env::temp_dir()
-                .join(format!("horizon-{name}-{}", std::process::id()));
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
+            let dir =
+                horizon_std::env::temp_dir().join(format!("horizon-{name}-{}", std::process::id()));
+            let _ = horizon_std::fs::remove_dir_all(&dir);
             Ok(Self {
                 lod: Lod::new(source(&dir), context),
                 facts,
@@ -5387,8 +5382,8 @@ mod tests {
             settle: bool,
         ) {
             let lod = &mut self.lod;
-            let deadline = horizon_platform::time::Instant::now()
-                + horizon_platform::time::Duration::from_secs(120);
+            let deadline =
+                horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(120);
             let mut covered = Some(covered.clone());
             let mut quiet = 0;
             while quiet < if settle { 50 } else { 3 } {
@@ -5414,7 +5409,7 @@ mod tests {
                     && !unsampled;
                 quiet = if idle { quiet + 1 } else { 0 };
                 assert!(
-                    horizon_platform::time::Instant::now() < deadline,
+                    horizon_std::time::Instant::now() < deadline,
                     "far terrain never settled: {} pending, {} meshing, {} observing, {} jobs, {} unsampled, {} waiting",
                     lod.pending.len(),
                     lod.outstanding_meshes,
@@ -5429,7 +5424,7 @@ mod tests {
                         .count(),
                     lod.retry.len(),
                 );
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(2));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(2));
             }
         }
         /// The chunks of `chunks` the active tiles don't draw as observed:
@@ -5465,7 +5460,7 @@ mod tests {
     }
     impl Drop for ServerLod {
         fn drop(&mut self) {
-            let _ = horizon_platform::fs::remove_dir_all(&self.dir);
+            let _ = horizon_std::fs::remove_dir_all(&self.dir);
         }
     }
     #[test]

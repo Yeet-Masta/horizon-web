@@ -6,8 +6,15 @@ mod commands;
 mod launch;
 mod mcp;
 
-use std::{io::{BufRead, BufReader, Write}, path::{Path, PathBuf}, process::ExitCode};
-use horizon_platform::{thread, time::{Duration, Instant}};
+use horizon_std::{
+    thread,
+    time::{Duration, Instant},
+};
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
 
 use horizon_client::control::Stream;
 use serde_json::{Value, json};
@@ -331,7 +338,7 @@ fn logs(home: &Path, words: &[String]) -> Result<Value, Failure> {
                 logging::crash_reports_dir(home).display()
             ))
         })?;
-        let text = horizon_platform::fs::read_to_string(&path)
+        let text = horizon_std::fs::read_to_string(&path)
             .map_err(|e| missing(format!("{}: {e}", path.display())))?;
         return Ok(json!({ "path": path, "text": text }));
     }
@@ -347,7 +354,7 @@ fn usage(name: &str) -> String {
 
 /// Paths are written by the game process: make them absolute here.
 fn absolute_paths(words: &mut [String]) {
-    let Ok(cwd) = horizon_platform::env::current_dir() else {
+    let Ok(cwd) = horizon_std::env::current_dir() else {
         return;
     };
     match words.first().map(String::as_str) {
@@ -455,7 +462,7 @@ fn script(session: &mut Session, reader: impl BufRead, keep_going: bool, pretty:
 }
 
 fn main() -> ExitCode {
-    let mut args: Vec<String> = horizon_platform::env::args().skip(1).collect();
+    let mut args: Vec<String> = horizon_std::env::args().skip(1).collect();
     let mut socket = horizon_client::control::default_path();
     let mut timeout = None;
     let mut pretty = false;
@@ -565,7 +572,7 @@ fn main() -> ExitCode {
         Some("script") => {
             let keep_going = args.iter().any(|a| a == "--keep-going");
             match args.iter().skip(1).find(|a| !a.starts_with("--")) {
-                Some(file) if file != "-" => match horizon_platform::fs::File::open(file) {
+                Some(file) if file != "-" => match horizon_std::fs::File::open(file) {
                     Ok(f) => script(&mut session, BufReader::new(f), keep_going, pretty),
                     Err(e) => {
                         print(
@@ -609,8 +616,9 @@ mod tests {
 
     #[test]
     fn logs_reads_the_end_of_latest_log_and_the_newest_crash_report() {
-        let home = horizon_platform::env::temp_dir().join(format!("horizon-ctl-logs-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&home);
+        let home =
+            horizon_std::env::temp_dir().join(format!("horizon-ctl-logs-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&home);
         let words = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
         let failure = logs(&home, &words("")).unwrap_err();
         assert!(
@@ -619,11 +627,11 @@ mod tests {
                 .unwrap()
                 .contains("latest.log")
         );
-        horizon_platform::fs::create_dir_all(home.join("logs")).unwrap();
+        horizon_std::fs::create_dir_all(home.join("logs")).unwrap();
         let text: String = (1..=150)
             .map(|i| format!("[10:00:00] [Render thread/INFO]: line {i}\n"))
             .collect();
-        horizon_platform::fs::write(home.join("logs/latest.log"), text).unwrap();
+        horizon_std::fs::write(home.join("logs/latest.log"), text).unwrap();
         let reply = logs(&home, &words("")).unwrap();
         let tail = reply["text"].as_str().unwrap();
         assert_eq!(tail.lines().count(), 100);
@@ -637,20 +645,20 @@ mod tests {
         assert_eq!(logs(&home, &words("--lines 0")).unwrap_err().status, USAGE);
         assert_eq!(logs(&home, &words("--tail")).unwrap_err().status, USAGE);
         assert!(logs(&home, &words("--crash")).is_err());
-        horizon_platform::fs::create_dir_all(home.join("crash-reports")).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(home.join("crash-reports")).unwrap();
+        horizon_std::fs::write(
             home.join("crash-reports/crash-2026-10-13_10.00.00-client.txt"),
             "old",
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             home.join("crash-reports/crash-2026-10-14_10.00.00-client.txt"),
             "new",
         )
         .unwrap();
         let reply = logs(&home, &words("--crash")).unwrap();
         assert_eq!(reply["text"], "new");
-        let _ = horizon_platform::fs::remove_dir_all(&home);
+        let _ = horizon_std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -678,11 +686,12 @@ mod tests {
     fn fake_game(
         name: &str,
         reply: &'static str,
-    ) -> (PathBuf, horizon_platform::thread::JoinHandle<Vec<String>>) {
-        let path = horizon_platform::env::temp_dir().join(format!("hctl-{name}-{}.sock", std::process::id()));
-        let _ = horizon_platform::fs::remove_file(&path);
+    ) -> (PathBuf, horizon_std::thread::JoinHandle<Vec<String>>) {
+        let path =
+            horizon_std::env::temp_dir().join(format!("hctl-{name}-{}.sock", std::process::id()));
+        let _ = horizon_std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let handle = horizon_platform::thread::spawn(move || {
+        let handle = horizon_std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut lines = Vec::new();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -701,7 +710,7 @@ mod tests {
     #[cfg(unix)]
     fn api_session(path: &Path, api: &str) -> Session {
         let mut s = Session::new(path.to_owned(), Some(Duration::from_secs(5)));
-        s.home = horizon_platform::env::temp_dir().join("horizon-ctl-api-no-home");
+        s.home = horizon_std::env::temp_dir().join("horizon-ctl-api-no-home");
         s.api = Some(api.to_owned());
         s
     }
@@ -731,7 +740,7 @@ mod tests {
         drop(s);
         // hello for the check, then the caller's own line.
         assert_eq!(game.join().unwrap(), ["hello", "hello"]);
-        let _ = horizon_platform::fs::remove_file(path);
+        let _ = horizon_std::fs::remove_file(path);
     }
 
     #[cfg(unix)]
@@ -753,7 +762,7 @@ mod tests {
         drop(s);
         // The refused command never reached the game.
         assert_eq!(game.join().unwrap(), ["hello"]);
-        let _ = horizon_platform::fs::remove_file(path);
+        let _ = horizon_std::fs::remove_file(path);
     }
 
     #[cfg(unix)]
@@ -771,7 +780,7 @@ mod tests {
         );
         drop(s);
         assert_eq!(game.join().unwrap(), ["hello"]);
-        let _ = horizon_platform::fs::remove_file(path);
+        let _ = horizon_std::fs::remove_file(path);
     }
 
     #[cfg(unix)]
@@ -782,14 +791,14 @@ mod tests {
         s.game("state").unwrap();
         drop(s);
         assert_eq!(game.join().unwrap(), ["state"]);
-        let _ = horizon_platform::fs::remove_file(path);
+        let _ = horizon_std::fs::remove_file(path);
     }
 
     #[test]
     fn unreachable_games_fail_with_status_3() {
-        let home =
-            horizon_platform::env::temp_dir().join(format!("horizon-ctl-unreachable-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&home).unwrap();
+        let home = horizon_std::env::temp_dir()
+            .join(format!("horizon-ctl-unreachable-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&home).unwrap();
         let mut s = Session::new(home.join("nobody.sock"), None);
         s.home = home.clone();
         let f = s.run(&["state".to_owned()]).unwrap_err();
@@ -797,14 +806,18 @@ mod tests {
         assert_eq!(f.reply["kind"], "connection");
         let f = s.run(&["sleep".to_owned(), "x".to_owned()]).unwrap_err();
         assert_eq!(f.status, USAGE);
-        horizon_platform::fs::remove_dir_all(home).unwrap();
+        horizon_std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
     fn no_ai_refuses_every_command() {
-        let home = horizon_platform::env::temp_dir().join(format!("horizon-ctl-no-ai-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&home);
-        let mut s = Session::new(horizon_platform::env::temp_dir().join("horizon-ctl-nobody.sock"), None);
+        let home =
+            horizon_std::env::temp_dir().join(format!("horizon-ctl-no-ai-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let mut s = Session::new(
+            horizon_std::env::temp_dir().join("horizon-ctl-nobody.sock"),
+            None,
+        );
         s.home = home.clone();
         assert_eq!(
             s.run(&["state".to_owned()]).unwrap_err().status,
@@ -818,7 +831,7 @@ mod tests {
             assert_eq!(f.reply["kind"], "denied");
             assert_eq!(f.reply["error"], horizon_core::no_ai::REFUSAL);
         }
-        let _ = horizon_platform::fs::remove_dir_all(&home);
+        let _ = horizon_std::fs::remove_dir_all(&home);
     }
 
     #[test]

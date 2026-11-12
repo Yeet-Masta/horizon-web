@@ -2,8 +2,8 @@
 //! multicast group 224.0.2.60:4445 every 1.5 seconds as
 //! `[MOTD]text[/MOTD][AD]port[/AD]`, and LanServerDetection collects those
 //! announcements for the multiplayer screen.
-use horizon_platform::sync::Mutex;
-use horizon_platform::{thread::JoinHandle, time::Duration};
+use horizon_std::sync::Mutex;
+use horizon_std::{thread::JoinHandle, time::Duration};
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
@@ -78,7 +78,7 @@ impl Pinger {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let message = ping_string(&motd, port);
-        let thread = horizon_platform::thread::Builder::new()
+        let thread = horizon_std::thread::Builder::new()
             .name("horizon-lan-ping".into())
             .spawn(move || {
                 let target = SocketAddr::V4(SocketAddrV4::new(GROUP, PORT));
@@ -86,7 +86,7 @@ impl Pinger {
                     let _ = socket.send_to(message.as_bytes(), target);
                     let mut slept = Duration::ZERO;
                     while slept < INTERVAL && !flag.load(Ordering::Relaxed) {
-                        horizon_platform::thread::sleep(Duration::from_millis(50));
+                        horizon_std::thread::sleep(Duration::from_millis(50));
                         slept += Duration::from_millis(50);
                     }
                 }
@@ -142,7 +142,7 @@ impl Scanner {
             && let Ok(socket) = bind_listener()
         {
             let (games, stop) = (games.clone(), stop.clone());
-            let _ = horizon_platform::thread::Builder::new()
+            let _ = horizon_std::thread::Builder::new()
                 .name("horizon-lan-scan".into())
                 .spawn(move || listen(socket, games, stop));
         }

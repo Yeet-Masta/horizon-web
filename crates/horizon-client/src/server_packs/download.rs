@@ -8,8 +8,8 @@
 //! page: straight from the pack's server when it lets pages read it (CORS),
 //! else through the WebSocket relay's download (horizon-web-relay).
 use super::{Batch, Request};
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::{fs, time::SystemTime};
+use horizon_std::fs::PathExt as _;
+use horizon_std::{fs, time::SystemTime};
 use sha1::{Digest, Sha1};
 use std::{
     io::{self, Read, Write},
@@ -25,8 +25,7 @@ const MAX_KEPT: usize = 20;
 /// queue runs batches on one thread, so a server that accepts the connection
 /// and then goes silent would otherwise hold the pack screen forever.
 #[cfg(not(target_family = "wasm"))]
-const NET_TIMEOUT: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(30);
+const NET_TIMEOUT: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(30);
 
 /// `createDownloadHeaders`: who is downloading, with which game.
 pub fn headers(name: &str, uuid: u128) -> Vec<(&'static str, String)> {
@@ -73,7 +72,7 @@ impl Queue {
         let (jobs, todo) = channel::<Job>();
         let (finished, done) = channel();
         #[cfg(not(target_family = "wasm"))]
-        horizon_platform::thread::Builder::new()
+        horizon_std::thread::Builder::new()
             .name("download-queue".into())
             .spawn(move || {
                 for (requests, headers, progress) in todo {
@@ -86,7 +85,7 @@ impl Queue {
                 }
             })?;
         #[cfg(target_family = "wasm")]
-        horizon_platform::thread::spawn_task("download-queue", async move {
+        horizon_std::thread::spawn_task("download-queue", async move {
             use std::sync::mpsc::TryRecvError;
             loop {
                 match todo.try_recv() {
@@ -97,8 +96,8 @@ impl Queue {
                         }
                     }
                     Err(TryRecvError::Empty) => {
-                        let wait = horizon_platform::time::Duration::from_millis(100);
-                        horizon_platform::thread::sleep_task(wait).await;
+                        let wait = horizon_std::time::Duration::from_millis(100);
+                        horizon_std::thread::sleep_task(wait).await;
                     }
                     Err(TryRecvError::Disconnected) => break,
                 }
@@ -172,8 +171,8 @@ fn record(
         (
             "time",
             // The page's clock on the web build (std's, which chrono reads, panics there).
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .ok()
                 .and_then(|d| {
                     chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
@@ -275,7 +274,7 @@ fn download_file_within(
     headers: &[(&'static str, String)],
     max_size: u64,
     progress: &Sender<Progress>,
-    timeout: horizon_platform::time::Duration,
+    timeout: horizon_std::time::Duration,
 ) -> Result<PathBuf, String> {
     if let Some(cached) = cached(dir, request)? {
         return Ok(cached);
@@ -390,7 +389,7 @@ fn store(
 fn get(
     url: &str,
     headers: &[(&'static str, String)],
-    timeout: horizon_platform::time::Duration,
+    timeout: horizon_std::time::Duration,
 ) -> Result<(Option<u64>, Box<dyn Read>), String> {
     let mut call = ureq::AgentBuilder::new()
         .timeout_connect(timeout)
@@ -506,7 +505,7 @@ async fn fetch_bytes(url: &str, max_size: u64) -> Result<Vec<u8>, Fetched> {
 }
 fn rand_suffix() -> u64 {
     use std::hash::{BuildHasher, RandomState};
-    RandomState::new().hash_one(horizon_platform::time::Instant::now())
+    RandomState::new().hash_one(horizon_std::time::Instant::now())
 }
 /// `downloadAndHash`: write what comes, at most `max_size` bytes.
 fn save_hashed(
@@ -603,14 +602,11 @@ mod tests {
     use std::net::TcpListener;
 
     /// A one-shot HTTP server answering `status` with `body`; the request it got.
-    fn serve(
-        status: &str,
-        body: Vec<u8>,
-    ) -> (String, horizon_platform::thread::JoinHandle<String>) {
+    fn serve(status: &str, body: Vec<u8>) -> (String, horizon_std::thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
         let status = status.to_owned();
-        let handle = horizon_platform::thread::spawn(move || {
+        let handle = horizon_std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = Vec::new();
             let mut buf = [0u8; 1024];
@@ -633,7 +629,7 @@ mod tests {
     }
     fn scratch() -> PathBuf {
         let dir =
-            horizon_platform::env::temp_dir().join(format!("horizon-packs-{:016x}", rand_suffix()));
+            horizon_std::env::temp_dir().join(format!("horizon-packs-{:016x}", rand_suffix()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -718,7 +714,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/pack.zip", listener.local_addr().unwrap());
         let (release, hold) = channel::<()>();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             // Accept, then answer nothing until the test is done.
             let (_stream, _) = listener.accept().unwrap();
             let _ = hold.recv();
@@ -728,17 +724,17 @@ mod tests {
             url,
             sha1: None,
         };
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let result = download_file_within(
             &dir,
             &request,
             &[],
             MAX_SIZE,
             &channel().0,
-            horizon_platform::time::Duration::from_millis(300),
+            horizon_std::time::Duration::from_millis(300),
         );
         assert!(result.is_err());
-        assert!(started.elapsed() < horizon_platform::time::Duration::from_secs(10));
+        assert!(started.elapsed() < horizon_std::time::Duration::from_secs(10));
         drop(release);
         server.join().unwrap();
         fs::remove_dir_all(dir).unwrap();
@@ -764,7 +760,7 @@ mod tests {
             if let Some(b) = queue.finished().pop() {
                 break b;
             }
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(10));
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(10));
         };
         server.join().unwrap();
         let file = dir
@@ -791,7 +787,7 @@ mod tests {
     #[test]
     fn the_cleaner_keeps_the_newest_file_of_each_pack_longest() {
         let dir = scratch();
-        let at = |secs| SystemTime::UNIX_EPOCH + horizon_platform::time::Duration::from_secs(secs);
+        let at = |secs| SystemTime::UNIX_EPOCH + horizon_std::time::Duration::from_secs(secs);
         for (pack, file, time) in [
             ("a", "1", 10),
             ("a", "2", 20),

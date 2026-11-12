@@ -1,6 +1,6 @@
 # The web build (web/README.md). getrandom draws from the browser's
 # crypto.getRandomValues: on wasm32 through its own `wasm_js` source (which zip
-# turns on), on wasm64 through horizon-platform.
+# turns on), on wasm64 through horizon-std.
 [target.wasm32-unknown-unknown]
 rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 

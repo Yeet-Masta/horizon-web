@@ -1,7 +1,7 @@
 //! `Stopwatches`: the named wall-clock timers of `/stopwatch`, saved in
 //! `data/minecraft/stopwatches.dat` as the elapsed milliseconds of each.
 use crate::save;
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use horizon_world::nbt::{Compound, JavaString, Tag};
 use std::{
     collections::BTreeMap,

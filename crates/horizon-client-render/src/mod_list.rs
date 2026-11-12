@@ -3,8 +3,8 @@
 //! mod is off until the player turns it on in Options > Mods. A native mod is
 //! built in, so on until turned off (`mod.<id>:false`); the launcher builds
 //! only the native mods whose line is `true`.
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,

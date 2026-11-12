@@ -18,7 +18,7 @@ use crate::{
     streaming::{LodDetail, LodSampler, LodSource},
 };
 use horizon_core::position::ChunkPos;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use horizon_world::{
     DATA_VERSION,
     compression::Compression,
@@ -82,11 +82,9 @@ pub fn level_dir(root: &Path, address: &str, hashed_seed: i64, level: &str) -> P
 pub fn minecraft_dir() -> PathBuf {
     let home = || {
         let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-        horizon_platform::env::var_os(var).map_or_else(|| PathBuf::from("."), PathBuf::from)
+        horizon_std::env::var_os(var).map_or_else(|| PathBuf::from("."), PathBuf::from)
     };
-    if let Some(dir) =
-        horizon_platform::env::var_os("HORIZON_MINECRAFT_DIR").filter(|d| !d.is_empty())
-    {
+    if let Some(dir) = horizon_std::env::var_os("HORIZON_MINECRAFT_DIR").filter(|d| !d.is_empty()) {
         let dir = PathBuf::from(dir);
         if let Ok(rest) = dir.strip_prefix("~") {
             return home().join(rest);
@@ -96,7 +94,7 @@ pub fn minecraft_dir() -> PathBuf {
     if cfg!(target_os = "macos") {
         home().join("Library/Application Support/minecraft")
     } else if cfg!(windows) {
-        horizon_platform::env::var_os("APPDATA")
+        horizon_std::env::var_os("APPDATA")
             .map_or_else(home, PathBuf::from)
             .join(".minecraft")
     } else {
@@ -120,7 +118,7 @@ pub fn bobby_level_dir(
         return None;
     }
     let names = [bare.to_owned(), format!("{bare}_25565")];
-    let mut servers: Vec<PathBuf> = horizon_platform::fs::read_dir(root)
+    let mut servers: Vec<PathBuf> = horizon_std::fs::read_dir(root)
         .ok()?
         .flatten()
         .filter(|entry| {
@@ -404,7 +402,7 @@ impl ServerTerrain {
             return Ok(());
         }
         if region(&mut state.regions, &self.dir, key).is_none() {
-            horizon_platform::fs::create_dir_all(&self.dir)?;
+            horizon_std::fs::create_dir_all(&self.dir)?;
             let file = RegionFile::open_writable(region_path(&self.dir, key), true)?;
             state.regions.insert(key, Some(Region::new(file)));
         }
@@ -473,8 +471,8 @@ fn remember(state: &mut State, key: (i32, i32), columns: Option<Columns>) {
 }
 
 fn now() -> u32 {
-    horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32)
 }
 
@@ -774,9 +772,9 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-{name}-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         dir
     }
 
@@ -798,7 +796,7 @@ mod tests {
         assert_eq!(sampler.column(0, 0), Column::default());
         // One chunk doesn't stand for a far cell of 64 × 64.
         assert_eq!(sampler.reduced_column(-64 * 16, 0, 1024), Column::default());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -820,7 +818,7 @@ mod tests {
             sampler.reduced_column(0, 0, 64),
             Column::reduced(&columns, 0, 0, 16)
         );
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Far terrain samples a cell before the server sent its chunk, then
@@ -843,7 +841,7 @@ mod tests {
             other.reduced_column(-16, 32, 16),
             Column::reduced(&columns, 0, 0, 16)
         );
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -856,7 +854,7 @@ mod tests {
             "localhost_25566/-7181178862026813658/minecraft/overworld",
             "Play.Example.net_25565/5/minecraft/overworld",
         ] {
-            horizon_platform::fs::create_dir_all(root.join(dir)).unwrap();
+            horizon_std::fs::create_dir_all(root.join(dir)).unwrap();
         }
         let find = |address: &str, seed: i64, level: &str| {
             bobby_level_dir(&root, address, seed, level)
@@ -916,12 +914,12 @@ mod tests {
             bobby_level_dir(&root.join("none"), "127.0.0.1", 0, overworld),
             None
         );
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A Bobby-shaped region of chunk records, written with `version`.
     fn bobby_region(dir: &Path, chunks: &[(i32, i32)], version: i32) {
-        horizon_platform::fs::create_dir_all(dir).unwrap();
+        horizon_std::fs::create_dir_all(dir).unwrap();
         let (rx, rz) = (chunks[0].0 >> 5, chunks[0].1 >> 5);
         let mut file = RegionFile::open_writable(region_path(dir, (rx, rz)), true).unwrap();
         for &(x, z) in chunks {
@@ -962,7 +960,7 @@ mod tests {
         bobby_region(&theirs, &[(-3, 5), (-2, 5), (-1, 6)], DATA_VERSION);
         bobby_region(&theirs.join("old"), &[(-3, 5)], DATA_VERSION - 1);
         let region = region_path(&theirs, (-1, 0));
-        let before = horizon_platform::fs::read(&region).unwrap();
+        let before = horizon_std::fs::read(&region).unwrap();
         // State 0 air, state 1 a kept block (`lod::state_kinds`).
         let bobby = |dir: &Path| Bobby {
             dir: dir.to_owned(),
@@ -991,11 +989,11 @@ mod tests {
         let kept = ServerTerrain::new(own.clone(), None);
         assert_eq!(kept.chunk(-2, 5), Some(expected));
         assert_eq!(kept.chunk(-3, 5), None);
-        assert_eq!(horizon_platform::fs::read(&region).unwrap(), before);
+        assert_eq!(horizon_std::fs::read(&region).unwrap(), before);
         // Another game version's chunk is none.
         let old =
             ServerTerrain::with_bobby(dir.join("own-old"), None, Some(bobby(&theirs.join("old"))));
         assert_eq!(old.chunk(-3, 5), None);
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 }

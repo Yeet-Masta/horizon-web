@@ -5,7 +5,7 @@
 //! leaf (544 bytes) and two allocations per property. Shared strings are
 //! never freed, nor counted: cloning a state copies pointers, so world
 //! generation threads cloning the same states don't contend on counters.
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{
     borrow::Borrow,
     cmp::Ordering,

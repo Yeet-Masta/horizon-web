@@ -288,9 +288,9 @@ mod tests {
     /// A temp pack of `files` (path under `optifine/random/entity`, or from the root when it
     /// starts with `assets/`; contents), scanned.
     fn pack(name: &str, files: &[(&str, &str)]) -> RandomTextures {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-mob-random-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         for (path, text) in files {
             let path = if path.starts_with("assets/") {
                 root.join(path)
@@ -298,11 +298,11 @@ mod tests {
                 root.join("assets/minecraft/optifine/random/entity")
                     .join(path)
             };
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            horizon_platform::fs::write(path, text).unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, text).unwrap();
         }
         let textures = RandomTextures::scan(&root);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         textures
     }
 

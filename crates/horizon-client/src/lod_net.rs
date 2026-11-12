@@ -18,11 +18,11 @@
 //! It is off unless the owner sets the key: far tiles show the generator's
 //! terrain far beyond view distance, which helps crack a world's seed.
 use crate::lod::{Column, Span, Spans, Surface};
-use horizon_platform::time::Instant;
 use horizon_protocol::{
     Error, Result,
     buf::{Reader, Writer},
 };
+use horizon_std::time::Instant;
 use horizon_world::registry::BlockStateId;
 use std::collections::HashMap;
 

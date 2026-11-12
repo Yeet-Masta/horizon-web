@@ -2,7 +2,7 @@
 //! template containers): turned into client containers, with loot tables
 //! unpacked as `RandomizableContainer.unpackLootTable` would on first open.
 use crate::{containers::BlockEntity, items::ItemStack};
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use horizon_world::{
     loot::LootData,
     nbt::{Compound, JavaString, Tag},
@@ -408,10 +408,10 @@ mod tests {
     #[test]
     fn a_world_open_reuses_loot_data_of_the_same_packs() {
         use horizon_world::loot::PackOverlay;
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-reuse-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
-        horizon_platform::fs::write(root.join("items.json"), "{}").unwrap();
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-reuse-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        horizon_std::fs::write(root.join("items.json"), "{}").unwrap();
         let mut slot = None;
         let first = reuse_or_load(&mut slot, &root, &PackOverlay::NONE).expect("loot data");
         let again = reuse_or_load(&mut slot, &root, &PackOverlay::NONE).unwrap();
@@ -423,7 +423,7 @@ mod tests {
         let packs = PackOverlay { files: &files };
         let other = reuse_or_load(&mut slot, &root, &packs).unwrap();
         assert!(!Arc::ptr_eq(&first, &other));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     #[test]

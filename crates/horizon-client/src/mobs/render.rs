@@ -3512,7 +3512,7 @@ mod scroll_tests {
     #[test]
     #[ignore = "manual benchmark; needs the prepared resources"]
     fn benchmark_mob_farm_geometry() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::{hash::Hasher, hint::black_box};
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.local/horizon-client/26.3");
@@ -3643,7 +3643,7 @@ mod emissive_tests {
     use super::*;
     use crate::mobs::{Polygon, Species};
     use horizon_optifine::{blink::Blinks, emissive::Emissive, random_textures::RandomTextures};
-    use horizon_platform::sync::RwLock;
+    use horizon_std::sync::RwLock;
     use std::sync::Arc;
 
     /// A silverfish (drawn with its type's texture) whose model is one quad.
@@ -3672,28 +3672,28 @@ mod emissive_tests {
 
     fn data(files: &[&str]) -> MobData {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-render-emissive-{}-{}",
             std::process::id(),
             N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         for file in files {
             let path = root.join(file);
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             // Rules files pick variant 2; images are only their names.
             let text = if file.ends_with(".properties") {
                 "textures.1=2"
             } else {
                 ""
             };
-            horizon_platform::fs::write(path, text).unwrap();
+            horizon_std::fs::write(path, text).unwrap();
         }
         let random = RandomTextures::scan(&root);
         let blinks = Blinks::scan(&root, &random);
         let mut emissive = Emissive::scan(&root, &random);
         emissive.pair_beside(&root, blinks.files());
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         MobData {
             states: Vec::new(),
             placements: Default::default(),
@@ -3935,7 +3935,7 @@ mod random_texture_tests {
     use super::*;
     use crate::mobs::{Polygon, Species};
     use horizon_optifine::random_textures::RandomTextures;
-    use horizon_platform::sync::RwLock;
+    use horizon_std::sync::RwLock;
     use std::sync::Arc;
 
     /// A silverfish (drawn with its type's texture) whose model is one quad.
@@ -3964,15 +3964,15 @@ mod random_texture_tests {
 
     /// A pack whose silverfish has a second variant, every silverfish wearing it.
     fn data() -> MobData {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-render-random-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let dir = root.join("assets/minecraft/optifine/random/entity");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join("silverfish.properties"), "textures.1=2").unwrap();
-        horizon_platform::fs::write(dir.join("silverfish2.png"), "").unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join("silverfish.properties"), "textures.1=2").unwrap();
+        horizon_std::fs::write(dir.join("silverfish2.png"), "").unwrap();
         let random = RandomTextures::scan(&root);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         MobData {
             states: Vec::new(),
             placements: Default::default(),

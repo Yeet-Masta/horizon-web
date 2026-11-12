@@ -1067,7 +1067,7 @@ impl H {
     }
 }
 fn max_workers() -> u32 {
-    horizon_platform::thread::available_parallelism().map_or(8, |n| n.get() as u32)
+    horizon_std::thread::available_parallelism().map_or(8, |n| n.get() as u32)
 }
 
 impl Item {
@@ -2084,7 +2084,7 @@ mod tests {
     const SIZE: (f32, f32) = (640.0, 360.0);
     const FB: [i32; 2] = [1920, 1080];
     /// Held by the tests that set `offer_hdr`, which is global.
-    static HDR_OFFER: horizon_platform::sync::Mutex<()> = horizon_platform::sync::Mutex::new(());
+    static HDR_OFFER: horizon_std::sync::Mutex<()> = horizon_std::sync::Mutex::new(());
 
     fn items() -> Vec<(Page, Item)> {
         rows()

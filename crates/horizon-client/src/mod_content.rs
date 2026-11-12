@@ -20,8 +20,8 @@ use horizon_mods::content::{
     Block, BlockShapes, Content, CreativeTab, EntityType, MenuType, MobEffect, Rarity,
     StateProperty,
 };
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use horizon_world::nbt::{self, Compound, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
 use std::{
@@ -2419,8 +2419,8 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
         overlay.write(name, &bytes)
     };
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let threads = horizon_platform::thread::scoped_threads(horizon_threads::worker_count());
-    horizon_platform::thread::scope(|scope| {
+    let threads = horizon_std::thread::scoped_threads(horizon_threads::worker_count());
+    horizon_std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads.min(TABLE_THREADS))
             .map(|_| {
                 scope.spawn(|| -> std::result::Result<(), String> {
@@ -2742,15 +2742,14 @@ pub fn resource_root(base: &Path, mods: &[ContentMod], cache: &Path) -> Result<P
 /// The length of a root's folder name: the start of its stamp.
 const ROOT_NAME: usize = 16;
 /// How long a root no start or switch used is kept.
-const KEEP_ROOTS: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(24 * 3600);
+const KEEP_ROOTS: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(24 * 3600);
 
 /// Removes from `roots` the roots other than `current` whose stamp is older
 /// than `keep`, and what an older game left there (one root built straight in
 /// the folder). A game still running on a removed root was started more than
 /// `keep` ago and reads its tables already; only the folders' own names are
 /// touched.
-fn prune_roots(roots: &Path, current: &Path, keep: horizon_platform::time::Duration) {
+fn prune_roots(roots: &Path, current: &Path, keep: horizon_std::time::Duration) {
     let Ok(entries) = fs::read_dir(roots) else {
         return;
     };
@@ -2836,7 +2835,7 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         let m = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let modified = m
             .modified()?
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .unwrap_or_default();
         Ok(format!(
             "{} {} {}",
@@ -2846,7 +2845,7 @@ fn stamp(base: &Path, mods: &[ContentMod]) -> Result<String> {
         ))
     };
     let mut parts = vec!["horizon mod content 1".to_owned()];
-    parts.push(meta(&horizon_platform::env::current_exe()?)?);
+    parts.push(meta(&horizon_std::env::current_exe()?)?);
     let base = std::path::absolute(base)?;
     parts.push(
         String::from_utf8_lossy(&fs::read(base.join("horizon-resources.json"))?).into_owned(),

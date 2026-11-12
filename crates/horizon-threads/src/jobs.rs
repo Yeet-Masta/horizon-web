@@ -22,12 +22,12 @@
 //! anywhere, its queue's lock held or not; a notify never waits for a worker.
 //!
 //! On the web build with threads the workers are Web Workers
-//! (`horizon_platform::thread::spawn_worker`), and the page's thread, which a
+//! (`horizon_std::thread::spawn_worker`), and the page's thread, which a
 //! browser never lets wait, only spins on the pool's locks. The web build
 //! without threads has no workers: the page runs jobs between its frames
 //! ([`Pool::run_here`]).
-use horizon_platform::sync::{Mutex, RwLock};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::{Mutex, RwLock};
+use horizon_std::time::{Duration, Instant};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, MutexGuard, OnceLock};
@@ -188,7 +188,7 @@ pub fn configure(threads: usize) {
 /// The process's pool, started on first use.
 pub fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
-        let threads = horizon_platform::env::var("HORIZON_JOB_THREADS")
+        let threads = horizon_std::env::var("HORIZON_JOB_THREADS")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
@@ -233,12 +233,11 @@ impl Pool {
         };
         for i in 0..threads {
             let worker = inner.clone();
-            let spawned =
-                horizon_platform::thread::spawn_worker(&format!("{name}-{i}"), move || {
-                    // Ticks and frames come first.
-                    crate::behind_server();
-                    work(&worker, i);
-                });
+            let spawned = horizon_std::thread::spawn_worker(&format!("{name}-{i}"), move || {
+                // Ticks and frames come first.
+                crate::behind_server();
+                work(&worker, i);
+            });
             if spawned.is_ok() {
                 started += 1;
             }
@@ -347,7 +346,7 @@ impl Drop for Registration {
         // while it holds the sources' read lock); wait for those that did.
         entry.retired.store(true, Ordering::SeqCst);
         // A browser's page may not wait: it spins for the jobs, which are short.
-        if !horizon_platform::thread::may_block() {
+        if !horizon_std::thread::may_block() {
             while entry.running.load(Ordering::SeqCst) > 0 {
                 std::hint::spin_loop();
             }

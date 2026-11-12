@@ -32,9 +32,7 @@ impl WorldRequest {
         create: Option<&horizon_client::title::WorldOptions>,
     ) -> Result<Self> {
         Ok(Self {
-            save_root: horizon_platform::env::current_dir()?
-                .join("saves")
-                .join(folder),
+            save_root: horizon_std::env::current_dir()?.join("saves").join(folder),
             folder: folder.to_owned(),
             name: name.map(str::to_owned),
             seed,
@@ -72,7 +70,7 @@ impl WorldRequest {
         }
         // Neither needs the world: they load beside it (the generator's decoration keeps one
         // core busy) and are done before it opens. A bundle both read loads once.
-        horizon_platform::thread::scope(|scope| {
+        horizon_std::thread::scope(|scope| {
             let loot = scope.spawn(loot);
             let live_features = scope.spawn(live_features);
             let prepared = self.prepare_world(res, pack, options, settings, upgrade);
@@ -155,8 +153,8 @@ impl WorldRequest {
             name: name.unwrap_or(&folder).to_owned(),
             // WorldOptions.randomSeed when no seed was given.
             seed: seed.unwrap_or_else(|| {
-                let t = horizon_platform::time::SystemTime::now()
-                    .duration_since(horizon_platform::time::UNIX_EPOCH)
+                let t = horizon_std::time::SystemTime::now()
+                    .duration_since(horizon_std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos() as u64);
                 (t ^ (t >> 29)).wrapping_mul(0x9E37_79B9_7F4A_7C15) as i64
             }),
@@ -298,7 +296,7 @@ pub(super) fn open_progress() -> f32 {
 }
 
 pub(super) struct WorldLoader {
-    handle: horizon_platform::thread::ThreadHandle<std::result::Result<PreparedWorld, String>>,
+    handle: horizon_std::thread::ThreadHandle<std::result::Result<PreparedWorld, String>>,
 }
 
 impl WorldLoader {
@@ -315,7 +313,7 @@ impl WorldLoader {
     ) -> Result<Self> {
         set_open_progress(0.0);
         // A Web Worker on the web build with threads.
-        let handle = horizon_platform::thread::spawn_thread("World initialization", move || {
+        let handle = horizon_std::thread::spawn_thread("World initialization", move || {
             request
                 .prepare(&res, &pack, &options, &settings, &upgrade)
                 .map_err(|e| e.to_string())
@@ -334,23 +332,21 @@ impl WorldLoader {
 /// How long the preloaded world data outlives the world screens: a player
 /// who goes back to the title or to Multiplayer and opens no world for this
 /// long gets the memory back.
-const PRELOAD_KEPT: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(60);
+const PRELOAD_KEPT: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(60);
 
 enum Preload {
     Idle,
     /// Read, or being read, on the "World data preload" thread. `left`: when
     /// the player last left the world screens.
     Started {
-        thread: horizon_platform::thread::ThreadHandle<()>,
-        left: Option<horizon_platform::time::Instant>,
+        thread: horizon_std::thread::ThreadHandle<()>,
+        left: Option<horizon_std::time::Instant>,
     },
     /// A world opened: the data is the world's now, and stays.
     Used,
 }
 
-static PRELOAD: horizon_platform::sync::Mutex<Preload> =
-    horizon_platform::sync::Mutex::new(Preload::Idle);
+static PRELOAD: horizon_std::sync::Mutex<Preload> = horizon_std::sync::Mutex::new(Preload::Idle);
 
 /// Each frame of the title: read what every world opening loads and keeps
 /// for the rest of the process (the worldgen bundle, the loot tables and the
@@ -371,9 +367,9 @@ pub(super) fn preload_world_data(
         Preload::Used => {}
         // The one-thread web build would read it all in a frame: the world
         // opening reads it instead.
-        Preload::Idle if on_world_screens && horizon_platform::THREADS => {
+        Preload::Idle if on_world_screens && horizon_std::THREADS => {
             let resources = resources.to_owned();
-            let spawned = horizon_platform::thread::spawn_thread("World data preload", move || {
+            let spawned = horizon_std::thread::spawn_thread("World data preload", move || {
                 horizon_threads::behind_server();
                 let sync = spawn_sync_preload(&resources, true);
                 // Errors are left for the world opening to report.
@@ -404,7 +400,7 @@ pub(super) fn preload_world_data(
         Preload::Idle => {}
         Preload::Started { left, .. } if on_world_screens => *left = None,
         Preload::Started { thread, left } => {
-            let left = *left.get_or_insert_with(horizon_platform::time::Instant::now);
+            let left = *left.get_or_insert_with(horizon_std::time::Instant::now);
             if left.elapsed() >= PRELOAD_KEPT && thread.is_finished() {
                 horizon_client::vanillagen::forget_shared_data();
                 horizon_client::structure_blocks::forget_loot_data();
@@ -433,14 +429,14 @@ pub(super) fn preload_launch_world(
     if !matches!(*preload, Preload::Idle) {
         return;
     }
-    let Ok(dir) = horizon_platform::env::current_dir() else {
+    let Ok(dir) = horizon_std::env::current_dir() else {
         return;
     };
     let world_root = dir.join("saves").join(folder);
     let resources = resources.to_owned();
-    let spawned = horizon_platform::thread::spawn_thread("World data preload", move || {
+    let spawned = horizon_std::thread::spawn_thread("World data preload", move || {
         // Not behind the server: the world's opening waits for it.
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let sync = spawn_sync_preload(&resources, false);
         // Errors are left for the world opening to report. The world's
         // flags from its level.dat: the feature packs a flag forces on.
@@ -484,9 +480,9 @@ pub(super) fn preload_launch_world(
 fn spawn_sync_preload(
     resources: &std::path::Path,
     behind_server: bool,
-) -> Option<horizon_platform::thread::ThreadHandle<()>> {
+) -> Option<horizon_std::thread::ThreadHandle<()>> {
     let resources = resources.to_owned();
-    horizon_platform::thread::spawn_thread("Sync data preload", move || {
+    horizon_std::thread::spawn_thread("Sync data preload", move || {
         if behind_server {
             horizon_threads::behind_server();
         }
@@ -498,7 +494,7 @@ fn spawn_sync_preload(
 /// Waits for [`spawn_sync_preload`]'s thread, so the preload is over when
 /// its own thread is; reads the data here if that thread did not start.
 fn join_sync_preload(
-    sync: Option<horizon_platform::thread::ThreadHandle<()>>,
+    sync: Option<horizon_std::thread::ThreadHandle<()>>,
     resources: &std::path::Path,
 ) {
     match sync {
@@ -526,11 +522,11 @@ pub(super) fn preload_server_loot(resources: &std::path::Path) {
         return;
     }
     // Not on the one-thread web build, which would read it in a frame.
-    if !horizon_platform::THREADS {
+    if !horizon_std::THREADS {
         return;
     }
     let resources = resources.to_owned();
-    let spawned = horizon_platform::thread::spawn_thread("Loot preload", move || {
+    let spawned = horizon_std::thread::spawn_thread("Loot preload", move || {
         horizon_threads::behind_server();
         let _ = horizon_client::structure_blocks::loot_data(
             &resources,
@@ -909,7 +905,7 @@ mod tests {
     #[test]
     fn worker_panics_reach_the_client() {
         let loader = WorldLoader {
-            handle: horizon_platform::thread::spawn(|| panic!("broken world initialization")),
+            handle: horizon_std::thread::spawn(|| panic!("broken world initialization")),
         };
         assert_eq!(
             loader.finish().err().unwrap().to_string(),

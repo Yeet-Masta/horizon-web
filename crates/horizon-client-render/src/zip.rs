@@ -2,7 +2,7 @@
 //! archive), on the `zip` crate. Like Java's `ZipFile` (what vanilla's
 //! `FilePackResources` reads with), the file stays open and only what is asked
 //! for is read, and entries aren't CRC-checked.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::{
     collections::BTreeMap,
     io::{self, Read, Seek, SeekFrom},
@@ -276,7 +276,7 @@ mod tests {
     use std::io::Cursor;
     /// `bytes` as a file and opened, the file removed again where the system lets it.
     fn opened(test: &str, bytes: &[u8]) -> io::Result<Zip> {
-        let path = horizon_platform::env::temp_dir()
+        let path = horizon_std::env::temp_dir()
             .join(format!("horizon-zip-{}-{test}.zip", std::process::id()));
         fs::write(&path, bytes)?;
         let zip = Zip::open(&path);

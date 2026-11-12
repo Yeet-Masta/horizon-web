@@ -1137,7 +1137,7 @@ mod tests {
 
     /// A mob of the prepared resources' type `kind` (None without them).
     fn mob(kind: &str) -> Option<horizon_client::mobs::Mob> {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -7,8 +7,8 @@
 //! (vanilla's `LocalChannel`, which an integrated server's player uses), or
 //! on the web build over a WebSocket, whose reads wait in [`ConnReader::recv_async`].
 use crate::{Error, Result, buf::Reader, crypto::Cfb8, frame};
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
@@ -163,7 +163,7 @@ enum Stream {
     Detached,
     /// The web build's socket: reads never block (`WouldBlock` until bytes arrive).
     #[cfg(target_family = "wasm")]
-    Web(horizon_platform::web::socket::Socket),
+    Web(horizon_std::web::socket::Socket),
 }
 fn detached() -> std::io::Error {
     std::io::ErrorKind::NotConnected.into()
@@ -329,7 +329,7 @@ impl Connection {
         loop {
             if let Some(&addr) = addrs.get(started) {
                 let (send, index) = (send.clone(), started);
-                let spawned = horizon_platform::thread::Builder::new()
+                let spawned = horizon_std::thread::Builder::new()
                     .name("horizon-connect".into())
                     .spawn(move || {
                         let _ = send.send((index, TcpStream::connect_timeout(&addr, timeout)));
@@ -377,7 +377,7 @@ impl Connection {
     }
     /// A connection over the web build's open socket.
     #[cfg(target_family = "wasm")]
-    pub fn web(socket: horizon_platform::web::socket::Socket) -> Self {
+    pub fn web(socket: horizon_std::web::socket::Socket) -> Self {
         Self::over(Stream::Web(socket)).expect("a socket clones")
     }
     fn over(stream: Stream) -> Result<Self> {
@@ -834,7 +834,7 @@ mod tests {
     fn loopback_with_compression_and_encryption() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut c = Connection::from_stream(stream).unwrap();
             let (id, payload) = c.recv().unwrap();
@@ -864,7 +864,7 @@ mod tests {
     #[test]
     fn local_pipe_carries_packets_and_closes() {
         let (a, b) = Pipe::pair();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let mut c = Connection::local(b);
             c.set_compression(64);
             let (id, payload) = c.recv().unwrap();
@@ -897,7 +897,7 @@ mod tests {
             })
             .collect();
         let sent = bodies.clone();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let mut c = Connection::local(b);
             c.set_compression(64);
             c.enable_encryption(&[3; 16]);
@@ -943,7 +943,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let (sent, both_sent) = std::sync::mpsc::channel();
-        let client = horizon_platform::thread::spawn(move || {
+        let client = horizon_std::thread::spawn(move || {
             let mut c = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
             c.send(&[0, 1, 2]).unwrap();
             c.enable_encryption(&[7; 16]);
@@ -967,7 +967,7 @@ mod tests {
     fn an_empty_compressed_frame_is_skipped() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut c = Connection::from_stream(stream).unwrap();
             c.set_compression(64);

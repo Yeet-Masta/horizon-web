@@ -64,7 +64,7 @@ fn registry_probe(
     out: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-        serde_json::from_str(&horizon_platform::fs::read_to_string(path)?)?;
+        serde_json::from_str(&horizon_std::fs::read_to_string(path)?)?;
     let registry = DensityRegistry::from_json(&bundle["noises"], &bundle["densities"])?;
     let entries: Vec<_> = registry
         .entries()
@@ -159,7 +159,7 @@ fn router_probe(
     out: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bundle: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-        serde_json::from_str(&horizon_platform::fs::read_to_string(path)?)?;
+        serde_json::from_str(&horizon_std::fs::read_to_string(path)?)?;
     let mut registry = DensityRegistry::from_json(&bundle["noises"], &bundle["densities"])?;
     let settings: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
         serde_json::from_str(&bundle["settings"][setting])?;
@@ -392,7 +392,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
         density::{ConstantSampler, DensitySampler, SampleError},
         random::PositionalRandom,
     };
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
     use horizon_world::{
         registry::BlockStateId,
         worldgen::aquifer::{
@@ -576,7 +576,7 @@ fn noise_aquifer_probe(line: &str, out: &mut impl Write) -> Result<(), Box<dyn s
     let seed: i64 = fields[1].parse()?;
     let legacy = fields[2] == "1";
     let bundle: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-        serde_json::from_str(&horizon_platform::fs::read_to_string(fields[3])?)?;
+        serde_json::from_str(&horizon_std::fs::read_to_string(fields[3])?)?;
     let fixture: serde_json::Value = serde_json::from_str(fields[5])?;
     let mut registry = DensityRegistry::from_json(&bundle["noises"], &bundle["densities"])?;
     let settings: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
@@ -729,7 +729,7 @@ fn tags_probe(
 }
 fn tag_registry_probe(path: &str, out: &mut impl Write) -> Result<(), Box<dyn std::error::Error>> {
     let bundle: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> =
-        serde_json::from_str(&horizon_platform::fs::read_to_string(path)?)?;
+        serde_json::from_str(&horizon_std::fs::read_to_string(path)?)?;
     let files: Vec<_> = bundle["tags"]
         .iter()
         .map(|(name, json)| serde_json::json!([name, "vanilla", json]))

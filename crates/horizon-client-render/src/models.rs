@@ -93,7 +93,7 @@ pub(crate) fn prepare_with_models(
     models: &crate::model_library::ParsedModels,
 ) -> Result<PreparedModels> {
     let facts: std::collections::BTreeMap<String, Value> =
-        serde_json::from_slice(&horizon_platform::fs::read(root.join("model-states.json"))?)?;
+        serde_json::from_slice(&horizon_std::fs::read(root.join("model-states.json"))?)?;
     let blocks: Vec<&str> = facts
         .keys()
         .filter(|name| registry.default_state(name).is_some())
@@ -153,7 +153,7 @@ pub fn load_visibility(
     root: &Path,
     registry: &BlockRegistry,
 ) -> Result<horizon_world::block_render::FaceVisibility> {
-    use horizon_platform::fs;
+    use horizon_std::fs;
     use horizon_world::{
         block_render::{FaceVisibility, RenderDefinition, SkipRendering},
         collision::CachedCollisionRegistry,

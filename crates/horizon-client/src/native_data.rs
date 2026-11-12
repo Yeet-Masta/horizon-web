@@ -30,7 +30,7 @@ macro_rules! native_data {
 /// native build's version folder. Empty or missing for a mod without one. None when the
 /// game's own path is unknown: never a folder relative to wherever the game was started.
 pub fn built(mod_id: &str) -> Option<PathBuf> {
-    let exe = horizon_platform::env::current_exe().ok()?;
+    let exe = horizon_std::env::current_exe().ok()?;
     Some(exe.parent()?.join("native-data").join(mod_id))
 }
 
@@ -45,7 +45,7 @@ mod tests {
             std::path::Path::new(path),
             root.join("native-data/zoom/levels/a.bin")
         );
-        let exe = horizon_platform::env::current_exe().unwrap();
+        let exe = horizon_std::env::current_exe().unwrap();
         let dir = super::built("zoom").unwrap();
         assert_eq!(dir.parent().unwrap().parent(), exe.parent());
         assert!(dir.ends_with("native-data/zoom"));

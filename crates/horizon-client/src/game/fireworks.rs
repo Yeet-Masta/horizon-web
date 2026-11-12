@@ -781,16 +781,15 @@ mod tests {
         use horizon_client::mobs::{Mob, leash::Holder};
         use horizon_core::geometry::Vec3;
 
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

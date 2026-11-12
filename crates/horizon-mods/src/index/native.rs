@@ -18,7 +18,7 @@ pub fn is_file(path: &Path) -> bool {
 /// Whether the mod file at `path` carries native code ([`MANIFEST`]): every `.hnmod`, and a
 /// `.hmod` with code beside or instead of its content.
 pub fn holds(path: &Path) -> bool {
-    horizon_platform::fs::File::open(path)
+    horizon_std::fs::File::open(path)
         .ok()
         .and_then(|f| zip::ZipArchive::new(f).ok())
         .is_some_and(|mut zip| zip.by_name(MANIFEST).is_ok())
@@ -126,7 +126,7 @@ pub fn allowed(rest: &str) -> bool {
 
 impl Bundle {
     pub fn read(path: &Path) -> Result<Self, String> {
-        let file = horizon_platform::fs::File::open(path).map_err(|e| e.to_string())?;
+        let file = horizon_std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut files = BTreeMap::new();
         let mut content_id = None;
@@ -244,9 +244,9 @@ mod tests {
         }
     }
     fn read(name: &str, extras: &[(&str, &[u8])], mixin: &str) -> Result<Bundle, String> {
-        let path = horizon_platform::env::temp_dir()
+        let path = horizon_std::env::temp_dir()
             .join(format!("native-bundle-{name}-{}.hnmod", std::process::id()));
-        let mut zip = zip::ZipWriter::new(horizon_platform::fs::File::create(&path).unwrap());
+        let mut zip = zip::ZipWriter::new(horizon_std::fs::File::create(&path).unwrap());
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file(MANIFEST, options).unwrap();
         zip.write_all(&serde_json::to_vec(&manifest()).unwrap())
@@ -260,7 +260,7 @@ mod tests {
         }
         zip.finish().unwrap();
         let result = Bundle::read(&path);
-        horizon_platform::fs::remove_file(path).unwrap();
+        horizon_std::fs::remove_file(path).unwrap();
         result
     }
     fn mixin() -> String {

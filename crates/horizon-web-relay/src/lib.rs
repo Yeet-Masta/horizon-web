@@ -21,7 +21,7 @@
 //! Every page may also reach the Microsoft, Xbox and Minecraft services a
 //! sign-in and an online-mode join call ([`ACCOUNT_HOSTS`], port 443):
 //! their APIs refuse other sites' pages, so the game speaks TLS with them
-//! through the tunnel (horizon-platform's `web::https`). The relay carries
+//! through the tunnel (horizon-std's `web::https`). The relay carries
 //! that TLS as it carries the game: it sees no token.
 pub mod rooms;
 use base64::Engine;

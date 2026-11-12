@@ -320,7 +320,7 @@
   "std::fs::read": 1,
   "std::fs::read_dir": 1
  },
- "crates/horizon-platform/src/thread.rs": {
+ "crates/horizon-std/src/thread.rs": {
   "std::thread::sleep": 1
  },
  "crates/horizon-protocol/src/connection.rs": {

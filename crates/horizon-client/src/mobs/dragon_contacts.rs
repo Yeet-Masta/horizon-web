@@ -176,8 +176,8 @@ mod parity {
             contact(&mut m, &f, name != "team");
             rows.push(serde_json::json!({"case":name,"health":m.health,"velocity":[m.velocity.x,m.velocity.y,m.velocity.z],"revenge":m.ai.last_hurt_by==Some(Who::Mob(99))}));
         }
-        let path = horizon_platform::env::var_os("HORIZON_DRAGON_CONTACT_OUTPUT")
-            .expect("parity output path");
-        horizon_platform::fs::write(path, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+        let path =
+            horizon_std::env::var_os("HORIZON_DRAGON_CONTACT_OUTPUT").expect("parity output path");
+        horizon_std::fs::write(path, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
     }
 }

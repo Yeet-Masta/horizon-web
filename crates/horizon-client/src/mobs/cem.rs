@@ -171,11 +171,11 @@ fn set_rule_species(species: Vec<String>) {
 /// A pack file's text, None when it's missing or larger than a model may read: its size is
 /// checked before anything is read.
 fn read_small(path: &Path) -> Option<String> {
-    let len = horizon_platform::fs::metadata(path).ok()?.len();
+    let len = horizon_std::fs::metadata(path).ok()?.len();
     if len > MAX_BYTES as u64 {
         return None;
     }
-    horizon_platform::fs::read_to_string(path).ok()
+    horizon_std::fs::read_to_string(path).ok()
 }
 
 /// One `optifine/cem/<name>.properties` random-model rule: `models.<n>` selects the model
@@ -196,8 +196,8 @@ pub struct Rule {
 /// The species whose model rules read the standing block (`blocks.<n>`): only their mobs
 /// pay the per-tick lookup, and none does without a pack of rules. Keyed like
 /// `MobType::id` (`minecraft:cow`), from the rule-carrying layers' owners.
-static RULE_SPECIES: horizon_platform::sync::RwLock<Option<std::collections::HashSet<String>>> =
-    horizon_platform::sync::RwLock::new(None);
+static RULE_SPECIES: horizon_std::sync::RwLock<Option<std::collections::HashSet<String>>> =
+    horizon_std::sync::RwLock::new(None);
 
 /// Whether the species' models carry `blocks.<n>` rules, which read the block under the
 /// mob's feet each tick (the window's remote tick keeps `standing_on` fresh; the server, which
@@ -711,7 +711,7 @@ fn part(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::fs;
+    use horizon_std::fs;
 
     fn plane(name: &str, children: Vec<Part>) -> Part {
         Part {
@@ -824,8 +824,7 @@ mod tests {
 
     #[test]
     fn files_reshape_their_layers_and_babies_fall_back() {
-        let root =
-            horizon_platform::env::temp_dir().join(format!("horizon-cem-{}", std::process::id()));
+        let root = horizon_std::env::temp_dir().join(format!("horizon-cem-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let cem = root.join("assets/minecraft/optifine/cem");
         fs::create_dir_all(cem.join("zombie")).unwrap();
@@ -890,8 +889,8 @@ mod tests {
 
     /// A fresh pack folder for the test `test` holding `files` (paths under `assets/minecraft/`).
     fn pack(test: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-cem-{test}-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-cem-{test}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for (path, text) in files {
             let path = root.join("assets/minecraft").join(path);
@@ -1078,7 +1077,7 @@ mod tests {
             biome_tags: Default::default(),
             entity_tags: Default::default(),
             villager_hats: Default::default(),
-            cem: horizon_platform::sync::RwLock::new(models.clone()),
+            cem: horizon_std::sync::RwLock::new(models.clone()),
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
@@ -1250,8 +1249,8 @@ mod tests {
     #[test]
     #[ignore = "requires prepared entity models in HORIZON_TEST_RESOURCES"]
     fn names_reach_horizons_models() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-            .expect("HORIZON_TEST_RESOURCES");
+        let root =
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES");
         let types: HashMap<String, Arc<MobType>> = super::super::MobTypes::load(Path::new(&root))
             .unwrap()
             .types

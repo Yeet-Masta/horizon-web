@@ -11,14 +11,14 @@ use std::sync::Arc;
 #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
 fn leave_block_goal_uses_real_neighbor_shapes_and_keeps_air_placement() {
     let root =
-        std::path::PathBuf::from(horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
     let loaded = load_resources(
         root.clone(),
         None,
         &root,
         &settings,
-        horizon_platform::time::Instant::now(),
+        horizon_std::time::Instant::now(),
         false,
         true,
         &Progress::new(),

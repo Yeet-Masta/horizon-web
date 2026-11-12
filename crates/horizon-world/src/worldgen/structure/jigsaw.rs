@@ -18,7 +18,7 @@ use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, RandomSource, position_seed},
 };
-use horizon_platform::sync::{Mutex, RwLock};
+use horizon_std::sync::{Mutex, RwLock};
 use serde_json::Value;
 use std::{
     cell::RefCell,

@@ -2,7 +2,7 @@
 //! progress (`PlayerAdvancements`) and the predicates criteria test
 //! (`EntityPredicate`, `ItemPredicate`, `LocationPredicate`, the loot
 //! conditions advancements use).
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use horizon_world::lazy_json::LazyJson;
 use serde_json::Value;
 use std::{
@@ -178,7 +178,7 @@ impl Tree {
     /// own: the top pack's file for each id replaces it.
     pub fn load_with(data: &Path, overlay: &horizon_world::loot::PackOverlay) -> Tree {
         let mut tree = Tree::default();
-        let Ok(namespaces) = horizon_platform::fs::read_dir(data) else {
+        let Ok(namespaces) = horizon_std::fs::read_dir(data) else {
             return tree;
         };
         // One JSON per id, the packs' over the game's own. Through `json_folder`: from
@@ -1734,23 +1734,22 @@ mod tests {
     #[ignore = "needs the prepared resources"]
     fn index_on_vanilla_tree() {
         let Some(root) =
-            horizon_platform::env::var_os("HORIZON_RESOURCES").map(std::path::PathBuf::from)
+            horizon_std::env::var_os("HORIZON_RESOURCES").map(std::path::PathBuf::from)
         else {
             return;
         };
         let data = root.join("data");
-        let t = horizon_platform::time::Instant::now();
+        let t = horizon_std::time::Instant::now();
         let tree = Tree::load(&data);
         let load = t.elapsed();
         let tags = data.join("minecraft/tags/item");
-        let tag_items: HashMap<String, Vec<String>> = horizon_platform::fs::read_dir(&tags)
+        let tag_items: HashMap<String, Vec<String>> = horizon_std::fs::read_dir(&tags)
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(|e| {
                 let v: Value =
-                    serde_json::from_str(&horizon_platform::fs::read_to_string(e.path()).ok()?)
-                        .ok()?;
+                    serde_json::from_str(&horizon_std::fs::read_to_string(e.path()).ok()?).ok()?;
                 let name = format!("minecraft:{}", e.path().file_stem()?.to_string_lossy());
                 let values = v["values"]
                     .as_array()?
@@ -1759,7 +1758,7 @@ mod tests {
                 Some((name, values.collect()))
             })
             .collect();
-        let t = horizon_platform::time::Instant::now();
+        let t = horizon_std::time::Instant::now();
         let index = InventoryIndex::build(&tree, |tag| {
             tag_items
                 .get(tag)
@@ -1782,7 +1781,7 @@ mod tests {
             "minecraft:stick",
             "minecraft:coal",
         ];
-        let t = horizon_platform::time::Instant::now();
+        let t = horizon_std::time::Instant::now();
         let mut candidates = 0;
         for _ in 0..1000 {
             candidates = index.candidates(held).len();
@@ -2266,7 +2265,7 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let json = serde_json::from_slice(&horizon_platform::fs::read(path).unwrap()).unwrap();
+        let json = serde_json::from_slice(&horizon_std::fs::read(path).unwrap()).unwrap();
         let advancement = parse("minecraft:husbandry/uh_oh", &json).unwrap();
         assert_eq!(advancement.criteria.len(), 2);
         let player = EntityView {

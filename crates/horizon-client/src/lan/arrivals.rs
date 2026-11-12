@@ -20,8 +20,8 @@
 //! is done on a tick. It has nothing to do with vanilla's `accepts-transfers`,
 //! which is about the transfer packet a server sends a client.
 use super::hub::Hub;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::Arc;
 

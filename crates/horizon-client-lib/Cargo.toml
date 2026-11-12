@@ -14,7 +14,7 @@ path = "../horizon-client/src/client_lib.rs"
 
 [dependencies]
 # std::fs, std::time and std::thread, or the browser's on the web build (web/README.md).
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 # Telemetry stays off on the web: the crate without its network side (`live`, natively below).
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
 horizon-assets = { path = "../horizon-assets" }
@@ -89,7 +89,7 @@ mio = { version = "1.2.4", features = ["os-poll", "net"] }
 # the anonymous "I'm playing" ping the game sends itself (`heartbeat.rs`).
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
 # HTTPS to the Minecraft services (online-mode session join); the web build speaks TLS in
-# the page (horizon-platform's web::https).
+# the page (horizon-std's web::https).
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }

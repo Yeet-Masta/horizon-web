@@ -11,8 +11,8 @@
 //! snapshot, while a rebuild that only touched other crates keeps them.
 use super::*;
 use crate::registry::snapshot as registry_snapshot;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::SystemTime;
+use horizon_std::sync::Mutex;
+use horizon_std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -270,7 +270,7 @@ fn hash_contents(bytes: &[u8]) -> [u8; 32] {
     }
     let workers = pieces
         .len()
-        .min(horizon_platform::thread::available_parallelism().map_or(1, |n| n.get()));
+        .min(horizon_std::thread::available_parallelism().map_or(1, |n| n.get()));
     if workers <= 1 {
         let mut hasher = Sha256::new();
         for piece in pieces {
@@ -279,7 +279,7 @@ fn hash_contents(bytes: &[u8]) -> [u8; 32] {
         return hasher.finalize().into();
     }
     let span = pieces.len().div_ceil(workers);
-    horizon_platform::thread::scope(|scope| {
+    horizon_std::thread::scope(|scope| {
         // The last span hashes here while the workers run.
         let (rest, last) = pieces.split_at(pieces.len() - span);
         let tasks: Vec<_> = rest
@@ -808,7 +808,7 @@ fn write_snapshot(
     let path = dir.join(file_name);
     let tmp = dir.join(format!(
         "{file_name}.tmp-{}-{}",
-        horizon_platform::process::id(),
+        horizon_std::process::id(),
         NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
@@ -923,7 +923,7 @@ mod tests {
     }
 
     fn fixture() -> Option<FixtureDir> {
-        let source = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let source = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -932,9 +932,9 @@ mod tests {
             eprintln!("skipping behaviour cache tests: no client resources");
             return None;
         }
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-behaviour-cache-test-{}-{}",
-            horizon_platform::process::id(),
+            horizon_std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir_all(dir.join("data/minecraft/tags/fluid")).unwrap();
@@ -1081,7 +1081,7 @@ mod tests {
 
     /// `facts.json` alone is a registry fixture's whole resource root.
     fn facts_fixture() -> Option<FixtureDir> {
-        let source = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let source = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -1090,7 +1090,7 @@ mod tests {
             eprintln!("skipping registry cache test: no client resources");
             return None;
         }
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-registry-cache-test-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed),
@@ -1106,7 +1106,7 @@ mod tests {
             return;
         };
         let (registry, flags) = BlockRegistry::from_facts_json_with_flags(
-            horizon_platform::fs::File::open(root.0.join("facts.json")).unwrap(),
+            horizon_std::fs::File::open(root.0.join("facts.json")).unwrap(),
         )
         .unwrap();
         // The game's cache folder, apart from the resources.

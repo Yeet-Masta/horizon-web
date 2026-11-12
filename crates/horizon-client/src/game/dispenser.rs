@@ -151,8 +151,8 @@ pub(super) fn entity_random() -> LegacyRandom {
             Err(actual) => current = actual,
         }
     };
-    let nanos = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let nanos = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as i64);
     LegacyRandom::new(seed ^ nanos)
 }

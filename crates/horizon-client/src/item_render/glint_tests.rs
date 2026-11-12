@@ -13,7 +13,7 @@ fn png(path: &Path, w: u32, h: u32, color: [u8; 4]) {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    let root = horizon_platform::env::temp_dir()
+    let root = horizon_std::env::temp_dir()
         .join(format!("horizon-glint-5851-{name}-{}", std::process::id()));
     let write = |name: &str, data: &[u8]| {
         let path = root.join(name);
@@ -414,7 +414,7 @@ fn glint_atlas_reads_prepared_images_and_metadata_together() {
 #[ignore = "requires the player's prepared pinned 26.3 resources in HORIZON_TEST_RESOURCES"]
 fn prepared_item_atlas_matches_pinned_vanilla() {
     let root = PathBuf::from(
-        horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").expect("prepared resources"),
+        horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("prepared resources"),
     );
     let atlas = glint_atlas::load(&root, 1, 16384).unwrap();
     assert_eq!(atlas.len(), 896);
@@ -439,15 +439,15 @@ fn prepared_item_atlas_matches_pinned_vanilla() {
 #[ignore = "requires an independently generated pinned vanilla atlas JSON and matching resources"]
 fn external_item_atlas_oracle() {
     let root =
-        PathBuf::from(horizon_platform::env::var_os("HORIZON_GLINT_ROOT").expect("resource root"));
+        PathBuf::from(horizon_std::env::var_os("HORIZON_GLINT_ROOT").expect("resource root"));
     let expected: Value = serde_json::from_str(
         &fs::read_to_string(
-            horizon_platform::env::var_os("HORIZON_GLINT_EXPECTED").expect("vanilla atlas JSON"),
+            horizon_std::env::var_os("HORIZON_GLINT_EXPECTED").expect("vanilla atlas JSON"),
         )
         .unwrap(),
     )
     .unwrap();
-    let bit = horizon_platform::env::var("HORIZON_GLINT_ANISO_BITS")
+    let bit = horizon_std::env::var("HORIZON_GLINT_ANISO_BITS")
         .unwrap()
         .parse()
         .unwrap();

@@ -57,7 +57,7 @@ fn grey() -> u32 {
 }
 const WHITE: u32 = u32::MAX;
 fn hint() -> String {
-    if horizon_platform::WEB {
+    if horizon_std::WEB {
         return tr(
             "horizon.friends.hint_web",
             "Friends type the code on Join a Friend (Multiplayer) in their browser, with the same relay set.",
@@ -161,7 +161,7 @@ fn layout(
     } else {
         add(
             &mut lines,
-            &if horizon_platform::WEB {
+            &if horizon_std::WEB {
                 tr(
                     "horizon.friends.share_intro_web",
                     "Share this world behind an invite code: friends join with it from their own browser, which connects straight to yours. The page's WebSocket relay introduces the two.",

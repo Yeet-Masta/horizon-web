@@ -6,8 +6,8 @@
 
 use super::chunks::ChunkEncoder;
 use crate::{biome::Biomes, fast_hash::FxHashMap, save::SaveDir};
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use horizon_world::registry::BlockRegistry;
 use std::{
     collections::VecDeque,
@@ -101,9 +101,8 @@ impl Far {
         for n in 0..READERS {
             let (asked, read, read_one) = (asked.clone(), read.clone(), read_one.clone());
             // A Web Worker on the web build, where a Builder's spawn runs in place.
-            let _ = horizon_platform::thread::spawn_worker(
-                &format!("Far chunk reader #{n}"),
-                move || {
+            let _ =
+                horizon_std::thread::spawn_worker(&format!("Far chunk reader #{n}"), move || {
                     loop {
                         // The far ring is gone once its sender is.
                         let Ok(((level, x, z), source)) = asked.lock().unwrap().recv() else {
@@ -114,8 +113,7 @@ impl Far {
                             return;
                         }
                     }
-                },
-            );
+                });
         }
         Self {
             max,
@@ -364,7 +362,7 @@ mod tests {
             }),
         );
         let save = Arc::new(SaveDir::new(
-            horizon_platform::env::temp_dir().join("horizon-far-ring-test"),
+            horizon_std::env::temp_dir().join("horizon-far-ring-test"),
             LevelShape::OVERWORLD,
         ));
         let encoder = ChunkEncoder::new(
@@ -382,7 +380,7 @@ mod tests {
         for _ in 0..1000 {
             far.poll();
             match far.saved(x, z) {
-                Saved::Waiting => horizon_platform::thread::sleep(Duration::from_millis(1)),
+                Saved::Waiting => horizon_std::thread::sleep(Duration::from_millis(1)),
                 done => return done,
             }
         }
@@ -424,7 +422,7 @@ mod tests {
             if far.asked.is_empty() {
                 break;
             }
-            horizon_platform::thread::sleep(Duration::from_millis(1));
+            horizon_std::thread::sleep(Duration::from_millis(1));
         }
         assert!(far.levels[0].bodies.is_empty());
         assert!(matches!(read(&mut far, 6, 0), Saved::Body(_)));

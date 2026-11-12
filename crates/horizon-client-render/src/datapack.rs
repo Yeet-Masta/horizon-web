@@ -2,7 +2,7 @@
 //! the parts of them commands use: `.mcfunction` functions (with macros and
 //! line continuation), function tags and predicates.
 use crate::zip::Zip;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use horizon_world::{
     nbt::Tag,
     worldgen::overrides::{self, PackFile, WorldgenOverrides},
@@ -46,7 +46,7 @@ impl DataPack {
         let Source::Dir(root) = &self.source else {
             return self.list("data/");
         };
-        let Ok(entries) = horizon_platform::fs::read_dir(root.join("data")) else {
+        let Ok(entries) = horizon_std::fs::read_dir(root.join("data")) else {
             return Vec::new();
         };
         let mut namespaces: Vec<_> = entries.flatten().map(|e| e.path()).collect();
@@ -80,7 +80,7 @@ impl DataPack {
     pub fn read(&self, path: &str) -> Option<Vec<u8>> {
         match &self.source {
             Source::Zip(z) => z.read(path).ok(),
-            Source::Dir(root) => horizon_platform::fs::read(root.join(path)).ok(),
+            Source::Dir(root) => horizon_std::fs::read(root.join(path)).ok(),
         }
     }
 
@@ -115,11 +115,11 @@ impl DataPack {
     }
 }
 fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = horizon_platform::fs::read_dir(dir) else {
+    let Ok(entries) = horizon_std::fs::read_dir(dir) else {
         return;
     };
     let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(horizon_platform::fs::DirEntry::file_name);
+    entries.sort_by_key(horizon_std::fs::DirEntry::file_name);
     for e in entries {
         let p = e.path();
         if p.fs_is_dir() {
@@ -144,7 +144,7 @@ pub fn discover(world: &Path) -> Vec<DataPack> {
 }
 /// Packs in Create World's temporary pack folder, before a world exists.
 pub fn discover_folder(dir: &Path) -> Vec<DataPack> {
-    let Ok(entries) = horizon_platform::fs::read_dir(dir) else {
+    let Ok(entries) = horizon_std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut packs = Vec::new();
@@ -175,7 +175,7 @@ pub fn discover_folder(dir: &Path) -> Vec<DataPack> {
 /// selects them.
 pub fn feature_packs(resources: &Path) -> Vec<DataPack> {
     let Ok(entries) =
-        horizon_platform::fs::read_dir(resources.join("data").join("minecraft").join("datapacks"))
+        horizon_std::fs::read_dir(resources.join("data").join("minecraft").join("datapacks"))
     else {
         return Vec::new();
     };
@@ -236,7 +236,7 @@ pub fn screen_packs(dir: &Path, resources: &Path) -> Vec<crate::pack_screen::Pac
         description_style: Style::default(),
         source: Source::BuiltIn,
         compat: Compat::Compatible,
-        icon: horizon_platform::fs::read(resources.join("pack.png"))
+        icon: horizon_std::fs::read(resources.join("pack.png"))
             .ok()
             .as_deref()
             .and_then(load_icon),
@@ -266,15 +266,13 @@ pub fn screen_packs(dir: &Path, resources: &Path) -> Vec<crate::pack_screen::Pac
 /// A new empty folder for Create World's packs
 /// (`Files.createTempDirectory("mcworld-")`).
 pub fn temp_folder() -> std::io::Result<PathBuf> {
-    let nanos = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let nanos = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dir = horizon_platform::env::temp_dir().join(format!(
-        "mcworld-{}-{nanos}",
-        horizon_platform::process::id()
-    ));
-    horizon_platform::fs::create_dir_all(&dir)?;
+    let dir = horizon_std::env::temp_dir()
+        .join(format!("mcworld-{}-{nanos}", horizon_std::process::id()));
+    horizon_std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 /// `PackSelectionScreen.onFilesDrop`'s `PackDetector`: a zip is a pack; a
@@ -284,11 +282,11 @@ pub fn temp_folder() -> std::io::Result<PathBuf> {
 pub fn copy_pack(path: &Path, dir: &Path) -> bool {
     fn copy_dir(from: &Path, at: &Path) -> bool {
         let mut whole = true;
-        if let Err(e) = horizon_platform::fs::create_dir_all(at) {
+        if let Err(e) = horizon_std::fs::create_dir_all(at) {
             log::warn!("Horizon: {} is not made: {e}", at.display());
             whole = false;
         }
-        for entry in horizon_platform::fs::read_dir(from)
+        for entry in horizon_std::fs::read_dir(from)
             .into_iter()
             .flatten()
             .flatten()
@@ -298,7 +296,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
             let copied = if path.is_dir() {
                 copy_dir(&path, &to)
             } else {
-                match horizon_platform::fs::copy(&path, &to) {
+                match horizon_std::fs::copy(&path, &to) {
                     Ok(_) => true,
                     Err(e) => {
                         log::warn!(
@@ -323,8 +321,8 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
             && {
-                let _ = horizon_platform::fs::create_dir_all(dir);
-                horizon_platform::fs::copy(path, dir.join(name())).is_ok()
+                let _ = horizon_std::fs::create_dir_all(dir);
+                horizon_std::fs::copy(path, dir.join(name())).is_ok()
             };
     }
     if !path.is_dir() {
@@ -333,7 +331,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
     if path.join("pack.mcmeta").is_file() {
         return copy_dir(path, &dir.join(name()));
     }
-    let own: Vec<PathBuf> = horizon_platform::fs::read_dir(path)
+    let own: Vec<PathBuf> = horizon_std::fs::read_dir(path)
         .into_iter()
         .flatten()
         .flatten()
@@ -347,8 +345,8 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
 }
 /// What's in a folder of packs, to notice packs added or removed while the
 /// screen shows it (`PackSelectionScreen.Watcher`).
-pub fn folder_stamp(dir: &Path) -> Vec<(String, Option<horizon_platform::time::SystemTime>)> {
-    let mut stamp: Vec<_> = horizon_platform::fs::read_dir(dir)
+pub fn folder_stamp(dir: &Path) -> Vec<(String, Option<horizon_std::time::SystemTime>)> {
+    let mut stamp: Vec<_> = horizon_std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -367,7 +365,7 @@ pub fn folder_stamp(dir: &Path) -> Vec<(String, Option<horizon_platform::time::S
 pub fn install(dir: &Path, world: &Path, selected: &[String]) -> Result<(), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let target = world.join("datapacks");
-    horizon_platform::fs::create_dir_all(&target).map_err(|e| err(&target, e))?;
+    horizon_std::fs::create_dir_all(&target).map_err(|e| err(&target, e))?;
     let mut disabled = Vec::new();
     for pack in crate::packs::folder(dir, horizon_core::version::DATA_PACK_FORMAT) {
         let (crate::packs::Source::Dir(from) | crate::packs::Source::Zip(from)) = &pack.source;
@@ -381,7 +379,7 @@ pub fn install(dir: &Path, world: &Path, selected: &[String]) -> Result<(), Stri
     }
     let json = serde_json::json!({ "enabled": selected, "disabled": disabled });
     let file = world.join("datapacks.json");
-    horizon_platform::fs::write(&file, json.to_string()).map_err(|e| err(&file, e))
+    horizon_std::fs::write(&file, json.to_string()).map_err(|e| err(&file, e))
 }
 /// Re-Create World's packs from a saved world: a new folder holding a copy of
 /// its `datapacks` (`CreateWorldScreen.createTempDataPackDirFromExistingWorld`; `None` when the
@@ -395,7 +393,7 @@ pub fn for_recreate(world: &Path) -> (Option<PathBuf>, Vec<String>) {
     // it asks for (`for_recreate`'s selection only seeds the new world's
     // `datapacks.json`).
     let mut selected = enabled_ids(world, &packs, &[]);
-    let vanilla_off = horizon_platform::fs::read(world.join("datapacks.json"))
+    let vanilla_off = horizon_std::fs::read(world.join("datapacks.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .and_then(|v| v["disabled"].as_array().cloned())
@@ -410,7 +408,7 @@ pub fn for_recreate(world: &Path) -> (Option<PathBuf>, Vec<String>) {
         if copy(&world.join("datapacks"), &dir).is_ok() {
             Some(dir)
         } else {
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
+            let _ = horizon_std::fs::remove_dir_all(&dir);
             None
         }
     });
@@ -420,10 +418,10 @@ pub fn for_recreate(world: &Path) -> (Option<PathBuf>, Vec<String>) {
 fn copy(from: &Path, to: &Path) -> Result<(), String> {
     let err = |e: std::io::Error| format!("{} -> {}: {e}", from.display(), to.display());
     if !from.fs_is_dir() {
-        return horizon_platform::fs::copy(from, to).map(drop).map_err(err);
+        return horizon_std::fs::copy(from, to).map(drop).map_err(err);
     }
-    horizon_platform::fs::create_dir_all(to).map_err(err)?;
-    for e in horizon_platform::fs::read_dir(from).map_err(err)?.flatten() {
+    horizon_std::fs::create_dir_all(to).map_err(err)?;
+    for e in horizon_std::fs::read_dir(from).map_err(err)?.flatten() {
         copy(&e.path(), &to.join(e.file_name()))?;
     }
     Ok(())
@@ -809,7 +807,7 @@ fn features_enabled(pack: &DataPack, enabled_features: &[String]) -> bool {
 /// features the world enables is forced on however the world's selection
 /// feels about it (`MinecraftServer.enableForcedFeaturePacks`).
 pub fn enabled_ids(world: &Path, packs: &[DataPack], enabled_features: &[String]) -> Vec<String> {
-    let saved: Option<serde_json::Value> = horizon_platform::fs::read(world.join("datapacks.json"))
+    let saved: Option<serde_json::Value> = horizon_std::fs::read(world.join("datapacks.json"))
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok());
     let list = |key: &str| -> Vec<String> {
@@ -937,32 +935,32 @@ mod tests {
 
     #[test]
     fn a_pack_that_cannot_be_copied_is_reported() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("hz-datapack-copy-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let root =
+            horizon_std::env::temp_dir().join(format!("hz-datapack-copy-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let pack = root.join("pack");
-        horizon_platform::fs::create_dir_all(pack.join("data")).unwrap();
-        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
-        horizon_platform::fs::write(pack.join("data/functions.mcfunction"), "").unwrap();
+        horizon_std::fs::create_dir_all(pack.join("data")).unwrap();
+        horizon_std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_std::fs::write(pack.join("data/functions.mcfunction"), "").unwrap();
         // A file where the pack's folder goes: every copy under it fails.
         let blocked = root.join("blocked");
-        horizon_platform::fs::write(&blocked, "").unwrap();
+        horizon_std::fs::write(&blocked, "").unwrap();
         assert!(!copy_pack(&pack, &blocked));
         let dir = root.join("packs");
         assert!(copy_pack(&pack, &dir));
         assert!(dir.join("pack/pack.mcmeta").is_file());
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn enabled_packs_override_worldgen_in_order() {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("hz-datapack-worldgen-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let write = |pack: &str, p: &str, t: &str| {
             let path = dir.join("datapacks").join(pack).join(p);
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            horizon_platform::fs::write(path, t).unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, t).unwrap();
         };
         for pack in ["a", "b", "off"] {
             write(pack, "pack.mcmeta", "{}");
@@ -986,7 +984,7 @@ mod tests {
             "{\"min_y\":-64,\"height\":2096}",
         );
         // `b` is enabled first, so `a` (enabled after it) wins.
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             dir.join("datapacks.json"),
             "{\"enabled\":[\"file/b\",\"file/a\"],\"disabled\":[\"file/off\"]}",
         )
@@ -1016,7 +1014,7 @@ mod tests {
             o.level_height("minecraft:overworld").map(|h| h.height),
             Some(2096)
         );
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
     use horizon_world::nbt::parse_snbt;
 
@@ -1077,14 +1075,13 @@ mod tests {
 
     #[test]
     fn packs_provide_functions_and_tags() {
-        let dir =
-            horizon_platform::env::temp_dir().join(format!("hz-datapack-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir = horizon_std::env::temp_dir().join(format!("hz-datapack-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks/mypack");
         let write = |p: &str, t: &str| {
             let path = pack.join(p);
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            horizon_platform::fs::write(path, t).unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, t).unwrap();
         };
         write(
             "pack.mcmeta",
@@ -1128,7 +1125,7 @@ mod tests {
             store.files["dialog/mine:config/points"],
             [b"{\"type\":\"minecraft:notice\",\"title\":\"Points\"}".to_vec()]
         );
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1138,11 +1135,11 @@ mod tests {
             .map(|i| (format!("t:f{}", i % 25_000), true))
             .collect();
         store.function_tags.insert("t:big".into(), big);
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         let got = store.tag_functions("t:big");
         assert_eq!(got.len(), 25_000);
         assert_eq!(got[0], "t:f0");
-        assert!(start.elapsed() < horizon_platform::time::Duration::from_secs(5));
+        assert!(start.elapsed() < horizon_std::time::Duration::from_secs(5));
         // A cycle terminates and keeps first-seen order.
         store.function_tags.insert(
             "t:a".into(),
@@ -1167,9 +1164,9 @@ mod tests {
 
     #[test]
     fn folder_packs_list_the_needed_kinds_in_walk_order() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("hz-datapack-kinds-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir =
+            horizon_std::env::temp_dir().join(format!("hz-datapack-kinds-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks/p");
         let files = [
             "data/b/function/z.mcfunction",
@@ -1187,10 +1184,10 @@ mod tests {
         ];
         for f in files {
             let path = pack.join(f);
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            horizon_platform::fs::write(path, "{}").unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, "{}").unwrap();
         }
-        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
         let p = DataPack::builtin(&pack);
         let kinds = ["function", "item_modifier", "predicate", "tags/function"];
         let wanted: Vec<String> = p
@@ -1203,19 +1200,19 @@ mod tests {
             .collect();
         assert_eq!(wanted.len(), 7);
         assert_eq!(p.list_kinds(&kinds), wanted);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn create_world_installs_its_packs() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("hz-datapack-install-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let (dir, world) = (root.join("mcworld"), root.join("world"));
         let write = |pack: &str, p: &str, t: &str| {
             let path = dir.join(pack).join(p);
-            horizon_platform::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            horizon_platform::fs::write(path, t).unwrap();
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, t).unwrap();
         };
         write(
             "fns",
@@ -1228,9 +1225,9 @@ mod tests {
             "pack.mcmeta",
             r#"{"pack":{"min_format":121,"max_format":121}}"#,
         );
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let mut zip =
-            zip::ZipWriter::new(horizon_platform::fs::File::create(dir.join("old.zip")).unwrap());
+            zip::ZipWriter::new(horizon_std::fs::File::create(dir.join("old.zip")).unwrap());
         zip.start_file("pack.mcmeta", zip::write::SimpleFileOptions::default())
             .unwrap();
         std::io::Write::write_all(&mut zip, br#"{"pack":{"pack_format":48}}"#).unwrap();
@@ -1254,14 +1251,13 @@ mod tests {
         let packs = discover(&world);
         let ids: Vec<&str> = packs.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["file/fns", "file/off", "file/old.zip"]);
-        let saved: serde_json::Value = serde_json::from_slice(
-            &horizon_platform::fs::read(world.join("datapacks.json")).unwrap(),
-        )
-        .unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&horizon_std::fs::read(world.join("datapacks.json")).unwrap())
+                .unwrap();
         assert_eq!(
             saved,
             serde_json::json!({"enabled": selected, "disabled": ["file/off"]})
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 }

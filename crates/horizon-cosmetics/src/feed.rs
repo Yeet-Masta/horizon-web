@@ -9,8 +9,8 @@
 //! started. The item files come from `GET /v1/items/<id>?hash=`, kept in memory.
 
 use crate::{BATCH, Item, Slot, Transport};
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, PoisonError};
 
@@ -57,7 +57,7 @@ impl Feed {
         });
         let inner = shared.clone();
         // A worker on the web build: `Builder` would run the loop there and then.
-        let _ = horizon_platform::thread::spawn_worker("Cosmetics emotes", move || {
+        let _ = horizon_std::thread::spawn_worker("Cosmetics emotes", move || {
             loop {
                 let wait = {
                     let s = inner.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -372,7 +372,7 @@ mod tests {
             if feed.playing(1).is_some() || Instant::now() > deadline {
                 break;
             }
-            horizon_platform::thread::sleep(Duration::from_millis(20));
+            horizon_std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(
             feed.playing(1).map(|s| s.item.id.clone()).as_deref(),

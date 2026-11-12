@@ -7,7 +7,7 @@ rust-version = "1.90"
 description = "Blocks and items as the client knows them: block facts, item stacks and their data components, enchantments, cooldowns, bundles, and items in NBT"
 
 [dependencies]
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-core = { path = "../horizon-core" }
 horizon-world = { path = "../horizon-world" }

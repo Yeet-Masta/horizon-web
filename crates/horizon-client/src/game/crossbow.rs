@@ -418,7 +418,7 @@ mod tests {
             None,
             root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -459,9 +459,8 @@ mod tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn bow_and_crossbow_shots_sound_at_the_feet_not_the_eye() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let (mut game, feet) = game_with_player(&root);
         let eye = game.eye_position().unwrap();
         assert_ne!(eye, feet);

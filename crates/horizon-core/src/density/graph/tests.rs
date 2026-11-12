@@ -1,5 +1,5 @@
 use super::*;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 
 #[test]
 fn power_literal_selection_retains_signed_zeros_and_negative_fallback_behavior() {

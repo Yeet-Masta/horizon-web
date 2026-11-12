@@ -7,7 +7,7 @@
 //! on the page's one thread there.
 //!
 //! The rest of the workspace names these modules where it named std's
-//! (`horizon_platform::fs::read`, `horizon_platform::time::Instant`), so a
+//! (`horizon_std::fs::read`, `horizon_std::time::Instant`), so a
 //! native build is unchanged.
 // The threaded web build (nightly, it builds std) sleeps its workers on the
 // allocator's lock with wasm's atomic wait (`web/alloc.rs`).

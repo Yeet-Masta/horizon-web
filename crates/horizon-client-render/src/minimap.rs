@@ -12,7 +12,7 @@ use crate::{
     fast_hash::FxHashMap,
     world::World,
 };
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 
 /// The image's side in texels.
 pub const SIZE: usize = 128;

@@ -20,7 +20,7 @@ use super::input_trace::{InputOrigin, TraceEvent, TraceKind};
 use super::{Game, Screen};
 use horizon_client::{Result, gamepad::Button, keybinds, text::Text, title::world_management};
 use horizon_core::geometry::Vec3;
-use horizon_platform::{
+use horizon_std::{
     fs, thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -199,7 +199,7 @@ fn bundles_dir() -> PathBuf {
     home().join("repro")
 }
 fn saves_dir() -> PathBuf {
-    horizon_platform::env::current_dir()
+    horizon_std::env::current_dir()
         .map(|dir| dir.join("saves"))
         .unwrap_or_else(|_| PathBuf::from("saves"))
 }
@@ -927,7 +927,7 @@ impl Game<'_> {
         while !self.repro.exports.is_empty() && Instant::now() < deadline {
             self.poll_exports();
             if !self.repro.exports.is_empty() {
-                horizon_platform::thread::sleep(Duration::from_millis(5));
+                horizon_std::thread::sleep(Duration::from_millis(5));
             }
         }
         self.poll_exports();
@@ -1487,7 +1487,7 @@ fn recording_started_at(dir: &Path) -> Option<SystemTime> {
     let time = chrono::DateTime::parse_from_rfc3339(created).ok()?;
     // The platform's clock (the page's on the web), not std's.
     let millis = u64::try_from(time.timestamp_millis()).ok()?;
-    Some(horizon_platform::time::UNIX_EPOCH + Duration::from_millis(millis))
+    Some(horizon_std::time::UNIX_EPOCH + Duration::from_millis(millis))
 }
 
 fn newest_recording() -> Option<PathBuf> {
@@ -1789,8 +1789,7 @@ fn write_bundle(
                     let since = modified
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default();
-                    horizon_platform::time::UNIX_EPOCH + since
-                        >= started_at - Duration::from_secs(60)
+                    horizon_std::time::UNIX_EPOCH + since >= started_at - Duration::from_secs(60)
                 })
         {
             let name = crash
@@ -1858,8 +1857,8 @@ mod tests {
 
     #[test]
     fn a_world_copy_skips_the_lock_and_symlinks() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-repro-test-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-repro-test-{}", std::process::id()));
         let src = root.join("src");
         let dst = root.join("dst");
         fs::create_dir_all(src.join("region")).unwrap();
@@ -1973,8 +1972,8 @@ mod tests {
 
     #[test]
     fn an_export_name_that_is_taken_gets_a_number() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-repro-dest-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-repro-dest-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let first = root.join("repro.zip");
         fs::write(&first, b"x").unwrap();

@@ -21,7 +21,7 @@ pub(in crate::game) fn read_now() {
 }
 
 fn read() -> (Vec<Arc<AuthSession>>, Vec<String>) {
-    let Ok(json) = horizon_platform::env::var("HORIZON_ACCOUNT_SESSIONS") else {
+    let Ok(json) = horizon_std::env::var("HORIZON_ACCOUNT_SESSIONS") else {
         return Default::default();
     };
     parse(&json)
@@ -72,19 +72,16 @@ mod tests {
 
     #[test]
     fn mismatched_account_sessions_are_consumed_and_refused() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("hz-split-account-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("hz-split-account-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("session.json");
-        horizon_platform::fs::write(&file, r#"{"name":"Ann","uuid":"00000000000000000000000000000001","access_token":"unused","user_type":"msa"}"#).unwrap();
+        horizon_std::fs::write(&file, r#"{"name":"Ann","uuid":"00000000000000000000000000000001","access_token":"unused","user_type":"msa"}"#).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            horizon_platform::fs::set_permissions(
-                &file,
-                horizon_platform::fs::Permissions::from_mode(0o600),
-            )
-            .unwrap();
+            horizon_std::fs::set_permissions(&file, horizon_std::fs::Permissions::from_mode(0o600))
+                .unwrap();
         }
         let json = serde_json::json!([{"name":"Ann", "uuid":"00000000000000000000000000000002", "file":file}]).to_string();
         let (sessions, unavailable) = parse(&json);
@@ -94,23 +91,23 @@ mod tests {
             !file.exists(),
             "session files are read once even when mismatched"
         );
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn every_listed_session_file_is_consumed() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("hz-split-consumed-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("hz-split-consumed-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let file = |n: &str| {
             let file = dir.join(format!("session-{n}.json"));
-            horizon_platform::fs::write(&file, r#"{"name":"Bea","uuid":"00000000000000000000000000000002","access_token":"not-a-real-token","user_type":"msa"}"#).unwrap();
+            horizon_std::fs::write(&file, r#"{"name":"Bea","uuid":"00000000000000000000000000000002","access_token":"not-a-real-token","user_type":"msa"}"#).unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                horizon_platform::fs::set_permissions(
+                horizon_std::fs::set_permissions(
                     &file,
-                    horizon_platform::fs::Permissions::from_mode(0o600),
+                    horizon_std::fs::Permissions::from_mode(0o600),
                 )
                 .unwrap();
             }
@@ -131,6 +128,6 @@ mod tests {
         for f in [bad_name, no_name, good] {
             assert!(!f.exists(), "{} left on disk", f.display());
         }
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 }

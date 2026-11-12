@@ -4697,8 +4697,8 @@ mod tests {
     #[test]
     #[ignore]
     fn dragon_render_parity_fixture() {
-        let path = horizon_platform::env::var("HORIZON_DRAGON_RENDER_OUTPUT")
-            .expect("harness output path");
+        let path =
+            horizon_std::env::var("HORIZON_DRAGON_RENDER_OUTPUT").expect("harness output path");
         let mut cases = Vec::new();
         for t in [0.0, 0.05, 0.25, 0.5, 0.8, 0.9, 0.95, 1.0] {
             let mut vertices = Vec::new();
@@ -4725,7 +4725,7 @@ mod tests {
                 .collect();
             cases.push(triangles);
         }
-        horizon_platform::fs::write(path, serde_json::to_vec(&cases).unwrap()).unwrap();
+        horizon_std::fs::write(path, serde_json::to_vec(&cases).unwrap()).unwrap();
     }
 
     #[test]
@@ -5053,8 +5053,8 @@ mod tests {
     /// The dragon hits the hook of these tests saw: entity, damage type,
     /// causing and direct entities, amount.
     type Seen = (String, i32, i32, f32);
-    static SEEN: horizon_platform::sync::Mutex<Vec<(i32, Seen)>> =
-        horizon_platform::sync::Mutex::new(Vec::new());
+    static SEEN: horizon_std::sync::Mutex<Vec<(i32, Seen)>> =
+        horizon_std::sync::Mutex::new(Vec::new());
     fn seen(entity: i32) -> Vec<Seen> {
         let seen = SEEN.lock().unwrap();
         seen.iter()

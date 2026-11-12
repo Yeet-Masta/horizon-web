@@ -272,7 +272,7 @@ pub fn free_columns<T: Send + 'static>(columns: T, count: usize) {
         return;
     }
     // Should the thread not start, the closure drops `columns` here.
-    let _ = horizon_platform::thread::Builder::new()
+    let _ = horizon_std::thread::Builder::new()
         .name("Chunk freeing".into())
         .spawn(move || drop(columns));
 }
@@ -293,8 +293,8 @@ pub fn set_block_states(states: usize) {
 /// (block, biome, light). A tall column is mostly such sections: air with
 /// full sky light above the terrain. Edits copy them (`Arc::make_mut`).
 type SharedSections = std::collections::HashMap<(u32, u32, u8), Arc<Section>>;
-static SHARED: horizon_platform::sync::Mutex<Option<SharedSections>> =
-    horizon_platform::sync::Mutex::new(None);
+static SHARED: horizon_std::sync::Mutex<Option<SharedSections>> =
+    horizon_std::sync::Mutex::new(None);
 
 /// Replaces the uniform sections of `sections` with the shared ones.
 pub fn share_uniform(sections: &mut [Arc<Section>]) {

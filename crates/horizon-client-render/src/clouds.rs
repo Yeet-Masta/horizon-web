@@ -453,7 +453,7 @@ mod worker {
         pub(super) fn start() -> Self {
             let (jobs, rx) = mpsc::channel::<Job>();
             let (tx, done) = mpsc::channel();
-            let _ = horizon_platform::thread::spawn_worker("Clouds", move || {
+            let _ = horizon_std::thread::spawn_worker("Clouds", move || {
                 let mut ring: (Option<i32>, Vec<(i32, i32)>) = (None, Vec::new());
                 while let Ok(mut job) = rx.recv() {
                     if ring.0 != Some(job.key.radius) {

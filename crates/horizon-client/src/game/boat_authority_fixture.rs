@@ -17,7 +17,7 @@ struct Case {
 
 impl Game<'_> {
     pub(super) fn run_boat_authority_fixture(&mut self, directory: &Path) -> Result<()> {
-        let cases: Vec<Case> = serde_json::from_str(&horizon_platform::fs::read_to_string(
+        let cases: Vec<Case> = serde_json::from_str(&horizon_std::fs::read_to_string(
             directory.join("inputs.json"),
         )?)?;
         let mut output = Vec::new();
@@ -46,7 +46,7 @@ impl Game<'_> {
             }
             output.push(json!({"name": case.name, "steps": steps}));
         }
-        horizon_platform::fs::write(directory.join("rust.json"), serde_json::to_vec(&output)?)?;
+        horizon_std::fs::write(directory.join("rust.json"), serde_json::to_vec(&output)?)?;
         Ok(())
     }
 }

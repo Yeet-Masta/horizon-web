@@ -2,7 +2,7 @@
 """The web build's hazard check (web/README.md, "Checks").
 
 std's file system, clocks, environment and threads fail or panic in a browser, and the page's
-thread may not block: the web build calls horizon_platform's counterparts instead. Every merge of
+thread may not block: the web build calls horizon_std's counterparts instead. Every merge of
 upstream brings new std calls, so this lints the wasm32 build with clippy's disallowed methods
 (web/clippy-web/clippy.toml) and compares what it finds, by file and method, with the calls known
 to run only natively (web/hazards.json). A call that isn't there fails the check, with its place.
@@ -80,7 +80,7 @@ def main():
     if not new:
         print(f"web_hazards: no new calls ({sum(len(v) for v in found.values())} known, native only)")
         return 0
-    print("web_hazards: calls the web build can't make (use horizon_platform's, or cfg them off the web):")
+    print("web_hazards: calls the web build can't make (use horizon_std's, or cfg them off the web):")
     for path, method, at, allowed in new:
         places = ", ".join(f"{path}:{n}" for n in at)
         print(f"  {method}: {len(at)} where {allowed} are known: {places}")

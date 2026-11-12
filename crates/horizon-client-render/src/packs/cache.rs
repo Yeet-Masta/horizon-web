@@ -2,8 +2,8 @@
 //! Published output is an owned cache artifact; hits do not traverse its tree.
 use super::{Pack, Source, build_overlay_uncached};
 use crate::zip::Zip;
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -291,7 +291,7 @@ fn absolute(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.into())
     } else {
-        horizon_platform::env::current_dir().map(|cwd| cwd.join(path))
+        horizon_std::env::current_dir().map(|cwd| cwd.join(path))
     }
 }
 
@@ -374,7 +374,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = horizon_platform::env::temp_dir().join(format!(
+            let path = horizon_std::env::temp_dir().join(format!(
                 "horizon-overlay-cache-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
@@ -402,7 +402,7 @@ mod tests {
             let start = stamp(0);
             // A second at most: no clock is that coarse, and a test never hangs on one.
             for n in 1..1000 {
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(1));
                 if stamp(n) != start {
                     break;
                 }
@@ -658,8 +658,8 @@ mod tests {
     fn a_large_zip_is_stamped_by_its_directory_and_time() {
         let f = Fixture::new();
         let path = f.0.join("large.zip");
-        let at = horizon_platform::time::SystemTime::UNIX_EPOCH
-            + horizon_platform::time::Duration::from_secs(1 << 30);
+        let at = horizon_std::time::SystemTime::UNIX_EPOCH
+            + horizon_std::time::Duration::from_secs(1 << 30);
         let write = |name: &str, first: u8, modified| {
             let mut body = vec![0u8; 1 << 18];
             body[0] = first;
@@ -680,7 +680,7 @@ mod tests {
         assert_ne!(signature(u64::MAX), bytes);
         write("b", 0, at);
         assert_ne!(signature(0), directory);
-        write("a", 0, at + horizon_platform::time::Duration::from_secs(60));
+        write("a", 0, at + horizon_std::time::Duration::from_secs(60));
         assert_ne!(signature(0), directory);
         assert_eq!(signature(u64::MAX), bytes);
     }
@@ -761,8 +761,8 @@ mod tests {
         packs::build_overlay(&vanilla, std::slice::from_ref(&pack), &out).unwrap();
         // A rebuild empties the output first: this file survives a cache hit only.
         fs::write(out.join("kept"), b"").unwrap();
-        let later = horizon_platform::time::SystemTime::now()
-            + horizon_platform::time::Duration::from_secs(60);
+        let later =
+            horizon_std::time::SystemTime::now() + horizon_std::time::Duration::from_secs(60);
         fs::OpenOptions::new()
             .append(true)
             .open(&zip)
@@ -906,7 +906,7 @@ mod tests {
 
     #[test]
     fn concurrent_selections_wait_and_never_publish_mismatched_markers() {
-        use horizon_platform::time::Duration;
+        use horizon_std::time::Duration;
         use std::sync::mpsc;
         let f = Fixture::new();
         let name = "assets/minecraft/lang/en_us.json";
@@ -926,7 +926,7 @@ mod tests {
         held.lock().unwrap();
         let (started, starts) = mpsc::channel();
         let (done, finishes) = mpsc::channel();
-        horizon_platform::thread::scope(|scope| {
+        horizon_std::thread::scope(|scope| {
             for pack in [&a, &b] {
                 let started = started.clone();
                 let done = done.clone();
@@ -970,7 +970,7 @@ mod tests {
         let mut pack = f.dir_pack("pack");
         let name = "assets/minecraft/textures/a";
         f.write(&format!("pack/{name}"), b"pack");
-        let cwd = horizon_platform::env::current_dir().unwrap();
+        let cwd = horizon_std::env::current_dir().unwrap();
         let mut relative = PathBuf::new();
         for component in cwd.components() {
             if matches!(component, std::path::Component::Normal(_)) {
@@ -1003,15 +1003,14 @@ mod tests {
     #[test]
     #[ignore = "requires prepared resources and real pack paths in environment"]
     fn benchmark_real_resource_root() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         let vanilla =
-            PathBuf::from(horizon_platform::env::var("HORIZON_OVERLAY_BENCH_VANILLA").unwrap());
+            PathBuf::from(horizon_std::env::var("HORIZON_OVERLAY_BENCH_VANILLA").unwrap());
         assert!(vanilla.join("horizon-resources.json").is_file());
-        let paths: Vec<PathBuf> = serde_json::from_str(
-            &horizon_platform::env::var("HORIZON_OVERLAY_BENCH_PACKS").unwrap(),
-        )
-        .unwrap();
+        let paths: Vec<PathBuf> =
+            serde_json::from_str(&horizon_std::env::var("HORIZON_OVERLAY_BENCH_PACKS").unwrap())
+                .unwrap();
         // The original resource_root selection/cache-key path, with its original builder.
         fn original(vanilla: &Path, packs: &[Pack], cache: &Path) -> PathBuf {
             let key = packs

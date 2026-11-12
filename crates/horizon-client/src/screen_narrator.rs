@@ -12,7 +12,7 @@
 //! (`shouldRunNarration`), whatever its status.
 use crate::widgets::{self, ElementType, ListKind, Narratable, Narration, ScreenInfo, What};
 use horizon_narrator::screen::{Output, Priority, ScreenNarration, Trigger, find_narratable};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::collections::HashMap;
 
 /// `InputType`: what the player used last on a screen.

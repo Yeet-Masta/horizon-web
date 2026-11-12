@@ -30,8 +30,8 @@ use horizon_assets::{
     palette::PalettedPermutations,
     resolve::{MISSING_MODEL, ModelLibrary},
 };
-use horizon_platform::fs;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::sync::Mutex;
 use horizon_world::nbt::Tag;
 use serde_json::Value;
 use std::{
@@ -1246,7 +1246,7 @@ mod tests {
     /// items.json still reports itself first.
     #[test]
     fn item_model_errors_wait_for_the_item_definitions() -> crate::Result<()> {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-item-model-errors-{}", std::process::id()));
         let model = root.join("assets/horizon/models/INVALID.json");
         fs::create_dir_all(model.parent().unwrap())?;
@@ -1273,7 +1273,7 @@ mod tests {
     /// ModelEngine's `modelengine:postman/head` does.
     #[test]
     fn item_definitions_load_from_nested_folders() -> crate::Result<()> {
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-item-definitions-nested-{}",
             std::process::id()
         ));
@@ -1293,7 +1293,7 @@ mod tests {
     /// none of the client item definitions.
     #[test]
     fn a_server_keeps_prototypes_without_definitions() -> crate::Result<()> {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-item-server-{}", std::process::id()));
         let definitions = root.join("assets/horizon/items");
         fs::create_dir_all(&definitions)?;
@@ -1354,10 +1354,10 @@ mod tests {
             0x00, 0x03, 0x52, 0x29, 0x78, 0x8f, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
             0xae, 0x42, 0x60, 0x82,
         ];
-        let dir = horizon_platform::env::temp_dir().join("horizon-trns-alpha");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_std::env::temp_dir().join("horizon-trns-alpha");
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("indexed.png");
-        horizon_platform::fs::write(&path, png).unwrap();
+        horizon_std::fs::write(&path, png).unwrap();
         let (_w, _h, rgba) = crate::hud::decode(&path).unwrap();
         let partial = rgba.chunks(4).filter(|p| matches!(p[3], 1..=254)).count();
         assert!(partial > 0, "tRNS alpha was stripped: {rgba:?}");

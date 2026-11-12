@@ -3,7 +3,7 @@
 //! versions under `<launcher home>/versions/<tag>`, each with its prepared
 //! resources in `.local/horizon-client/<minecraft version>` and run from the
 //! game home, where saves and options.txt live.
-use horizon_platform::{
+use horizon_std::{
     thread,
     time::{Duration, Instant},
 };
@@ -21,7 +21,7 @@ const CLIENT: &str = "horizon-client.exe";
 const CLIENT: &str = "horizon-client";
 
 pub fn launcher_home() -> PathBuf {
-    match horizon_platform::env::var_os("HORIZON_LAUNCHER_HOME").filter(|h| !h.is_empty()) {
+    match horizon_std::env::var_os("HORIZON_LAUNCHER_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
         None => data_dir().join("horizon-launcher"),
     }
@@ -39,7 +39,7 @@ pub fn version_parts(tag: &str) -> Vec<u64> {
 
 /// Installed launcher versions, newest first.
 pub fn installed(versions: &Path) -> Vec<String> {
-    let mut tags: Vec<String> = horizon_platform::fs::read_dir(versions)
+    let mut tags: Vec<String> = horizon_std::fs::read_dir(versions)
         .into_iter()
         .flatten()
         .flatten()
@@ -52,7 +52,7 @@ pub fn installed(versions: &Path) -> Vec<String> {
 
 /// A folder's prepared resources, as the launcher prepares them.
 pub fn prepared_resources(dir: &Path) -> Option<PathBuf> {
-    let version = horizon_platform::fs::read_to_string(dir.join("research-lock.json"))
+    let version = horizon_std::fs::read_to_string(dir.join("research-lock.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v["minecraft"]["version"].as_str().map(str::to_owned))
@@ -185,7 +185,7 @@ pub fn launch(socket: &Path, args: &[String]) -> Result<Value, Value> {
             "kind": "connection",
         }));
     }
-    let exe = horizon_platform::env::current_exe().ok();
+    let exe = horizon_std::env::current_exe().ok();
     let beside = exe.as_deref().and_then(Path::parent);
     let install = find(
         o.game.as_deref(),
@@ -195,7 +195,7 @@ pub fn launch(socket: &Path, args: &[String]) -> Result<Value, Value> {
     )
     .map_err(|e| json!({ "error": e, "kind": "launch" }))?;
     let log = socket.with_extension("log");
-    let file = horizon_platform::fs::File::create(&log)
+    let file = horizon_std::fs::File::create(&log)
         .map_err(|e| json!({ "error": format!("{}: {e}", log.display()), "kind": "launch" }))?;
     let mut cmd = Command::new(&install.game);
     let gave_resources = o.game_args.iter().any(|a| a == "--resources");
@@ -203,7 +203,7 @@ pub fn launch(socket: &Path, args: &[String]) -> Result<Value, Value> {
         cmd.arg("--resources").arg(resources);
     }
     if let Some(cwd) = &install.cwd {
-        let _ = horizon_platform::fs::create_dir_all(cwd);
+        let _ = horizon_std::fs::create_dir_all(cwd);
         cmd.current_dir(cwd);
     }
     let stderr = file
@@ -244,7 +244,7 @@ pub fn launch(socket: &Path, args: &[String]) -> Result<Value, Value> {
             return Ok(reply);
         }
         if let Ok(Some(status)) = child.try_wait() {
-            let tail = horizon_platform::fs::read_to_string(&log).unwrap_or_default();
+            let tail = horizon_std::fs::read_to_string(&log).unwrap_or_default();
             let tail: Vec<&str> = tail.lines().rev().take(15).collect();
             return Err(json!({
                 "error": format!("the game exited ({status}) before opening the control socket"),
@@ -277,26 +277,26 @@ mod tests {
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-ctl-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-ctl-{name}-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         dir
     }
     fn fake_version(versions: &Path, tag: &str, prepared: bool) -> PathBuf {
         let dir = versions.join(tag);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join(CLIENT), "").unwrap();
-        horizon_platform::fs::write(dir.join(".installed"), "").unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join(CLIENT), "").unwrap();
+        horizon_std::fs::write(dir.join(".installed"), "").unwrap();
+        horizon_std::fs::write(
             dir.join("research-lock.json"),
             r#"{"minecraft":{"version":"26.3"}}"#,
         )
         .unwrap();
         if prepared {
             let res = dir.join(".local/horizon-client/26.3");
-            horizon_platform::fs::create_dir_all(&res).unwrap();
-            horizon_platform::fs::write(res.join("horizon-resources.json"), "{}").unwrap();
+            horizon_std::fs::create_dir_all(&res).unwrap();
+            horizon_std::fs::write(res.join("horizon-resources.json"), "{}").unwrap();
         }
         dir
     }
@@ -324,7 +324,7 @@ mod tests {
         let picked = find(None, Some("2026.10.2"), None, &home).unwrap();
         assert_eq!(picked.version.as_deref(), Some("v2026.10.2"));
         assert!(find(None, Some("v1.0"), None, &home).is_err());
-        let _ = horizon_platform::fs::remove_dir_all(home);
+        let _ = horizon_std::fs::remove_dir_all(home);
     }
 
     #[test]
@@ -332,7 +332,7 @@ mod tests {
         let home = temp("beside");
         fake_version(&home.join("versions"), "v2026.10.13", true);
         let build = temp("build");
-        horizon_platform::fs::write(build.join(CLIENT), "").unwrap();
+        horizon_std::fs::write(build.join(CLIENT), "").unwrap();
         let install = find(None, None, Some(&build), &home).unwrap();
         assert_eq!(install.source, "beside horizon-ctl");
         assert_eq!((install.resources, install.cwd), (None, None));
@@ -343,8 +343,8 @@ mod tests {
                 .source,
             "launcher"
         );
-        let _ = horizon_platform::fs::remove_dir_all(home);
-        let _ = horizon_platform::fs::remove_dir_all(build);
+        let _ = horizon_std::fs::remove_dir_all(home);
+        let _ = horizon_std::fs::remove_dir_all(build);
     }
 
     #[test]
@@ -361,7 +361,7 @@ mod tests {
                 .unwrap_err()
                 .contains("not prepared")
         );
-        let _ = horizon_platform::fs::remove_dir_all(home);
+        let _ = horizon_std::fs::remove_dir_all(home);
     }
 
     #[test]

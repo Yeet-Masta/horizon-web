@@ -22,7 +22,7 @@ use horizon_client::{
     save::SaveDir, streaming::Streaming, tick_chunk_membership::TickChunkMembership,
     ticket_levels::ChunkTickets, vanillagen::VanillaTerrain, world::World,
 };
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use horizon_world::level::{LevelEvent, Ticks};
 use std::{collections::HashMap, sync::Arc};
 
@@ -640,7 +640,7 @@ impl Game<'_> {
             self.pump_chunks(*next, paused);
             let now = Instant::now();
             if *next > now {
-                horizon_platform::thread::sleep(*next - now);
+                horizon_std::thread::sleep(*next - now);
             }
         } else if now - *next > Duration::from_secs(2) {
             let behind = now - *next;

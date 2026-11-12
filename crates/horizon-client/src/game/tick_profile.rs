@@ -3,7 +3,7 @@
 //! level and mob type. Off, a mob costs one thread-local read; sampled, two clock reads and a
 //! map update. A mob's riders tick inside its own tick, so they count for it.
 use horizon_client::{fast_hash::FxHashMap, mobs::MobType};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::cell::{Cell, RefCell};
 
 /// One server tick in this many is sampled while a report records.
@@ -114,7 +114,7 @@ mod tests {
         set_sampling(true);
         for _ in 0..3 {
             let t = start().expect("sampled");
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(1));
             add("minecraft:overworld", zombie, t);
         }
         add("minecraft:overworld", cow, Instant::now());

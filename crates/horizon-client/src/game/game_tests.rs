@@ -24,7 +24,7 @@ use horizon_client::{
     test_instance_block::{ErrorMarker, Status, TestInstanceBlock},
     text::{self, Text},
 };
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use horizon_world::{
     level::flags,
     worldgen::structure::{BoundingBox, Mirror, Rotation, StructureTemplate},
@@ -845,11 +845,11 @@ impl Game<'_> {
             return;
         }
         self.force_load_test_chunks(area);
-        let deadline = Instant::now() + horizon_platform::time::Duration::from_secs(120);
+        let deadline = Instant::now() + horizon_std::time::Duration::from_secs(120);
         while missing(self) && Instant::now() < deadline {
             let _ = self.streaming.update(&mut self.world);
             self.streaming
-                .wait(horizon_platform::time::Duration::from_millis(5));
+                .wait(horizon_std::time::Duration::from_millis(5));
         }
     }
 

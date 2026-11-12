@@ -12,7 +12,7 @@ mod motion;
 mod optical_flow;
 
 use glam::{DMat4, DVec3, Mat4};
-use horizon_platform::{
+use horizon_std::{
     thread,
     time::{Duration, Instant},
 };
@@ -36,7 +36,7 @@ fn debug() -> Option<&'static str> {
     static DEBUG: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     DEBUG
         .get_or_init(|| {
-            horizon_platform::env::var("HORIZON_FRAMEGEN_DEBUG")
+            horizon_std::env::var("HORIZON_FRAMEGEN_DEBUG")
                 .ok()
                 .filter(|v| v == "generated" || v == "motion")
         })

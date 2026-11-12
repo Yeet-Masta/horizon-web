@@ -5,7 +5,7 @@
 //! or login for both directions, `login_finished` and `login_acknowledged` move each direction to
 //! configuration, `finish_configuration` to play, and `start_configuration` / `configuration_acknowledged`
 //! back to configuration.
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{
     collections::{HashMap, VecDeque},
     sync::atomic::{AtomicU8, Ordering},

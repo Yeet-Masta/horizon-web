@@ -558,7 +558,7 @@ impl Worker {
         }
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
-        horizon_platform::thread::spawn_worker("occlusion", move || {
+        horizon_std::thread::spawn_worker("occlusion", move || {
             let mut columns = Columns::new(min_y, sections);
             let (mut vis, mut queue) = (Vec::new(), VecDeque::new());
             while let Ok(mut job) = job_rx.recv() {
@@ -1521,7 +1521,7 @@ mod tests {
         let mut graph = Graph::default();
         let mut best = f64::MAX;
         for _ in 0..12 {
-            let started = horizon_platform::time::Instant::now();
+            let started = horizon_std::time::Instant::now();
             graph.search(&o.columns, camera, 34, &mut vis, &mut queue);
             best = best.min(started.elapsed().as_secs_f64() * 1000.0);
         }

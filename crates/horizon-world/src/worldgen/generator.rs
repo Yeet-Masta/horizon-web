@@ -49,9 +49,9 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     random::{LegacyRandom, PositionalRandom, RandomSource, XoroshiroRandom},
 };
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{
     any::Any,
@@ -336,13 +336,13 @@ fn quantize_parameter_report(json: &str) -> Result<String, GeneratorError> {
 /// `load` on a thread of its own ("Worldgen loader").
 fn loading<T: Send + 'static>(
     load: impl FnOnce() -> T + Send + 'static,
-) -> io::Result<horizon_platform::thread::JoinHandle<T>> {
-    horizon_platform::thread::Builder::new()
+) -> io::Result<horizon_std::thread::JoinHandle<T>> {
+    horizon_std::thread::Builder::new()
         .name("Worldgen loader".into())
         .spawn(load)
 }
 /// A loading thread's result; its panic goes on in this thread.
-fn joined<T>(thread: horizon_platform::thread::JoinHandle<T>) -> T {
+fn joined<T>(thread: horizon_std::thread::JoinHandle<T>) -> T {
     thread
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -1324,8 +1324,7 @@ where
     fn blender_at(&self, pos: ChunkPos) -> Arc<super::blending::Blender> {
         // `SharedConstants.DEBUG_DISABLE_BLENDING`.
         static DISABLED: OnceLock<bool> = OnceLock::new();
-        if *DISABLED
-            .get_or_init(|| horizon_platform::env::var_os("HORIZON_DISABLE_BLENDING").is_some())
+        if *DISABLED.get_or_init(|| horizon_std::env::var_os("HORIZON_DISABLE_BLENDING").is_some())
         {
             return Arc::new(super::blending::Blender::empty());
         }
@@ -1523,7 +1522,7 @@ where
             self.settings.noise_height,
             self.settings.sea_level,
         );
-        let mut clock = horizon_platform::time::Instant::now();
+        let mut clock = horizon_std::time::Instant::now();
         let mut neighbors = Vec::with_capacity(9);
         // The biome ids present, as a bitset: ascending like a sorted set.
         let mut seen: Vec<u64> = Vec::new();
@@ -2357,8 +2356,8 @@ impl<R: RandomSource> MaterialSurfaceQueries for SurfaceQueries<'_, '_, R> {
     }
 }
 
-fn lap(clock: &mut horizon_platform::time::Instant) -> horizon_platform::time::Duration {
-    let now = horizon_platform::time::Instant::now();
+fn lap(clock: &mut horizon_std::time::Instant) -> horizon_std::time::Duration {
+    let now = horizon_std::time::Instant::now();
     let elapsed = now - *clock;
     *clock = now;
     elapsed
@@ -2367,14 +2366,14 @@ fn lap(clock: &mut horizon_platform::time::Instant) -> horizon_platform::time::D
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StageTimings {
     pub chunks: u64,
-    pub biomes: horizon_platform::time::Duration,
+    pub biomes: horizon_std::time::Duration,
     /// Noise fill including aquifer setup.
-    pub noise: horizon_platform::time::Duration,
-    pub surface: horizon_platform::time::Duration,
+    pub noise: horizon_std::time::Duration,
+    pub surface: horizon_std::time::Duration,
     /// Structure starts/references and terrain adaptation.
-    pub structures: horizon_platform::time::Duration,
+    pub structures: horizon_std::time::Duration,
     /// Carving mask generation/application and final heightmap priming.
-    pub carvers: horizon_platform::time::Duration,
+    pub carvers: horizon_std::time::Duration,
 }
 /// Worker-owned mutable caches. Biome temperature caches mirror vanilla's
 /// thread-local caches and never change results.
@@ -3878,7 +3877,7 @@ mod tests {
     }
     #[test]
     fn a_pack_level_stem_names_taller_noise_which_clamps_to_the_build_height() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -3917,7 +3916,7 @@ mod tests {
     }
     #[test]
     fn end_identity_surface_matches_normal_surface_and_rejects_custom_rules() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4109,8 +4108,8 @@ mod tests {
     /// Full detail to prove the first half is discriminating, not vacuous.
     #[test]
     fn reduced_far_detail_paints_only_the_top_of_a_wide_column() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-            .or_else(|| horizon_platform::env::var_os("HORIZON_RESOURCES"))
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
+            .or_else(|| horizon_std::env::var_os("HORIZON_RESOURCES"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4166,8 +4165,8 @@ mod tests {
     }
     #[test]
     fn far_surface_matches_undecorated_land_and_keeps_end_void() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-            .or_else(|| horizon_platform::env::var_os("HORIZON_RESOURCES"))
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
+            .or_else(|| horizon_std::env::var_os("HORIZON_RESOURCES"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4214,7 +4213,7 @@ mod tests {
             sample.water.is_some(),
             "fixture includes underwater terrain"
         );
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let mut exact = Vec::new();
         for z in 0..8 {
             for x in 0..8 {
@@ -4222,7 +4221,7 @@ mod tests {
             }
         }
         let dense_time = started.elapsed();
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let direct = worker.lod_grid(-1024, 0, 32, 8, false).unwrap();
         for z in 0..8 {
             for x in 0..8 {
@@ -4271,7 +4270,7 @@ mod tests {
 
     #[test]
     fn local_carver_cache_is_worker_owned_and_eviction_preserves_terrain() {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4322,7 +4321,7 @@ mod tests {
 
     /// The prepared worldgen data, if this checkout has it.
     fn prepared_data() -> Option<Arc<GeneratorData>> {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4646,7 +4645,7 @@ mod tests {
     /// chunks generated after it have the same blocks and biomes.
     #[test]
     fn released_caches_generate_the_same_chunks() {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4723,7 +4722,7 @@ mod tests {
     /// then cache eviction and explicit start invalidation with old Arcs alive.
     #[test]
     fn concurrent_neighbours_share_results_and_survive_invalidation() {
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
@@ -4759,7 +4758,7 @@ mod tests {
         };
         let barrier = std::sync::Barrier::new(6);
         let pos = ChunkPos::new(11, -11); // ancient city for this seed
-        let results = horizon_platform::thread::scope(|scope| {
+        let results = horizon_std::thread::scope(|scope| {
             let handles: Vec<_> = (0..6)
                 .map(|_| {
                     scope.spawn(|| {
@@ -4816,8 +4815,8 @@ mod tests {
 
     /// The resources the worldgen tests read.
     fn test_root() -> std::path::PathBuf {
-        horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-            .or_else(|| horizon_platform::env::var_os("HORIZON_RESOURCES"))
+        horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
+            .or_else(|| horizon_std::env::var_os("HORIZON_RESOURCES"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")

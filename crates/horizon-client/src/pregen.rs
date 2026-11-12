@@ -210,9 +210,9 @@ mod tests {
 
     #[test]
     fn a_huge_area_is_planned_at_once() {
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let p = Pregen::new((0, 0), 30_000_000 >> 4, Shape::Circle);
         assert!(p.total > 11_000_000_000_000);
-        assert!(started.elapsed() < horizon_platform::time::Duration::from_secs(5));
+        assert!(started.elapsed() < horizon_std::time::Duration::from_secs(5));
     }
 }

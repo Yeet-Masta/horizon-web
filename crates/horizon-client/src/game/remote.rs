@@ -31,7 +31,6 @@ use horizon_client::{
     world::World,
 };
 use horizon_core::{geometry::Vec3, random::RandomSource};
-use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::{
     entity_data::{ITEM_ENTITY_ITEM, Value},
     item::{Hashed, Stack},
@@ -44,6 +43,7 @@ use horizon_protocol::{
     secure_chat::{self, Signature},
     text::{Language, plain},
 };
+use horizon_std::time::{Duration, Instant};
 use horizon_world::{
     attachments::{Attachments, Holder},
     level::InteractionResult,
@@ -58,8 +58,7 @@ use std::{
 use winit::{event::MouseButton, keyboard::KeyCode};
 
 type BuiltinCache = Vec<(std::path::PathBuf, Arc<Builtin>)>;
-static BUILTIN: horizon_platform::sync::Mutex<BuiltinCache> =
-    horizon_platform::sync::Mutex::new(Vec::new());
+static BUILTIN: horizon_std::sync::Mutex<BuiltinCache> = horizon_std::sync::Mutex::new(Vec::new());
 
 /// The prepared resources' `registries.json`, parsed once per root: the
 /// file never changes while the game runs, and parsing it took about 3 ms
@@ -613,7 +612,7 @@ pub(super) struct Remote {
     next_chat_index: i32,
     /// `serverEnforcesSecureChat`, from the login packet.
     enforces_secure_chat: bool,
-    services_keys: Arc<horizon_platform::sync::Mutex<ServicesKeys>>,
+    services_keys: Arc<horizon_std::sync::Mutex<ServicesKeys>>,
     /// The `RemoteChatSession.Data` each player's list entry last carried (INITIALIZE_CHAT).
     chat_sessions: HashMap<u128, Option<(u128, i64, Vec<u8>, Vec<u8>)>>,
     /// `PlayerInfo.messageValidator` of the players whose chat has been read.
@@ -877,7 +876,7 @@ impl Game<'_> {
             if self.title.is_none() {
                 self.title = Some(
                     horizon_client::title::Title::new(
-                        horizon_platform::env::current_dir()?.join("saves"),
+                        horizon_std::env::current_dir()?.join("saves"),
                         &self.options.resources,
                     )
                     .with_user(|| self.options.player_name()),
@@ -990,7 +989,7 @@ impl Game<'_> {
         self.streaming = streaming;
         self.world = World::new(self.res.facts().air, 0);
         self.save = Arc::new(SaveDir::new(
-            horizon_platform::env::temp_dir().join("horizon-remote-unused"),
+            horizon_std::env::temp_dir().join("horizon-remote-unused"),
             horizon_client::save::LevelShape::OVERWORLD,
         ));
         self.inventory = vec![None; 36];
@@ -1045,9 +1044,9 @@ impl Game<'_> {
         let chat_tree = self.chat_tree_for(None);
         // Minecraft.services() has the keys wherever the game is played, single player's own
         // server included: its guests' chat keys are checked against them.
-        let services_keys = Arc::new(horizon_platform::sync::Mutex::new(ServicesKeys::Pending));
+        let services_keys = Arc::new(horizon_std::sync::Mutex::new(ServicesKeys::Pending));
         let slot = services_keys.clone();
-        let _ = horizon_platform::thread::Builder::new()
+        let _ = horizon_std::thread::Builder::new()
             .name("Services keys".into())
             .spawn(move || {
                 use horizon_server_files::profiles;
@@ -1291,7 +1290,7 @@ impl Game<'_> {
         if let Some(r) = self.renderer.as_mut() {
             r.clear_sections(self.world.layout());
         }
-        let saves = horizon_platform::env::current_dir()?.join("saves");
+        let saves = horizon_std::env::current_dir()?.join("saves");
         let mut title = horizon_client::title::Title::new(saves.clone(), &self.options.resources)
             .with_user(|| self.options.player_name());
         title.last_server = self.settings.file.string("lastServer");
@@ -1599,8 +1598,8 @@ impl Game<'_> {
         }
         // PlayerChatMessage.hasExpiredClient: MESSAGE_EXPIRES_AFTER_CLIENT is
         // the server's five minutes and two more.
-        let now = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let now = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let expired = now
             > timestamp.saturating_add(
@@ -2536,7 +2535,7 @@ impl Game<'_> {
         if self.integrated.is_some() {
             return;
         }
-        if let Ok(dir) = horizon_platform::env::current_dir() {
+        if let Ok(dir) = horizon_std::env::current_dir() {
             horizon_client::multiplayer::save_server_icon(
                 &dir.join("saves"),
                 &r.session.address,
@@ -4846,8 +4845,8 @@ impl Game<'_> {
                     self.handle_chat_message_error(&p.chat_type, signature.as_ref());
                     return Ok(());
                 }
-                let now = horizon_platform::time::SystemTime::now()
-                    .duration_since(horizon_platform::time::UNIX_EPOCH)
+                let now = horizon_std::time::SystemTime::now()
+                    .duration_since(horizon_std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
                 let incoming = secure_chat::Incoming {
                     sender: p.sender,
@@ -5344,7 +5343,7 @@ impl Game<'_> {
                     return;
                 };
                 let (send, recv) = std::sync::mpsc::channel();
-                horizon_platform::thread::Builder::new()
+                horizon_std::thread::Builder::new()
                     .name("Own profile".into())
                     .spawn(move || {
                         let _ = send.send(horizon_client::auth::own_textures(auth.as_ref()));
@@ -10979,10 +10978,9 @@ fn snapshot_value(s: &play::AttributeSnapshot) -> f64 {
 
 /// `Util.getMillis` for the level load tracker's timeouts.
 fn client_millis() -> u64 {
-    static ORIGIN: std::sync::OnceLock<horizon_platform::time::Instant> =
-        std::sync::OnceLock::new();
+    static ORIGIN: std::sync::OnceLock<horizon_std::time::Instant> = std::sync::OnceLock::new();
     ORIGIN
-        .get_or_init(horizon_platform::time::Instant::now)
+        .get_or_init(horizon_std::time::Instant::now)
         .elapsed()
         .as_millis() as u64
 }
@@ -11078,7 +11076,7 @@ mod tests {
         use horizon_protocol::connection::Pipe;
 
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
                 .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
         );
         let settings = Settings::default();
@@ -11087,7 +11085,7 @@ mod tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

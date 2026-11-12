@@ -984,8 +984,8 @@ impl Game<'_> {
         let modifier = self.item_modifier_arg(ctx, "modifier")?;
         let source = self.command_source.unwrap_or_else(|| self.player_source());
         let view = source.entity.map(|t| self.entity_view_asked(t, &modifier));
-        let seed = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let seed = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as i64);
         let mut rng = horizon_core::random::LegacyRandom::new(seed);
         let mut tracker = Tracker::default();

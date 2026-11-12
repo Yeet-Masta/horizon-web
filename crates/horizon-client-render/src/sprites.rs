@@ -852,7 +852,7 @@ pub(crate) fn sprite_mipmap_limit(requested: u32, size: u32, minimum: u32, avail
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::fs::{self, File};
+    use horizon_std::fs::{self, File};
     #[test]
     fn the_texture_budget_picks_the_largest_side_that_fits() {
         // 1300 layers: vanilla's count, about.
@@ -902,7 +902,7 @@ mod tests {
     }
     #[test]
     fn companion_grid_and_static_map_follow_colour_frame_selection() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-companion-grid-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let write = |name: &str, width, height, pixels: &[u8]| {
@@ -963,7 +963,7 @@ mod tests {
     }
     #[test]
     fn files_outside_textures_load_by_path() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-file-{}", std::process::id()));
         let tile = "assets/minecraft/optifine/ctm/glass/0.png";
         fs::create_dir_all(root.join(tile).parent().unwrap()).unwrap();
@@ -991,7 +991,7 @@ mod tests {
     }
     #[test]
     fn tile_sheets_cut_into_a_layer_per_tile() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-tiles-{}", std::process::id()));
         let file = root.join("assets/minecraft/textures/block/sheet.png");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -1060,8 +1060,8 @@ mod tests {
     }
     #[test]
     fn custom_item_texture_ids_load_with_their_animation() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-sprite-cit-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-sprite-cit-{}", std::process::id()));
         let file = root.join("assets/minecraft/optifine/cit/a.png");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         let mut encoder = png::Encoder::new(File::create(&file).unwrap(), 16, 48);
@@ -1085,7 +1085,7 @@ mod tests {
     }
     #[test]
     fn custom_item_textures_skip_the_disk_cache() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-cit-disk-{}", std::process::id()));
         // A realistic root: the cache's fingerprint walks the `textures` trees.
         let vanilla = root.join("assets/minecraft/textures/item/stick.png");
@@ -1119,7 +1119,7 @@ mod tests {
     }
     #[test]
     fn custom_item_textures_mip_as_items() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-cit-mip-{}", std::process::id()));
         let write = |rel: &str| {
             let path = root.join(rel);
@@ -1154,7 +1154,7 @@ mod tests {
     }
     #[test]
     fn prefetched_textures_take_the_layers_inserting_alone_gives() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-prefetch-{}", std::process::id()));
         let png = |path: &str, side: u32, seed: u8| {
             let file = root.join(path);
@@ -1227,7 +1227,7 @@ mod tests {
     }
     #[test]
     fn identical_still_textures_share_a_layer() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-share-{}", std::process::id()));
         let directory = root.join("assets/a/textures/block");
         fs::create_dir_all(&directory).unwrap();
@@ -1342,11 +1342,11 @@ mod tests {
 
     #[test]
     fn native_32_pixel_animation_frames_keep_every_texel() {
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-sprite-detail-{}-{}",
             std::process::id(),
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

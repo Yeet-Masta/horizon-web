@@ -15,7 +15,7 @@ use horizon_client::{
     hud::{HudBatch, rgba},
     items::ItemStack,
 };
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 
 const SLOT: f32 = 18.0;
 /// The title row's height, and the gap under each recipe.

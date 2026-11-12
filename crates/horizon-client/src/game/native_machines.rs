@@ -280,7 +280,7 @@ mod tests {
     /// chunk at the origin is loaded.
     fn server_game() -> Game<'static> {
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
                 .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
         );
         let settings = Settings::default();
@@ -289,7 +289,7 @@ mod tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

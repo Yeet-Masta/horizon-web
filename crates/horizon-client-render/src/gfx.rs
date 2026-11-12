@@ -13,7 +13,7 @@ use crate::{
     sprites::SpriteAnimation,
 };
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -152,7 +152,7 @@ fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bo
 
 /// The compact layout of solid quads, unless `HORIZON_PACKED_QUADS=0` (A/B checks).
 fn packed_wanted() -> bool {
-    horizon_platform::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
+    horizon_std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
 }
 
 mod animate;
@@ -474,10 +474,10 @@ struct SectionGpu {
     /// When it began to fade in over the far terrain it replaces, which
     /// stays whole behind it until then: a section new where far tiles are
     /// drawn. Meshed again, it stays as it was.
-    fading: Option<horizon_platform::time::Instant>,
+    fading: Option<horizon_std::time::Instant>,
     /// When it began to fade out, its column gone over far terrain that
     /// stays behind it (`Renderer::leave_section`); released once it has.
-    leaving: Option<horizon_platform::time::Instant>,
+    leaving: Option<horizon_std::time::Instant>,
     /// Animated sprite layers present in this section.
     animated_layers: Box<[u16]>,
 }
@@ -498,7 +498,7 @@ impl SectionGpu {
     /// Its fade code this frame (`lod::fade_code`), 0 once whole. `retiring`:
     /// its column has left the render distance, far terrain is coming in
     /// under it (`lod::HELD`).
-    fn fade(&self, now: horizon_platform::time::Instant, retiring: bool) -> u32 {
+    fn fade(&self, now: horizon_std::time::Instant, retiring: bool) -> u32 {
         match self.leaving {
             Some(since) => lod::fade_out_code(since, 0, now),
             None if retiring => lod::HELD,
@@ -586,8 +586,7 @@ impl SectionGpu {
             return None;
         }
         let vanilla = f.uploaded.get(&key).filter(|_| f.fade_ms > 0);
-        let vanilla =
-            vanilla.map(|&t| t + horizon_platform::time::Duration::from_millis(f.fade_ms));
+        let vanilla = vanilla.map(|&t| t + horizon_std::time::Duration::from_millis(f.fade_ms));
         vanilla.max(self.fading.map(|t| t + lod::FADE))
     }
 }
@@ -822,16 +821,14 @@ const COMPACT_BUDGET: u64 = 32 << 20;
 /// `Renderer::remove_columns` filters each store once rather than looking up every
 /// section key from this many keys, or from as many as there are resident sections.
 const BULK_REMOVAL_KEYS: usize = 256;
-const SHRINK_SETTLE: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(1);
-const SHRINK_RETRY: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(5);
+const SHRINK_SETTLE: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(1);
+const SHRINK_RETRY: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(5);
 /// Not before then may a large translucent page start to shrink.
 #[derive(Default)]
 struct ShrinkGate(Option<Instant>);
 impl ShrinkGate {
     /// Not before `wait` from `now`, nor before an earlier wait is over.
-    fn wait(&mut self, now: Instant, wait: horizon_platform::time::Duration) {
+    fn wait(&mut self, now: Instant, wait: horizon_std::time::Duration) {
         self.0 = self.0.max(Some(now + wait));
     }
     /// Whether one may start now: the waits are over, and `compact_arena` copied
@@ -1043,7 +1040,7 @@ pub struct Renderer {
     /// The surface `release_surface` set aside for the renderer that replaces
     /// this one on the same device: reused, not created again, as a new
     /// surface for the window can come back lost (Wayland on Mesa).
-    spare_surface: horizon_platform::sync::Mutex<Option<wgpu::Surface<'static>>>,
+    spare_surface: horizon_std::sync::Mutex<Option<wgpu::Surface<'static>>>,
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
     /// Offscreen submissions still on the GPU: at most two frames run ahead.
@@ -1063,9 +1060,9 @@ pub struct Renderer {
     /// Time the last `render` spent blocked on the GPU or the display
     /// (acquiring, presenting, offscreen pacing, the submit thread holding the queue),
     /// excluded from CPU time.
-    pub last_wait: horizon_platform::time::Duration,
+    pub last_wait: horizon_std::time::Duration,
     /// CPU time of the last `render`, waits excluded.
-    pub last_encode: horizon_platform::time::Duration,
+    pub last_encode: horizon_std::time::Duration,
     /// What the system says about the window's display, watched only while HDR output
     /// is on; before `window`, so it's dropped first.
     display: DisplayWatch,
@@ -1288,7 +1285,7 @@ pub struct Renderer {
     /// Removed sections of `lod_cutout` columns, released once tiles cover them.
     lod_retiring: crate::fast_hash::FxHashSet<SectionKey>,
     /// Removed sections fading out over far terrain (`leave_section`).
-    lod_leaving: Vec<(SectionKey, horizon_platform::time::Instant)>,
+    lod_leaving: Vec<(SectionKey, horizon_std::time::Instant)>,
     /// Finished tile meshes `upload_lods` has yet to upload.
     lod_pending: Option<lod::Pending>,
     detail_columns: FxHashMap<(i32, i32), SectionMask>,
@@ -1350,13 +1347,13 @@ pub struct Renderer {
     block_entity_membership_revisions: FxHashMap<SectionKey, u64>,
     /// When each section was first uploaded (`RenderSection.uploadedTime`): kept across meshing
     /// it again, gone with its column. Sections that fade in over far terrain are not in it.
-    section_uploaded: FxHashMap<SectionKey, horizon_platform::time::Instant>,
+    section_uploaded: FxHashMap<SectionKey, horizon_std::time::Instant>,
     /// When `section_uploaded` last gained a section: once the fade time has passed since,
     /// every section is whole and frames skip the per-section lookups.
-    newest_upload: Option<horizon_platform::time::Instant>,
+    newest_upload: Option<horizon_std::time::Instant>,
     /// When a section last began to fade in over far terrain (`SectionGpu::fading`), for the
     /// same shortcut.
-    newest_lod_fade: Option<horizon_platform::time::Instant>,
+    newest_lod_fade: Option<horizon_std::time::Instant>,
     /// Changes whenever `block_entities` does (unique across renderers).
     block_entity_revision: u64,
     /// The light sources of each section and their revision, for `block_light`.
@@ -1452,7 +1449,7 @@ pub struct Renderer {
     /// outcome waits here for the next frame (`screenshot_result`).
     #[cfg(target_family = "wasm")]
     screenshots_mapped:
-        std::sync::Arc<horizon_platform::sync::Mutex<Vec<std::result::Result<[u32; 2], String>>>>,
+        std::sync::Arc<horizon_std::sync::Mutex<Vec<std::result::Result<[u32; 2], String>>>>,
     /// Screenshot Quality (Horizon setting): a `scaled` screenshot's frame is this many
     /// times the game's resolution (1, 2, 4 or 8).
     pub screenshot_quality: u32,
@@ -1488,7 +1485,7 @@ pub(crate) const SPRITE_SPLIT: u32 = 2048;
 /// A smaller split from `HORIZON_SPRITE_SPLIT` (dev only: vanilla's sprites
 /// drawn from several arrays must look the same).
 fn requested_split() -> Option<u32> {
-    horizon_platform::env::var("HORIZON_SPRITE_SPLIT")
+    horizon_std::env::var("HORIZON_SPRITE_SPLIT")
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&n| (1..=SPRITE_SPLIT).contains(&n))
@@ -1874,7 +1871,7 @@ impl wgpu::rwh::HasDisplayHandle for WindowDisplay {
 }
 /// The backends to open a device on, each tried in turn until one gives a
 /// device. `api` is the player's choice (`GraphicsApi::with_env` applied);
-/// `os` is `horizon_platform::env::consts::OS`; `wgpu_backend`: whether `WGPU_BACKEND` is set,
+/// `os` is `horizon_std::env::consts::OS`; `wgpu_backend`: whether `WGPU_BACKEND` is set,
 /// which picks the backends itself. Auto tries DirectX 12 first on Windows ARM64,
 /// then Vulkan, based on the device-loss observed in a Windows ARM64 test. Other
 /// Windows systems try Vulkan, then DirectX 12, then OpenGL; Linux tries Vulkan then
@@ -2085,7 +2082,7 @@ pub async fn open_web_device() -> Result<()> {
         .map_err(|e| format!("{NO_GPU_DRIVER} (device: {e})"))?;
     // A browser without multi-draw replays a repeated batch of indirect section draws from a
     // render bundle (wgpu's `set_render_bundles`); HORIZON_WEB_BUNDLES=0 issues every draw.
-    if horizon_platform::env::var("HORIZON_WEB_BUNDLES").is_ok_and(|v| v.trim() == "0") {
+    if horizon_std::env::var("HORIZON_WEB_BUNDLES").is_ok_and(|v| v.trim() == "0") {
         device.set_render_bundles(false);
         startup_step(format_args!("render bundles off (HORIZON_WEB_BUNDLES=0)"));
     }
@@ -2170,12 +2167,12 @@ async fn open_device(
     api: GraphicsApi,
     layers: u32,
 ) -> Result<Opened> {
-    let wgpu_backend = horizon_platform::env::var_os("WGPU_BACKEND").is_some();
+    let wgpu_backend = horizon_std::env::var_os("WGPU_BACKEND").is_some();
     let mut first = None;
     for (order, allow_cpu) in device_search(
         api.with_env(),
-        horizon_platform::env::consts::OS,
-        horizon_platform::env::consts::ARCH,
+        horizon_std::env::consts::OS,
+        horizon_std::env::consts::ARCH,
         wgpu_backend,
     ) {
         match open_device_with(window, offscreen, &order, layers, allow_cpu).await {
@@ -4487,7 +4484,7 @@ impl Renderer {
             })];
             let info = adapter.get_info();
             let min_sections = if flat::is_broken_intel_vulkan(&info)
-                || horizon_platform::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
+                || horizon_std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
             {
                 0
             } else if flat::for_vanilla(&info) {
@@ -4635,7 +4632,7 @@ impl Renderer {
         // HORIZON_GPU_CULL=0 turns occlusion culling off, `all` culls every
         // frame however few its draws and little it hides, `shader` tests in
         // the shader as on Metal (A/B checks).
-        let cull_env = horizon_platform::env::var("HORIZON_GPU_CULL");
+        let cull_env = horizon_std::env::var("HORIZON_GPU_CULL");
         let adapter_info = adapter.get_info();
         let cull = cull::Cull::supported(&adapter, &device)
             .filter(|_| occlusion_culling_requested(&adapter_info, cull_env.as_deref().ok()))
@@ -4690,7 +4687,7 @@ impl Renderer {
             instance,
             adapter,
             surface: surface.map(Arc::new),
-            spare_surface: horizon_platform::sync::Mutex::new(None),
+            spare_surface: horizon_std::sync::Mutex::new(None),
             offscreen,
             in_flight: std::collections::VecDeque::new(),
             paced_elsewhere: false,
@@ -4702,8 +4699,8 @@ impl Renderer {
             gpu_timer,
             gpu_times: Vec::new(),
             lightmap_pixels: [0; 16 * 16 * 4],
-            last_wait: horizon_platform::time::Duration::ZERO,
-            last_encode: horizon_platform::time::Duration::ZERO,
+            last_wait: horizon_std::time::Duration::ZERO,
+            last_encode: horizon_std::time::Duration::ZERO,
             window,
             device,
             reuse,
@@ -4931,7 +4928,7 @@ impl Renderer {
             fullbright: false,
             animated_textures: true,
             present_modes,
-            capture_copies: horizon_platform::env::var_os("HORIZON_RENDER_CAPTURE")
+            capture_copies: horizon_std::env::var_os("HORIZON_RENDER_CAPTURE")
                 .is_some()
                 .then(capture::Copies::default),
             capture: None,
@@ -5469,14 +5466,14 @@ impl Renderer {
         let fading = match self.sections.find(key) {
             Some(old) => old.fading,
             None if !self.lods.is_empty() => {
-                let now = horizon_platform::time::Instant::now();
+                let now = horizon_std::time::Instant::now();
                 self.newest_lod_fade = Some(now);
                 Some(now)
             }
             None => None,
         };
         if fading.is_none() && !self.section_uploaded.contains_key(&key) {
-            let now = horizon_platform::time::Instant::now();
+            let now = horizon_std::time::Instant::now();
             self.section_uploaded.insert(key, now);
             self.newest_upload = Some(now);
         }
@@ -5901,7 +5898,7 @@ impl Renderer {
         fade_seconds: f32,
     ) -> impl Iterator<Item = &([i32; 3], u32)> {
         let fade = fade_millis(fade_seconds);
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let all = !self.sections_fading_in(fade, now);
         self.block_entities
             .iter()
@@ -5913,7 +5910,7 @@ impl Renderer {
     }
     /// Whether a section may still be fading in over `fade_ms` (vanilla's chunk fade): one was
     /// uploaded more recently than that. Otherwise every section is whole.
-    fn sections_fading_in(&self, fade_ms: u64, now: horizon_platform::time::Instant) -> bool {
+    fn sections_fading_in(&self, fade_ms: u64, now: horizon_std::time::Instant) -> bool {
         fade_ms > 0
             && self
                 .newest_upload
@@ -5921,7 +5918,7 @@ impl Renderer {
     }
     /// Whether a section may be fading in or out over far terrain (`SectionGpu::fade`):
     /// otherwise every section's code is 0.
-    fn sections_fading_over_lods(&self, now: horizon_platform::time::Instant) -> bool {
+    fn sections_fading_over_lods(&self, now: horizon_std::time::Instant) -> bool {
         !self.lod_retiring.is_empty()
             || !self.lod_leaving.is_empty()
             || self
@@ -5980,7 +5977,7 @@ impl Renderer {
             })
     }
     /// Milliseconds since `key` was uploaded; a section not in `section_uploaded` is old.
-    fn section_elapsed_ms(&self, key: SectionKey, now: horizon_platform::time::Instant) -> u64 {
+    fn section_elapsed_ms(&self, key: SectionKey, now: horizon_std::time::Instant) -> u64 {
         self.section_uploaded.get(&key).map_or(u64::MAX, |t| {
             now.saturating_duration_since(*t).as_millis() as u64
         })
@@ -6158,7 +6155,7 @@ impl Renderer {
     /// away at once, the column's detail dropped to the far terrain's in one
     /// frame.
     fn leave_section(&mut self, key: SectionKey) {
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         if let Some(section) = self.sections.find_mut(key)
             && section.leaving.is_none()
         {
@@ -6170,7 +6167,7 @@ impl Renderer {
         }
     }
     /// Releases the sections that have faded out (`leave_section`).
-    fn release_left(&mut self, now: horizon_platform::time::Instant) {
+    fn release_left(&mut self, now: horizon_std::time::Instant) {
         let mut done = Vec::new();
         self.lod_leaving.retain(|&(key, since)| {
             let left = now.saturating_duration_since(since) >= lod::FADE;
@@ -6308,8 +6305,8 @@ impl Renderer {
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         surface.configure(device, config);
-        let memory = horizon_platform::block_on_or(memory.pop(), None);
-        if let Some(e) = memory.or(horizon_platform::block_on_or(validation.pop(), None)) {
+        let memory = horizon_std::block_on_or(memory.pop(), None);
+        if let Some(e) = memory.or(horizon_std::block_on_or(validation.pop(), None)) {
             return Err(e.to_string());
         }
         if device_lost.load(std::sync::atomic::Ordering::Relaxed) {
@@ -6426,12 +6423,11 @@ impl Renderer {
             // the next start, which then comes up with HDR off.
             if output.is_some() {
                 if self.surface.is_some() {
-                    let _ =
-                        horizon_platform::fs::write(marker, "HDR output was being switched on\n");
+                    let _ = horizon_std::fs::write(marker, "HDR output was being switched on\n");
                     self.hdr_marker = Some(marker.to_owned());
                 }
             } else if let Some(marker) = self.hdr_marker.take() {
-                let _ = horizon_platform::fs::remove_file(marker);
+                let _ = horizon_std::fs::remove_file(marker);
             }
             // Only HDR output asks the system about the display, so with HDR off the
             // game never waits on the compositor for it.
@@ -7803,7 +7799,7 @@ impl Renderer {
             !gpu_frame || self.occlusion.generation() == graph_given,
             "the walk reads the graph GPU culling was given"
         );
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let mut visible_lods = std::mem::take(&mut self.visible_lods);
         visible_lods.clear();
         if frame.title {
@@ -8536,7 +8532,7 @@ impl Renderer {
         // path.
         let hdr_lighting = self.native.is_none()
             && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
-            && horizon_platform::env::var_os("HORIZON_HDR_LIGHTING").is_none_or(|v| v != "0");
+            && horizon_std::env::var_os("HORIZON_HDR_LIGHTING").is_none_or(|v| v != "0");
         if let Some(hdr) = &mut self.hdr {
             hdr.lighting = hdr_lighting && hdr.look;
         }
@@ -10905,7 +10901,7 @@ impl Renderer {
             if self.hdr.is_some()
                 && let Some(marker) = self.hdr_marker.take()
             {
-                let _ = horizon_platform::fs::remove_file(marker);
+                let _ = horizon_std::fs::remove_file(marker);
                 log::info!("Horizon renderer: HDR output presented its first frame");
             }
             if reconfigure {
@@ -11251,8 +11247,8 @@ impl GpuChecks {
         Self { memory, validation }
     }
     fn pop(self) -> Option<wgpu::Error> {
-        let validation = horizon_platform::block_on_or(self.validation.pop(), None);
-        let memory = horizon_platform::block_on_or(self.memory.pop(), None);
+        let validation = horizon_std::block_on_or(self.validation.pop(), None);
+        let memory = horizon_std::block_on_or(self.memory.pop(), None);
         memory.or(validation)
     }
 }
@@ -11381,7 +11377,7 @@ impl Renderer {
             let index = self.in_flight.pop_front();
             let _ = self.device.poll(wgpu::PollType::Wait {
                 submission_index: index,
-                timeout: Some(horizon_platform::time::Duration::from_secs(5)),
+                timeout: Some(horizon_std::time::Duration::from_secs(5)),
             });
         }
     }
@@ -11470,7 +11466,7 @@ impl Renderer {
             None => (self.config.width, self.config.height, pixels),
         };
         let mut encoder = png::Encoder::new(
-            std::io::BufWriter::new(horizon_platform::fs::File::create(&request.path)?),
+            std::io::BufWriter::new(horizon_std::fs::File::create(&request.path)?),
             width,
             height,
         );
@@ -11529,7 +11525,7 @@ impl Renderer {
             None => (width, height, pixels),
         };
         let mut encoder = png::Encoder::new(
-            std::io::BufWriter::new(horizon_platform::fs::File::create(&request.path)?),
+            std::io::BufWriter::new(horizon_std::fs::File::create(&request.path)?),
             width,
             height,
         );
@@ -11552,7 +11548,7 @@ impl Renderer {
         info.bit_depth = png::BitDepth::Sixteen;
         info.icc_profile = Some(hdr_icc::profile().into());
         let encoder = png::Encoder::with_info(
-            std::io::BufWriter::new(horizon_platform::fs::File::create(path)?),
+            std::io::BufWriter::new(horizon_std::fs::File::create(path)?),
             info,
         )?;
         let mut writer = encoder.write_header()?;
@@ -12098,7 +12094,7 @@ mod tests {
     #[test]
     fn shrinking_starts_once_terrain_has_settled() {
         use super::{COMPACT_BUDGET, SHRINK_RETRY, SHRINK_SETTLE, ShrinkGate};
-        use horizon_platform::time::{Duration, Instant};
+        use horizon_std::time::{Duration, Instant};
         let (now, ms) = (Instant::now(), Duration::from_millis(1));
         let mut gate = ShrinkGate::default();
         assert!(gate.may_start(now, COMPACT_BUDGET));
@@ -12489,7 +12485,7 @@ mod tests {
         assert!(shown(true));
         // The first try keeps wgpu's own filtering, unless `with_env` turns the
         // flag on from the environment (WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER).
-        if horizon_platform::env::var_os("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER").is_none() {
+        if horizon_std::env::var_os("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER").is_none() {
             assert!(!shown(false));
         }
     }
@@ -12499,7 +12495,7 @@ mod tests {
     #[test]
     fn shaders_translate_to_hlsl_for_directx_12_and_glsl_for_opengl() {
         fn wgsl_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in horizon_platform::fs::read_dir(dir).unwrap() {
+            for entry in horizon_std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
                     wgsl_files(&path, out);
@@ -12517,7 +12513,7 @@ mod tests {
         // Improved transparency's files are appended to terrain.wgsl and entity.wgsl.
         let mut sources: Vec<(std::path::PathBuf, String)> = Vec::new();
         for path in files {
-            let text = horizon_platform::fs::read_to_string(&path).unwrap();
+            let text = horizon_std::fs::read_to_string(&path).unwrap();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name == "oit.wgsl" || name == "gpu_occlusion.wgsl" {
                 // The shared maths: it needs the file it is appended to. GPU culling's
@@ -12769,7 +12765,7 @@ mod tests {
     fn section(
         solid: u32,
         translucent: u32,
-        fading: Option<horizon_platform::time::Instant>,
+        fading: Option<horizon_std::time::Instant>,
     ) -> super::SectionGpu {
         super::SectionGpu {
             page: 0,
@@ -12799,7 +12795,7 @@ mod tests {
     fn a_fade_ends_by_its_deadline_and_never_comes_back() {
         use super::FadeInputs;
         use crate::fast_hash::{FxHashMap, FxHashSet};
-        use horizon_platform::time::{Duration, Instant};
+        use horizon_std::time::{Duration, Instant};
         let ms = Duration::from_millis;
         // The steps start at `zero`; what began `t` ms before it began off the steps.
         let zero = Instant::now() + Duration::from_secs(3);
@@ -12865,7 +12861,7 @@ mod tests {
             hold_fading, mark_fades,
         };
         use crate::fast_hash::{FxHashMap, FxHashSet};
-        use horizon_platform::time::{Duration, Instant};
+        use horizon_std::time::{Duration, Instant};
         /// The level's sections: those at y -1 and 14 have no record.
         const ROWS: usize = 14;
         const FRAME: Duration = Duration::from_millis(16);
@@ -13213,8 +13209,8 @@ mod tests {
                 .flags
                 .contains(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
         };
-        if horizon_platform::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_none()
-            && horizon_platform::env::var_os("WGPU_BACKEND").is_none()
+        if horizon_std::env::var_os("WGPU_VALIDATION_INDIRECT_CALL").is_none()
+            && horizon_std::env::var_os("WGPU_BACKEND").is_none()
         {
             assert_eq!(validated(wgpu::Backends::default()), cfg!(debug_assertions));
             assert_eq!(validated(wgpu::Backends::VULKAN), cfg!(debug_assertions));
@@ -13476,12 +13472,11 @@ struct DisplayWatch {
     /// sends no event for a moved window or a changed SDR brightness slider.
     polled: Option<(
         Option<crate::graphics::Reported>,
-        horizon_platform::time::Instant,
+        horizon_std::time::Instant,
     )>,
 }
 /// How often [`DisplayWatch`] reads the OS's values again where no event says they changed.
-const DISPLAY_POLL: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(2);
+const DISPLAY_POLL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(2);
 impl DisplayWatch {
     /// Starts watching, with what the system reports now.
     fn new(
@@ -13503,7 +13498,7 @@ impl DisplayWatch {
         let watch = Self {
             #[cfg(target_os = "linux")]
             wayland: None,
-            polled: Some((now, horizon_platform::time::Instant::now() + DISPLAY_POLL)),
+            polled: Some((now, horizon_std::time::Instant::now() + DISPLAY_POLL)),
         };
         (watch, now)
     }
@@ -13518,7 +13513,7 @@ impl DisplayWatch {
             return wayland.changed().map(|now| now.map(reported));
         }
         let (last, next) = self.polled.as_mut()?;
-        let time = horizon_platform::time::Instant::now();
+        let time = horizon_std::time::Instant::now();
         if time < *next {
             return None;
         }
@@ -13539,19 +13534,18 @@ impl DisplayWatch {
 /// held that long, and only the one they settled on is logged.
 struct DisplayLog {
     last: String,
-    at: Option<horizon_platform::time::Instant>,
-    pending: Option<(String, horizon_platform::time::Instant)>,
+    at: Option<horizon_std::time::Instant>,
+    pending: Option<(String, horizon_std::time::Instant)>,
 }
-static DISPLAY_LOG: horizon_platform::sync::Mutex<DisplayLog> =
-    horizon_platform::sync::Mutex::new(DisplayLog {
+static DISPLAY_LOG: horizon_std::sync::Mutex<DisplayLog> =
+    horizon_std::sync::Mutex::new(DisplayLog {
         last: String::new(),
         at: None,
         pending: None,
     });
-const DISPLAY_LOG_QUIET: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(1);
+const DISPLAY_LOG_QUIET: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(1);
 fn log_display(line: String) {
-    let now = horizon_platform::time::Instant::now();
+    let now = horizon_std::time::Instant::now();
     let mut log = DISPLAY_LOG
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13567,7 +13561,7 @@ fn log_display(line: String) {
 /// Logs a change [`log_display`] held back, once the values have held for
 /// [`DISPLAY_LOG_QUIET`].
 fn flush_display_log() {
-    let now = horizon_platform::time::Instant::now();
+    let now = horizon_std::time::Instant::now();
     let mut log = DISPLAY_LOG
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

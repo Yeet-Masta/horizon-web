@@ -6,8 +6,8 @@
 //!   `[timestamp_ms: u32 big-endian][packet_length: u32 big-endian][packet_data: VarInt(packet_id) + payload]`
 //! - Optional `markers.json`: timeline markers/chapters.
 
-use horizon_platform::fs::{self, File, OpenOptions, PathExt as _};
 use horizon_protocol::buf::{Reader, write_varint};
+use horizon_std::fs::{self, File, OpenOptions, PathExt as _};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{self, BufReader, BufWriter, Read, Write},
@@ -112,14 +112,11 @@ impl TimestampedPacket {
 /// A file name beside `dest` that no other writer in this or another process
 /// picks: `<dest>.<pid>-<nanos>.<suffix>`.
 fn sibling(dest: &Path, suffix: &str) -> PathBuf {
-    let nanos = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let nanos = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(
-        ".{}-{nanos}.{suffix}",
-        horizon_platform::process::id()
-    ));
+    name.push(format!(".{}-{nanos}.{suffix}", horizon_std::process::id()));
     dest.with_file_name(name)
 }
 
@@ -645,7 +642,7 @@ pub fn recover_crashed_recordings(dir: &Path) -> io::Result<RecoveryReport> {
 /// Err on the side of yes: packaging a live recording would take the stream from
 /// under its writer.
 fn writer_may_be_alive(stream: &Path, pid: u32) -> bool {
-    if pid == horizon_platform::process::id() {
+    if pid == horizon_std::process::id() {
         return true;
     }
     #[cfg(target_os = "linux")]
@@ -763,7 +760,7 @@ fn modified_ms(path: &Path) -> u64 {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| t.duration_since(horizon_platform::time::UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(horizon_std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_millis() as u64)
 }
 
@@ -774,7 +771,7 @@ mod tests {
     #[test]
     fn mcpr_roundtrip_metadata_and_packets() {
         let temp_dir =
-            horizon_platform::env::temp_dir().join(format!("mcpr_test_{}", std::process::id()));
+            horizon_std::env::temp_dir().join(format!("mcpr_test_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
         let mcpr_path = temp_dir.join("test_recording.mcpr");
 
@@ -834,8 +831,8 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = horizon_platform::env::temp_dir()
-                .join(format!("mcpr_{name}_{}", std::process::id()));
+            let dir =
+                horizon_std::env::temp_dir().join(format!("mcpr_{name}_{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             Self(dir)

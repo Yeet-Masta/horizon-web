@@ -11,9 +11,9 @@
 //! The web build has no sockets of its own to poll: its connections are all
 //! pipes (a friend's data channel is bridged to one on the page, conn.rs's
 //! `serve_web`), so its threads, Web Workers, only wait for a wake ([`web_poll`]).
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::connection::{ConnReader, ConnWriter, Pipe, Socket};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 #[cfg(not(target_family = "wasm"))]
 use mio::{Events, Interest, Poll, Registry, Token, Waker};
 use std::{
@@ -30,8 +30,8 @@ use web_poll::{Events, Poll, Registry, Token, Waker};
 /// timeout, and reports no events (a pipe posts its readiness to the inbox).
 #[cfg(target_family = "wasm")]
 mod web_poll {
-    use horizon_platform::sync::Mutex;
-    use horizon_platform::time::Duration;
+    use horizon_std::sync::Mutex;
+    use horizon_std::time::Duration;
     use std::sync::{Arc, Condvar, PoisonError};
 
     pub struct Token(pub usize);
@@ -305,8 +305,7 @@ struct Pool {
 /// The pool, started the first time: one thread per two cores.
 fn pool() -> Result<&'static Pool, String> {
     static POOL: OnceLock<Result<Pool, String>> = OnceLock::new();
-    let threads =
-        horizon_platform::thread::available_parallelism().map_or(1, |n| n.get().div_ceil(2));
+    let threads = horizon_std::thread::available_parallelism().map_or(1, |n| n.get().div_ceil(2));
     POOL.get_or_init(|| start(threads).map_err(|e| format!("network threads: {e}")))
         .as_ref()
         .map_err(Clone::clone)
@@ -322,9 +321,7 @@ fn start(threads: usize) -> std::io::Result<Pool> {
             load: AtomicUsize::new(0),
         });
         let mine = worker.clone();
-        horizon_platform::thread::spawn_worker(&format!("horizon-net-{n}"), move || {
-            run(poll, &mine)
-        })?;
+        horizon_std::thread::spawn_worker(&format!("horizon-net-{n}"), move || run(poll, &mine))?;
         workers.push(worker);
     }
     Ok(Pool { workers })
@@ -376,7 +373,7 @@ fn run(mut poll: Poll, worker: &Arc<Worker>) {
             && e.kind() != ErrorKind::Interrupted
         {
             log::warn!("[lan] network poll: {e}");
-            horizon_platform::thread::sleep(SWEEP);
+            horizon_std::thread::sleep(SWEEP);
         }
         let now = Instant::now();
         for event in &events {
@@ -936,7 +933,7 @@ mod tests {
         // through: Windows takes a write of any size whole while its buffer
         // has room.
         let full = || {
-            horizon_platform::thread::sleep(Duration::from_millis(50));
+            horizon_std::thread::sleep(Duration::from_millis(50));
             served.pending.load(Ordering::Relaxed) > 0
         };
         for i in 0..=u8::MAX {
@@ -947,7 +944,7 @@ mod tests {
             served.send(vec![body(i, 1 << 20)], None);
         }
         served.send(Vec::new(), Some(End::Disconnect));
-        horizon_platform::thread::sleep(Duration::from_millis(300));
+        horizon_std::thread::sleep(Duration::from_millis(300));
         assert!(served.seen.try_recv().is_err(), "still writing");
         served.send(Vec::new(), Some(End::Close));
         assert_eq!(served.next(), Seen::Left("Disconnected".into()));

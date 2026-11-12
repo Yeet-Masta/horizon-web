@@ -69,7 +69,7 @@ fn read_source(root: &Path, id: &str, ext: &str) -> Result<String, String> {
         .join(ns)
         .join("shaders")
         .join(format!("{path}.{ext}"));
-    horizon_platform::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))
+    horizon_std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))
 }
 
 fn include(root: &Path, src: &str, depth: u32) -> Result<String, String> {
@@ -92,7 +92,7 @@ fn include(root: &Path, src: &str, depth: u32) -> Result<String, String> {
                 .join("shaders")
                 .join("include")
                 .join(path);
-            let text = horizon_platform::fs::read_to_string(&file)
+            let text = horizon_std::fs::read_to_string(&file)
                 .map_err(|e| format!("#include <{name}>: {}: {e}", file.display()))?;
             out.push_str(&include(root, &text, depth + 1)?);
         } else if t.starts_with("#version") || t.starts_with("#extension") {

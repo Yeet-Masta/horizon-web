@@ -2,14 +2,14 @@
 use super::PackAtlas;
 use crate::gfx::{section_instance, section_visibility};
 use crate::mesher::TerrainVertex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::path::PathBuf;
 use wgpu::util::DeviceExt;
 
 struct ProbePack(PathBuf);
 impl Drop for ProbePack {
     fn drop(&mut self) {
-        horizon_platform::fs::remove_dir_all(&self.0).unwrap();
+        horizon_std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
 
@@ -44,10 +44,9 @@ fn terrain_fade_reaches_pack_pixels_through_real_instances() {
     atlas.separate_ao = true;
     queue.submit([encoder.finish()]);
     let folder = ProbePack(
-        horizon_platform::env::temp_dir()
-            .join(format!("horizon-terrain-fade-{}", std::process::id())),
+        horizon_std::env::temp_dir().join(format!("horizon-terrain-fade-{}", std::process::id())),
     );
-    horizon_platform::fs::create_dir_all(folder.0.join("shaders")).unwrap();
+    horizon_std::fs::create_dir_all(folder.0.join("shaders")).unwrap();
     // The guard, initializer, varying and integer output are independent probe code.
     let vertex = "#version 330\nout vec4 observation;\n\
         #ifdef IRIS_FEATURE_FADE_VARIABLE\nfloat first = mc_chunkFade;\n#endif\n\
@@ -70,7 +69,7 @@ fn terrain_fade_reaches_pack_pixels_through_real_instances() {
         EmitVertex();\n}\nEndPrimitive();\n}";
     for name in ["gbuffers_terrain", "gbuffers_water", "shadow"] {
         for (extension, code) in [("vsh", vertex), ("fsh", fragment)] {
-            horizon_platform::fs::write(folder.0.join(format!("shaders/{name}.{extension}")), code)
+            horizon_std::fs::write(folder.0.join(format!("shaders/{name}.{extension}")), code)
                 .unwrap();
         }
     }
@@ -86,7 +85,7 @@ fn terrain_fade_reaches_pack_pixels_through_real_instances() {
     ];
     let mut count = 0;
     for requested in [false, true] {
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             folder.0.join("shaders/shaders.properties"),
             if requested {
                 "shadow.enabled=true\niris.features.optional=FADE_VARIABLE\niris.features.required=FADE_VARIABLE\n"
@@ -103,11 +102,11 @@ fn terrain_fade_reaches_pack_pixels_through_real_instances() {
             for geometry in [false, true].into_iter().filter(|g| !*g || flat) {
                 let geometry_path = folder.0.join("shaders/shadow.gsh");
                 if geometry {
-                    horizon_platform::fs::write(&geometry_path, geometry_shader).unwrap();
+                    horizon_std::fs::write(&geometry_path, geometry_shader).unwrap();
                 } else if geometry_path.exists() {
-                    horizon_platform::fs::remove_file(&geometry_path).unwrap();
+                    horizon_std::fs::remove_file(&geometry_path).unwrap();
                 }
-                horizon_platform::fs::write(
+                horizon_std::fs::write(
                     folder.0.join("shaders/shadow.vsh"),
                     if geometry {
                         geometry_vertex.as_str()

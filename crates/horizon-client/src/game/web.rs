@@ -3,7 +3,7 @@
 //! on the browser, as nothing else in the game may), then the game starts as
 //! it does natively, on the page's event loop.
 use horizon_client::Result;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 
 /// `main` on the web: starts the game once the page is ready, and returns.
 pub fn start() {
@@ -15,10 +15,10 @@ pub fn start() {
 }
 
 async fn boot() -> Result<()> {
-    horizon_platform::web::boot().await?;
+    horizon_std::web::boot().await?;
     // Logs, crash reports and saves all live in the game folder.
-    if horizon_platform::env::var_os("HORIZON_HOME").is_none() {
-        horizon_platform::env::set_var("HORIZON_HOME", horizon_platform::env::HOME);
+    if horizon_std::env::var_os("HORIZON_HOME").is_none() {
+        horizon_std::env::set_var("HORIZON_HOME", horizon_std::env::HOME);
     }
     horizon_client::telemetry::mark_start();
     let home = horizon_client::logging::game_home();
@@ -28,7 +28,7 @@ async fn boot() -> Result<()> {
     let report = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         report(info);
-        horizon_platform::web::status(&format!("Horizon crashed: {info}"), true);
+        horizon_std::web::status(&format!("Horizon crashed: {info}"), true);
     }));
     horizon_client::gfx::open_web_device().await?;
     super::run_with()
@@ -39,11 +39,9 @@ pub fn stopped(error: Option<&dyn std::error::Error>) {
     match error {
         Some(error) => {
             log::error!("Horizon: {error}");
-            horizon_platform::web::status(&format!("Horizon stopped: {error}"), true);
+            horizon_std::web::status(&format!("Horizon stopped: {error}"), true);
         }
-        None => {
-            horizon_platform::web::status("Horizon quit. Reload the page to play again.", false)
-        }
+        None => horizon_std::web::status("Horizon quit. Reload the page to play again.", false),
     }
 }
 
@@ -97,11 +95,10 @@ pub fn skip_frame(limit: i32) -> bool {
 
 /// What the page asked of the frame statistics ([`horizon_frame_stats_ask`]): to read them, and
 /// whether to start them over after.
-static FRAME_STATS_ASK: horizon_platform::sync::Mutex<Option<bool>> =
-    horizon_platform::sync::Mutex::new(None);
+static FRAME_STATS_ASK: horizon_std::sync::Mutex<Option<bool>> =
+    horizon_std::sync::Mutex::new(None);
 /// The frame statistics last asked for, as `horizon-ctl frame-stats` prints them.
-static FRAME_STATS: horizon_platform::sync::Mutex<Option<String>> =
-    horizon_platform::sync::Mutex::new(None);
+static FRAME_STATS: horizon_std::sync::Mutex<Option<String>> = horizon_std::sync::Mutex::new(None);
 
 /// The page asks for the game's frame statistics (`FrameStats::summary`): frame, CPU and GPU
 /// times and where the slowest frames went. The game answers at its next frame

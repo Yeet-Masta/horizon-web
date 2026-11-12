@@ -32,7 +32,7 @@ use horizon_client::{
     widgets::{self, Kind, Target},
 };
 use horizon_client_input::snap;
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use winit::{
     dpi::PhysicalPosition,
     event::{DeviceId, ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},

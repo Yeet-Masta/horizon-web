@@ -1117,7 +1117,7 @@ mod tests {
     #[test]
     #[ignore = "microbenchmark; run with --ignored --nocapture"]
     fn benchmark_unpack() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         let values: Vec<u32> = (0..4096).map(|i| (i % 12) as u32).collect();
         let list = PalettedContainer::from_values(BLOCKS, &values);
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     #[ignore = "microbenchmark; run with --ignored --nocapture"]
     fn benchmark_palette_ids() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         for (name, values) in palette_cases() {
             let mut times = [Vec::new(), Vec::new()];

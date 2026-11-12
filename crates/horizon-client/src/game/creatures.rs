@@ -8330,8 +8330,8 @@ mod knockback_tests {
 
     /// What the hook of these tests saw: the player, its source (as damage
     /// type, causing, direct) and the push.
-    type Pushes = horizon_platform::sync::Mutex<Vec<(i32, (String, i32, i32), Knock)>>;
-    static PUSHES: Pushes = horizon_platform::sync::Mutex::new(Vec::new());
+    type Pushes = horizon_std::sync::Mutex<Vec<(i32, (String, i32, i32), Knock)>>;
+    static PUSHES: Pushes = horizon_std::sync::Mutex::new(Vec::new());
 
     /// Sets the native knockback hook of these tests (global: it stays set for
     /// the process) for players 9201 to 9203: it records the push, cancels

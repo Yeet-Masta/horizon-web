@@ -318,7 +318,7 @@ mod tests {
     use super::*;
     use crate::{blocks::RenderShape, graphics::LeafCullingMode};
     use horizon_core::geometry::Direction;
-    use horizon_platform::time::Instant;
+    use horizon_std::time::Instant;
     use horizon_world::fluid::FluidState;
 
     fn info(leaves: bool, opaque: bool) -> Info {

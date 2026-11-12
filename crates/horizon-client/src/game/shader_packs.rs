@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 /// The values the player chose for pack `name`'s options (`shaderpacks/<name>.txt`).
 fn chosen_shader_options(name: &str) -> BTreeMap<String, String> {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(name));
-    horizon_platform::fs::read_to_string(file)
+    horizon_std::fs::read_to_string(file)
         .map(|text| horizon_shaders::parse_chosen(&text))
         .unwrap_or_default()
 }
@@ -56,12 +56,12 @@ pub(super) fn read_shader_options(
 pub(super) fn write_shader_options(options: &ShaderOptions) {
     let file = Game::shader_packs_dir().join(horizon_shaders::chosen_file(&options.pack));
     let saved = if options.chosen.is_empty() {
-        horizon_platform::fs::remove_file(&file).or_else(|e| match e.kind() {
+        horizon_std::fs::remove_file(&file).or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
             _ => Err(e),
         })
     } else {
-        horizon_platform::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
+        horizon_std::fs::write(&file, horizon_shaders::chosen_text(&options.chosen))
     };
     if let Err(e) = saved {
         log::warn!("shader pack {}: {}: {e}", options.pack, file.display());
@@ -72,7 +72,7 @@ pub(super) fn write_shader_options(options: &ShaderOptions) {
 /// (`active_pack`).
 fn picked_pack(settings: &horizon_client::settings::Settings) -> &str {
     static DEV_PACK: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let dev = DEV_PACK.get_or_init(|| horizon_platform::env::var("HORIZON_SHADER_PACK").ok());
+    let dev = DEV_PACK.get_or_init(|| horizon_std::env::var("HORIZON_SHADER_PACK").ok());
     active_pack(
         dev.as_deref().unwrap_or(&settings.horizon.shader_pack),
         &settings.mods,
@@ -110,7 +110,7 @@ fn active_pack<'a>(picked: &'a str, mods: &horizon_client::mod_list::ModList) ->
 
 /// A selected pack may read resource-pack material maps, whether native or GLSL.
 pub(super) fn picks_material_pack(settings: &horizon_client::settings::Settings) -> bool {
-    let dev = horizon_platform::env::var("HORIZON_SHADER_PACK").ok();
+    let dev = horizon_std::env::var("HORIZON_SHADER_PACK").ok();
     let picked = active_pack(
         dev.as_deref().unwrap_or(&settings.horizon.shader_pack),
         &settings.mods,
@@ -206,7 +206,7 @@ impl Game<'_> {
             && renderer.shader_pack_dimension() != Some(dimension)
         {
             let name = name.as_str();
-            let started = horizon_platform::time::Instant::now();
+            let started = horizon_std::time::Instant::now();
             // A pack is not the game's own code: one that makes the shader compiler (or our
             // translation of it) panic is turned off instead of crashing every world load (#3525).
             let loaded = horizon_client::crash::contain(|| {
@@ -248,7 +248,7 @@ impl Game<'_> {
                         // the game's own resources.
                         let resources = self.options.resources.clone();
                         let read = |namespace: &str, path: &str| {
-                            horizon_platform::fs::read(
+                            horizon_std::fs::read(
                                 resources.join("assets").join(namespace).join(path),
                             )
                             .ok()
@@ -301,7 +301,7 @@ impl Game<'_> {
                             blocks: ids.clone(),
                             block_states: RefCell::default(),
                         });
-                        let started_ids = horizon_platform::time::Instant::now();
+                        let started_ids = horizon_std::time::Instant::now();
                         let table = terrain_table(
                             &block_id_table(&self.pack, &ids),
                             &block_emission_table(&self.pack),
@@ -1013,27 +1013,27 @@ mod native_pack_tests {
 
     #[test]
     fn shaders_packs_and_packs_with_a_shadow_pass_draw_flat() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-flat-packs-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-flat-packs-{}", std::process::id()));
         // A folder without a manifest is a `shaders/` pack; with one, a pack of Horizon's own.
         let pack = |name: &str, manifest: Option<&str>| {
             let dir = root.join(name);
-            horizon_platform::fs::create_dir_all(&dir).unwrap();
+            horizon_std::fs::create_dir_all(&dir).unwrap();
             if let Some(extra) = manifest {
-                horizon_platform::fs::write(dir.join("material.wgsl"), "").unwrap();
+                horizon_std::fs::write(dir.join("material.wgsl"), "").unwrap();
                 let text = format!(
                     "schema = 1\nid = \"{name}\"\nname = \"{name}\"\nversion = \"1\"\napi = \"{}\"\n\
                      [material]\nfile = \"material.wgsl\"\n{extra}",
                     horizon_shader_api::API
                 );
-                horizon_platform::fs::write(dir.join(horizon_shader_api::MANIFEST), text).unwrap();
+                horizon_std::fs::write(dir.join(horizon_shader_api::MANIFEST), text).unwrap();
             }
             dir
         };
         assert!(pack_draws_flat(&pack("shaders_pack", None)));
         assert!(!pack_draws_flat(&pack("unshadowed", Some(""))));
         assert!(pack_draws_flat(&pack("shadowed", Some("[shadow]\n"))));
-        horizon_platform::fs::remove_dir_all(&root).ok();
+        horizon_std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

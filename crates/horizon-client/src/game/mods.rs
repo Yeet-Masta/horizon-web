@@ -22,7 +22,7 @@ pub(super) struct ModsState {
     pub(super) applied: Option<std::collections::BTreeSet<String>>,
     /// A live switch's resource reload is running: when it applied, the server
     /// reloads its data from the new root. Its start, for the log.
-    pub(super) live: Option<horizon_platform::time::Instant>,
+    pub(super) live: Option<horizon_std::time::Instant>,
     /// The content mods installed, and those of them with only assets and
     /// data (`mod_content::live_switch`): they switch with a world open.
     content_ids: std::collections::BTreeSet<String>,
@@ -91,7 +91,7 @@ pub(super) fn content_root(
 ) -> std::path::PathBuf {
     use horizon_client::mod_content::{self, ContentMod};
     use horizon_mods::{Capability, Content, Package};
-    let here = horizon_platform::env::current_dir().unwrap_or_default();
+    let here = horizon_std::env::current_dir().unwrap_or_default();
     let mut paths = horizon_mods::find(&here.join(mod_list::DIR));
     paths.retain(|p| !dev.contains(p));
     paths.extend(dev.iter().cloned());
@@ -203,7 +203,7 @@ fn announced_entry(
     use horizon_protocol::mod_list;
     use sha2::{Digest, Sha256};
     let sha256 = if path.is_file() {
-        horizon_platform::fs::read(path)
+        horizon_std::fs::read(path)
             .ok()
             .map(|bytes| Sha256::digest(bytes).into())
     } else {
@@ -303,9 +303,9 @@ fn build_lists_mods(built: &str) -> bool {
 /// Whether the game playing was built with native mods: the launcher writes their ids into
 /// [`BUILD_INFO`] beside the executable, and a release or Nightly has no such file.
 pub(super) fn built_with_native_mods() -> bool {
-    horizon_platform::env::current_exe()
+    horizon_std::env::current_exe()
         .ok()
-        .and_then(|exe| horizon_platform::fs::read_to_string(exe.with_file_name(BUILD_INFO)).ok())
+        .and_then(|exe| horizon_std::fs::read_to_string(exe.with_file_name(BUILD_INFO)).ok())
         .is_some_and(|built| build_lists_mods(&built))
 }
 
@@ -359,7 +359,7 @@ fn not_built(dir: &std::path::Path, built: &str, rows: &[Installed]) -> Vec<Inst
             .as_array()
             .is_some_and(|mods| mods.iter().any(|m| m["id"] == id))
     };
-    let mut paths: Vec<PathBuf> = horizon_platform::fs::read_dir(dir)
+    let mut paths: Vec<PathBuf> = horizon_std::fs::read_dir(dir)
         .map(|d| d.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
     paths.retain(|p| p.extension().is_some_and(|e| e == "hnmod"));
@@ -439,11 +439,9 @@ impl Game<'_> {
         // A mod with a native version built in says so instead, and isn't news.
         self.list_native_mods();
         self.sync_native_switches();
-        let built = horizon_platform::env::current_exe()
+        let built = horizon_std::env::current_exe()
             .ok()
-            .and_then(|exe| {
-                horizon_platform::fs::read_to_string(exe.with_file_name(BUILD_INFO)).ok()
-            })
+            .and_then(|exe| horizon_std::fs::read_to_string(exe.with_file_name(BUILD_INFO)).ok())
             .unwrap_or_default();
         let built_mods = native_mods_detail(&built);
         let built_with_mods = built_mods.is_some();
@@ -532,7 +530,7 @@ impl Game<'_> {
             next
         );
         self.mods.applied = Some(next);
-        self.mods.live = Some(horizon_platform::time::Instant::now());
+        self.mods.live = Some(horizon_std::time::Instant::now());
         self.reload_packs();
     }
     /// A live switch's resources applied: the server reloads its data packs
@@ -549,7 +547,7 @@ impl Game<'_> {
         let root = self.options.resources.clone();
         let enabled = self.applied_mods();
         let reload = move |g: &mut Game<'_>| {
-            let at = horizon_platform::time::Instant::now();
+            let at = horizon_std::time::Instant::now();
             g.options.resources = root;
             g.settings.mods.enabled = enabled.clone();
             g.mods.applied = Some(enabled);
@@ -592,7 +590,7 @@ impl Game<'_> {
         self.system_message(Text::literal(format!(
             "Horizon mods are native now: {names} stopped running until they have a native version. The launcher's Mods page has the native ones."
         )));
-        let _ = horizon_platform::fs::write(&seen, "");
+        let _ = horizon_std::fs::write(&seen, "");
     }
 }
 
@@ -622,14 +620,14 @@ pub(super) fn living_mod_types()
     // A folder per call: tests run in parallel in one process, and each removes its own.
     static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let root = horizon_platform::env::temp_dir().join(format!(
+    let root = horizon_std::env::temp_dir().join(format!(
         "horizon-living-mod-types-{}-{call}",
         std::process::id()
     ));
-    horizon_platform::fs::create_dir_all(&root).unwrap();
-    horizon_platform::fs::write(root.join("entity-types.json"), table).unwrap();
+    horizon_std::fs::create_dir_all(&root).unwrap();
+    horizon_std::fs::write(root.join("entity-types.json"), table).unwrap();
     let types = horizon_client::mobs::MobTypes::load_for_server(&root).unwrap();
-    let _ = horizon_platform::fs::remove_dir_all(&root);
+    let _ = horizon_std::fs::remove_dir_all(&root);
     types
         .types
         .into_iter()
@@ -761,7 +759,7 @@ mod tests {
         let mixin = format!(
             "[mod]\nid = \"{id}\"\nversion = \"0.3.0\"\n[compatibility]\nhorizon_revision = \"{horizon}\"\n"
         );
-        let file = horizon_platform::fs::File::create(dir.join(format!("{id}.hnmod"))).unwrap();
+        let file = horizon_std::fs::File::create(dir.join(format!("{id}.hnmod"))).unwrap();
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file("horizon-native.json", options).unwrap();
@@ -786,15 +784,15 @@ mod tests {
 
     #[test]
     fn native_mods_installed_but_not_built_get_a_row_saying_so() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-not-built-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-not-built-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         for id in ["veinminer", "zoom", "minimap"] {
             hnmod(&dir, id);
         }
-        horizon_platform::fs::write(dir.join("notes.txt"), "not a mod").unwrap();
-        horizon_platform::fs::write(dir.join("broken.hnmod"), "not a zip").unwrap();
+        horizon_std::fs::write(dir.join("notes.txt"), "not a mod").unwrap();
+        horizon_std::fs::write(dir.join("broken.hnmod"), "not a zip").unwrap();
         // A release: none is built in; the page lists them, sorted, instead of "No mods".
         let rows = not_built(&dir, "", &[]);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
@@ -814,7 +812,7 @@ mod tests {
         assert_eq!(rows[0].id, "veinminer");
         // No folder: no rows.
         assert!(not_built(&dir.join("missing"), "", &[]).is_empty());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A trait mod's `register_goals` (`Mob.registerGoals`) gets every new

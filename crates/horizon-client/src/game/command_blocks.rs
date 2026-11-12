@@ -37,7 +37,7 @@ pub(super) struct CommandBlockScreen {
     /// The command box with its `CommandSuggestions`.
     pub(super) command: ChatScreen,
     /// When the command box was focused, for its cursor's blink.
-    opened: horizon_platform::time::Instant,
+    opened: horizon_std::time::Instant,
     previous: EditBox,
     pub(super) track_output: bool,
     mode: Mode,
@@ -605,7 +605,7 @@ impl Game<'_> {
             pos,
             cart,
             command,
-            opened: horizon_platform::time::Instant::now(),
+            opened: horizon_std::time::Instant::now(),
             previous,
             track_output: block.track_output,
             mode,

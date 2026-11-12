@@ -21,7 +21,7 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     random::{LegacyRandom, RandomSource, position_seed},
 };
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::sync::Arc;
 
 pub type Result<T> = std::result::Result<T, PlacementQueryError>;

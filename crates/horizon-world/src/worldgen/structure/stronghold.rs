@@ -10,7 +10,7 @@ use horizon_core::{
     position::ChunkPos,
     random::{LegacyRandom, RandomSource, WorldgenRandom},
 };
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{collections::BTreeSet, f64::consts::PI};
 
 /// ChunkGeneratorStructureState.generateRingPositions with

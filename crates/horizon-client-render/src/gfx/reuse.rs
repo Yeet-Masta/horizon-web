@@ -11,7 +11,7 @@
 //! names (shader modules, layouts) by their ids, so a descriptor that names a
 //! kept handle matches only the same handle. Kept objects stay alive, so their
 //! ids are never reused while they are keys.
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{collections::HashMap, sync::PoisonError};
 
 /// One map of kept objects with the generation each was last asked for in.

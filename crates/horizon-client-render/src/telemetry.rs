@@ -3,8 +3,8 @@
 //! summary, in the outbox. It never sends those itself: the launcher does, at its next start (the
 //! game's only sending is the anonymous "I'm playing" ping, `heartbeat.rs`).
 //! Without the player's yes for that kind nothing is kept, and crash-reports/ stays local.
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::Instant;
+use horizon_std::sync::Mutex;
+use horizon_std::time::Instant;
 use std::path::Path;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,7 +15,7 @@ use horizon_telemetry::{Item, Payload, Source, outbox};
 
 /// Whether the game keeps anything for the launcher to send. Never on the web build: it
 /// collects nothing, keeps nothing and sends nothing (nor the ping, `heartbeat.rs`).
-pub const ENABLED: bool = !horizon_platform::WEB;
+pub const ENABLED: bool = !horizon_std::WEB;
 
 /// A session shorter than this says too little to keep.
 const MIN_SECONDS: f32 = 60.0;
@@ -121,7 +121,7 @@ pub fn gpu_kind(device_type: &str) -> &'static str {
 /// This machine, with the GPU and the screen once the renderer knows them. The drive is the one
 /// under the game folder (the current folder).
 pub fn system() -> System {
-    let home = horizon_platform::env::current_dir().ok();
+    let home = horizon_std::env::current_dir().ok();
     let mut system = System::detect_in(home.as_deref());
     if let Some(gpu) = GPU.lock().unwrap_or_else(|e| e.into_inner()).clone() {
         system.vram_mb = match gpu.kind.as_str() {
@@ -332,7 +332,7 @@ impl Session {
 /// The game's resident memory: the peak on Linux, what it uses now elsewhere.
 fn peak_ram_mb() -> u32 {
     let kib = if cfg!(target_os = "linux") {
-        horizon_platform::fs::read_to_string("/proc/self/status")
+        horizon_std::fs::read_to_string("/proc/self/status")
             .ok()
             .and_then(|t| {
                 t.lines()
@@ -365,12 +365,12 @@ mod tests {
     use horizon_telemetry::{Choices, Consent, Kind};
 
     fn home(name: &str) -> std::path::PathBuf {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-client-telemetry-{name}-{}",
             std::process::id()
         ));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 

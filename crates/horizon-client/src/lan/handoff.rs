@@ -17,7 +17,7 @@
 //! `take_changed`).
 use crate::chunk::{Chunk, Section};
 use crate::fast_hash::FxHashMap;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::sync::{Arc, Weak};
 
 /// Columns offered and not taken yet before the dead ones are swept.

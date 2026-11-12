@@ -21,10 +21,10 @@ use horizon_client::{
     },
     text::Text,
 };
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::text::translatable;
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use horizon_world::nbt::{JavaString, Tag};
 use std::{
     io::Write,
@@ -63,7 +63,7 @@ impl Watchdog {
             running: AtomicBool::new(true),
         });
         let shared = watchdog.clone();
-        horizon_platform::thread::Builder::new()
+        horizon_std::thread::Builder::new()
             .name("Server Watchdog".into())
             .spawn(move || shared.run(max))
             .ok()?;
@@ -126,7 +126,7 @@ impl Watchdog {
             }
             // Thread.sleep(nextTickTime + maxTickTime - now).
             let wait = (next + max).saturating_sub(now).max(1_000_000);
-            horizon_platform::thread::sleep(Duration::from_nanos(wait));
+            horizon_std::thread::sleep(Duration::from_nanos(wait));
         }
     }
 }
@@ -173,7 +173,7 @@ pub(super) fn player_joined(id: u128, name: &str) {
 /// `server.toml`'s `[anticheat]`, beside server.properties when horizon-server runs the game; the
 /// default (on) without the file or the section, off (with an error logged) when the section is wrong.
 fn load_anticheat() -> horizon_anticheat::Config {
-    let Ok(text) = horizon_platform::fs::read_to_string("server.toml") else {
+    let Ok(text) = horizon_std::fs::read_to_string("server.toml") else {
         return Default::default();
     };
     match horizon_anticheat::Config::from_server_toml(&text) {
@@ -202,7 +202,7 @@ fn load_anticheat() -> horizon_anticheat::Config {
 /// `server.toml`'s `[chat_filter]` (docs/chat-filter.md), like `[anticheat]`: on by default, off (with an
 /// error logged) when the section is wrong. The mutes are kept beside server.properties.
 fn load_chat_filter() -> Option<horizon_chat_filter::Guard> {
-    let text = horizon_platform::fs::read_to_string("server.toml").unwrap_or_default();
+    let text = horizon_std::fs::read_to_string("server.toml").unwrap_or_default();
     let config = match horizon_chat_filter::Config::from_server_toml(&text) {
         Ok(config) => config,
         Err(e) => {
@@ -239,7 +239,7 @@ fn load_combat() -> bool {
         #[serde(default)]
         legacy: bool,
     }
-    let Ok(text) = horizon_platform::fs::read_to_string("server.toml") else {
+    let Ok(text) = horizon_std::fs::read_to_string("server.toml") else {
         return false;
     };
     let section = toml::from_str::<toml::Table>(&text)
@@ -286,7 +286,7 @@ fn forwarding_secret(online: bool) -> Result<Option<Vec<u8>>> {
         );
         return Ok(None);
     }
-    let text = horizon_platform::fs::read(FILE).map_err(|e| format!("{FILE}: {e}"))?;
+    let text = horizon_std::fs::read(FILE).map_err(|e| format!("{FILE}: {e}"))?;
     let secret = text.trim_ascii().to_vec();
     if secret.is_empty() {
         return Err(format!(
@@ -386,7 +386,7 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
             "serverId" | "pidFile" => {
                 let value = it.next().ok_or("missing value")?;
                 if name == "pidFile" {
-                    horizon_platform::fs::write(value, std::process::id().to_string())?;
+                    horizon_std::fs::write(value, std::process::id().to_string())?;
                 }
             }
             _ => return Err(format!("{arg} is not a recognized option").into()),
@@ -419,8 +419,7 @@ pub(super) fn preflight(options: &mut Options) -> Result<bool> {
         }
     };
     if init_settings {
-        let abs =
-            |p: &PathBuf| horizon_platform::env::current_dir().map_or(p.clone(), |d| d.join(p));
+        let abs = |p: &PathBuf| horizon_std::env::current_dir().map_or(p.clone(), |d| d.join(p));
         log(
             "INFO",
             &format!(
@@ -534,7 +533,7 @@ impl Lists {
             whitelist_bypass: Vec::new(),
         };
         // Horizon only: players from a proxy's Bedrock bridge (Floodgate) are never on whitelist.json.
-        if let Ok(text) = horizon_platform::fs::read_to_string("whitelist-bypass.txt") {
+        if let Ok(text) = horizon_std::fs::read_to_string("whitelist-bypass.txt") {
             match parse_whitelist_bypass(&text) {
                 Ok(prefixes) => {
                     log(
@@ -896,7 +895,7 @@ impl Game<'_> {
             .ok_or("dedicated server not prepared")?;
         // Main's WorldLoader: a new world's dimensions come from
         // server.properties before the server starts.
-        let world_dir = horizon_platform::env::current_dir()?
+        let world_dir = horizon_std::env::current_dir()?
             .join(&universe)
             .join(&level_name);
         let new_world = !world_dir.join("level.dat").fs_exists();
@@ -905,7 +904,7 @@ impl Game<'_> {
         }
         // The console thread starts first, as in initServer.
         let (tx, console) = mpsc::channel();
-        horizon_platform::thread::Builder::new()
+        horizon_std::thread::Builder::new()
             .name("Server console handler".into())
             .spawn(move || {
                 let stdin = std::io::stdin();
@@ -1064,7 +1063,7 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
-        let favicon = horizon_platform::fs::read("server-icon.png")
+        let favicon = horizon_std::fs::read("server-icon.png")
             .ok()
             .filter(|b| png_size(b) == Some((64, 64)));
         // Behind a Velocity proxy: `forwarding.secret` in the server folder, like the proxy's own file.
@@ -1410,7 +1409,7 @@ impl Game<'_> {
                     if Instant::now() > deadline {
                         return Err("the spawn area did not load".into());
                     }
-                    horizon_platform::thread::sleep(Duration::from_millis(2));
+                    horizon_std::thread::sleep(Duration::from_millis(2));
                 };
                 self.level.spawn = Some([f64::from(x), f64::from(y), f64::from(z)]);
                 self.level.world_spawn.get_or_insert([x, y, z]);
@@ -1428,7 +1427,7 @@ impl Game<'_> {
             if Instant::now() > deadline {
                 return Err("the spawn area did not load".into());
             }
-            horizon_platform::thread::sleep(Duration::from_millis(2));
+            horizon_std::thread::sleep(Duration::from_millis(2));
         }
         self.player = None;
         Ok(())
@@ -2312,7 +2311,7 @@ impl Game<'_> {
                 );
             }
         }
-        horizon_platform::thread::sleep(Duration::from_millis(100));
+        horizon_std::thread::sleep(Duration::from_millis(100));
         log("INFO", "Saving worlds");
         // ServerPlayer.disconnect: nobody is left in a bed.
         self.free_player_beds()?;
@@ -2332,7 +2331,7 @@ impl Game<'_> {
 /// load of a `OnceLock` without it.
 pub(super) fn crash_fixture(point: &str, armed: impl FnOnce() -> bool) {
     static FIXTURE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let fixture = FIXTURE.get_or_init(|| horizon_platform::env::var("HORIZON_CRASH_FIXTURE").ok());
+    let fixture = FIXTURE.get_or_init(|| horizon_std::env::var("HORIZON_CRASH_FIXTURE").ok());
     if fixture.as_deref() == Some(point) && armed() {
         panic!("crash fixture at {point}");
     }
@@ -2369,7 +2368,7 @@ mod tests {
     use super::{
         capture_log, log, log_from, overload_warning, panic_message, parse_whitelist_bypass,
     };
-    use horizon_platform::{
+    use horizon_std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -2443,9 +2442,9 @@ mod tests {
     /// Vanilla's words, with how far behind the server is in milliseconds and in whole ticks.
     #[test]
     fn the_overload_warning_reads_as_vanilla_s() {
-        let tick = horizon_platform::time::Duration::from_millis(50);
+        let tick = horizon_std::time::Duration::from_millis(50);
         assert_eq!(
-            overload_warning(horizon_platform::time::Duration::from_millis(13_027), tick),
+            overload_warning(horizon_std::time::Duration::from_millis(13_027), tick),
             "Can't keep up! Is the server overloaded? Running 13027ms or 260 ticks behind"
         );
     }
@@ -2483,13 +2482,13 @@ mod tests {
 
     #[test]
     fn console_logging_survives_closed_stdout() {
-        if let Some(home) = horizon_platform::env::var_os(CHILD_HOME) {
+        if let Some(home) = horizon_std::env::var_os(CHILD_HOME) {
             horizon_client::logging::init(std::path::Path::new(&home), "Server thread");
             // Let the parent close the real stdout pipe only after libtest's startup output.
             io::stdout().write_all(READY.as_bytes()).unwrap();
             io::stdout().flush().unwrap();
             io::stdin().read_exact(&mut [0]).unwrap();
-            horizon_platform::thread::Builder::new()
+            horizon_std::thread::Builder::new()
                 .name("Server thread".into())
                 .spawn(|| {
                     let captured = capture_log(|| {
@@ -2511,12 +2510,12 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let home = horizon_platform::env::temp_dir().join(format!(
+            let home = horizon_std::env::temp_dir().join(format!(
                 "horizon-console-log-test-{}-{unique}",
                 std::process::id()
             ));
             fs::create_dir(&home).unwrap();
-            let mut child = Command::new(horizon_platform::env::current_exe().unwrap())
+            let mut child = Command::new(horizon_std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "game::dedicated::tests::console_logging_survives_closed_stdout",
@@ -2565,8 +2564,8 @@ mod tests {
     fn a_temporarily_banned_player_is_refused_with_the_end_until_it_has_passed() {
         use super::{BanEntry, BanList, Lists, NameAndId};
         use horizon_chat_filter::now_millis;
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-can-login-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-can-login-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let mut lists = Lists {
             ops: super::OpList::new(dir.join("ops.json")),

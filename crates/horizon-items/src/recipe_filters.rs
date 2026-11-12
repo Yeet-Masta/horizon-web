@@ -109,7 +109,7 @@ impl RecipeFilters {
 }
 
 fn read_dir(dir: &Path, prefix: &str, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
-    for entry in horizon_platform::fs::read_dir(dir)
+    for entry in horizon_std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -119,7 +119,7 @@ fn read_dir(dir: &Path, prefix: &str, out: &mut std::collections::BTreeMap<Strin
         if path.is_dir() {
             read_dir(&path, &format!("{prefix}{name}/"), out);
         } else if let Some(stem) = name.strip_suffix(".json")
-            && let Ok(bytes) = horizon_platform::fs::read(&path)
+            && let Ok(bytes) = horizon_std::fs::read(&path)
         {
             out.insert(format!("{prefix}{stem}"), bytes);
         }
@@ -347,20 +347,20 @@ mod tests {
 
     #[test]
     fn packs_replace_a_mods_file_and_files_apply_in_id_order() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-recipe-filters-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let dir = root.join("data/mymod/recipe_filter");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(
             root.join(crate::content_namespaces::MARKER),
             json!(["mymod"]).to_string(),
         )
         .unwrap();
         let remove_sticks = json!({"filters": [{"id": "minecraft:stick", "remove": true}]});
-        horizon_platform::fs::write(dir.join("a.json"), remove_sticks.to_string()).unwrap();
+        horizon_std::fs::write(dir.join("a.json"), remove_sticks.to_string()).unwrap();
         let swap = json!({"filters": [{"replace_output": {"from": "minecraft:stone", "to": "minecraft:dirt"}}]});
-        horizon_platform::fs::write(dir.join("b.json"), swap.to_string()).unwrap();
+        horizon_std::fs::write(dir.join("b.json"), swap.to_string()).unwrap();
         let mut stone = json!({"type": "minecraft:smelting", "ingredient": "minecraft:cobblestone", "result": {"id": "minecraft:stone"}});
         let f = RecipeFilters::load(&root, &PackOverlay::NONE);
         assert!(!f.apply("minecraft:stick", &mut json!({})));
@@ -373,6 +373,6 @@ mod tests {
         )];
         let f = RecipeFilters::load(&root, &PackOverlay { files: &files });
         assert!(f.apply("minecraft:stick", &mut json!({})));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 }

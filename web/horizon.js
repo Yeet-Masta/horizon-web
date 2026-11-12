@@ -3,7 +3,7 @@
 // folder (options, saves) in the origin's private file system (else IndexedDB), and starts
 // the game.
 //
-// The game calls three functions here (crates/horizon-platform/src/web/mod.rs):
+// The game calls three functions here (crates/horizon-std/src/web/mod.rs):
 //   horizonBoot()           -> Promise<{ args, env, resources | resourcesBlob, resourceFiles, files }>
 //   horizonPersist(records) -> keeps [path, "file"|"dir"|"removed", bytes, mtime] records
 //   horizonStatus(text, error)

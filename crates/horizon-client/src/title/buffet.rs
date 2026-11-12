@@ -97,7 +97,7 @@ impl State {
 /// under: `Registry.listElements` sorted with a locale collator, which for
 /// these names is a case-insensitive order with the id breaking ties.
 fn load(root: &Path) -> Vec<Biome> {
-    let Ok(text) = horizon_platform::fs::read_to_string(root.join("worldgen/biomes.json")) else {
+    let Ok(text) = horizon_std::fs::read_to_string(root.join("worldgen/biomes.json")) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<Value>(&text) else {

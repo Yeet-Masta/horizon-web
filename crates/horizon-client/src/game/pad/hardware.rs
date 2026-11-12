@@ -7,7 +7,7 @@ use super::{
 };
 use horizon_client::controller_ui::Device;
 use horizon_client::gamepad::{self, Button, GlyphStyle, PadState, Rumble, TriggerFeel};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 mod face_buttons;
@@ -564,8 +564,8 @@ impl Game<'_> {
             self.pad.devices.haptics_tried = false;
         } else if !self.pad.devices.haptics_tried {
             self.pad.devices.haptics_tried = true;
-            if horizon_platform::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
-                && horizon_platform::env::var_os("HORIZON_NO_AUDIO").is_none()
+            if horizon_std::env::var_os("HORIZON_DUALSENSE_HAPTICS").is_some_and(|v| v == "1")
+                && horizon_std::env::var_os("HORIZON_NO_AUDIO").is_none()
             {
                 self.pad.devices.haptics = horizon_dualsense::haptics::Haptics::open();
             }

@@ -3,7 +3,7 @@
 use super::*;
 
 fn biomes() -> Biomes {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

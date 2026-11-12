@@ -3,15 +3,15 @@
 //! The option screens live in `options_ui`.
 use crate::keybinds::KeyBinds;
 use crate::options_file::{OptionsFile, V};
-use horizon_platform::fs;
 use horizon_protocol::packets::configuration::ClientInformation;
+use horizon_std::fs;
 use std::path::Path;
 
 pub use horizon_client_core::sound_source::SOUND_SOURCES;
 
 /// Per-source volumes for the mixer (soundCategory_* except master).
-static SOURCE_VOLUMES: horizon_platform::sync::RwLock<[f32; 11]> =
-    horizon_platform::sync::RwLock::new([1.0; 11]);
+static SOURCE_VOLUMES: horizon_std::sync::RwLock<[f32; 11]> =
+    horizon_std::sync::RwLock::new([1.0; 11]);
 pub fn set_source_volumes(volumes: [f32; 11]) {
     *SOURCE_VOLUMES.write().unwrap_or_else(|e| e.into_inner()) = volumes;
 }
@@ -862,10 +862,10 @@ mod tests {
     fn three_d_skin_layers_move_from_options_txt_to_the_extras_file() {
         // #8091 wrote the switch into options.txt; a player who had it on keeps
         // it, and the next options.txt is vanilla's again.
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-skin-layers-{}-{:?}",
             std::process::id(),
-            horizon_platform::thread::current().id()
+            horizon_std::thread::current().id()
         ));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("options.txt"), "fov:0.5\nthreeDSkinLayers:true\n").unwrap();

@@ -431,11 +431,11 @@ impl<E: Entry> UserList<E> {
         Json::Array(items).pretty()
     }
     pub fn save(&self) -> std::io::Result<()> {
-        horizon_platform::fs::write(&self.file, self.to_json())
+        horizon_std::fs::write(&self.file, self.to_json())
     }
     /// StoredUserList.load: a missing file leaves the list as it is.
     pub fn load(&mut self) -> Result<(), String> {
-        let Ok(text) = horizon_platform::fs::read_to_string(&self.file) else {
+        let Ok(text) = horizon_std::fs::read_to_string(&self.file) else {
             return Ok(());
         };
         self.load_str(&text)
@@ -515,11 +515,11 @@ mod tests {
 
     #[test]
     fn a_watcher_hears_what_vanillas_notification_service_does() {
-        use horizon_platform::sync::Mutex;
+        use horizon_std::sync::Mutex;
         use std::sync::Arc;
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-lists-watch-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let heard = Arc::new(Mutex::new(Vec::new()));
         let mut ops = OpList::new(dir.join("ops.json"));
         let sink = heard.clone();
@@ -555,14 +555,14 @@ mod tests {
         assert!(bans.add(ban.clone()));
         assert!(!bans.add(ban));
         assert_eq!(*said.lock().unwrap(), 1);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_cleared_list_saves_empty() {
         let dir =
-            horizon_platform::env::temp_dir().join(format!("horizon-lists-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+            horizon_std::env::temp_dir().join(format!("horizon-lists-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let mut white = WhiteList::new(dir.join("whitelist.json"));
         assert!(white.add(WhiteEntry {
             user: NameAndId::offline("Kim")
@@ -570,9 +570,9 @@ mod tests {
         white.clear();
         assert!(white.is_empty());
         assert_eq!(
-            horizon_platform::fs::read_to_string(dir.join("whitelist.json")).unwrap(),
+            horizon_std::fs::read_to_string(dir.join("whitelist.json")).unwrap(),
             "[]"
         );
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

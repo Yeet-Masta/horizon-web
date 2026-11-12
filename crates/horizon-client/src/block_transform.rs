@@ -4,8 +4,8 @@
 //! `tools/test_block_transformer_parity.py` compares every block state with
 //! vanilla.
 use crate::{Result, items::Items};
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use horizon_world::{chunk::BlockState, registry::BlockRegistry};
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};

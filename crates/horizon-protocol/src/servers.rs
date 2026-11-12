@@ -68,7 +68,7 @@ impl ServerEntry {
 
 /// ServerList.load: missing or unreadable files give an empty list.
 pub fn load(path: &Path) -> Vec<ServerEntry> {
-    let Ok(bytes) = horizon_platform::fs::read(path) else {
+    let Ok(bytes) = horizon_std::fs::read(path) else {
         return Vec::new();
     };
     let Ok((root, _)) = nbt::read_named(&bytes, nbt::Limits::default()) else {
@@ -125,7 +125,7 @@ fn insert(
     entry: &ServerEntry,
     at: impl Fn(&[Tag]) -> Option<usize>,
 ) -> std::io::Result<()> {
-    let mut root = match horizon_platform::fs::read(path) {
+    let mut root = match horizon_std::fs::read(path) {
         Ok(bytes) => {
             nbt::read_named(&bytes, nbt::Limits::default())
                 .map_err(std::io::Error::other)?
@@ -155,8 +155,8 @@ fn insert(
 fn write(path: &Path, root: &NamedTag) -> std::io::Result<()> {
     let bytes = nbt::write_named(root, nbt::Limits::default()).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("dat_tmp");
-    horizon_platform::fs::write(&tmp, bytes)?;
-    horizon_platform::fs::rename(tmp, path)
+    horizon_std::fs::write(&tmp, bytes)?;
+    horizon_std::fs::rename(tmp, path)
 }
 
 /// ServerAddress.parseString: `host`, `host:port` or `[v6]:port`; default 25565.
@@ -187,9 +187,9 @@ mod tests {
 
     #[test]
     fn servers_dat_round_trips() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-servers-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-servers-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("servers.dat");
         let list = vec![
             ServerEntry::new("Minecraft Server", "localhost:25565"),
@@ -202,20 +202,20 @@ mod tests {
         assert_eq!(load(&path), list);
         // Vanilla layout: an unnamed root compound with a "servers" list.
         let (root, _) = nbt::read_named(
-            &horizon_platform::fs::read(&path).unwrap(),
+            &horizon_std::fs::read(&path).unwrap(),
             nbt::Limits::default(),
         )
         .unwrap();
         assert_eq!(root.name, JavaString::from(""));
         assert!(matches!(root.tag.get("servers"), Some(Tag::List(l)) if l.len() == 2));
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn prepend_keeps_hidden_entries_and_unknown_fields() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-prepend-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-prepend-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("servers.dat");
         prepend(&path, &ServerEntry::new("First", "a.example")).unwrap();
         assert_eq!(load(&path), [ServerEntry::new("First", "a.example")]);
@@ -232,7 +232,7 @@ mod tests {
         write(&path, &root).unwrap();
         prepend(&path, &ServerEntry::new("Top", "c.example")).unwrap();
         let (root, _) = nbt::read_named(
-            &horizon_platform::fs::read(&path).unwrap(),
+            &horizon_std::fs::read(&path).unwrap(),
             nbt::Limits::default(),
         )
         .unwrap();
@@ -244,10 +244,10 @@ mod tests {
             &[ServerEntry::new("Top", "c.example").to_tag(), hidden]
         );
         // A file that can't be read stays as it is.
-        horizon_platform::fs::write(&path, b"not nbt").unwrap();
+        horizon_std::fs::write(&path, b"not nbt").unwrap();
         assert!(prepend(&path, &ServerEntry::new("Top", "c.example")).is_err());
-        assert_eq!(horizon_platform::fs::read(&path).unwrap(), b"not nbt");
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(horizon_std::fs::read(&path).unwrap(), b"not nbt");
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

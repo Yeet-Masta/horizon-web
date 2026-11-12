@@ -27,13 +27,13 @@ use horizon_client::{
     settings::Settings,
     title::WorldOptions,
 };
-use horizon_platform::sync::Mutex;
-use horizon_platform::{
+use horizon_protocol::connection::Pipe;
+use horizon_protocol::{crypto::offline_uuid, text::translatable};
+use horizon_std::sync::Mutex;
+use horizon_std::{
     thread::ThreadHandle,
     time::{Duration, Instant},
 };
-use horizon_protocol::connection::Pipe;
-use horizon_protocol::{crypto::offline_uuid, text::translatable};
 use std::{
     net::TcpListener,
     sync::{
@@ -231,8 +231,8 @@ impl Integrated {
                 let _ = tx.send(f(g));
             }))
             .ok()?;
-        // The page's thread may not wait on the channel: it looks (horizon_platform::sync).
-        match horizon_platform::sync::recv_timeout(&rx, CALL_TIMEOUT) {
+        // The page's thread may not wait on the channel: it looks (horizon_std::sync).
+        match horizon_std::sync::recv_timeout(&rx, CALL_TIMEOUT) {
             Ok(answer) => Some(answer),
             Err(RecvTimeoutError::Timeout) => {
                 log::warn!(
@@ -458,9 +458,7 @@ impl Game<'_> {
         // The window plays against the world's own biome table (its chunks
         // carry the packs' ids past the built-in list, `set_registries`
         // names them through it), as the server thread's copy does.
-        let world = horizon_platform::env::current_dir()?
-            .join("saves")
-            .join(folder);
+        let world = horizon_std::env::current_dir()?.join("saves").join(folder);
         let enabled_features = horizon_client::save::Level::read(&world)
             .map(|l| l.enabled_features)
             .unwrap_or_default();
@@ -489,7 +487,7 @@ impl Game<'_> {
         let (tasks, server_tasks) = channel();
         let server_flags = flags.clone();
         super::world_loading::set_open_progress(0.0);
-        let thread = horizon_platform::thread::spawn_thread("Server thread", move || {
+        let thread = horizon_std::thread::spawn_thread("Server thread", move || {
             // MinecraftServer.spin's Thread.setPriority(8).
             horizon_threads::favour_current();
             let result = serve(
@@ -527,7 +525,7 @@ impl Game<'_> {
             while self.integrated_starting.is_some() {
                 self.poll_integrated_start()?;
                 if self.integrated_starting.is_some() {
-                    horizon_platform::thread::sleep(Duration::from_millis(5));
+                    horizon_std::thread::sleep(Duration::from_millis(5));
                 }
             }
         }
@@ -585,7 +583,7 @@ impl Game<'_> {
         // IntegratedServer.getWorldScreenshotFile: the client grabs the frame
         // the Select World list shows, and needs the save folder for it.
         self.world_icon = Some(WorldIcon {
-            path: horizon_platform::env::current_dir()?
+            path: horizon_std::env::current_dir()?
                 .join("saves")
                 .join(&folder)
                 .join("icon.png"),
@@ -701,8 +699,8 @@ impl Game<'_> {
         // The server thread's `WorldOpenReady` site, before the tick loop.
         self.native_lifecycle_world_ready();
         if let (Some(script), Some(output)) = (
-            horizon_platform::env::var_os("HORIZON_COMMAND_SCRIPT"),
-            horizon_platform::env::var_os("HORIZON_COMMAND_OUTPUT"),
+            horizon_std::env::var_os("HORIZON_COMMAND_SCRIPT"),
+            horizon_std::env::var_os("HORIZON_COMMAND_OUTPUT"),
         ) {
             // The script owns the clock: connection setup and terrain loading
             // cannot add wall-clock-dependent world ticks to oracle output.
@@ -786,7 +784,7 @@ impl Game<'_> {
         opening: Opening,
     ) -> Result<()> {
         // The mods' server configs, read before the server starts.
-        if let Ok(dir) = horizon_platform::env::current_dir() {
+        if let Ok(dir) = horizon_std::env::current_dir() {
             self.native_configs_server_start(&dir.join("saves").join(&launch.folder), false);
         }
         // MinecraftServer.loadLevel's start: nothing is loaded yet.
@@ -923,7 +921,7 @@ impl Game<'_> {
             let has_remote_guests = host.hub.guests.iter().any(|g| g.conn != 0);
             self.lan = Some(host);
             if has_remote_guests {
-                horizon_platform::thread::sleep(Duration::from_millis(50));
+                horizon_std::thread::sleep(Duration::from_millis(50));
             }
         }
         // ServerPlayer.disconnect: nobody is left in a bed.
@@ -1067,7 +1065,7 @@ impl Game<'_> {
         if s.flags.published.load(Ordering::Relaxed) != 0 {
             return Err("already published".into());
         }
-        let (listener, port) = if horizon_platform::WEB {
+        let (listener, port) = if horizon_std::WEB {
             (None, settings.port.max(1))
         } else {
             let listener = Lan::bind(None, settings.port).map_err(|e| e.to_string())?;
@@ -1299,7 +1297,7 @@ impl Game<'_> {
         let mut options = self.options.clone();
         options.execution_role = ExecutionRole::IntegratedServer;
         options.dedicated = Some(Vec::new());
-        let result = horizon_platform::thread::Builder::new()
+        let result = horizon_std::thread::Builder::new()
             .name("Server thread".into())
             .spawn(move || {
                 let run = || -> Result<()> {
@@ -1400,9 +1398,7 @@ mod tests {
         let (tasks, _) = channel();
         let server = Integrated {
             flags: flags.clone(),
-            thread: Some(horizon_platform::thread::spawn(move || {
-                wait.recv().unwrap()
-            })),
+            thread: Some(horizon_std::thread::spawn(move || wait.recv().unwrap())),
             tasks,
             world_name: String::new(),
         };
@@ -1420,7 +1416,7 @@ mod tests {
         let (tasks, _) = channel();
         let server = Integrated {
             flags,
-            thread: Some(horizon_platform::thread::spawn(move || {
+            thread: Some(horizon_std::thread::spawn(move || {
                 *saving.failure.lock().unwrap() = Some("disk write failed".into());
             })),
             tasks,

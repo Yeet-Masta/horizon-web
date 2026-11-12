@@ -2,7 +2,7 @@
 //! (water, waterlogged blocks, bubble columns and lava, with their currents), the
 //! water-entry splash and the fall resets that hinge on touching water.
 use super::*;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use horizon_world::{
     entity_fluid::{
         CurrentTarget, EntityFluidInteraction, FluidInteractionWorld, FluidMembership,

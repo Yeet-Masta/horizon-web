@@ -11,7 +11,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"
 # The clock: std's natively, the page's on the web build (std's panics there).
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 
 [lints]
 workspace = true

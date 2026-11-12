@@ -166,15 +166,14 @@ pub const MIN_SECTIONS: usize = 1600;
 /// frames without one draw flat only where `for_vanilla` says.
 /// `HORIZON_FLAT_DRAWS=1` draws every frame flat, `0` none.
 pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
-    horizon_platform::env::var("HORIZON_FLAT_DRAWS").as_deref() != Ok("0")
-        && supported(adapter, device)
+    horizon_std::env::var("HORIZON_FLAT_DRAWS").as_deref() != Ok("0") && supported(adapter, device)
 }
 
 /// Whether frames without a shader pack's terrain draw flat: where the backend
 /// emulates multi-draw (Metal, past `MIN_SECTIONS`), on Intel Gen11/Gen12's Vulkan
 /// driver, or with `HORIZON_FLAT_DRAWS=1`. Elsewhere per-section draws stay.
 pub fn for_vanilla(info: &wgpu::AdapterInfo) -> bool {
-    horizon_platform::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
+    horizon_std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
         || info.backend == wgpu::Backend::Metal
         || is_broken_intel_vulkan(info)
 }

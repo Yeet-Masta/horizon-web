@@ -481,7 +481,7 @@ pub struct Content {
 /// Reads a mod's content files ([`Content::reader`]).
 pub enum FileReader<'a> {
     Dir(&'a Path),
-    Zip(Box<zip::ZipArchive<horizon_platform::fs::File>>),
+    Zip(Box<zip::ZipArchive<horizon_std::fs::File>>),
 }
 impl FileReader<'_> {
     /// One content file's bytes.
@@ -489,8 +489,7 @@ impl FileReader<'_> {
         check_path(name)?;
         let reader: Box<dyn Read + '_> = match self {
             Self::Dir(root) => Box::new(
-                horizon_platform::fs::File::open(root.join(name))
-                    .map_err(|e| format!("{name}: {e}"))?,
+                horizon_std::fs::File::open(root.join(name)).map_err(|e| format!("{name}: {e}"))?,
             ),
             Self::Zip(zip) => Box::new(zip.by_name(name).map_err(|e| format!("{name}: {e}"))?),
         };
@@ -1188,20 +1187,20 @@ fn reader_of(source: &Source) -> Result<FileReader<'_>, String> {
     })
 }
 
-fn open_zip(path: &Path) -> Result<zip::ZipArchive<horizon_platform::fs::File>, String> {
-    let file = horizon_platform::fs::File::open(path).map_err(|e| e.to_string())?;
+fn open_zip(path: &Path) -> Result<zip::ZipArchive<horizon_std::fs::File>, String> {
+    let file = horizon_std::fs::File::open(path).map_err(|e| e.to_string())?;
     zip::ZipArchive::new(file).map_err(|e| e.to_string())
 }
 
 /// Files under `dir`, relative to `root` with `/` separators. Symbolic links
 /// are not followed: a mod folder holds its own files.
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, u64)>) -> Result<(), String> {
-    let Ok(read) = horizon_platform::fs::read_dir(dir) else {
+    let Ok(read) = horizon_std::fs::read_dir(dir) else {
         return Ok(());
     };
     for entry in read.flatten() {
         let path = entry.path();
-        let meta = horizon_platform::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        let meta = horizon_std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
         if meta.is_dir() {
             walk(root, &path, out)?;
         } else if meta.is_file() {
@@ -1235,10 +1234,10 @@ capabilities = ["registries"]
     const ITEM: &[u8] = br#"{"template": "minecraft:diamond", "rarity": "uncommon"}"#;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-content-{}-{name}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         dir
     }
     #[test]
@@ -1294,10 +1293,10 @@ capabilities = ["registries"]
     fn hmod(name: &str, manifest: &str, files: &[(&str, &[u8])]) -> Result<Content, String> {
         let dir = scratch(name);
         let path = dir.join("m.hmod");
-        horizon_platform::fs::write(&path, Package::write_files(manifest, None, files)?).unwrap();
+        horizon_std::fs::write(&path, Package::write_files(manifest, None, files)?).unwrap();
         let package = Package::read(&path);
         let content = package.and_then(|p| Content::read(&path, &p.manifest));
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
         content
     }
 
@@ -1452,14 +1451,14 @@ capabilities = ["registries"]
         let read = |declared: &[String]| {
             let dir = scratch("declared-remainder");
             let path = dir.join("m.hmod");
-            horizon_platform::fs::write(
+            horizon_std::fs::write(
                 &path,
                 Package::write_files(MANIFEST_TEXT, None, files).unwrap(),
             )
             .unwrap();
             let package = Package::read(&path).unwrap();
             let content = Content::read_declaring(&path, &package.manifest, declared);
-            horizon_platform::fs::remove_dir_all(&dir).unwrap();
+            horizon_std::fs::remove_dir_all(&dir).unwrap();
             content
         };
         assert!(read(&[]).is_err(), "a remainder nobody declares is refused");
@@ -1845,16 +1844,16 @@ capabilities = ["registries"]
     #[test]
     fn folder_mod_reads_the_same() {
         let dir = scratch("folder");
-        horizon_platform::fs::write(dir.join(MANIFEST), MANIFEST_TEXT).unwrap();
+        horizon_std::fs::write(dir.join(MANIFEST), MANIFEST_TEXT).unwrap();
         let block = dir.join("data/ruby/horizon/block");
-        horizon_platform::fs::create_dir_all(&block).unwrap();
-        horizon_platform::fs::write(block.join("ruby_block.json"), BLOCK).unwrap();
+        horizon_std::fs::create_dir_all(&block).unwrap();
+        horizon_std::fs::write(block.join("ruby_block.json"), BLOCK).unwrap();
         let package = Package::read(&dir).unwrap();
         assert!(package.wasm.is_none());
         let content = Content::read(&dir, &package.manifest).unwrap();
         assert_eq!(content.files, ["data/ruby/horizon/block/ruby_block.json"]);
         assert_eq!(content.file(&content.files[0]).unwrap(), BLOCK);
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A connecting block names a block tag and copies a `PipeBlock`.
@@ -2256,7 +2255,7 @@ capabilities = ["registries"]
         let dir = scratch("no-cap");
         let path = dir.join("m.hmod");
         let files: &[(&str, &[u8])] = &[("assets/ruby/lang/en_us.json", b"{}")];
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             &path,
             Package::write_files(&code_only, Some(b"\0asm"), files).unwrap(),
         )
@@ -2264,7 +2263,7 @@ capabilities = ["registries"]
         let package = Package::read(&path).unwrap();
         let e = Content::read(&path, &package.manifest).err().unwrap();
         assert!(e.contains("not capability registries"), "{e}");
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

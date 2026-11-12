@@ -227,7 +227,7 @@ impl EntitySkin {
         // HORIZON_NO_ENTITY_SKIN: every model on the CPU path (A/B runs, a driver's bug).
         if !compute
             || device.limits().max_storage_buffers_per_shader_stage < 4
-            || horizon_platform::env::var_os("HORIZON_NO_ENTITY_SKIN").is_some()
+            || horizon_std::env::var_os("HORIZON_NO_ENTITY_SKIN").is_some()
         {
             return None;
         }
@@ -246,8 +246,8 @@ impl EntitySkin {
             cache: None,
         });
         let layout = pipeline.get_bind_group_layout(0);
-        let internal = horizon_platform::block_on_or(internal.pop(), None);
-        if let Some(e) = internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             log::warn!("Horizon renderer: entity models posed on the CPU ({e})");
             return None;
         }

@@ -7,7 +7,7 @@
 //! refused with "You logged in from another location". The generated name is
 //! kept in `horizon-player.txt` next to `options.txt` so the same player gets
 //! the same offline UUID (and inventory on a friend's world) every time.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::path::Path;
 
 pub const FILE: &str = "horizon-player.txt";
@@ -49,11 +49,11 @@ fn parse(text: &str) -> Option<String> {
 }
 
 fn seed() -> u64 {
-    let nanos = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let nanos = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos() as u64);
     // Two players starting the game in the same millisecond still differ.
-    let mut x = nanos ^ u64::from(horizon_platform::process::id()).rotate_left(32);
+    let mut x = nanos ^ u64::from(horizon_std::process::id()).rotate_left(32);
     x ^= x >> 33;
     x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
     x ^ (x >> 33)
@@ -64,9 +64,9 @@ mod tests {
     use super::*;
 
     fn dir(name: &str) -> std::path::PathBuf {
-        let d = horizon_platform::env::temp_dir().join(format!(
+        let d = horizon_std::env::temp_dir().join(format!(
             "horizon-offline-name-{name}-{}",
-            horizon_platform::process::id()
+            horizon_std::process::id()
         ));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();

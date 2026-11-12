@@ -2,7 +2,7 @@
 //! a browser's game folder is out of the player's reach, so a world's zip goes
 //! into `saves` and a resource pack into `resourcepacks`, where the native game's
 //! folders would take them.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::{
     io::{Cursor, Read},
     path::{Path, PathBuf},
@@ -27,12 +27,15 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
         .flatten()
         .map(|n| n.replace('\\', "/"))
         .collect();
-    let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
+    let stem = Path::new(name)
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
     let folder = |root: &str| {
         let last = root.trim_end_matches('/').rsplit('/').next().unwrap_or("");
         sanitize(if last.is_empty() { &stem } else { last })
     };
-    let game = horizon_platform::env::current_dir().unwrap_or_default();
+    let game = horizon_std::env::current_dir().unwrap_or_default();
     if let Some(root) = shortest_root(&names, "level.dat") {
         let dest = available(&game.join("saves"), &folder(&root));
         extract(&mut zip, &root, &dest)?;
@@ -42,7 +45,11 @@ fn import(name: &str, bytes: Vec<u8>) -> Result<String, String> {
         ));
     }
     if let Some(root) = shortest_root(&names, "pack.mcmeta") {
-        let has = |dir: &str| names.iter().any(|n| n.starts_with(&format!("{root}{dir}/")));
+        let has = |dir: &str| {
+            names
+                .iter()
+                .any(|n| n.starts_with(&format!("{root}{dir}/")))
+        };
         if has("data") && !has("assets") {
             return Err(format!(
                 "{name} is a data pack: add it to a world from Create World's Data Packs."
@@ -117,8 +124,8 @@ fn sanitize(name: &str) -> String {
     let name: String = name
         .chars()
         .map(|c| match c {
-            '/' | '\n' | '\r' | '\t' | '\0' | '\x0c' | '`' | '?' | '*' | '\\' | '<' | '>'
-            | '|' | '"' | ':' => '_',
+            '/' | '\n' | '\r' | '\t' | '\0' | '\x0c' | '`' | '?' | '*' | '\\' | '<' | '>' | '|'
+            | '"' | ':' => '_',
             c => c,
         })
         .collect();

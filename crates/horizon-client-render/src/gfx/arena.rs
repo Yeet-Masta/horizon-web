@@ -634,7 +634,7 @@ pub fn free_later<T: Send + 'static>(items: Vec<T>) {
     if items.is_empty() {
         return;
     }
-    let _ = horizon_platform::thread::Builder::new()
+    let _ = horizon_std::thread::Builder::new()
         .name("Buffer freeing".into())
         .spawn(move || drop(items));
 }
@@ -655,7 +655,7 @@ pub(super) fn try_create(
         mapped_at_creation: false,
     });
     // Native error scopes resolve at once; the web's later, read as no error.
-    horizon_platform::block_on_or(scope.pop(), None)
+    horizon_std::block_on_or(scope.pop(), None)
         .is_none()
         .then_some(buffer)
 }

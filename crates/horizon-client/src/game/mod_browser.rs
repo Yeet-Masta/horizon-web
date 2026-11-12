@@ -140,7 +140,7 @@ impl Jobs {
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
     // A worker on the web build: `Builder` runs its closure there and then, and the page's
     // thread may not wait for the registry.
-    if let Err(e) = horizon_platform::thread::spawn_worker(name, work) {
+    if let Err(e) = horizon_std::thread::spawn_worker(name, work) {
         log::warn!("Horizon: {name} did not start: {e}");
     }
 }

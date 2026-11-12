@@ -2,7 +2,7 @@
 //! (`gameplay-facts.json`), indexed by registry state ID.
 mod decode;
 use crate::Result;
-use horizon_platform::fs::{self, File};
+use horizon_std::fs::{self, File};
 use horizon_world::{
     level::{Behaviours, GameplayStateSource},
     registry::{BlockRegistry, BlockStateId},
@@ -317,7 +317,7 @@ impl BlockFacts {
         }
         // The validation pass (a third of the load) only reports errors: it
         // reads the file beside the decode, and its error still wins.
-        horizon_platform::thread::scope(|scope| {
+        horizon_std::thread::scope(|scope| {
             let validated = scope.spawn(validate);
             let decoded = Self::decode_with_callback(&bytes, registry, behaviours, callback);
             validated

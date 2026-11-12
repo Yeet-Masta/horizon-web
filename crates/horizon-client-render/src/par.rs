@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// doesn't hold back the others.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads =
-        horizon_platform::thread::scoped_threads(horizon_threads::worker_count()).min(items.len());
+        horizon_std::thread::scoped_threads(horizon_threads::worker_count()).min(items.len());
     if threads <= 1 {
         return items.iter().map(f).collect();
     }
     let next = AtomicUsize::new(0);
-    let mut out: Vec<(usize, R)> = horizon_platform::thread::scope(|scope| {
+    let mut out: Vec<(usize, R)> = horizon_std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
                 scope.spawn(|| {

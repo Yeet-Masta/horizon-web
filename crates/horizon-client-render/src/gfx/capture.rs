@@ -23,7 +23,7 @@ use crate::{
     mesher::{SectionMesh, Sides, TerrainVertex, Vertex},
 };
 use glam::{DVec3, Mat4, Vec3};
-use horizon_platform::fs::{self, File};
+use horizon_std::fs::{self, File};
 use serde::{Deserialize, Serialize};
 use std::{
     io::{BufReader, BufWriter, Read, Write},

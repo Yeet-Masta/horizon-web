@@ -112,7 +112,7 @@ impl Split<'_> {
 
     /// The splitscreen folder in the game folder: `profiles/<name>/` holds each profile.
     fn folder() -> Result<PathBuf> {
-        Ok(horizon_platform::env::current_dir()?.join("splitscreen"))
+        Ok(horizon_std::env::current_dir()?.join("splitscreen"))
     }
 
     /// Add a player driven by `pad`: it picks a profile first, unless `name` is given (tests).
@@ -302,7 +302,7 @@ impl Split<'_> {
         let mut settings = if options.exists() {
             horizon_client::settings::Settings::load(&options)
         } else {
-            horizon_platform::fs::create_dir_all(&profile)?;
+            horizon_std::fs::create_dir_all(&profile)?;
             self.host.settings.save(&options);
             self.host.settings.clone()
         };
@@ -435,7 +435,7 @@ impl Split<'_> {
         }
         let res = self.res.ok_or("no resources")?;
         let host = &mut self.host;
-        horizon_platform::fs::create_dir_all(options_file.parent().ok_or("bad options path")?)?;
+        horizon_std::fs::create_dir_all(options_file.parent().ok_or("bad options path")?)?;
         let mut options = host.options.clone();
         options.world = None;
         options.server = None;

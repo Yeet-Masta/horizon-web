@@ -1030,7 +1030,7 @@ impl Game<'_> {
             tag.trim_start_matches("minecraft:")
         ));
         serde_json::from_slice::<serde_json::Value>(
-            &horizon_platform::fs::read(path).unwrap_or_default(),
+            &horizon_std::fs::read(path).unwrap_or_default(),
         )
         .ok()
         .is_some_and(|v| {
@@ -3927,7 +3927,7 @@ impl Game<'_> {
                 .into_iter()
                 .flatten()
                 .filter_map(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
-            let parsed = horizon_platform::fs::read(file)
+            let parsed = horizon_std::fs::read(file)
                 .ok()
                 .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
                 .into_iter()
@@ -4153,16 +4153,15 @@ mod teleport_pitch_tests {
     fn teleport_and_rotate_resolve_pitch_at_their_own_boundary() {
         use super::Target;
         use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -4368,16 +4367,15 @@ mod teleport_rider_tests {
         use super::Target;
         use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
         use horizon_core::geometry::Vec3;
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -4476,7 +4474,7 @@ mod selector_bounds_tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -4548,16 +4546,15 @@ mod query_feedback_tests {
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn a_silent_source_drops_query_results_but_still_stores_them() {
         use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

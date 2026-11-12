@@ -10,7 +10,7 @@
 //! writes `{"transport":"tcp","port":N,"token":"..."}` to the path, readable
 //! only by its user; a client's first line must then be `auth TOKEN`.
 use crate::block_entity_render::StaticCacheFrameStats;
-use horizon_platform::thread;
+use horizon_std::thread;
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
@@ -41,10 +41,7 @@ impl Stream {
         })
     }
     /// A read timeout (None waits forever).
-    pub fn set_read_timeout(
-        &self,
-        timeout: Option<horizon_platform::time::Duration>,
-    ) -> io::Result<()> {
+    pub fn set_read_timeout(&self, timeout: Option<horizon_std::time::Duration>) -> io::Result<()> {
         match self {
             #[cfg(unix)]
             Self::Unix(s) => s.set_read_timeout(timeout),
@@ -85,7 +82,7 @@ pub fn uses_tcp(path: &Path) -> bool {
 
 /// The TCP endpoint file: (port, token).
 fn read_endpoint(path: &Path) -> io::Result<(u16, String)> {
-    let text = horizon_platform::fs::read_to_string(path)?;
+    let text = horizon_std::fs::read_to_string(path)?;
     let bad = || io::Error::new(io::ErrorKind::InvalidData, "not a control endpoint file");
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad())?;
     let port = v["port"]
@@ -155,14 +152,14 @@ pub struct Server {
 /// `$HORIZON_CONTROL`, else `horizon-control.sock` in the user's runtime
 /// directory (`horizon-control.json` in the temporary directory on Windows).
 pub fn default_path() -> PathBuf {
-    if let Some(path) = horizon_platform::env::var_os("HORIZON_CONTROL") {
+    if let Some(path) = horizon_std::env::var_os("HORIZON_CONTROL") {
         return path.into();
     }
     if !cfg!(unix) {
-        return horizon_platform::env::temp_dir().join("horizon-control.json");
+        return horizon_std::env::temp_dir().join("horizon-control.json");
     }
-    let dir = horizon_platform::env::var_os("XDG_RUNTIME_DIR")
-        .map_or_else(horizon_platform::env::temp_dir, PathBuf::from);
+    let dir = horizon_std::env::var_os("XDG_RUNTIME_DIR")
+        .map_or_else(horizon_std::env::temp_dir, PathBuf::from);
     dir.join("horizon-control.sock")
 }
 
@@ -190,7 +187,7 @@ impl Server {
         check_path(path)?;
         // An endpoint left by a crashed game refuses connections; replace it.
         if path.exists() && connect(path).is_err() {
-            horizon_platform::fs::remove_file(path)?;
+            horizon_std::fs::remove_file(path)?;
         }
         let (sender, requests) = mpsc::channel();
         let local = sender.clone();
@@ -286,7 +283,7 @@ fn spawn_listener<S: Send + 'static>(
                     return;
                 }
                 let Ok(stream) = next else {
-                    thread::sleep(horizon_platform::time::Duration::from_millis(10));
+                    thread::sleep(horizon_std::time::Duration::from_millis(10));
                     continue;
                 };
                 let sender = sender.clone();
@@ -346,7 +343,7 @@ impl Drop for Server {
             #[cfg(not(unix))]
             None => {}
         }
-        let _ = horizon_platform::fs::remove_file(&self.path);
+        let _ = horizon_std::fs::remove_file(&self.path);
     }
 }
 
@@ -402,39 +399,39 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn check_path_says_what_bind_does() {
-        let dir = horizon_platform::env::temp_dir().join(format!("hz-sock-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_std::env::temp_dir().join(format!("hz-sock-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let (mut fits, mut too_long) = (false, false);
         for len in 1..=150 {
             let path = dir.join("x".repeat(len));
             let bound = UnixListener::bind(&path).is_ok();
             assert_eq!(check_path(&path).is_ok(), bound, "{}", path.display());
-            let _ = horizon_platform::fs::remove_file(&path);
+            let _ = horizon_std::fs::remove_file(&path);
             fits |= bound;
             too_long |= !bound;
         }
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         assert!(fits && too_long, "the lengths tried must cross the limit");
     }
 
     /// A `.json` endpoint is a file and TCP: the socket limit is not its limit.
     #[test]
     fn long_tcp_endpoint_opens() {
-        let dir = horizon_platform::env::temp_dir().join(format!("hz-long-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir = horizon_std::env::temp_dir().join(format!("hz-long-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{}.json", "x".repeat(150)));
         let server = Server::start(&path);
         assert!(server.is_ok(), "{:?}", server.err());
         drop(server);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn tcp_endpoint_round_trip() {
-        let path = horizon_platform::env::temp_dir()
+        let path = horizon_std::env::temp_dir()
             .join(format!("horizon-ctl-test-{}.json", std::process::id()));
         let server = Server::start(&path).unwrap();
-        let text = horizon_platform::fs::read_to_string(&path).unwrap();
+        let text = horizon_std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("\"tcp\""));
         let mut client = connect(&path).unwrap();
         writeln!(client, "status").unwrap();
@@ -442,7 +439,7 @@ mod tests {
             if let Some(r) = server.try_recv() {
                 break r;
             }
-            thread::sleep(horizon_platform::time::Duration::from_millis(5));
+            thread::sleep(horizon_std::time::Duration::from_millis(5));
         };
         assert_eq!(request.line, "status");
         request.reply.send(r#"{"ok":true}"#.into()).unwrap();
@@ -456,7 +453,7 @@ mod tests {
     /// A request past the limit is answered with an error and never reaches the game.
     #[test]
     fn a_request_longer_than_the_limit_is_refused() {
-        let path = horizon_platform::env::temp_dir()
+        let path = horizon_std::env::temp_dir()
             .join(format!("horizon-ctl-long-{}.json", std::process::id()));
         let server = Server::start(&path).unwrap();
         let client = connect(&path).unwrap();
@@ -484,7 +481,7 @@ mod tests {
 
     #[test]
     fn tcp_refuses_a_wrong_token() {
-        let path = horizon_platform::env::temp_dir()
+        let path = horizon_std::env::temp_dir()
             .join(format!("horizon-ctl-bad-{}.json", std::process::id()));
         let _server = Server::start(&path).unwrap();
         let (port, _) = read_endpoint(&path).unwrap();

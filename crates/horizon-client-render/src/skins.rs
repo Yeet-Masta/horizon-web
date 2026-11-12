@@ -236,17 +236,16 @@ pub struct Resolver {
     entries: std::collections::HashMap<NameOrId, Entry>,
     done: std::sync::mpsc::Receiver<(NameOrId, Option<ResolvedProfile>)>,
     send: std::sync::mpsc::Sender<(NameOrId, Option<ResolvedProfile>)>,
-    last_sweep: horizon_platform::time::Instant,
+    last_sweep: horizon_std::time::Instant,
 }
 struct Entry {
-    touched: horizon_platform::time::Instant,
+    touched: horizon_std::time::Instant,
     /// `None` while the fetch is in flight.
     resolved: Option<Option<ResolvedProfile>>,
 }
 /// `ProfileResolver.Cached`'s cache bounds.
 const MAX_PROFILES: usize = 256;
-const PROFILE_TTL: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(10 * 60);
+const PROFILE_TTL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(10 * 60);
 
 /// `StringUtil.isValidPlayerName` (the check `fetchByName` makes first).
 fn valid_player_name(name: &str) -> bool {
@@ -304,15 +303,15 @@ impl Resolver {
             entries: Default::default(),
             done,
             send,
-            last_sweep: horizon_platform::time::Instant::now(),
+            last_sweep: horizon_std::time::Instant::now(),
         }
     }
     /// `CacheBuilder.expireAfterAccess` with `maximumSize`.
     fn sweep(&mut self) {
-        if self.last_sweep.elapsed() < horizon_platform::time::Duration::from_secs(30) {
+        if self.last_sweep.elapsed() < horizon_std::time::Duration::from_secs(30) {
             return;
         }
-        self.last_sweep = horizon_platform::time::Instant::now();
+        self.last_sweep = horizon_std::time::Instant::now();
         self.entries
             .retain(|_, e| e.touched.elapsed() < PROFILE_TTL);
         while self.entries.len() > MAX_PROFILES
@@ -331,14 +330,14 @@ impl Resolver {
             self.entries.insert(
                 key,
                 Entry {
-                    touched: horizon_platform::time::Instant::now(),
+                    touched: horizon_std::time::Instant::now(),
                     resolved: Some(resolved),
                 },
             );
         }
         self.sweep();
         if let Some(entry) = self.entries.get_mut(key) {
-            entry.touched = horizon_platform::time::Instant::now();
+            entry.touched = horizon_std::time::Instant::now();
             return match &entry.resolved {
                 Some(resolved) => Resolve::Done(resolved.clone()),
                 None => Resolve::Pending,
@@ -350,7 +349,7 @@ impl Resolver {
         self.entries.insert(
             key.clone(),
             Entry {
-                touched: horizon_platform::time::Instant::now(),
+                touched: horizon_std::time::Instant::now(),
                 resolved: resolved.then_some(None),
             },
         );
@@ -358,7 +357,7 @@ impl Resolver {
             return Resolve::Done(None);
         }
         let (key, send) = (key.clone(), self.send.clone());
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let resolved = crate::auth::discovery()
                 .ok()
                 .and_then(|doc| resolve_profile(&key, &doc));
@@ -632,9 +631,8 @@ pub fn process_cape(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
 pub fn offline_cape() -> Option<&'static [u8]> {
     static CAPE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
     CAPE.get_or_init(|| {
-        let path =
-            horizon_platform::env::var_os("HORIZON_OFFLINE_CAPE").filter(|p| !p.is_empty())?;
-        let image = horizon_platform::fs::read(&path)
+        let path = horizon_std::env::var_os("HORIZON_OFFLINE_CAPE").filter(|p| !p.is_empty())?;
+        let image = horizon_std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|bytes| crate::hud::decode_bytes(&bytes).map_err(|e| e.to_string()))
             .and_then(|(w, h, rgba)| process_cape(w, h, &rgba).ok_or("not an image".into()));
@@ -652,9 +650,8 @@ pub fn offline_cape() -> Option<&'static [u8]> {
 pub fn offline_skin() -> Option<&'static (Vec<u8>, bool)> {
     static SKIN: std::sync::OnceLock<Option<(Vec<u8>, bool)>> = std::sync::OnceLock::new();
     SKIN.get_or_init(|| {
-        let path =
-            horizon_platform::env::var_os("HORIZON_OFFLINE_SKIN").filter(|p| !p.is_empty())?;
-        let model = horizon_platform::env::var("HORIZON_OFFLINE_SKIN_MODEL").unwrap_or_default();
+        let path = horizon_std::env::var_os("HORIZON_OFFLINE_SKIN").filter(|p| !p.is_empty())?;
+        let model = horizon_std::env::var("HORIZON_OFFLINE_SKIN_MODEL").unwrap_or_default();
         read_offline_skin(std::path::Path::new(&path), &model)
             .inspect_err(|e| eprintln!("Horizon: no offline skin ({}): {e}", path.display()))
             .ok()
@@ -662,7 +659,7 @@ pub fn offline_skin() -> Option<&'static (Vec<u8>, bool)> {
     .as_ref()
 }
 fn read_offline_skin(path: &std::path::Path, model: &str) -> Result<(Vec<u8>, bool), String> {
-    let bytes = horizon_platform::fs::read(path).map_err(|e| e.to_string())?;
+    let bytes = horizon_std::fs::read(path).map_err(|e| e.to_string())?;
     let (w, h, rgba) = crate::hud::decode_bytes(&bytes).map_err(|e| e.to_string())?;
     let skin = process_legacy_skin(w, h, &rgba).ok_or("not a 64x64 or 64x32 skin")?;
     Ok((skin, model == "slim"))
@@ -819,9 +816,9 @@ pub struct Downloader {
     /// When each failed texture download was last tried, so it can be retried:
     /// a transient network error must not pin a player to the default skin for
     /// the rest of the session.
-    failed: std::collections::HashMap<(Kind, String), horizon_platform::time::Instant>,
+    failed: std::collections::HashMap<(Kind, String), horizon_std::time::Instant>,
     /// How long a failed texture download waits before it is tried again.
-    retry_after: horizon_platform::time::Duration,
+    retry_after: horizon_std::time::Duration,
 }
 /// `images` is bounded only so a long session on a busy server does not grow
 /// without end; the disk cache holds everything it drops.
@@ -853,7 +850,7 @@ impl Downloader {
             resource_root: Default::default(),
             resources: Default::default(),
             failed: Default::default(),
-            retry_after: horizon_platform::time::Duration::from_secs(60),
+            retry_after: horizon_std::time::Duration::from_secs(60),
         }
     }
     /// The resource packs changed (or were first loaded) at `root`: patch
@@ -881,7 +878,7 @@ impl Downloader {
         let file = self
             .resource_root
             .join(format!("assets/{namespace}/textures/{path}.png"));
-        let image = horizon_platform::fs::read(file)
+        let image = horizon_std::fs::read(file)
             .ok()
             .and_then(|b| crate::hud::decode_bytes(&b).ok())
             .and_then(|(w, h, rgba)| resample_64(w, h, &rgba));
@@ -910,7 +907,7 @@ impl Downloader {
                 }
                 None => {
                     self.failed
-                        .insert(key.clone(), horizon_platform::time::Instant::now());
+                        .insert(key.clone(), horizon_std::time::Instant::now());
                     Download::Failed
                 }
             };
@@ -934,7 +931,7 @@ impl Downloader {
         self.states.insert(key.clone(), Download::Pending);
         let digest: String = skin_location(&key.1)["skins/".len()..].to_owned();
         let (url, send, root) = (url.to_owned(), self.send.clone(), self.root.clone());
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let image = Self::load_texture(&root, kind, &digest, &url, http_get);
             let _ = send.send((key, image));
         });
@@ -962,16 +959,13 @@ impl Downloader {
                 Kind::Elytra => Some(rgba),
             }
         };
-        if let Some(image) = horizon_platform::fs::read(&file)
-            .ok()
-            .and_then(|b| decode(&b))
-        {
+        if let Some(image) = horizon_std::fs::read(&file).ok().and_then(|b| decode(&b)) {
             return Some(image);
         }
         let body = fetch(url)?;
         let image = decode(&body)?;
-        let _ = horizon_platform::fs::create_dir_all(file.parent()?);
-        let _ = horizon_platform::fs::write(&file, &body);
+        let _ = horizon_std::fs::create_dir_all(file.parent()?);
+        let _ = horizon_std::fs::write(&file, &body);
         Some(image)
     }
     /// Keeps a decoded skin for `again`, dropping the oldest past the bound.
@@ -1022,7 +1016,7 @@ impl Downloader {
                 .join(if digest.len() > 2 { &digest[..2] } else { "xx" })
                 .join(digest);
             let (w, h, rgba) =
-                crate::hud::decode_bytes(&horizon_platform::fs::read(&file).ok()?).ok()?;
+                crate::hud::decode_bytes(&horizon_std::fs::read(&file).ok()?).ok()?;
             process(w, h, &rgba)
         });
         let Some(image) = image else {
@@ -1123,7 +1117,7 @@ impl SkinSlots {
 fn http_get(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let response = ureq::AgentBuilder::new()
-        .timeout(horizon_platform::time::Duration::from_secs(15))
+        .timeout(horizon_std::time::Duration::from_secs(15))
         .user_agent("Java")
         .build()
         .get(url)
@@ -1202,24 +1196,24 @@ mod tests {
                 .unwrap();
             (out, rgba)
         };
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-offline-skin-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("steve.png");
         for (h, model, slim) in [(64, "slim", true), (32, "classic", false), (64, "", false)] {
             let (bytes, rgba) = png(64, h);
-            horizon_platform::fs::write(&file, bytes).unwrap();
+            horizon_std::fs::write(&file, bytes).unwrap();
             let (skin, is_slim) = super::read_offline_skin(&file, model).unwrap();
             assert_eq!(skin, super::process_legacy_skin(64, h, &rgba).unwrap());
             assert_eq!(skin.len(), 64 * 64 * 4);
             assert_eq!(is_slim, slim);
         }
-        horizon_platform::fs::write(&file, png(32, 32).0).unwrap();
+        horizon_std::fs::write(&file, png(32, 32).0).unwrap();
         assert!(super::read_offline_skin(&file, "slim").is_err());
-        horizon_platform::fs::write(&file, b"not a png").unwrap();
+        horizon_std::fs::write(&file, b"not a png").unwrap();
         assert!(super::read_offline_skin(&file, "slim").is_err());
         assert!(super::read_offline_skin(&dir.join("missing.png"), "").is_err());
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     /// `MinecraftProfileTexture.getMetadata("model")`: `slim` marks a slim
@@ -1322,7 +1316,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let reply = |status: &str, body: &str| {
                 format!(
                     "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1378,9 +1372,8 @@ mod tests {
     /// in turn. Those drawn keep their slots; the rest wait.
     #[test]
     fn skins_drawn_last_frame_keep_their_slots() {
-        let mut d = super::Downloader::new(
-            horizon_platform::env::temp_dir().join("horizon-test-skin-slots"),
-        );
+        let mut d =
+            super::Downloader::new(horizon_std::env::temp_dir().join("horizon-test-skin-slots"));
         let skins: Vec<String> = (0..6).map(|i| format!("skins/{i}")).collect();
         for (i, s) in skins.iter().enumerate() {
             d.remember(s.clone(), vec![i as u8]);
@@ -1434,8 +1427,7 @@ mod tests {
     /// A skin evicted from the atlas re-uploads (`again`), once per ask.
     #[test]
     fn evicted_skins_upload_again() {
-        let mut d =
-            super::Downloader::new(horizon_platform::env::temp_dir().join("horizon-test-skins"));
+        let mut d = super::Downloader::new(horizon_std::env::temp_dir().join("horizon-test-skins"));
         d.remember("skins/abc".into(), vec![1, 2, 3]);
         assert!(d.again("skins/abc"));
         assert!(!d.again("skins/missing"));
@@ -1502,7 +1494,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             for stream in listener.incoming().take(2) {
                 let mut stream = stream.unwrap();
                 let mut line = String::new();
@@ -1627,9 +1619,9 @@ mod tests {
     /// cached file is fetched again and replaced. A failed fetch writes nothing.
     #[test]
     fn the_texture_cache_holds_only_what_decodes() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-test-skin-cache-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let body = png([7, 8, 9, 255]);
         let file = root.join("ab").join("abcdef");
         let load = |fetched: Option<&[u8]>| {
@@ -1643,15 +1635,15 @@ mod tests {
             )
         };
         assert_eq!(load(Some(&body)), Some(vec![7, 8, 9, 255]));
-        assert_eq!(horizon_platform::fs::read(&file).unwrap(), body);
+        assert_eq!(horizon_std::fs::read(&file).unwrap(), body);
         // From then on the cache answers; no fetch is needed.
         assert_eq!(load(None), Some(vec![7, 8, 9, 255]));
         // A broken file is fetched again and replaced, not kept.
-        horizon_platform::fs::write(&file, b"<html>not a png</html>").unwrap();
+        horizon_std::fs::write(&file, b"<html>not a png</html>").unwrap();
         assert_eq!(load(Some(&body)), Some(vec![7, 8, 9, 255]));
-        assert_eq!(horizon_platform::fs::read(&file).unwrap(), body);
+        assert_eq!(horizon_std::fs::read(&file).unwrap(), body);
         // A body that does not decode is not cached at all.
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(load(Some(b"<html>not a png</html>")), None);
         assert!(!file.exists());
     }
@@ -1662,14 +1654,14 @@ mod tests {
         url: &str,
         want: super::Download,
     ) -> super::Download {
-        let deadline = horizon_platform::time::Instant::now()
-            + horizon_platform::time::Duration::from_secs(10);
+        let deadline =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(10);
         loop {
             let state = d.state(kind, url);
-            if state == want || horizon_platform::time::Instant::now() > deadline {
+            if state == want || horizon_std::time::Instant::now() > deadline {
                 return state;
             }
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(5));
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(5));
         }
     }
 
@@ -1684,7 +1676,7 @@ mod tests {
         let body = png([1, 2, 3, 4]);
         let served = std::sync::Arc::new(AtomicUsize::new(0));
         let count = served.clone();
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             for (i, stream) in listener.incoming().take(2).enumerate() {
                 let mut stream = stream.unwrap();
                 let mut line = String::new();
@@ -1708,9 +1700,9 @@ mod tests {
                 }
             }
         });
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-test-skin-retry-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let mut d = super::Downloader::new(root);
         let url = format!("{base}/texture/retry.png");
         assert_eq!(d.state(super::Kind::Elytra, &url), super::Download::Pending);
@@ -1722,7 +1714,7 @@ mod tests {
         assert_eq!(d.state(super::Kind::Elytra, &url), super::Download::Failed);
         assert_eq!(served.load(Ordering::SeqCst), 1);
         // After it, the download is started again and takes the good answer.
-        d.retry_after = horizon_platform::time::Duration::ZERO;
+        d.retry_after = horizon_std::time::Duration::ZERO;
         assert_eq!(d.state(super::Kind::Elytra, &url), super::Download::Pending);
         assert_eq!(
             wait_state(&mut d, super::Kind::Elytra, &url, super::Download::Ready),

@@ -1505,7 +1505,7 @@ impl ParticleEngine {
     /// and a native mod's (`assets/<namespace>/particles/<name>.json`).
     fn load_sprites(&mut self, root: &Path) {
         let assets = root.join("assets");
-        if let Ok(namespaces) = horizon_platform::fs::read_dir(&assets) {
+        if let Ok(namespaces) = horizon_std::fs::read_dir(&assets) {
             for namespace in namespaces.flatten() {
                 let ns = namespace.file_name().to_string_lossy().into_owned();
                 if ns == "minecraft" || !namespace.path().is_dir() {
@@ -1544,7 +1544,7 @@ impl ParticleEngine {
     /// A namespace's particle JSONs that vanilla has no type for: each becomes
     /// one sprite set under `<ns>:<file name>`.
     fn load_mod_sprites(&mut self, ns: &str, dir: &Path) {
-        let Ok(files) = horizon_platform::fs::read_dir(dir) else {
+        let Ok(files) = horizon_std::fs::read_dir(dir) else {
             return;
         };
         for file in files.flatten() {
@@ -1559,7 +1559,7 @@ impl ParticleEngine {
             if ParticleType::from_name(&key).is_some() {
                 continue;
             }
-            let Ok(bytes) = horizon_platform::fs::read(&path) else {
+            let Ok(bytes) = horizon_std::fs::read(&path) else {
                 continue;
             };
             let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
@@ -5042,11 +5042,11 @@ mod tests {
 
     #[test]
     fn a_mod_particles_json_becomes_its_sprite_set() {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-mod-particles-{}", std::process::id()));
         let particles = dir.join("assets/mymod/particles");
-        horizon_platform::fs::create_dir_all(&particles).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&particles).unwrap();
+        horizon_std::fs::write(
             particles.join("spark.json"),
             br#"{"textures":["mymod:spark/1","mymod:spark/2"]}"#,
         )
@@ -5079,7 +5079,7 @@ mod tests {
                 )
                 .is_none()
         );
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             particles.join("spark.json"),
             br#"{"textures":["mymod:spark/1"],"horizon:behaviour":{
                 "velocity":[0,0.5,0],"gravity":-1,"friction":0.5,
@@ -5103,7 +5103,7 @@ mod tests {
         assert_eq!(custom.size, 0.25);
         assert_eq!(custom.rgba[3], 0.75);
         for suffix in [r#", "horizon:behaviour": {"lifetime":0}"#, ""] {
-            horizon_platform::fs::write(
+            horizon_std::fs::write(
                 particles.join("spark.json"),
                 format!(r#"{{"textures":["mymod:spark/1","mymod:spark/2"]{suffix}}}"#,),
             )
@@ -5127,7 +5127,7 @@ mod tests {
         }
         assert_eq!(custom.lifetime, 4);
         assert_eq!(custom.size, 0.25);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]

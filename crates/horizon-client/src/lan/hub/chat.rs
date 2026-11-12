@@ -29,8 +29,8 @@ pub fn native_player_chat(
 
 /// Now, in epoch milliseconds (Instant.now()).
 pub fn now_millis() -> i64 {
-    horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
 

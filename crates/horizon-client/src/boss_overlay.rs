@@ -12,8 +12,8 @@ const LERP_MS: u128 = 100;
 
 /// `Util.getMillis`.
 pub fn now_millis() -> u128 {
-    horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
 }

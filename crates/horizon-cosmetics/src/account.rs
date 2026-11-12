@@ -21,7 +21,7 @@ pub trait Call {
     ) -> Result<Value, String>;
 }
 
-/// The web build's calls: horizon_platform's HTTP (the browser's fetch, else the relay's TLS
+/// The web build's calls: horizon_std's HTTP (the browser's fetch, else the relay's TLS
 /// tunnel, which carries the session only as ciphertext).
 #[cfg(target_family = "wasm")]
 impl Call for crate::Http {
@@ -32,7 +32,7 @@ impl Call for crate::Http {
         session: Option<&str>,
         body: &Value,
     ) -> Result<Value, String> {
-        let mut request = horizon_platform::web::http::Request::post(
+        let mut request = horizon_std::web::http::Request::post(
             &format!("{}{path}", self.base()),
             body.to_string().into_bytes(),
         )
@@ -69,8 +69,8 @@ impl Call for crate::Http {
 
 /// How often a running game tells the service its player plays Horizon (the service's
 /// `PRESENCE_EVERY`; it forgets them some hours after the last time).
-pub const PRESENCE_EVERY: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(3600);
+pub const PRESENCE_EVERY: horizon_std::time::Duration =
+    horizon_std::time::Duration::from_secs(3600);
 
 /// "Show me as a Horizon player": listed, other Horizon players see the mark by `name`'s name for
 /// a while (sent again every `PRESENCE_EVERY`); not listed, the service forgets it at once.
@@ -127,7 +127,7 @@ fn sign_in_for(
 /// minute: emotes come often, Mojang's `join` shouldn't each time.
 #[derive(Default)]
 pub struct Kept {
-    session: Option<(String, horizon_platform::time::Instant)>,
+    session: Option<(String, horizon_std::time::Instant)>,
 }
 
 impl Kept {
@@ -147,17 +147,14 @@ impl Kept {
             let fresh = self
                 .session
                 .as_ref()
-                .filter(|(_, until)| horizon_platform::time::Instant::now() < *until);
+                .filter(|(_, until)| horizon_std::time::Instant::now() < *until);
             let session = match fresh {
                 Some((s, _)) => s.clone(),
                 None => {
                     let (session, seconds) = sign_in_for(service, name, &mut join)?;
-                    let keep =
-                        horizon_platform::time::Duration::from_secs(seconds.saturating_sub(60));
-                    self.session = Some((
-                        session.clone(),
-                        horizon_platform::time::Instant::now() + keep,
-                    ));
+                    let keep = horizon_std::time::Duration::from_secs(seconds.saturating_sub(60));
+                    self.session =
+                        Some((session.clone(), horizon_std::time::Instant::now() + keep));
                     session
                 }
             };
@@ -396,8 +393,7 @@ mod tests {
         // The service forgot the session (a restart): one more sign-in, then the call.
         kept.session = Some((
             "stale".into(),
-            horizon_platform::time::Instant::now()
-                + horizon_platform::time::Duration::from_secs(60),
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(60),
         ));
         play_emote(&mut kept, &service, "Alex", join, Some("wave_hello")).unwrap();
         assert_eq!(joins.get(), 2);

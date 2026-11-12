@@ -376,7 +376,7 @@ mod tests {
         },
     };
     use horizon_core::{position::ChunkPos, random::LegacyRandom};
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
     use std::{collections::BTreeMap, path::Path};
 
     /// Air, the water and the floor the piece is placed in, and the structure

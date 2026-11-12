@@ -10,8 +10,8 @@ use crate::{
     collision::CachedCollisionRegistry,
     registry::{BlockRegistry, BlockTableFile},
 };
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -111,7 +111,7 @@ impl BlockBehavior {
         };
         // The support table reads on its own thread while the collision and
         // property tables (which need the collisions) read on this one.
-        let (collisions, properties, support) = horizon_platform::thread::scope(|scope| {
+        let (collisions, properties, support) = horizon_std::thread::scope(|scope| {
             let support = scope.spawn(|| -> Result<_, GeneratorError> {
                 Ok(BlockSupportRegistry::from_table(
                     read("cached-support.nbt")?.table("support")?,

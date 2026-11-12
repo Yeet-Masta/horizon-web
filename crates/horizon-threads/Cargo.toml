@@ -8,10 +8,10 @@ description = "Scheduling hints for the game's threads and its allocator, and th
 
 [dependencies]
 # Locks, clocks and workers that a browser's page allows (the job pool on the web build).
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 
 # The game's allocator natively; the web build has the browser's memory and its own allocator
-# (horizon-platform's web/alloc.rs).
+# (horizon-std's web/alloc.rs).
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 mimalloc = { version = "0.1.52", default-features = false }
 libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }

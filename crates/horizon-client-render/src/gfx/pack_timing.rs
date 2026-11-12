@@ -87,7 +87,7 @@ impl PassTiming {
     /// Whether `HORIZON_SHADER_PACK_TIMING` asks for timing without the F3 overlay.
     pub fn logging() -> bool {
         static LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *LOG.get_or_init(|| horizon_platform::env::var_os("HORIZON_SHADER_PACK_TIMING").is_some())
+        *LOG.get_or_init(|| horizon_std::env::var_os("HORIZON_SHADER_PACK_TIMING").is_some())
     }
 
     /// At the start of a frame's passes: moves the last timed frame along, and decides whether

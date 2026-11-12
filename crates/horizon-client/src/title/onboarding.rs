@@ -7,7 +7,7 @@ use crate::{
     hud::{HudAtlas, HudBatch, rgba},
     lang,
 };
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use std::cell::Cell;
 
 /// `AccessibilityOnboardingScreen.TEXT_WIDGET_WIDTH`.
@@ -310,7 +310,7 @@ impl Title {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::time::Duration;
+    use horizon_std::time::Duration;
 
     #[test]
     fn the_widgets_sit_where_the_layouts_put_them() {

@@ -6,7 +6,7 @@
 //! `SystemToast.addOrUpdate` makes a repeat reset the toast it already shows,
 //! so only the newest chunk of each kind is kept.
 use crate::{lang, save, toasts::SystemToast};
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::path::Path;
 
 /// What the window has still to toast.

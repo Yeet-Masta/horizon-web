@@ -2,17 +2,17 @@
 """The web build's rewrite of upstream code (web/README.md, "Merging upstream").
 
 std's file system, clocks, environment, threads and locks fail, panic or block in a browser, so the
-crates the web build compiles reach them through horizon_platform, which is std natively. Upstream
+crates the web build compiles reach them through horizon_std, which is std natively. Upstream
 writes `std::fs`, `std::time`, `std::thread`, `std::env` and `std::sync::{Mutex, RwLock}`; this
-routes them through horizon_platform, in place:
+routes them through horizon_std, in place:
 
     python3 tools/web_rewrite.py FILE...                 # these files
     python3 tools/web_rewrite.py --changed A B           # files of the web crates B changed since A
 
-`--changed` takes the crates that depend on horizon-platform (their Cargo.toml says so), less
-horizon-platform and horizon-threads, and their `src/` files that changed between the two revisions.
+`--changed` takes the crates that depend on horizon-std (their Cargo.toml says so), less
+horizon-std and horizon-threads, and their `src/` files that changed between the two revisions.
 Before merging upstream, what the merge brings is `--changed $(git merge-base HEAD upstream/main)
-upstream/main`. Rewritten files are run through rustfmt. What it can't decide stays for a person: a `horizon_platform::thread::Builder` spawn runs
+upstream/main`. Rewritten files are run through rustfmt. What it can't decide stays for a person: a `horizon_std::thread::Builder` spawn runs
 in place on the web (a loop there hangs the thread that started it), so loops go through
 `spawn_thread` / `spawn_worker` by hand; tools/upstream_watch.py lists the new ones.
 """
@@ -82,11 +82,11 @@ def rewrite_platform_uses(src):
             parts = []
             if keep:
                 parts.append(f"{ind}{vis}use std::{{{', '.join(x.strip() for x in keep)}}};")
-            parts.append(f"{ind}{vis}use horizon_platform::{{{', '.join(x.strip() for x in moved)}}};")
+            parts.append(f"{ind}{vis}use horizon_std::{{{', '.join(x.strip() for x in moved)}}};")
             out.append("\n".join(parts))
         i = end
     src = "".join(out)
-    return re.sub(r"\bstd::(fs|time|thread|env)\b(?!!)", r"horizon_platform::\1", src)
+    return re.sub(r"\bstd::(fs|time|thread|env)\b(?!!)", r"horizon_std::\1", src)
 
 
 # --- std::sync::{Mutex, RwLock} ---------------------------------------------------------------
@@ -183,14 +183,14 @@ def rewrite_locks(src):
         out.append(before)
         names = [p[2] + (f" as {a}" if a else "") for p, a in moved]
         names = names[0] if len(names) == 1 else "{" + ", ".join(names) + "}"
-        platform = f"{ind}{vis}use horizon_platform::sync::{names};"
+        platform = f"{ind}{vis}use horizon_std::sync::{names};"
         if kept:
             prefix = "\n".join(attrs) + "\n" if attrs else ""
             out.append(f"{ind}{vis}use {emit(kept)};\n{prefix}{platform}")
         else:
             out.append(platform)
         i = semi
-    return re.sub(r"\bstd::sync::(Mutex|RwLock)\b", r"horizon_platform::sync::\1", "".join(out))
+    return re.sub(r"\bstd::sync::(Mutex|RwLock)\b", r"horizon_std::sync::\1", "".join(out))
 
 
 def rewrite(src):
@@ -200,13 +200,13 @@ def rewrite(src):
 # --- which files -------------------------------------------------------------------------------
 
 def web_crates():
-    """The crate folders whose sources go through horizon_platform."""
+    """The crate folders whose sources go through horizon_std."""
     out = []
     for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
         name = manifest.parent.name
-        if name in ("horizon-platform", "horizon-threads"):
+        if name in ("horizon-std", "horizon-threads"):
             continue
-        if re.search(r"^horizon-platform\s*=", manifest.read_text(), re.M):
+        if re.search(r"^horizon-std\s*=", manifest.read_text(), re.M):
             out.append(manifest.parent)
     return out
 

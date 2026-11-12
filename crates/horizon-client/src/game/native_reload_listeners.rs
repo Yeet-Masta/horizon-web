@@ -116,7 +116,7 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::fs;
+    use horizon_std::fs;
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -124,7 +124,7 @@ mod tests {
 
     impl Folder {
         fn new(name: &str) -> Self {
-            let dir = horizon_platform::env::temp_dir().join(format!(
+            let dir = horizon_std::env::temp_dir().join(format!(
                 "horizon-reload-listeners-{name}-{}",
                 std::process::id()
             ));

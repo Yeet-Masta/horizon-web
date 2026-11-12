@@ -22,13 +22,13 @@ use horizon_core::{
     geometry::{Aabb, ShapeOp, Vec3, VoxelShape},
     random::LegacyRandom,
 };
-use horizon_platform::sync::Mutex;
 use horizon_protocol::ids::play::clientbound as ids;
 use horizon_protocol::{
     entity_data::{Particle, ParticleData, Value, serializer},
     packets::play::{self, Clientbound as C, Serverbound as S},
     text::{literal, translatable},
 };
+use horizon_std::sync::Mutex;
 use horizon_world::{
     attachments::Holder,
     block_collision::BlockCollisionRegistry,
@@ -1058,10 +1058,7 @@ impl Hub {
         let Some(transfers) = &self.transfers else {
             return;
         };
-        for uuid in transfers
-            .table()
-            .expire(horizon_platform::time::Instant::now())
-        {
+        for uuid in transfers.table().expire(horizon_std::time::Instant::now()) {
             events.push(HostEvent::Warn(format!(
                 "player {} was expected from another server and never came",
                 horizon_protocol::crypto::uuid_string(uuid)
@@ -2143,7 +2140,7 @@ impl Hub {
                     // Frozen for a hand-over: it answers the server and nothing more.
                     self.keep_acknowledgements(i, &mut events);
                 }
-                let started = timed.then(horizon_platform::time::Instant::now);
+                let started = timed.then(horizon_std::time::Instant::now);
                 let waiting = self.guests[i].inbox.len();
                 self.process_inbox(i, ctx, &mut events);
                 // Its moves are dropped, so whether the last one left it floating is
@@ -2297,7 +2294,7 @@ impl Hub {
         if g.left_reason.is_empty() {
             g.left_reason = reason.to_owned();
         }
-        if horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some() {
+        if horizon_std::env::var_os("HORIZON_NET_DEBUG").is_some() {
             log::info!("[lan] {} left: {reason}", g.name);
         }
         if !g.placed {
@@ -3350,8 +3347,8 @@ impl Hub {
             // ServerPlayer.tick's CriteriaTriggers.TICK, then flushDirty. A
             // player who has been here has had the tick's criteria already.
             if !g.advancements_loaded {
-                let now = horizon_platform::time::SystemTime::now()
-                    .duration_since(horizon_platform::time::UNIX_EPOCH)
+                let now = horizon_std::time::SystemTime::now()
+                    .duration_since(horizon_std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis() as i64);
                 let sync = self.sync.clone();
                 let g = &mut self.guests[i];
@@ -3516,8 +3513,8 @@ impl Hub {
     pub fn reload_resources(&mut self, sync: Arc<SyncData>) {
         self.lan.shared.set_sync(sync.clone());
         self.sync = sync.clone();
-        let now = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let now = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         for g in &mut self.guests {
             let mut granted = Vec::new();
@@ -5151,17 +5148,17 @@ mod tests {
     /// A data folder holding two advancements: `minecraft:root`, a root with a display, and
     /// `minecraft:task`, which hangs off it.
     fn advancement_data() -> std::path::PathBuf {
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-advancement-tab-{}-{:?}",
             std::process::id(),
-            horizon_platform::thread::current().id()
+            horizon_std::thread::current().id()
         ));
         let folder = root.join("data").join("minecraft").join("advancement");
-        horizon_platform::fs::create_dir_all(&folder).unwrap();
+        horizon_std::fs::create_dir_all(&folder).unwrap();
         let display = |icon: &str, title: &str| {
             format!(r#"{{"icon":{{"id":"{icon}"}},"title":"{title}","description":"{title}"}}"#)
         };
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             folder.join("root.json"),
             format!(
                 r#"{{"display":{},"criteria":{{}}}}"#,
@@ -5169,7 +5166,7 @@ mod tests {
             ),
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             folder.join("task.json"),
             format!(
                 r#"{{"parent":"minecraft:root","display":{},"criteria":{{}}}}"#,
@@ -5250,7 +5247,7 @@ mod tests {
             hub.guests[0].selected_tab.as_deref(),
             Some("minecraft:root")
         );
-        let _ = horizon_platform::fs::remove_dir_all(&data);
+        let _ = horizon_std::fs::remove_dir_all(&data);
     }
 
     /// `handlePlayerCommand` START_RIDING_JUMP (3) and STOP_RIDING_JUMP (4): the
@@ -5334,7 +5331,7 @@ mod tests {
 
     #[test]
     fn a_guests_frozen_ticks_go_to_its_client() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5555,18 +5552,18 @@ mod tests {
     fn the_owner_is_listed_with_the_accounts_skin_once_fetched() {
         let (answer, fetched) = std::sync::mpsc::channel();
         let profile = super::super::OwnerProfile::new(move || fetched.recv().unwrap_or_default());
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         assert!(listed_properties(&[], true, Some(&profile)).is_empty());
-        assert!(start.elapsed() < horizon_platform::time::Duration::from_millis(500));
+        assert!(start.elapsed() < horizon_std::time::Duration::from_millis(500));
         answer.send(vec![textures("owner")]).unwrap();
         let deadline =
-            horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(5);
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(5);
         while listed_properties(&[], true, Some(&profile)).is_empty() {
             assert!(
-                horizon_platform::time::Instant::now() < deadline,
+                horizon_std::time::Instant::now() < deadline,
                 "the fetch never landed"
             );
-            horizon_platform::thread::yield_now();
+            horizon_std::thread::yield_now();
         }
         assert_eq!(
             listed_properties(&[], true, Some(&profile)),
@@ -5582,11 +5579,11 @@ mod tests {
         assert!(listed_properties(&[], true, None).is_empty());
         let failed = super::super::OwnerProfile::new(Vec::new);
         let deadline =
-            horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(5);
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(5);
         while failed.properties.get().is_none() {
             let _ = failed.properties();
-            assert!(horizon_platform::time::Instant::now() < deadline);
-            horizon_platform::thread::yield_now();
+            assert!(horizon_std::time::Instant::now() < deadline);
+            horizon_std::thread::yield_now();
         }
         assert!(listed_properties(&[], true, Some(&failed)).is_empty());
     }
@@ -5729,7 +5726,7 @@ mod tests {
             ] {
                 let sent = FxHashSet::default();
                 let mut queue = Vec::new();
-                let start = horizon_platform::time::Instant::now();
+                let start = horizon_std::time::Instant::now();
                 let moves = 200;
                 for step in 0..moves {
                     // Nothing sent yet (an explorer waiting on generation).

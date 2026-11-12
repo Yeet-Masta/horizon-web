@@ -420,8 +420,8 @@ fn pipeline(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::BindG
         cache: None,
     });
     let layout = pipeline.get_bind_group_layout(0);
-    let internal = horizon_platform::block_on_or(internal.pop(), None);
-    match internal.or(horizon_platform::block_on_or(validation.pop(), None)) {
+    let internal = horizon_std::block_on_or(internal.pop(), None);
+    match internal.or(horizon_std::block_on_or(validation.pop(), None)) {
         None => Some((pipeline, layout)),
         Some(e) => {
             log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");

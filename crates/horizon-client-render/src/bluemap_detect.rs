@@ -5,8 +5,8 @@
 //! `server-terrain/<server>/BlueMap/detected.txt` so a rejoin asks nothing.
 //! A `blueMap:` line the player wrote always wins.
 use crate::bluemap::Settings;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, SystemTime};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, SystemTime};
 use std::{
     net::IpAddr,
     path::{Path, PathBuf},
@@ -168,12 +168,12 @@ pub fn is_web_app_settings(json: &[u8]) -> bool {
         && v.get("mapDataRoot").is_some_and(|r| r.is_string())
 }
 
-/// [`probe`] for the web build: horizon_platform's HTTP, from the BlueMap worker.
+/// [`probe`] for the web build: horizon_std's HTTP, from the BlueMap worker.
 #[cfg(target_family = "wasm")]
 pub fn probe_web(base: &str) -> bool {
-    let request = horizon_platform::web::http::Request::get(&format!("{base}/settings.json"))
-        .timeout(TIMEOUT);
-    horizon_platform::web::http::request(request)
+    let request =
+        horizon_std::web::http::Request::get(&format!("{base}/settings.json")).timeout(TIMEOUT);
+    horizon_std::web::http::request(request)
         .is_ok_and(|r| r.status == 200 && r.body.len() <= 256 << 10 && is_web_app_settings(&r.body))
 }
 
@@ -209,7 +209,7 @@ pub enum Remembered {
 }
 
 pub fn remembered(dir: &Path, now: SystemTime) -> Remembered {
-    let Ok(text) = horizon_platform::fs::read_to_string(dir.join(FILE)) else {
+    let Ok(text) = horizon_std::fs::read_to_string(dir.join(FILE)) else {
         return Remembered::Stale(None);
     };
     let mut words = text.split_whitespace();
@@ -238,8 +238,8 @@ pub fn remember(dir: &Path, found: Option<&str>, now: SystemTime) {
         Some(url) => format!("found {secs} {url}\n"),
         None => format!("none {secs}\n"),
     };
-    let _ = horizon_platform::fs::create_dir_all(dir);
-    let _ = horizon_platform::fs::write(dir.join(FILE), text);
+    let _ = horizon_std::fs::create_dir_all(dir);
+    let _ = horizon_std::fs::write(dir.join(FILE), text);
 }
 
 /// The servers being looked at now, by BlueMap folder: one look a server at
@@ -360,11 +360,11 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-bluemap-detect-{name}-{}",
             std::process::id()
         ));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         dir
     }
 
@@ -388,9 +388,9 @@ mod tests {
             remembered(&dir, t0 + RETRY_FOUND),
             Remembered::Stale(Some("https://map.example.net".into()))
         );
-        horizon_platform::fs::write(dir.join(FILE), "garbage").unwrap();
+        horizon_std::fs::write(dir.join(FILE), "garbage").unwrap();
         assert_eq!(remembered(&dir, t0), Remembered::Stale(None));
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -448,7 +448,7 @@ mod tests {
                 maps: vec![("minecraft:the_nether".into(), "n".into())]
             })
         );
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -710,7 +710,7 @@ impl NativeShadow {
                 "horizon_shadow_fs_displaced",
             )
         });
-        if let Some(e) = horizon_platform::block_on_or(scope.pop(), None) {
+        if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {

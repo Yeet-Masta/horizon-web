@@ -21,7 +21,7 @@ pub(super) struct Emotes {
     pub(super) names: std::collections::HashMap<String, std::collections::BTreeMap<String, String>>,
     /// The account's emotes on their way from the service, and when they last came.
     pub(super) loading: Option<std::sync::mpsc::Receiver<Result<Vec<OwnedEmote>, String>>>,
-    pub(super) loaded: Option<horizon_platform::time::Instant>,
+    pub(super) loaded: Option<horizon_std::time::Instant>,
     /// `owned` was read from `HORIZON_COSMETICS_LOCAL`'s folder.
     local_read: bool,
     playing: Option<Playing>,
@@ -43,11 +43,11 @@ impl Emotes {
 
 /// The emotes among a folder's item files, by id.
 fn read_folder(dir: &std::path::Path) -> Vec<Arc<Item>> {
-    let mut emotes: Vec<Arc<Item>> = horizon_platform::fs::read_dir(dir)
+    let mut emotes: Vec<Arc<Item>> = horizon_std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| Item::parse(&horizon_platform::fs::read(e.path()).ok()?).ok())
+        .filter_map(|e| Item::parse(&horizon_std::fs::read(e.path()).ok()?).ok())
         .filter(|i| i.slot == Slot::Emote)
         .map(Arc::new)
         .collect();
@@ -61,7 +61,7 @@ impl Game<'_> {
     pub(super) fn owned_emotes(&mut self) -> &[Arc<Item>] {
         if !self.emotes.local_read {
             self.emotes.local_read = true;
-            if let Some(dir) = horizon_platform::env::var_os("HORIZON_COSMETICS_LOCAL") {
+            if let Some(dir) = horizon_std::env::var_os("HORIZON_COSMETICS_LOCAL") {
                 self.emotes.owned = read_folder(std::path::Path::new(&dir));
             }
         }
@@ -200,7 +200,7 @@ impl Game<'_> {
         {
             self.emotes.loading = None;
             if let Ok(owned) = done {
-                self.emotes.loaded = Some(horizon_platform::time::Instant::now());
+                self.emotes.loaded = Some(horizon_std::time::Instant::now());
                 self.emotes.names.clear();
                 self.emotes.owned.clear();
                 for (item, names) in owned {

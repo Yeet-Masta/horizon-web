@@ -78,7 +78,7 @@ impl Game<'_> {
 
     /// An agent's command arrived.
     pub(super) fn agent_command_seen(&mut self) {
-        self.agent_last = Some(horizon_platform::time::Instant::now());
+        self.agent_last = Some(horizon_std::time::Instant::now());
     }
 
     /// The AI Agent page's lines: the state, then where agents connect.
@@ -111,7 +111,7 @@ impl Game<'_> {
     /// and an MCP client's config for this game.
     pub(super) fn agent_details(&self) -> String {
         let socket = self.agent_socket_path();
-        let ctl = horizon_platform::env::current_exe()
+        let ctl = horizon_std::env::current_exe()
             .unwrap_or_default()
             .with_file_name(if cfg!(windows) {
                 "horizon-ctl.exe"

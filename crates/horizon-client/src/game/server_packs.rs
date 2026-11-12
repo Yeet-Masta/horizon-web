@@ -16,8 +16,8 @@ use horizon_client::{
     ui,
 };
 use horizon_core::jmath;
-use horizon_platform::fs::PathExt as _;
 use horizon_protocol::{packets::configuration::ResourcePackPush, servers};
+use horizon_std::fs::PathExt as _;
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, TryRecvError},
@@ -206,7 +206,7 @@ fn human_readable(bytes: u64) -> String {
 }
 
 pub(super) fn saves() -> PathBuf {
-    horizon_platform::env::current_dir()
+    horizon_std::env::current_dir()
         .unwrap_or_default()
         .join("saves")
 }
@@ -418,7 +418,7 @@ impl Game<'_> {
     fn start_pack_downloads(&mut self, requests: Vec<horizon_client::server_packs::Request>) {
         let state = &mut self.server_packs;
         if state.queue.is_none() {
-            let dir = horizon_platform::env::current_dir()
+            let dir = horizon_std::env::current_dir()
                 .unwrap_or_default()
                 .join("downloads");
             match download::Queue::open(dir) {

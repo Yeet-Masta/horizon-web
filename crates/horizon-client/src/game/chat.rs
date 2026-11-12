@@ -12,8 +12,8 @@ use horizon_client::{
     screen_draw::Measure,
     text::{ClickEvent, Style, Text},
 };
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use std::{
     collections::BTreeMap,
@@ -147,7 +147,7 @@ pub struct UiState {
     /// `ChatScreen.isDraft`: the box opened with the draft and is unchanged since.
     pub chat_draft_shown: bool,
     /// When the chat screen opened (its input took the focus: the cursor blink).
-    pub chat_opened: Option<horizon_platform::time::Instant>,
+    pub chat_opened: Option<horizon_std::time::Instant>,
     /// The chat screen is `InBedChatScreen`: the sleeper's, with a Leave Bed button.
     pub in_bed_chat: bool,
     pub registries: Registries,
@@ -173,10 +173,10 @@ pub struct UiState {
     pub vanilla_root: std::path::PathBuf,
     /// Death screen cause and when the player died (buttons wait 20 ticks).
     pub death_text: Option<Text>,
-    pub died_at: Option<horizon_platform::time::Instant>,
+    pub died_at: Option<horizon_std::time::Instant>,
     /// `DeathScreen.TitleConfirmScreen` and when it opened (its buttons wait
     /// 20 ticks, `setDelay`).
-    pub death_confirm: Option<horizon_platform::time::Instant>,
+    pub death_confirm: Option<horizon_std::time::Instant>,
     /// `LivingEntity.deathTime` of the window's player: ticks since it died.
     pub death_time: u32,
 }
@@ -186,7 +186,7 @@ impl UiState {
     /// in the game folder (`ChatComponent`'s constructor).
     pub fn new() -> Self {
         let mut ui = Self::default();
-        if let Ok(dir) = horizon_platform::env::current_dir() {
+        if let Ok(dir) = horizon_std::env::current_dir() {
             ui.chat.load_history(&dir);
         }
         ui
@@ -214,7 +214,7 @@ static RESOURCE_IDS: Mutex<Vec<(PathBuf, Arc<ResourceIds>)>> = Mutex::new(Vec::n
 
 /// The `minecraft:` ids of the `.json` files directly in `dir`, sorted.
 fn json_ids_in(dir: &Path) -> Vec<String> {
-    let mut out: Vec<String> = horizon_platform::fs::read_dir(dir)
+    let mut out: Vec<String> = horizon_std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -237,7 +237,7 @@ fn overworld_timelines(root: &Path) -> (Vec<(String, Option<i64>)>, Vec<(String,
     for name in json_ids_in(&dir) {
         let path = dir.join(format!("{}.json", name.trim_start_matches("minecraft:")));
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(
-            &horizon_platform::fs::read(path).unwrap_or_default(),
+            &horizon_std::fs::read(path).unwrap_or_default(),
         ) else {
             continue;
         };
@@ -274,7 +274,7 @@ fn resource_ids(root: &Path) -> Arc<ResourceIds> {
     }
     let data = root.join("data/minecraft");
     let mut entity_types: Vec<String> = serde_json::from_slice::<serde_json::Value>(
-        &horizon_platform::fs::read(root.join("entity-types.json")).unwrap_or_default(),
+        &horizon_std::fs::read(root.join("entity-types.json")).unwrap_or_default(),
     )
     .ok()
     .and_then(|v| {
@@ -352,7 +352,7 @@ fn command_export(dir: &Path, keep: bool) -> Option<Arc<Registries>> {
     if let Some((_, export)) = cache.iter().find(|(cached, _)| cached == dir) {
         return export.clone();
     }
-    let export = horizon_platform::fs::read(dir.join("command-registries.json"))
+    let export = horizon_std::fs::read(dir.join("command-registries.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .map(|export| Arc::new(Registries::from_export(&export)));
@@ -371,7 +371,7 @@ fn ids_under(root: &Path, extension: &str) -> Vec<String> {
 /// namespace of `root` (vanilla's and the content mods'), sorted.
 fn json_ids_of_every_namespace(root: &Path, kind: &str) -> Vec<String> {
     let data = root.join("data");
-    let mut namespaces: std::collections::BTreeSet<String> = horizon_platform::fs::read_dir(&data)
+    let mut namespaces: std::collections::BTreeSet<String> = horizon_std::fs::read_dir(&data)
         .into_iter()
         .flatten()
         .flatten()
@@ -397,7 +397,7 @@ fn json_ids_of_every_namespace(root: &Path, kind: &str) -> Vec<String> {
 /// The templates of every namespace folder under `root` (vanilla's and the
 /// content mods'), as `namespace:path`, sorted.
 fn templates_under(root: &Path) -> Vec<String> {
-    let Ok(namespaces) = horizon_platform::fs::read_dir(root) else {
+    let Ok(namespaces) = horizon_std::fs::read_dir(root) else {
         return Vec::new();
     };
     let mut out: Vec<String> = namespaces
@@ -426,7 +426,7 @@ fn ids_in(root: &Path, extension: &str, namespace: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_owned()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = horizon_platform::fs::read_dir(&dir) else {
+        let Ok(entries) = horizon_std::fs::read_dir(&dir) else {
             continue;
         };
         for e in entries.flatten() {
@@ -509,7 +509,7 @@ impl Game<'_> {
         }
         let dirs = [self.options.resources.clone(), self.ui.vanilla_root.clone()];
         let registry = self.pack.assets.registry;
-        let spawned = horizon_platform::thread::Builder::new()
+        let spawned = horizon_std::thread::Builder::new()
             .name("Registries preload".into())
             .spawn(move || {
                 horizon_threads::behind_server();
@@ -732,7 +732,7 @@ impl Game<'_> {
         );
         screen.auto_suggestions = self.settings.auto_suggestions;
         self.ui.chat_screen = Some(screen);
-        self.ui.chat_opened = Some(horizon_platform::time::Instant::now());
+        self.ui.chat_opened = Some(horizon_std::time::Instant::now());
         self.screen = Screen::Chat;
         self.keys.clear();
         self.left = false;
@@ -1531,7 +1531,7 @@ impl Game<'_> {
         // PrimaryLevelData: the difficulty comes back from level.dat's difficulty_settings.
         self.ui.difficulty = self.level.difficulty_id();
         if let Ok(bytes) =
-            horizon_platform::fs::read(self.world_root.join("data/minecraft/world_clocks.dat"))
+            horizon_std::fs::read(self.world_root.join("data/minecraft/world_clocks.dat"))
             && let Ok(raw) = horizon_world::compression::Compression::Gzip.decode(&bytes, 1 << 20)
             && let Ok((root, _)) =
                 horizon_world::nbt::read_named(&raw, horizon_world::nbt::Limits::default())
@@ -1613,7 +1613,7 @@ impl Game<'_> {
     /// F2: ScreenShot.grab into `screenshots/` with vanilla's file name.
     pub(super) fn take_screenshot(&mut self) {
         let dir = horizon_client::logging::player_dir().join("screenshots");
-        if horizon_platform::fs::create_dir_all(&dir).is_err() {
+        if horizon_std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let name = screenshot_name(&dir);
@@ -1661,8 +1661,8 @@ impl Game<'_> {
                 // A browser's game folder is out of the player's reach: the
                 // picture is downloaded too (its link downloads it again).
                 #[cfg(target_family = "wasm")]
-                if let Ok(bytes) = horizon_platform::fs::read(&path) {
-                    horizon_platform::web::save_file(&name, &bytes);
+                if let Ok(bytes) = horizon_std::fs::read(&path) {
+                    horizon_std::web::save_file(&name, &bytes);
                 }
                 let link = Text::styled(
                     name,
@@ -1694,8 +1694,8 @@ pub fn screenshot_name(dir: &std::path::Path) -> String {
     let now = chrono::Local::now();
     // std's clock, which chrono reads, panics in a browser: the page's, in UTC.
     #[cfg(target_family = "wasm")]
-    let now = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let now = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .ok()
         .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, d.subsec_nanos()))
         .unwrap_or_default();
@@ -1740,65 +1740,63 @@ mod tests {
 
     #[test]
     fn resource_ids_are_listed_once_per_root() {
-        let root =
-            horizon_platform::env::temp_dir().join(format!("horizon-ids-{}", std::process::id()));
+        let root = horizon_std::env::temp_dir().join(format!("horizon-ids-{}", std::process::id()));
         let recipe = root.join("data/minecraft/recipe");
-        horizon_platform::fs::create_dir_all(recipe.join("sub")).unwrap();
-        horizon_platform::fs::write(recipe.join("b.json"), "{}").unwrap();
-        horizon_platform::fs::write(recipe.join("sub/a.json"), "{}").unwrap();
-        horizon_platform::fs::write(recipe.join("notes.txt"), "").unwrap();
+        horizon_std::fs::create_dir_all(recipe.join("sub")).unwrap();
+        horizon_std::fs::write(recipe.join("b.json"), "{}").unwrap();
+        horizon_std::fs::write(recipe.join("sub/a.json"), "{}").unwrap();
+        horizon_std::fs::write(recipe.join("notes.txt"), "").unwrap();
         let first = resource_ids(&root);
         assert_eq!(first.recipes, ["minecraft:b", "minecraft:sub/a"]);
         assert!(first.loot_tables.is_empty());
-        horizon_platform::fs::write(recipe.join("c.json"), "{}").unwrap();
+        horizon_std::fs::write(recipe.join("c.json"), "{}").unwrap();
         assert!(Arc::ptr_eq(&first, &resource_ids(&root)));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// A content mod's loot tables are listed with vanilla's, so `/loot`
     /// finds them.
     #[test]
     fn loot_tables_of_every_namespace_are_listed() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-ids-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-ids-{}", std::process::id()));
         for dir in [
             "data/minecraft/loot_table/chests",
             "data/mymod/loot_table/rooms",
         ] {
-            horizon_platform::fs::create_dir_all(root.join(dir)).unwrap();
+            horizon_std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        horizon_platform::fs::write(root.join("data/minecraft/loot_table/chests/a.json"), "{}")
-            .unwrap();
-        horizon_platform::fs::write(root.join("data/mymod/loot_table/rooms/b.json"), "{}").unwrap();
-        horizon_platform::fs::write(root.join("data/mymod/loot_table/notes.txt"), "").unwrap();
+        horizon_std::fs::write(root.join("data/minecraft/loot_table/chests/a.json"), "{}").unwrap();
+        horizon_std::fs::write(root.join("data/mymod/loot_table/rooms/b.json"), "{}").unwrap();
+        horizon_std::fs::write(root.join("data/mymod/loot_table/notes.txt"), "").unwrap();
         assert_eq!(
             resource_ids(&root).loot_tables,
             ["minecraft:chests/a", "mymod:rooms/b"]
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// Only the overworld clock's timelines count; a marker is a bare tick
     /// count (hidden from commands) or an object that may show itself.
     #[test]
     fn overworld_timelines_and_markers() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-timelines-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-timelines-{}", std::process::id()));
         let dir = root.join("data/minecraft/timeline");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(
             dir.join("day.json"),
             r#"{"clock":"minecraft:overworld","period_ticks":24000,
                 "time_markers":{"minecraft:noon":6000,
                 "minecraft:night":{"ticks":13000,"show_in_commands":true}}}"#,
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             dir.join("other.json"),
             r#"{"clock":"minecraft:the_end","time_markers":{"minecraft:x":1}}"#,
         )
         .unwrap();
-        horizon_platform::fs::write(dir.join("broken.json"), "{").unwrap();
+        horizon_std::fs::write(dir.join("broken.json"), "{").unwrap();
         let (timelines, markers) = overworld_timelines(&root);
         assert_eq!(timelines, [("minecraft:day".to_owned(), Some(24000))]);
         let mut markers: Vec<_> = markers
@@ -1813,26 +1811,26 @@ mod tests {
                 ("minecraft:noon", 6000, Some(24000), false),
             ]
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// The export is read once per folder; a folder without one stays without.
     #[test]
     fn command_exports_are_read_once_per_folder() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-export-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join("command-registries.json"), r#"{"effects":["a"]}"#)
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-export-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join("command-registries.json"), r#"{"effects":["a"]}"#)
             .unwrap();
         let first = command_export(&dir, true).unwrap();
         assert_eq!(first.effects, ["a"]);
-        horizon_platform::fs::write(dir.join("command-registries.json"), "{}").unwrap();
+        horizon_std::fs::write(dir.join("command-registries.json"), "{}").unwrap();
         assert!(Arc::ptr_eq(&first, &command_export(&dir, true).unwrap()));
         assert!(command_export(&dir.join("missing"), true).is_none());
         // A dedicated server's read is not kept.
         let other = dir.join("other");
-        horizon_platform::fs::create_dir_all(&other).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&other).unwrap();
+        horizon_std::fs::write(
             other.join("command-registries.json"),
             r#"{"effects":["b"]}"#,
         )
@@ -1840,7 +1838,7 @@ mod tests {
         let once = command_export(&other, false).unwrap();
         assert_eq!(once.effects, ["b"]);
         assert!(!Arc::ptr_eq(&once, &command_export(&other, false).unwrap()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     /// A native mod's command is in the tree the chat box uses (#456): known

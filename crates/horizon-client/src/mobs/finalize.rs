@@ -25,7 +25,7 @@ use horizon_core::{
     geometry::Aabb,
     random::{LegacyRandom, RandomSource},
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
 
@@ -2277,7 +2277,7 @@ pub fn sound_variants(s: Species) -> &'static [&'static str] {
 /// footsteps that every variant shares (not the cow's). None for a species
 /// without sound variants.
 pub fn variant_sound(m: &Mob, kind: &str) -> Option<&'static str> {
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
     use std::collections::HashMap;
     let species = m.species();
     let name = match species {

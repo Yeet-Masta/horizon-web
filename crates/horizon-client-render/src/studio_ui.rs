@@ -11,7 +11,7 @@ use crate::{
     text::Text,
     ui,
 };
-use horizon_platform::fs::{self, File};
+use horizon_std::fs::{self, File};
 use serde::{Deserialize, Serialize};
 use std::{
     io::Read,
@@ -189,7 +189,7 @@ impl StudioUi {
                     let modified = meta
                         .modified()
                         .ok()
-                        .and_then(|t| t.duration_since(horizon_platform::time::UNIX_EPOCH).ok())
+                        .and_then(|t| t.duration_since(horizon_std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     (
@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn scan_and_select_recordings() {
         let temp_dir =
-            horizon_platform::env::temp_dir().join(format!("studio_test_{}", std::process::id()));
+            horizon_std::env::temp_dir().join(format!("studio_test_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
 
         let rec_path = temp_dir.join("sample.mcpr");

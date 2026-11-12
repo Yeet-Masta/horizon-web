@@ -1,6 +1,6 @@
 //! `net.minecraft.util.worldupdate.UpgradeProgress`: what a world upgrade has
 //! done so far, read by `FileFixerProgressScreen` while another thread works.
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 

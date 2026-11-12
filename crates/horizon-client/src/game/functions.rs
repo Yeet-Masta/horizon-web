@@ -209,7 +209,7 @@ impl Game<'_> {
             .filter(|id| !self.fns.enabled.contains(id))
             .collect();
         let json = serde_json::json!({"enabled": self.fns.enabled, "disabled": disabled});
-        let _ = horizon_platform::fs::write(self.datapack_settings_path(), json.to_string());
+        let _ = horizon_std::fs::write(self.datapack_settings_path(), json.to_string());
     }
     pub(super) fn sync_function_registries(&mut self) {
         let reg = &mut self.ui.registries;
@@ -812,11 +812,11 @@ impl Game<'_> {
                 "max_format": pack_format,
             }
         });
-        let written = horizon_platform::fs::create_dir_all(&datapacks)
-            .and_then(|()| horizon_platform::fs::create_dir(&pack))
-            .and_then(|()| horizon_platform::fs::create_dir(pack.join("data")))
+        let written = horizon_std::fs::create_dir_all(&datapacks)
+            .and_then(|()| horizon_std::fs::create_dir(&pack))
+            .and_then(|()| horizon_std::fs::create_dir(pack.join("data")))
             .and_then(|()| {
-                horizon_platform::fs::write(
+                horizon_std::fs::write(
                     pack.join("pack.mcmeta"),
                     serde_json::to_string_pretty(&mcmeta).unwrap_or_default(),
                 )
@@ -1021,20 +1021,20 @@ mod tests {
     #[test]
     fn content_overlay_follows_enabled_order() {
         for order in [["file/a", "file/b"], ["file/b", "file/a"]] {
-            let dir = horizon_platform::env::temp_dir().join(format!(
+            let dir = horizon_std::env::temp_dir().join(format!(
                 "horizon-overlay-{}-{}",
                 std::process::id(),
                 order[0].replace('/', "_")
             ));
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
+            let _ = horizon_std::fs::remove_dir_all(&dir);
             for name in ["a", "b"] {
                 let pack = dir.join("datapacks").join(name);
-                horizon_platform::fs::create_dir_all(pack.join("data/x/recipe")).unwrap();
-                horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
-                horizon_platform::fs::write(pack.join("data/x/recipe/r.json"), name).unwrap();
+                horizon_std::fs::create_dir_all(pack.join("data/x/recipe")).unwrap();
+                horizon_std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+                horizon_std::fs::write(pack.join("data/x/recipe/r.json"), name).unwrap();
             }
             let json = serde_json::json!({"enabled": order, "disabled": []});
-            horizon_platform::fs::write(dir.join("datapacks.json"), json.to_string()).unwrap();
+            horizon_std::fs::write(dir.join("datapacks.json"), json.to_string()).unwrap();
             let files = content_overlay(&dir, std::path::Path::new(""), true, &[]);
             let (_, versions) = files.iter().find(|(id, _)| id == "recipe/x:r").unwrap();
             let last = versions.last().unwrap();
@@ -1042,7 +1042,7 @@ mod tests {
                 last.as_slice(),
                 order[1].trim_start_matches("file/").as_bytes()
             );
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
+            let _ = horizon_std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -1053,19 +1053,19 @@ mod tests {
     /// counts.
     #[test]
     fn contributed_files_join_the_load_below_the_worlds_packs() {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-contributed-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks").join("pack");
-        horizon_platform::fs::create_dir_all(pack.join("data/pkg/tags/item")).unwrap();
-        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(pack.join("data/pkg/tags/item")).unwrap();
+        horizon_std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_std::fs::write(
             pack.join("data/pkg/tags/item/both.json"),
             r#"{"replace": true, "values": ["pkg:from_pack"]}"#,
         )
         .unwrap();
         let settings = serde_json::json!({"enabled": ["file/pack"], "disabled": []});
-        horizon_platform::fs::write(dir.join("datapacks.json"), settings.to_string()).unwrap();
+        horizon_std::fs::write(dir.join("datapacks.json"), settings.to_string()).unwrap();
         let tag = |entry: &str| format!(r#"{{"values": ["{entry}"]}}"#).into_bytes();
         let files = overlay_files(
             &dir,
@@ -1127,6 +1127,6 @@ mod tests {
             overlay_files(&dir, std::path::Path::new(""), true, &[], Vec::new()),
             content_overlay(&dir, std::path::Path::new(""), true, &[])
         );
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

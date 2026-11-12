@@ -3,8 +3,8 @@
 //! online-mode servers need: authlib's MinecraftServicesSessionService.joinServer
 //! through the services discovery document. The access token stays in this
 //! process's memory: it is never logged, printed or written anywhere.
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, SystemTime};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, SystemTime};
 use std::{
     path::Path,
     sync::{Arc, OnceLock},
@@ -83,9 +83,9 @@ impl AuthSession {
     /// must be fresh and, on Unix, readable by its owner only.
     pub fn load(path: &Path) -> Result<Self, String> {
         let meta =
-            horizon_platform::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            horizon_std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let refuse = |why: &str| {
-            let _ = horizon_platform::fs::remove_file(path);
+            let _ = horizon_std::fs::remove_file(path);
             Err(format!("{}: {why}", path.display()))
         };
         #[cfg(unix)]
@@ -103,8 +103,8 @@ impl AuthSession {
         if age > MAX_SESSION_FILE_AGE {
             return refuse("it is too old (start the game from the launcher)");
         }
-        let text = horizon_platform::fs::read_to_string(path);
-        let _ = horizon_platform::fs::remove_file(path);
+        let text = horizon_std::fs::read_to_string(path);
+        let _ = horizon_std::fs::remove_file(path);
         Self::parse(&text.map_err(|e| format!("{}: {e}", path.display()))?)
     }
     /// The access token's expiry (its JWT `exp`) has passed, or is a minute away: the session
@@ -187,7 +187,7 @@ impl JoinError {
 /// The services discovery document URL: `HORIZON_API_DISCOVERY` overrides
 /// it like authlib's `-Dminecraft.api.discovery.host`.
 pub fn discovery_url() -> String {
-    horizon_platform::env::var("HORIZON_API_DISCOVERY")
+    horizon_std::env::var("HORIZON_API_DISCOVERY")
         .ok()
         .filter(|u| !u.is_empty())
         .unwrap_or_else(|| DEFAULT_DISCOVERY.to_owned())
@@ -204,8 +204,8 @@ fn agent() -> ureq::Agent {
 /// The discovery document, fetched once per game (a failure is retried next time).
 #[cfg(not(target_family = "wasm"))]
 pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
-    static CACHE: horizon_platform::sync::Mutex<Option<Arc<serde_json::Value>>> =
-        horizon_platform::sync::Mutex::new(None);
+    static CACHE: horizon_std::sync::Mutex<Option<Arc<serde_json::Value>>> =
+        horizon_std::sync::Mutex::new(None);
     if let Some(d) = CACHE.lock().unwrap().clone() {
         return Ok(d);
     }
@@ -290,7 +290,7 @@ fn with_one_retry(
 ) -> Result<(), JoinError> {
     match join() {
         Err(JoinError::Unavailable) => {
-            horizon_platform::thread::sleep(pause);
+            horizon_std::thread::sleep(pause);
             join()
         }
         result => result,
@@ -464,7 +464,7 @@ const KEY_RETRY: Duration = Duration::from_secs(60 * 60);
 struct ChatKeys {
     current: Option<Arc<ChatKeyPair>>,
     fetching: bool,
-    next_try: Option<horizon_platform::time::Instant>,
+    next_try: Option<horizon_std::time::Instant>,
 }
 static CHAT_KEYS: std::sync::LazyLock<Mutex<std::collections::HashMap<u128, ChatKeys>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
@@ -474,7 +474,7 @@ static CHAT_KEYS: std::sync::LazyLock<Mutex<std::collections::HashMap<u128, Chat
 /// due a refresh. Nothing without a signed-in account.
 pub fn prepare_chat_keys(now: bool) {
     // The web build signs no chat (web/README.md): it fetches no key pair.
-    if horizon_platform::WEB {
+    if horizon_std::WEB {
         return;
     }
     let Some(session) = current() else {
@@ -488,7 +488,7 @@ pub fn prepare_chat_keys_for(session: Arc<AuthSession>, now: bool) {
     let uuid = session.uuid;
     let mut accounts = CHAT_KEYS.lock().unwrap();
     let keys = accounts.entry(uuid).or_default();
-    let instant = horizon_platform::time::Instant::now();
+    let instant = horizon_std::time::Instant::now();
     if keys.fetching || !now && keys.next_try.is_some_and(|t| instant < t) {
         return;
     }
@@ -502,7 +502,7 @@ pub fn prepare_chat_keys_for(session: Arc<AuthSession>, now: bool) {
     }
     keys.fetching = true;
     drop(accounts);
-    let spawned = horizon_platform::thread::Builder::new()
+    let spawned = horizon_std::thread::Builder::new()
         .name("Profile key fetch".into())
         .spawn(move || {
             let result = fetch_chat_keys(&session);
@@ -617,7 +617,7 @@ pub fn has_joined(
 }
 
 /// The web build reaches the services only through the relay, with TLS in
-/// the module (horizon-platform's `web::https`), which can't block:
+/// the module (horizon-std's `web::https`), which can't block:
 /// [`join_server_web`] instead.
 #[cfg(target_family = "wasm")]
 pub(crate) fn discovery() -> Result<Arc<serde_json::Value>, JoinError> {
@@ -648,9 +648,9 @@ pub async fn join_server_web(
     session: &AuthSession,
     server_hash: &str,
 ) -> Result<(), JoinError> {
-    use horizon_platform::web::https;
-    static CACHE: horizon_platform::sync::Mutex<Option<Arc<serde_json::Value>>> =
-        horizon_platform::sync::Mutex::new(None);
+    use horizon_std::web::https;
+    static CACHE: horizon_std::sync::Mutex<Option<Arc<serde_json::Value>>> =
+        horizon_std::sync::Mutex::new(None);
     let agent = format!("Horizon/{} (web)", horizon_core::release::VERSION);
     let timeout = Duration::from_secs(15);
     let cached = CACHE.lock().unwrap().clone();
@@ -798,15 +798,12 @@ mod tests {
 
     fn write(dir: &Path, text: &str, mode: u32) -> std::path::PathBuf {
         let path = dir.join("session.json");
-        horizon_platform::fs::write(&path, text).unwrap();
+        horizon_std::fs::write(&path, text).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            horizon_platform::fs::set_permissions(
-                &path,
-                horizon_platform::fs::Permissions::from_mode(mode),
-            )
-            .unwrap();
+            horizon_std::fs::set_permissions(&path, horizon_std::fs::Permissions::from_mode(mode))
+                .unwrap();
         }
         let _ = mode;
         path
@@ -828,9 +825,9 @@ mod tests {
 
     #[test]
     fn session_files_are_read_once_and_must_be_private() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-auth-test-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-auth-test-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let text = r#"{"name":"Notch","uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","access_token":"mock-token","user_type":"msa"}"#;
         let path = write(&dir, text, 0o600);
         let s = AuthSession::load(&path).unwrap();
@@ -847,7 +844,7 @@ mod tests {
             );
             assert!(!path.exists());
         }
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]

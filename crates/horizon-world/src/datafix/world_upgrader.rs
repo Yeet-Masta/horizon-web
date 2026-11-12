@@ -14,8 +14,8 @@ use crate::compression::Compression;
 use crate::nbt::{Limits, Tag};
 use crate::region::{ChunkRecord, RegionFile};
 use horizon_core::position::ChunkPos;
-use horizon_platform::fs;
-use horizon_platform::thread::JoinHandle;
+use horizon_std::fs;
+use horizon_std::thread::JoinHandle;
 use std::collections::{BTreeMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -310,8 +310,8 @@ impl RegionStorageUpgrader {
         self.upgrade_tag(&mut root.tag, CURRENT);
         changed |= version < CURRENT;
         if changed || self.builder.recreate_region_files {
-            let timestamp = horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            let timestamp = horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as u32);
             let out = ChunkRecord::from_nbt(&root, Compression::Zlib, timestamp, limits)?;
             let target = if self.builder.recreate_region_files {
@@ -444,7 +444,7 @@ impl WorldUpgrader {
         let worker_progress = progress.clone();
         let worker_levels = levels.clone();
         let base = base.to_path_buf();
-        let thread = horizon_platform::thread::Builder::new()
+        let thread = horizon_std::thread::Builder::new()
             .name("World Upgrader #0".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -520,7 +520,7 @@ fn work(
     erase_cache: bool,
     recreate: bool,
 ) {
-    let started = horizon_platform::time::Instant::now();
+    let started = horizon_std::time::Instant::now();
     upgrade_levels(
         base,
         levels,

@@ -19,7 +19,7 @@ use std::{
 /// as its constructor does with `mkdirs`.
 pub fn directory(world: &Path) -> PathBuf {
     let dir = directory_path(world);
-    if let Err(e) = horizon_platform::fs::create_dir_all(&dir) {
+    if let Err(e) = horizon_std::fs::create_dir_all(&dir) {
         log::warn!("Horizon: {} is not created: {e}", dir.display());
     }
     dir
@@ -265,7 +265,7 @@ fn write_snapshot(snapshot: Snapshot) -> Result<SavedPlayer, String> {
 struct PlayerWriter {
     send: std::sync::mpsc::Sender<Snapshot>,
     done: std::sync::mpsc::Receiver<Result<SavedPlayer, String>>,
-    thread: horizon_platform::thread::ThreadHandle<()>,
+    thread: horizon_std::thread::ThreadHandle<()>,
 }
 
 /// One FIFO writer for a server's player autosaves. Synchronous logout writes
@@ -289,7 +289,7 @@ impl Autosaves {
         if self.writer.is_none() {
             let (send, receive) = std::sync::mpsc::channel::<Snapshot>();
             let (complete, done) = std::sync::mpsc::channel();
-            match horizon_platform::thread::spawn_thread("horizon-player-writer", move || {
+            match horizon_std::thread::spawn_thread("horizon-player-writer", move || {
                 for snapshot in receive {
                     let _ = complete.send(write_snapshot(snapshot));
                 }
@@ -584,9 +584,9 @@ mod tests {
     }
 
     fn world(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-owner-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         dir
     }
 
@@ -625,14 +625,14 @@ mod tests {
         drop(saves);
         assert!(load(&mut loaded, &dir));
         assert_eq!(first_item(&loaded), Some(("minecraft:iron_ingot", 11)));
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn autosave_failures_recover_and_drop_drains_writes() {
         let dir = world("async-error");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join("players"), b"not a directory").unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join("players"), b"not a directory").unwrap();
         let mut saves = Autosaves::default();
         saves.enqueue(&holding(1, "minecraft:diamond", 5), &dir);
         assert!(saves.completed(true).is_empty());
@@ -640,7 +640,7 @@ mod tests {
         assert!(saves.completed(false).is_empty());
         assert!(saves.writes_finished().unwrap());
         drop(saves);
-        horizon_platform::fs::remove_file(dir.join("players")).unwrap();
+        horizon_std::fs::remove_file(dir.join("players")).unwrap();
         let mut saves = Autosaves::default();
         saves.enqueue(&holding(1, "minecraft:diamond", 5), &dir);
         for uuid in 2..=150 {
@@ -657,7 +657,7 @@ mod tests {
         loaded.uuid = 1;
         assert!(load(&mut loaded, &dir));
         assert_eq!(first_item(&loaded), Some(("minecraft:diamond", 5)));
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -665,8 +665,8 @@ mod tests {
         let bad = world("mixed-bad");
         let good = world("mixed-good");
         let reference = world("mixed-reference");
-        horizon_platform::fs::create_dir_all(&bad).unwrap();
-        horizon_platform::fs::write(bad.join("players"), b"not a directory").unwrap();
+        horizon_std::fs::create_dir_all(&bad).unwrap();
+        horizon_std::fs::write(bad.join("players"), b"not a directory").unwrap();
         let mut saves = Autosaves::default();
         let g = holding(2, "minecraft:emerald", 9);
         saves.enqueue(&holding(1, "minecraft:diamond", 5), &bad);
@@ -681,12 +681,12 @@ mod tests {
             read_dat(&path(&good, 2)).unwrap(),
             read_dat(&path(&reference, 2)).unwrap()
         );
-        horizon_platform::fs::remove_file(bad.join("players")).unwrap();
+        horizon_std::fs::remove_file(bad.join("players")).unwrap();
         saves.enqueue(&g, &bad);
         assert_eq!(saves.completed(true).len(), 1);
         assert!(saves.writes_finished().unwrap());
         for dir in [bad, good, reference] {
-            horizon_platform::fs::remove_dir_all(dir).unwrap();
+            horizon_std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -701,7 +701,7 @@ mod tests {
         saves.writer = Some(PlayerWriter {
             send,
             done,
-            thread: horizon_platform::thread::spawn(|| {}),
+            thread: horizon_std::thread::spawn(|| {}),
         });
         saves.pending = 1;
         saves.enqueue(&holding(1, "minecraft:diamond", 5), &dir);
@@ -711,7 +711,7 @@ mod tests {
         assert!(saves.writer.is_some());
         assert_eq!(saves.completed(true).len(), 1);
         assert!(saves.writes_finished().unwrap());
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn first_item(g: &Guest) -> Option<(&str, u32)> {
@@ -739,7 +739,7 @@ mod tests {
         g.uuid = owner;
         assert!(load_owner(&mut g, &dir, Some(&saved)));
         assert_eq!(first_item(&g), Some(("minecraft:gold_ingot", 7)));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
         g.uuid = owner;
         assert!(load_owner(&mut g, &dir, Some(&saved)));
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -783,7 +783,7 @@ mod tests {
         assert!(load(&mut loaded, &dir));
         loaded.attachments = loaded.attachments.copy_on_death().unwrap();
         assert_eq!(loaded.attachments.get(&keep), Ok(31));
-        let _ = horizon_platform::fs::remove_dir_all(dir);
+        let _ = horizon_std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -801,7 +801,7 @@ mod tests {
         }
         let named = path(&dir, ints_uuid(level.player_uuid.unwrap()));
         for file in [&named, &path(&dir, owner)] {
-            horizon_platform::fs::remove_file(file).unwrap();
+            horizon_std::fs::remove_file(file).unwrap();
             assert!(file.with_extension("dat_old").is_file());
         }
         let saved = Level::read(&dir).unwrap();
@@ -814,7 +814,7 @@ mod tests {
         g.uuid = owner;
         assert!(load(&mut g, &dir), "a guest's own file falls back too");
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -838,7 +838,7 @@ mod tests {
         g.uuid = owner;
         assert!(load(&mut g, &dir));
         assert_eq!(first_item(&g), Some(("minecraft:gold_ingot", 7)));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1004,7 +1004,7 @@ mod tests {
 
     /// The resources the prepared game data holds, for a body to breathe with.
     fn resources() -> Option<(crate::assets::Assets, crate::motion::MotionResources)> {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1203,7 +1203,7 @@ mod tests {
         )]));
         apply(&mut other, &level);
         assert_eq!(other.flying_speed, 0.05);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1216,7 +1216,7 @@ mod tests {
         save(&holding(friend, "minecraft:netherite_ingot", 9), &dir);
         let mut level = Level::default();
         level.write(&dir).unwrap();
-        let _ = horizon_platform::fs::remove_file(dir.join("level.dat_old"));
+        let _ = horizon_std::fs::remove_file(dir.join("level.dat_old"));
         let mut tag = read_dat(&dir.join("level.dat")).unwrap();
         if let Some(Tag::Compound(data)) = tag.get_mut("Data") {
             data.remove(&"singleplayer_uuid".into());
@@ -1229,14 +1229,11 @@ mod tests {
         assert!(!known, "the owner has not been here before");
         assert_eq!(first_item(&g), None, "no inventory of the friend's");
         // The owner's save names the owner, and leaves the friend's file alone.
-        let before = horizon_platform::fs::read(path(&dir, friend)).unwrap();
+        let before = horizon_std::fs::read(path(&dir, friend)).unwrap();
         let mut level = read;
         save_owner(&g, &mut level, &dir);
         assert_eq!(level.player_uuid, Some(uuid_ints(owner)));
-        assert_eq!(
-            horizon_platform::fs::read(path(&dir, friend)).unwrap(),
-            before
-        );
+        assert_eq!(horizon_std::fs::read(path(&dir, friend)).unwrap(), before);
         assert!(exists(&dir, owner));
     }
 }

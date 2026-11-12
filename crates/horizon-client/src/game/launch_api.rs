@@ -257,10 +257,10 @@ mod tests {
             .join("../..")
             .join("docs/api/launch-reference.md");
         let want = markdown();
-        if horizon_platform::env::var_os("HORIZON_WRITE_DOCS").is_some() {
-            horizon_platform::fs::write(&path, &want).unwrap();
+        if horizon_std::env::var_os("HORIZON_WRITE_DOCS").is_some() {
+            horizon_std::fs::write(&path, &want).unwrap();
         }
-        let have = horizon_platform::fs::read_to_string(&path)
+        let have = horizon_std::fs::read_to_string(&path)
             .unwrap_or_default()
             .replace("\r\n", "\n");
         assert!(

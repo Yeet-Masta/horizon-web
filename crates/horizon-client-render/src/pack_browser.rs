@@ -406,7 +406,7 @@ impl Browser {
 }
 
 fn spawn(name: &str, work: impl FnOnce() + Send + 'static) {
-    if let Err(e) = horizon_platform::thread::spawn_worker(name, work) {
+    if let Err(e) = horizon_std::thread::spawn_worker(name, work) {
         log::warn!("Horizon: {name} did not start: {e}");
     }
 }
@@ -430,7 +430,7 @@ fn download_pack(versions: &str, dir: &Path) -> Message {
         }
     }
     let name = safe_file_name(&name);
-    if let Err(e) = horizon_platform::fs::create_dir_all(dir) {
+    if let Err(e) = horizon_std::fs::create_dir_all(dir) {
         return Message::Failed(e.to_string());
     }
     let Some(path) = free_path(dir, &name) else {
@@ -439,8 +439,8 @@ fn download_pack(versions: &str, dir: &Path) -> Message {
     // Written beside the pack and renamed, so a pack list never sees a
     // half-written zip.
     let partial = path.with_extension("partial");
-    match horizon_platform::fs::write(&partial, &body)
-        .and_then(|()| horizon_platform::fs::rename(&partial, &path))
+    match horizon_std::fs::write(&partial, &body)
+        .and_then(|()| horizon_std::fs::rename(&partial, &path))
     {
         Ok(()) => Message::Downloaded(
             path.file_name()
@@ -448,7 +448,7 @@ fn download_pack(versions: &str, dir: &Path) -> Message {
                 .unwrap_or(name),
         ),
         Err(e) => {
-            let _ = horizon_platform::fs::remove_file(&partial);
+            let _ = horizon_std::fs::remove_file(&partial);
             Message::Failed(e.to_string())
         }
     }
@@ -471,12 +471,12 @@ fn https_only(url: &str) -> Result<(), String> {
     }
 }
 
-/// The web build's GET: horizon_platform's HTTP from this Web Worker (the browser's fetch:
+/// The web build's GET: horizon_std's HTTP from this Web Worker (the browser's fetch:
 /// the pack sites allow a page's requests; else the relay).
 #[cfg(target_family = "wasm")]
-fn web_get(url: &str) -> Result<horizon_platform::web::http::Response, String> {
-    let request = horizon_platform::web::http::Request::get(url).header("User-Agent", AGENT);
-    let response = horizon_platform::web::http::request(request)?;
+fn web_get(url: &str) -> Result<horizon_std::web::http::Response, String> {
+    let request = horizon_std::web::http::Request::get(url).header("User-Agent", AGENT);
+    let response = horizon_std::web::http::request(request)?;
     if !(200..300).contains(&response.status) {
         return Err(format!("{url}: HTTP {}", response.status));
     }
@@ -654,16 +654,16 @@ mod tests {
 
     #[test]
     fn a_download_never_replaces_a_pack_already_there() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-browser-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        let _ = horizon_platform::fs::remove_file(dir.join("p.zip"));
-        let _ = horizon_platform::fs::remove_file(dir.join("p (2).zip"));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-browser-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_std::fs::remove_file(dir.join("p.zip"));
+        let _ = horizon_std::fs::remove_file(dir.join("p (2).zip"));
         assert_eq!(free_path(&dir, "p.zip"), Some(dir.join("p.zip")));
-        horizon_platform::fs::write(dir.join("p.zip"), b"x").unwrap();
+        horizon_std::fs::write(dir.join("p.zip"), b"x").unwrap();
         assert_eq!(free_path(&dir, "p.zip"), Some(dir.join("p (2).zip")));
-        horizon_platform::fs::write(dir.join("p (2).zip"), b"x").unwrap();
+        horizon_std::fs::write(dir.join("p (2).zip"), b"x").unwrap();
         assert_eq!(free_path(&dir, "p.zip"), Some(dir.join("p (3).zip")));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

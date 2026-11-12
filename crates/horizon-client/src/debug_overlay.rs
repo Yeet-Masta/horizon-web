@@ -437,8 +437,8 @@ impl ProcessMemory {
         if !cfg!(target_os = "linux") {
             return None;
         }
-        let status = horizon_platform::fs::read_to_string("/proc/self/status").ok()?;
-        let meminfo = horizon_platform::fs::read_to_string("/proc/meminfo").ok()?;
+        let status = horizon_std::fs::read_to_string("/proc/self/status").ok()?;
+        let meminfo = horizon_std::fs::read_to_string("/proc/meminfo").ok()?;
         Self::parse(&status, &meminfo)
     }
     fn parse(status: &str, meminfo: &str) -> Option<Self> {
@@ -458,13 +458,13 @@ impl ProcessMemory {
 /// second; a drop in use (a GC in vanilla) keeps the last rate.
 #[derive(Debug, Default)]
 pub struct MemoryMeter {
-    last: Option<(horizon_platform::time::Instant, ProcessMemory)>,
+    last: Option<(horizon_std::time::Instant, ProcessMemory)>,
     rate: i64,
 }
 
 impl MemoryMeter {
     pub fn lines(&mut self) -> Option<[String; 3]> {
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let memory = match self.last {
             Some((at, memory)) if now.duration_since(at).as_millis() < 500 => memory,
             last => {

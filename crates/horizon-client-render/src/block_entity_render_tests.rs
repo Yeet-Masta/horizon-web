@@ -56,7 +56,7 @@ fn renderer_with_shapes(
     let vanilla = Arc::new(BlockEntityShapes::new(models, HashMap::new()));
     BlockEntityRenderer {
         vanilla: vanilla.clone(),
-        shapes: horizon_platform::sync::RwLock::new(vanilla),
+        shapes: horizon_std::sync::RwLock::new(vanilla),
         kinds,
         pot_patterns,
         ..Default::default()

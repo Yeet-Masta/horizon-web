@@ -738,14 +738,13 @@ mod tests {
     #[ignore = "run by tools/test_mob_air_parity.py"]
     fn mob_air_parity_fixture() {
         use std::io::Write;
-        let input = horizon_platform::fs::read_to_string(
-            horizon_platform::env::var("HORIZON_MOB_AIR_INPUT").unwrap(),
+        let input = horizon_std::fs::read_to_string(
+            horizon_std::env::var("HORIZON_MOB_AIR_INPUT").unwrap(),
         )
         .unwrap();
-        let mut output = horizon_platform::fs::File::create(
-            horizon_platform::env::var("HORIZON_MOB_AIR_OUTPUT").unwrap(),
-        )
-        .unwrap();
+        let mut output =
+            horizon_std::fs::File::create(horizon_std::env::var("HORIZON_MOB_AIR_OUTPUT").unwrap())
+                .unwrap();
         for line in input.lines() {
             let mut fields = line.split_whitespace();
             let kind = fields.next().unwrap();
@@ -899,12 +898,12 @@ mod tests {
     #[ignore = "run by tools/test_raider_celebration_parity.py"]
     fn raider_celebration_parity_fixture() {
         use std::io::Write;
-        let input = horizon_platform::fs::read_to_string(
-            horizon_platform::env::var("HORIZON_RAIDER_SYNC_INPUT").unwrap(),
+        let input = horizon_std::fs::read_to_string(
+            horizon_std::env::var("HORIZON_RAIDER_SYNC_INPUT").unwrap(),
         )
         .unwrap();
-        let mut output = horizon_platform::fs::File::create(
-            horizon_platform::env::var("HORIZON_RAIDER_SYNC_OUTPUT").unwrap(),
+        let mut output = horizon_std::fs::File::create(
+            horizon_std::env::var("HORIZON_RAIDER_SYNC_OUTPUT").unwrap(),
         )
         .unwrap();
         for line in input.lines() {
@@ -1056,11 +1055,11 @@ mod tests {
     #[test]
     fn a_happy_ghast_and_a_nautilus_take_their_babyhood() {
         use horizon_client::mobs::MobTypes;
-        use horizon_platform::fs;
+        use horizon_std::fs;
         use std::sync::Arc;
 
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-baby-flag-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-baby-flag-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("entity-types.json"),
@@ -1111,12 +1110,12 @@ mod tests {
     fn bat_flags_select_continuous_client_clocks_without_changing_motion() {
         use horizon_client::mobs::{MobTypes, anim, keyframes::Animation};
         use horizon_core::geometry::Vec3;
-        use horizon_platform::fs;
+        use horizon_std::fs;
         use serde_json::json;
         use std::{collections::HashMap, sync::Arc};
 
         // Original minimal resources keep this regression runnable without vanilla data.
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-bat-animation-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
         fs::write(root.join("entity-types.json"), r#"{"minecraft:bat": {}}"#).unwrap();
@@ -1459,11 +1458,11 @@ mod tests {
     fn a_synced_boost_starts_the_client_timer() {
         use horizon_client::mobs::MobTypes;
         use horizon_core::geometry::trig::Mth;
-        use horizon_platform::fs;
+        use horizon_std::fs;
         use std::sync::Arc;
 
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-boost-sync-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-boost-sync-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("entity-types.json"),

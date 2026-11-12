@@ -159,7 +159,7 @@ thread_local! {
 fn random_start() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     // The page's clock on the web build, where std's panics.
-    use horizon_platform::time::{SystemTime, UNIX_EPOCH};
+    use horizon_std::time::{SystemTime, UNIX_EPOCH};
     static THREADS: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

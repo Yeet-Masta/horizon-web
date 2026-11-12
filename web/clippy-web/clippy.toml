@@ -1,6 +1,6 @@
 # What the web build may not call (tools/web_hazards.py, web/README.md "Checks"): std's file system,
 # clocks, environment and threads either fail or panic in a browser, and a page's thread may not
-# block. Each has a horizon_platform counterpart (fs, time, env, thread, sync). Calls that run only
+# block. Each has a horizon_std counterpart (fs, time, env, thread, sync). Calls that run only
 # natively are listed in web/hazards.json; a new one fails the check.
 disallowed-methods = [
   "std::path::Path::exists",

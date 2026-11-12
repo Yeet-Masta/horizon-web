@@ -3,7 +3,7 @@
 use super::*;
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = horizon_platform::env::temp_dir().join(format!(
+    let dir = horizon_std::env::temp_dir().join(format!(
         "horizon-mod-registry-{name}-{}",
         std::process::id()
     ));

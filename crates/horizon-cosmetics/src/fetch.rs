@@ -16,8 +16,8 @@
 //!   changes for a hash.
 
 use crate::Item;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, PoisonError};
@@ -82,7 +82,7 @@ impl Cosmetics {
         let mut work = c.worker.take().expect("worker");
         let shared = c.shared.clone();
         // A Web Worker on the web build, where a Builder's spawn runs in place.
-        let _ = horizon_platform::thread::spawn_worker("Cosmetics", move || {
+        let _ = horizon_std::thread::spawn_worker("Cosmetics", move || {
             loop {
                 {
                     let state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -244,7 +244,7 @@ impl Saved {
     fn load(cache: &Option<PathBuf>) -> Self {
         cache
             .as_ref()
-            .and_then(|d| horizon_platform::fs::read(d.join(Self::FILE)).ok())
+            .and_then(|d| horizon_std::fs::read(d.join(Self::FILE)).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
@@ -253,13 +253,13 @@ impl Saved {
         let Some(dir) = cache else { return };
         let (Ok(text), Ok(())) = (
             serde_json::to_vec(self),
-            horizon_platform::fs::create_dir_all(dir),
+            horizon_std::fs::create_dir_all(dir),
         ) else {
             return;
         };
         let part = dir.join("worn.part");
-        if horizon_platform::fs::write(&part, text).is_ok() {
-            let _ = horizon_platform::fs::rename(&part, dir.join(Self::FILE));
+        if horizon_std::fs::write(&part, text).is_ok() {
+            let _ = horizon_std::fs::rename(&part, dir.join(Self::FILE));
         }
     }
 }
@@ -464,9 +464,7 @@ fn item(
     let file = cache
         .as_ref()
         .map(|d| d.join(format!("{}-{}.json", r.id, r.hash)));
-    let from_disk = file
-        .as_ref()
-        .and_then(|f| horizon_platform::fs::read(f).ok());
+    let from_disk = file.as_ref().and_then(|f| horizon_std::fs::read(f).ok());
     let bytes = match from_disk {
         Some(b) => Some(b),
         None => {
@@ -476,11 +474,11 @@ fn item(
             if let Some(f) = &file
                 && Item::parse(&fetched).is_ok()
                 && let Some(dir) = f.parent()
-                && horizon_platform::fs::create_dir_all(dir).is_ok()
+                && horizon_std::fs::create_dir_all(dir).is_ok()
             {
                 let part = f.with_extension("part");
-                if horizon_platform::fs::write(&part, &fetched).is_ok() {
-                    let _ = horizon_platform::fs::rename(&part, f);
+                if horizon_std::fs::write(&part, &fetched).is_ok() {
+                    let _ = horizon_std::fs::rename(&part, f);
                 }
             }
             Some(fetched)
@@ -553,16 +551,12 @@ impl Http {
     }
 }
 
-/// The web build's transport: horizon_platform's HTTP from the Cosmetics worker (the
+/// The web build's transport: horizon_std's HTTP from the Cosmetics worker (the
 /// browser's fetch, else the relay).
 #[cfg(target_family = "wasm")]
 impl Http {
-    pub(crate) fn web(
-        &self,
-        request: horizon_platform::web::http::Request,
-    ) -> Result<Vec<u8>, String> {
-        let response =
-            horizon_platform::web::http::request(request.timeout(Duration::from_secs(10)))?;
+    pub(crate) fn web(&self, request: horizon_std::web::http::Request) -> Result<Vec<u8>, String> {
+        let response = horizon_std::web::http::request(request.timeout(Duration::from_secs(10)))?;
         if !(200..300).contains(&response.status) {
             return Err(format!("HTTP {}", response.status));
         }
@@ -577,12 +571,12 @@ impl Transport for Http {
     fn post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {
         let url = format!("{}{path}", self.base);
         self.web(
-            horizon_platform::web::http::Request::post(&url, body.to_vec())
+            horizon_std::web::http::Request::post(&url, body.to_vec())
                 .header("Content-Type", "application/json"),
         )
     }
     fn get(&self, path: &str) -> Result<Vec<u8>, String> {
-        self.web(horizon_platform::web::http::Request::get(&format!(
+        self.web(horizon_std::web::http::Request::get(&format!(
             "{}{path}",
             self.base
         )))
@@ -620,7 +614,7 @@ impl Local {
 
     /// The first item file of each slot, by file name.
     fn worn(&self) -> Vec<String> {
-        let mut files: Vec<PathBuf> = horizon_platform::fs::read_dir(&self.dir)
+        let mut files: Vec<PathBuf> = horizon_std::fs::read_dir(&self.dir)
             .into_iter()
             .flatten()
             .flatten()
@@ -631,7 +625,7 @@ impl Local {
         let mut slots = Vec::new();
         let mut ids = Vec::new();
         for file in files {
-            if let Some(item) = horizon_platform::fs::read(&file)
+            if let Some(item) = horizon_std::fs::read(&file)
                 .ok()
                 .and_then(|b| Item::parse(&b).ok())
                 && !slots.contains(&item.slot)
@@ -677,7 +671,7 @@ impl Transport for Local {
             .split('?')
             .next()
             .unwrap_or_default();
-        horizon_platform::fs::read(self.dir.join(format!("{id}.json"))).map_err(|e| e.to_string())
+        horizon_std::fs::read(self.dir.join(format!("{id}.json"))).map_err(|e| e.to_string())
     }
 }
 

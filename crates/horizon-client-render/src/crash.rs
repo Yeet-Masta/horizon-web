@@ -3,7 +3,7 @@
 //! Written to `crash-reports/crash-<yyyy-MM-dd_HH.mm.ss>-client.txt` in the game folder when
 //! the main thread panics or `main` gets an error back. It leaves the machine only scrubbed, and
 //! only if the player allows crash reports (`telemetry`).
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -191,9 +191,9 @@ impl Report {
     /// Writes the report in `home/crash-reports` and returns its path.
     pub fn save(&self, home: &Path) -> std::io::Result<PathBuf> {
         let dir = crate::logging::crash_reports_dir(home);
-        horizon_platform::fs::create_dir_all(&dir)?;
+        horizon_std::fs::create_dir_all(&dir)?;
         let path = dir.join(file_name(&self.time, self.side));
-        horizon_platform::fs::write(&path, self.text())?;
+        horizon_std::fs::write(&path, self.text())?;
         Ok(path)
     }
 }
@@ -223,7 +223,7 @@ pub fn release_tag() -> Option<String> {
     if let Some(version) = horizon_core::release::RELEASE {
         return Some(format!("v{version}"));
     }
-    let exe = horizon_platform::env::current_exe().ok()?;
+    let exe = horizon_std::env::current_exe().ok()?;
     let folder = exe.parent()?.file_name()?.to_str()?;
     (folder.starts_with('v') && folder[1..].starts_with(|c: char| c.is_ascii_digit()))
         .then(|| folder.to_owned())
@@ -239,12 +239,12 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 }
 
 fn read(path: &str) -> Option<String> {
-    horizon_platform::fs::read_to_string(path).ok()
+    horizon_std::fs::read_to_string(path).ok()
 }
 
 /// `PRETTY_NAME` of /etc/os-release and the kernel, or the system's own version string.
 fn operating_system() -> String {
-    let arch = horizon_platform::env::consts::ARCH;
+    let arch = horizon_std::env::consts::ARCH;
     let version = if cfg!(target_os = "linux") {
         let name = read("/etc/os-release").and_then(|t| {
             t.lines()
@@ -265,14 +265,14 @@ fn operating_system() -> String {
     };
     format!(
         "{} ({arch}) version {}",
-        horizon_platform::env::consts::OS,
+        horizon_std::env::consts::OS,
         version.unwrap_or_else(|| "unknown".into())
     )
 }
 
 /// Logical processors and the CPU's name (`12x AMD Ryzen 5 5600X ...`).
 pub fn cpu() -> String {
-    let threads = horizon_platform::thread::available_parallelism().map_or(0, |n| n.get());
+    let threads = horizon_std::thread::available_parallelism().map_or(0, |n| n.get());
     let name = if cfg!(target_os = "linux") {
         read("/proc/cpuinfo").and_then(|t| horizon_telemetry::system::linux_cpu_name(&t))
     } else if cfg!(target_os = "macos") {
@@ -280,11 +280,11 @@ pub fn cpu() -> String {
     } else if cfg!(windows) {
         horizon_telemetry::system::windows_cpu()
     } else {
-        horizon_platform::env::var("PROCESSOR_IDENTIFIER").ok()
+        horizon_std::env::var("PROCESSOR_IDENTIFIER").ok()
     };
     format!(
         "{threads}x {}",
-        name.unwrap_or_else(|| horizon_platform::env::consts::ARCH.into())
+        name.unwrap_or_else(|| horizon_std::env::consts::ARCH.into())
     )
 }
 
@@ -365,7 +365,7 @@ pub fn system_details(side: &str) -> Vec<(String, String)> {
 /// The thread's name as vanilla's reports say it: the main thread is the client's "Render thread"
 /// and the dedicated server's "Server thread".
 fn thread_name(side: &str) -> String {
-    let current = horizon_platform::thread::current();
+    let current = horizon_std::thread::current();
     match current.name() {
         Some("main") | None if side == "server" => "Server thread".into(),
         Some("main") | None => "Render thread".into(),
@@ -569,10 +569,10 @@ pub fn install(home: PathBuf, side: &'static str) {
             return;
         }
         default(info);
-        let main = horizon_platform::thread::current().name() == Some("main");
+        let main = horizon_std::thread::current().name() == Some("main");
         if main {
             deliver(&home, panic_report(info, side));
-        } else if is_worker_thread(horizon_platform::thread::current().name()) {
+        } else if is_worker_thread(horizon_std::thread::current().name()) {
             deliver(&home, worker_panic_report(info, side));
             // The crash ends the game, as the relayed report does on vanilla's main thread.
             std::process::exit(101);
@@ -659,13 +659,10 @@ pub fn report_error(
 /// Called every frame: panics once `HORIZON_DEBUG_CRASH` asks (development builds only).
 pub fn debug_crash_tick() {
     static AT: std::sync::OnceLock<
-        Option<(
-            horizon_platform::time::Instant,
-            horizon_platform::time::Duration,
-        )>,
+        Option<(horizon_std::time::Instant, horizon_std::time::Duration)>,
     > = std::sync::OnceLock::new();
     if let Some((first, after)) =
-        AT.get_or_init(|| debug_crash_after().map(|d| (horizon_platform::time::Instant::now(), d)))
+        AT.get_or_init(|| debug_crash_after().map(|d| (horizon_std::time::Instant::now(), d)))
         && first.elapsed() >= *after
     {
         panic!("Manually triggered debug crash");
@@ -674,13 +671,13 @@ pub fn debug_crash_tick() {
 
 /// Development builds crash on purpose when `HORIZON_DEBUG_CRASH` is set (vanilla has F3+C held
 /// for ten seconds): the number is seconds after the first frame (default 5).
-pub fn debug_crash_after() -> Option<horizon_platform::time::Duration> {
+pub fn debug_crash_after() -> Option<horizon_std::time::Duration> {
     if !cfg!(debug_assertions) {
         return None;
     }
-    let value = horizon_platform::env::var("HORIZON_DEBUG_CRASH").ok()?;
+    let value = horizon_std::env::var("HORIZON_DEBUG_CRASH").ok()?;
     let seconds = value.parse::<f64>().unwrap_or(5.0).max(0.0);
-    Some(horizon_platform::time::Duration::from_secs_f64(seconds))
+    Some(horizon_std::time::Duration::from_secs_f64(seconds))
 }
 
 #[cfg(test)]
@@ -774,7 +771,7 @@ mod tests {
     #[test]
     fn a_dedicated_servers_report_names_its_server_thread_and_no_render_settings() {
         let unnamed = |side: &'static str| {
-            horizon_platform::thread::spawn(move || thread_name(side))
+            horizon_std::thread::spawn(move || thread_name(side))
                 .join()
                 .unwrap()
         };
@@ -878,10 +875,10 @@ mod tests {
         )));
         assert!(text.contains("\tOperating System: "));
         assert!(text.contains("\tCPU: "));
-        let home = horizon_platform::env::temp_dir()
-            .join(format!("horizon-crash-save-{}", std::process::id()));
+        let home =
+            horizon_std::env::temp_dir().join(format!("horizon-crash-save-{}", std::process::id()));
         let path = report.save(&home).unwrap();
-        assert_eq!(horizon_platform::fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(horizon_std::fs::read_to_string(&path).unwrap(), text);
         assert!(
             path.file_name()
                 .unwrap()
@@ -889,6 +886,6 @@ mod tests {
                 .unwrap()
                 .ends_with("-client.txt")
         );
-        let _ = horizon_platform::fs::remove_dir_all(&home);
+        let _ = horizon_std::fs::remove_dir_all(&home);
     }
 }

@@ -196,7 +196,7 @@ mod tests {
         let connection = crate::connection::Connection::connect_server(
             "127.0.0.1",
             address.port(),
-            horizon_platform::time::Duration::from_secs(1),
+            horizon_std::time::Duration::from_secs(1),
         )
         .unwrap();
         let (accepted, _) = listener.accept().unwrap();

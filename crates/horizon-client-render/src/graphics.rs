@@ -2,7 +2,7 @@
 //! `horizon-graphics.txt` next to `options.txt` so that file stays exactly
 //! vanilla's. Every default reproduces vanilla's rendering; only choices the
 //! player makes here depart from it.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::{
     path::Path,
     sync::atomic::{AtomicU32, Ordering},
@@ -273,7 +273,7 @@ impl GraphicsApi {
     }
     /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else the setting.
     pub fn with_env(self) -> Self {
-        horizon_platform::env::var("HORIZON_GRAPHICS_API")
+        horizon_std::env::var("HORIZON_GRAPHICS_API")
             .ok()
             .and_then(|v| Self::from_name(&v))
             .unwrap_or(self)
@@ -800,7 +800,7 @@ impl Default for Graphics {
             chunk_updates: 0,
             // The web build uploads through the browser's WebGPU, slower than
             // a native driver: a burst of new sections spreads over frames.
-            upload_budget_kib: if horizon_platform::WEB { 4096 } else { 0 },
+            upload_budget_kib: if horizon_std::WEB { 4096 } else { 0 },
             texture_budget_mib: 0,
             sky: true,
             fog: true,
@@ -1087,8 +1087,8 @@ impl Graphics {
             return self.workers as usize;
         }
         // A browser can't run workers behind the page (web/README.md).
-        if horizon_platform::WEB {
-            return horizon_platform::thread::worker_count();
+        if horizon_std::WEB {
+            return horizon_std::thread::worker_count();
         }
         // Vanilla's count (Util.maxAllowedExecutorThreads: every core but
         // one). The pool never takes every core: a pool that fills them all

@@ -7,7 +7,7 @@ use crate::{
     mesher::SectionMesh,
 };
 use glam::{DVec3, Vec3};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::collections::VecDeque;
 
 /// Finished tile meshes not uploaded yet, the tiles they replace (removed

@@ -6,7 +6,7 @@
 //! bindings, deadzones and the look curve, button edges from successive pad
 //! states, and `horizon-controller.txt`, kept next to `options.txt` so that
 //! file stays exactly vanilla's. The game reads the pads with gilrs.
-use horizon_platform::{
+use horizon_std::{
     fs::{self, PathExt as _},
     time::{Duration, Instant},
 };
@@ -527,7 +527,7 @@ pub fn steam_keyboard(choice: TextKeyboard) -> bool {
     match choice {
         TextKeyboard::Steam => true,
         TextKeyboard::Horizon => false,
-        TextKeyboard::Auto => horizon_platform::env::var("SteamDeck").is_ok_and(|v| v == "1"),
+        TextKeyboard::Auto => horizon_std::env::var("SteamDeck").is_ok_and(|v| v == "1"),
     }
 }
 
@@ -1616,11 +1616,11 @@ bind_key.hotbar.2:north
 
     #[test]
     fn navigation_preferences_migrate_and_stay_with_each_player() {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-pad-{}-{}",
             std::process::id(),
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

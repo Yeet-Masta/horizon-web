@@ -7,7 +7,7 @@ rust-version = "1.90"
 description = "Commands (Brigadier): the vanilla command tree, argument types, selectors, parsing, suggestions and the network form of the tree"
 
 [dependencies]
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-core = { path = "../horizon-core" }
 horizon-protocol = { path = "../horizon-protocol" }

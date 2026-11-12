@@ -14,7 +14,7 @@ use horizon_client::{
     gamepad::{self, Button, Edges, GlyphStyle, HealthWatch, PadState, Route, Rumble},
     keymapping::SNEAK,
 };
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;

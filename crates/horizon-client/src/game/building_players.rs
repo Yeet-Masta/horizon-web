@@ -173,16 +173,15 @@ mod tests {
         };
         use horizon_protocol::packets::configuration::ClientInformation;
         use std::sync::{Arc, atomic::AtomicI32, mpsc};
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -202,15 +201,15 @@ mod tests {
             None,
         )
         .unwrap();
-        let scratch = horizon_platform::env::temp_dir().join(format!(
+        let scratch = horizon_std::env::temp_dir().join(format!(
             "horizon-building-turn-{}-{}",
             std::process::id(),
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        horizon_platform::fs::create_dir_all(&scratch).unwrap();
+        horizon_std::fs::create_dir_all(&scratch).unwrap();
         game.world_root = scratch.clone();
         game.player = Some(PlayerMotion::new(game.motion, Vec3::new(10.5, 64.0, 0.5)).unwrap());
         let original = game.player.as_ref().unwrap().bounds();
@@ -284,7 +283,7 @@ mod tests {
             Vec3::new(10.5, 64.0, 0.5)
         );
         drop(game);
-        assert!(scratch.starts_with(horizon_platform::env::temp_dir()));
-        horizon_platform::fs::remove_dir_all(scratch).unwrap();
+        assert!(scratch.starts_with(horizon_std::env::temp_dir()));
+        horizon_std::fs::remove_dir_all(scratch).unwrap();
     }
 }

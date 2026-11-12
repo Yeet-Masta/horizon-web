@@ -11,7 +11,7 @@
 
 use super::{Mob, Part, anim::Poses, anim::State};
 use horizon_optifine::cem::expr::{Expr, compile};
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -121,8 +121,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The frame the next animations see. Its `frame_time` and `frame_counter` come from the
 /// calls themselves: the time since the previous one, and how many there were.
 pub fn set_frame(mut frame: Frame) {
-    static LAST: Mutex<Option<horizon_platform::time::Instant>> = Mutex::new(None);
-    let now = horizon_platform::time::Instant::now();
+    static LAST: Mutex<Option<horizon_std::time::Instant>> = Mutex::new(None);
+    let now = horizon_std::time::Instant::now();
     let mut last = lock(&LAST);
     frame.frame_time = last.map_or(0.0, |t| (now - t).as_secs_f32());
     *last = Some(now);

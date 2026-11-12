@@ -114,7 +114,7 @@ def main():
                     print("web_smoke: a panic unwound and was caught", flush=True)
                 else:
                     failures.append("the build says its panics unwind, but one was not caught")
-            # A Web Worker's HTTP (horizon_platform::web::http): its request runs on the page.
+            # A Web Worker's HTTP (horizon_std::web::http): its request runs on the page.
             if build.get("threads"):
                 answer = page.evaluate("globalThis.horizonGlue.horizon_http_check('/build.json')")
                 if answer.startswith("200 "):

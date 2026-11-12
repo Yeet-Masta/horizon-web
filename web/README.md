@@ -113,7 +113,7 @@ Those services refuse requests from other sites' pages, so the requests go
 through the relay set in Options: it opens TCP connections to them
 (`ACCOUNT_HOSTS` in `crates/horizon-web-relay`, port 443 only;
 `--no-accounts` turns that off) and the game speaks TLS with them itself
-(rustls with RustCrypto's algorithms, `horizon_platform::web::https`), so the
+(rustls with RustCrypto's algorithms, `horizon_std::web::https`), so the
 relay carries ciphertext and never sees a token. The account's record (its
 refresh and Minecraft tokens) stays in this browser's IndexedDB, encrypted
 with a key the page makes and can't read back (a non-extractable WebCrypto
@@ -231,7 +231,7 @@ then asks every JS callback to be unwind-safe: winit's are, in `third_party/wini
 ## HTTP
 
 What the game asks of web services natively with ureq (Realms, cosmetics, the resource pack
-sites, a server's BlueMap) goes through `horizon_platform::web::http`: the browser's `fetch`,
+sites, a server's BlueMap) goes through `horizon_std::web::http`: the browser's `fetch`,
 or, for a site that refuses a page's requests (no CORS headers, an `http://` address from an
 https page, a cookie), the relay's TCP tunnel with TLS spoken in the module, so the relay
 carries ciphertext. Those requests run on the page's thread, whose event loop has `fetch` and
@@ -261,18 +261,18 @@ process while playing (as `chrome://gpucrash` does) and checks that the game dra
 Upstream merges hundreds of pull requests a day. What they bring compiles for the web, but
 some of it hangs or crashes there:
 
-- a loop on a thread started with `thread::Builder`: horizon_platform's runs it where it is
+- a loop on a thread started with `thread::Builder`: horizon_std's runs it where it is
   called on the web, so it never returns. A loop goes through `spawn_thread` or `spawn_worker`
   (a Web Worker);
 - a blocking wait on the page's thread (`pollster::block_on`, a channel's `recv`, a `Condvar`):
-  a browser refuses `Atomics.wait` there. `horizon_platform::block_on_or` doesn't wait;
-- std's or chrono's clocks in a crate that doesn't go through horizon_platform;
+  a browser refuses `Atomics.wait` there. `horizon_std::block_on_or` doesn't wait;
+- std's or chrono's clocks in a crate that doesn't go through horizon_std;
 - a socket or HTTP client (`ureq`, `std::net`, `mio`) the browser build doesn't have.
 
 ```sh
 base=$(git merge-base HEAD upstream/main)
 git merge upstream/main                                       # resolve what conflicts
-python3 tools/web_rewrite.py --changed $base upstream/main    # std::{fs,time,thread,env,sync} -> horizon_platform
+python3 tools/web_rewrite.py --changed $base upstream/main    # std::{fs,time,thread,env,sync} -> horizon_std
 python3 tools/upstream_watch.py --base $base --head upstream/main   # what the merge brings to look at
 python3 tools/upstream_watch.py --open-prs ludovic111/horizon       # the open pull requests that will
 ```
@@ -314,7 +314,7 @@ The page checks all of these and says what is missing.
 ## What differs from the native game
 
 The web build is the native game with the operating system swapped out
-(`crates/horizon-platform`):
+(`crates/horizon-std`):
 
 - **Files**: an in-memory file system. The resources zip is mounted read-only at
   `/app/resources` and read in place; the game folder (`/home/horizon`: options,
@@ -330,7 +330,7 @@ The web build is the native game with the operating system swapped out
   browser storage*, read as the game opens them, which takes less memory and
   starts slower (thousands of small reads): workers read them with
   `FileReaderSync`, and the page's thread asks a worker that does
-  (`horizon-platform`'s `web/blobs.rs`). Options → *Download the game folder*
+  (`horizon-std`'s `web/blobs.rs`). Options → *Download the game folder*
   exports it as a zip.
 - **Threads**: chunk generation, lighting and meshing run on Web Workers that
   share the page's memory (`web/worker.js`), as the native game's workers do.
@@ -342,7 +342,7 @@ The web build is the native game with the operating system swapped out
   frees for its next allocations, and the rest comes from dlmalloc heaps
   behind locks of their own: the page's thread's, three the workers share,
   and one for blocks of 1 MiB and more; pages a heap frees go to a pool any
-  heap takes from (`horizon-platform`'s `web/alloc.rs`; std's wasm allocator
+  heap takes from (`horizon-std`'s `web/alloc.rs`; std's wasm allocator
   is one spinning lock for every thread). Sounds decode on two more workers (effects, and
   streamed music and ambience), and region files are written on another, as
   natively. Single player runs on the integrated server's thread, a worker
@@ -354,7 +354,7 @@ The web build is the native game with the operating system swapped out
   and the other loads run on workers, so their loading screens keep drawing;
   cloud meshes are built on one too. The page's thread may not
   wait on a lock, so it spins on the locks it shares with the workers
-  (`horizon_platform::sync`); the workers wait on them. The `--no-threads` build has no workers: chunk
+  (`horizon_std::sync`); the workers wait on them. The `--no-threads` build has no workers: chunk
   work runs between frames, most urgent first, for 8 ms a frame (more while
   the level loads; `HORIZON_WEB_WORK_MS` sets it), and a job that wouldn't fit
   what is left of a frame waits for the next. Region files are written as

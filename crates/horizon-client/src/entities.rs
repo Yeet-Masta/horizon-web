@@ -3561,7 +3561,7 @@ mod entity_collision_tests {
                 Aabb::new(Vec3::new(x, 64.0, z), Vec3::new(x + 0.25, 64.25, z + 0.25))
             })
             .collect();
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         let mut hits = 0;
         for item in &items {
             let area = item.inflate(Vec3::new(1.0, 1.0, 1.0));
@@ -3569,7 +3569,7 @@ mod entity_collision_tests {
         }
         let scan = start.elapsed();
         let grid = ObstacleGrid::new(boxes);
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         let (mut out, mut found) = (Vec::new(), 0);
         for item in &items {
             grid.near(item.inflate(Vec3::new(1.0, 1.0, 1.0)), &mut out);
@@ -3702,7 +3702,7 @@ mod armor_stand_motion_tests {
 
     #[test]
     fn climbing_uses_actual_blocks_and_post_collision_position() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -100,7 +100,7 @@ impl Macros {
     pub fn standard() -> Self {
         let mut m = Self::default();
         m.define("MC_VERSION", MC_VERSION.to_string());
-        let os = match horizon_platform::env::consts::OS {
+        let os = match horizon_std::env::consts::OS {
             "windows" => "MC_OS_WINDOWS",
             "macos" => "MC_OS_MAC",
             "linux" => "MC_OS_LINUX",

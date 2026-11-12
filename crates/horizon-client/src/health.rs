@@ -5,7 +5,7 @@ use crate::{
     Result,
     motion::{MotionEvent, PlayerMotion},
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::{
     attributes::live::LiveAttributes,
     block_landing::LandingDamage,
@@ -1040,7 +1040,7 @@ mod tests {
             assert!(panic.is_err());
             assert_eq!(super::knockback_attacker(), 7);
             assert_eq!(
-                horizon_platform::thread::spawn(super::knockback_attacker)
+                horizon_std::thread::spawn(super::knockback_attacker)
                     .join()
                     .unwrap(),
                 0
@@ -1191,8 +1191,8 @@ mod tests {
 
     /// What the hook of these tests saw: entity, damage type (a mob's kind)
     /// and causing entity, amount.
-    static SEEN: horizon_platform::sync::Mutex<Vec<(i32, String, f32)>> =
-        horizon_platform::sync::Mutex::new(Vec::new());
+    static SEEN: horizon_std::sync::Mutex<Vec<(i32, String, f32)>> =
+        horizon_std::sync::Mutex::new(Vec::new());
     /// Sets the native damage hook of these tests (global: it stays set for
     /// the process): for entities 9001 to 9004 and 9011 to 9013 it records the
     /// hit, cancels x1's, doubles x2's, makes 9003's -5 and 9004's NaN.
@@ -1301,8 +1301,8 @@ mod tests {
 
     /// What the knockback hook of these tests saw: the entity, the hit that
     /// causes it (a mob's damage kind) and the push it was handed.
-    static PUSHES: horizon_platform::sync::Mutex<Vec<(i32, String, super::Knock)>> =
-        horizon_platform::sync::Mutex::new(Vec::new());
+    static PUSHES: horizon_std::sync::Mutex<Vec<(i32, String, super::Knock)>> =
+        horizon_std::sync::Mutex::new(Vec::new());
     /// Sets the native knockback hook of these tests (global: it stays set for
     /// the process), for mobs 9101 to 9106 only: it records the push, cancels
     /// 9101's, doubles 9102's strength and turns its direction around, leaves

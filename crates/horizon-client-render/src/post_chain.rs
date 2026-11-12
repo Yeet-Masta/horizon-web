@@ -690,7 +690,7 @@ impl PostEffects {
         #[cfg(not(target_family = "wasm"))]
         let format = format.remove_srgb_suffix();
         #[cfg(not(target_family = "wasm"))]
-        let spawned = horizon_platform::thread::Builder::new()
+        let spawned = horizon_std::thread::Builder::new()
             .name("Post effects".into())
             .spawn({
                 let ids = ids.clone();
@@ -797,7 +797,7 @@ impl PostEffects {
         queue: &wgpu::Queue,
         id: &str,
     ) -> Result<Option<Chain>, String> {
-        let Ok(text) = horizon_platform::fs::read_to_string(resource_path(root, id)) else {
+        let Ok(text) = horizon_std::fs::read_to_string(resource_path(root, id)) else {
             return Ok(None);
         };
         let config = Config::parse(&text)?;
@@ -1036,8 +1036,7 @@ impl PostEffects {
             .join("textures/effect")
             .join(format!("{path}.png"));
         let mut decoder = png::Decoder::new(std::io::BufReader::new(
-            horizon_platform::fs::File::open(&file)
-                .map_err(|e| format!("{}: {e}", file.display()))?,
+            horizon_std::fs::File::open(&file).map_err(|e| format!("{}: {e}", file.display()))?,
         ));
         // As the other resource-pack images: stb_image never checks chunk CRCs.
         decoder.ignore_checksums(true);
@@ -1780,11 +1779,11 @@ mod tests {
     }
 
     fn scratch(name: &str, json: &str) -> PathBuf {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-post-chain-{}-{name}", std::process::id()));
         let dir = root.join("assets/minecraft/post_effect");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join(format!("{name}.json")), json).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join(format!("{name}.json")), json).unwrap();
         root
     }
 
@@ -1892,7 +1891,7 @@ mod tests {
             near(px[0], 51) && near(px[1], 102) && near(px[2], 153),
             "{px:?}"
         );
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1909,7 +1908,7 @@ mod tests {
         let names = ["minecraft:unknown".to_owned()];
         assert!(!run(&device, &queue, &mut effects, &root, &names).0);
         assert!(effects.failed.contains("minecraft:unknown"));
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The chains the prepared vanilla resources hold all load (skipped without
@@ -2019,7 +2018,7 @@ mod tests {
         );
         assert_eq!(top, [255, 0, 0, 255]);
         assert_eq!(bottom, [0, 255, 0, 255]);
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A chain with its own GLSL, a target read twice, a depth input and a
@@ -2060,20 +2059,20 @@ mod tests {
         // Green stays below it: 0.5 * 1 * 1.
         assert!(bottom[0] == 0 && near(bottom[1], 128), "{bottom:?}");
         assert!(effects.failed.is_empty());
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     /// `core/quad.vsh`, `post/mine.fsh` and the `tint` image of `a_chain_runs_its_own_glsl`.
     fn own_glsl(root: &Path) {
         let shaders = root.join("assets/minecraft/shaders");
-        horizon_platform::fs::create_dir_all(shaders.join("core")).unwrap();
-        horizon_platform::fs::create_dir_all(shaders.join("post")).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(shaders.join("core")).unwrap();
+        horizon_std::fs::create_dir_all(shaders.join("post")).unwrap();
+        horizon_std::fs::write(
             shaders.join("core/quad.vsh"),
             "#version 330\nlayout(location = 0) out vec2 texCoord;\nvoid main() {\n  vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);\n  gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);\n  texCoord = uv;\n}\n",
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             shaders.join("post/mine.fsh"),
             "#version 330\nuniform sampler2D InSampler;\nuniform sampler2D DepthSampler;\nuniform sampler2D TintSampler;\n\
              layout(std140) uniform SamplerInfo { vec2 OutSize; vec2 InSize; };\n\
@@ -2085,7 +2084,7 @@ mod tests {
         .unwrap();
         // A 1x1 image, (0.5, 1, 1).
         let effect = root.join("assets/minecraft/textures/effect");
-        horizon_platform::fs::create_dir_all(&effect).unwrap();
+        horizon_std::fs::create_dir_all(&effect).unwrap();
         let mut png_bytes = Vec::new();
         {
             let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
@@ -2094,7 +2093,7 @@ mod tests {
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&[128, 255, 255, 255]).unwrap();
         }
-        horizon_platform::fs::write(effect.join("tint.png"), png_bytes).unwrap();
+        horizon_std::fs::write(effect.join("tint.png"), png_bytes).unwrap();
     }
 
     /// A chain `preload` loaded arrives with its pipelines compiled on the loading
@@ -2125,10 +2124,10 @@ mod tests {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         effects.preload(&device, &queue, &root, &["minecraft:preloaded"], format);
         assert!(effects.pending.contains("minecraft:preloaded"));
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         while !effects.pending.is_empty() {
             assert!(started.elapsed().as_secs() < 60, "the chain never arrived");
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(1));
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(1));
             effects.collect_preloaded();
         }
         let chain = effects.chains["minecraft:preloaded"]
@@ -2149,7 +2148,7 @@ mod tests {
         let near = |a: u8, b: u8| a.abs_diff(b) <= 3;
         assert!(near(top[0], 32) && top[1] == 0 && top[3] == 255, "{top:?}");
         assert!(bottom[0] == 0 && near(bottom[1], 128), "{bottom:?}");
-        horizon_platform::fs::remove_dir_all(root).unwrap();
+        horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Vanilla's own chains run on the GPU without a validation error (skipped

@@ -181,8 +181,8 @@ impl Game<'_> {
         let Ok(bytes) = Compression::Gzip.encode(&raw) else {
             return false;
         };
-        horizon_platform::fs::create_dir_all(parent).is_ok()
-            && horizon_platform::fs::write(file, bytes).is_ok()
+        horizon_std::fs::create_dir_all(parent).is_ok()
+            && horizon_std::fs::write(file, bytes).is_ok()
     }
 
     /// `StructureTemplate.fillFromWorld` for a box at `origin`: every block
@@ -681,8 +681,8 @@ pub(super) fn load_settings(
 /// `StructureBlockEntity.createRandom`'s seed: 0 is the clock.
 pub(super) fn create_seed(seed: i64) -> i64 {
     if seed == 0 {
-        horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(1, |d| d.as_millis() as i64)
     } else {
         seed

@@ -7,7 +7,7 @@ rust-version = "1.90"
 description = "The client's input layer: key bindings and their names, mouse, controllers, clipboard and window options"
 
 [dependencies]
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 horizon-client-core = { path = "../horizon-client-core" }
 winit = "0.30.13"
 # The window icon.

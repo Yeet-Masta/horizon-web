@@ -124,7 +124,7 @@ mod tests {
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     fn fixture() -> (PathBuf, SaveDir) {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "gateway-migration-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)

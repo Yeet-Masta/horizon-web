@@ -2,7 +2,7 @@
 //! turn, one UDP try of 1 s (`com.sun.jndi.dns.timeout.retries` = 1), TCP when
 //! the reply is truncated, and the answer's first SRV record. By hand, so the
 //! game needs no async runtime or resolver library for one question.
-use horizon_platform::time::Duration;
+use horizon_std::time::Duration;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream, UdpSocket},
@@ -16,7 +16,7 @@ pub(super) const SERVER_TIMEOUT: Duration = Duration::from_secs(1);
 /// Windows, where it leaves out the scoped IPv6 ones.
 #[cfg(unix)]
 pub(super) fn system_name_servers() -> Vec<SocketAddr> {
-    horizon_platform::fs::read_to_string("/etc/resolv.conf")
+    horizon_std::fs::read_to_string("/etc/resolv.conf")
         .map_or_else(|_| Vec::new(), |conf| name_servers(&conf))
 }
 
@@ -333,7 +333,7 @@ mod tests {
             }
         };
         let servers = [silent.local_addr().unwrap(), udp.local_addr().unwrap()];
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let mut buf = [0; 512];
             let (len, from) = udp.recv_from(&mut buf).unwrap();
             let mut truncated = reply(&buf[..len], 0, &[]);

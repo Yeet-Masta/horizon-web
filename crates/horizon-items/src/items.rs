@@ -3,7 +3,7 @@
 //! for the condition, entry and modifier types used by block drops).
 use crate::{Result, blocks::BlockFacts};
 use horizon_core::random::RandomSource;
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::loot::PackOverlay;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use serde_json::Value;
@@ -647,8 +647,8 @@ fn worn_mob_visibility(
 /// Every item of the last item registry loaded with its `villager_food`
 /// nutrition (0 without the component): what the mobs' villagers read, since
 /// a mob does not hold the registry (`None` until one is loaded).
-static VILLAGER_FOOD: horizon_platform::sync::RwLock<Option<HashMap<Arc<str>, i32>>> =
-    horizon_platform::sync::RwLock::new(None);
+static VILLAGER_FOOD: horizon_std::sync::RwLock<Option<HashMap<Arc<str>, i32>>> =
+    horizon_std::sync::RwLock::new(None);
 fn set_villager_food(items: &HashMap<Arc<str>, ItemInfo>) {
     let food = items
         .values()
@@ -2841,7 +2841,7 @@ mod tests {
     /// A content root's remainders reach the mods' items; vanilla's stay its own.
     #[test]
     fn mod_items_take_their_crafting_remainders() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-craft-remainders-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();

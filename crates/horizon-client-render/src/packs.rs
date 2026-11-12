@@ -7,7 +7,7 @@ mod cache;
 use crate::text::Style;
 use crate::{text::Text, zip::Zip};
 pub use horizon_client_core::pattern;
-use horizon_platform::fs;
+use horizon_std::fs;
 use pattern::Pattern;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1236,8 +1236,7 @@ mod tests {
 
     #[test]
     fn mcmeta_with_utf8_bom_is_read() {
-        let dir =
-            horizon_platform::env::temp_dir().join(format!("horizon-bom-{}", std::process::id()));
+        let dir = horizon_std::env::temp_dir().join(format!("horizon-bom-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let mut meta = b"\xEF\xBB\xBF".to_vec();
         meta.extend_from_slice(br#"{"pack":{"description":"d","pack_format":97}}"#);
@@ -1510,7 +1509,7 @@ mod tests {
     }
     #[test]
     fn companion_maps_follow_the_winning_colour_or_a_higher_map_only_pack() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-material-owner-{}", std::process::id()));
         let vanilla = root.join("vanilla");
         let relative = "assets/minecraft/textures/block";
@@ -1566,8 +1565,8 @@ mod tests {
     #[test]
     fn overlay_layers_packs_over_vanilla() {
         // `&` would split an unquoted `cmd /C mklink` line.
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-packs-&{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-packs-&{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();
@@ -1648,8 +1647,8 @@ mod tests {
     #[test]
     fn every_file_of_a_big_stack_comes_from_its_top_pack() {
         use std::io::Write as _;
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-pack-stack-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-pack-stack-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         // Folders whose names start alike (`item`, `item_extra`, `item2`) and files beside
@@ -1715,7 +1714,7 @@ mod tests {
     #[test]
     fn zip_entries_never_leave_the_overlay() {
         use std::io::Write as _;
-        let base = horizon_platform::env::temp_dir()
+        let base = horizon_std::env::temp_dir()
             .join(format!("horizon-pack-escape-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
@@ -1766,8 +1765,8 @@ mod tests {
     #[test]
     fn built_in_and_folder_packs_give_their_pack_png() {
         use std::io::Write as _;
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-pack-icons-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-pack-icons-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let meta = br#"{"pack":{"description":"d","pack_format":97}}"#;
         let built_in = base.join("vanilla/assets/minecraft/resourcepacks");
@@ -1821,8 +1820,8 @@ mod tests {
             {"formats":97,"directory":"C:"},
             {"formats":97,"directory":"ok_1.21-x"}]}}"#);
         assert_eq!(overlays_of(&meta), ["ok_1.21-x"]);
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-packs-ov-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-packs-ov-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let vanilla = base.join("vanilla");
         fs::create_dir_all(vanilla.join("assets/minecraft/textures/block")).unwrap();

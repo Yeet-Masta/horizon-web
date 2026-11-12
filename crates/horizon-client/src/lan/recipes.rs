@@ -3,8 +3,8 @@
 //! table slot and brewing stand slot accepts) and the stonecutter's recipes,
 //! read from the data pack's recipe files.
 use super::data::SyncData;
-use horizon_platform::sync::Mutex;
 use horizon_protocol::buf::Writer;
+use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},

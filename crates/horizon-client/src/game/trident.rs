@@ -1106,16 +1106,15 @@ mod tests {
     fn trident_release_rechecks_stack_durability_after_charge() {
         use crate::game::{Audio, Options, PlayerMotion, Progress, Settings, load_resources};
         use horizon_world::nbt::Tag;
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

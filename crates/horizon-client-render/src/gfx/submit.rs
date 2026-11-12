@@ -6,8 +6,8 @@
 //! frame's encoder to [`Queue::submit_later`] and goes on; every use of the queue
 //! ([`Deref`]) first waits for that frame to be submitted, so writes, copies and
 //! submissions keep the order they had on one thread.
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -17,7 +17,7 @@ use std::sync::mpsc;
 /// macOS's Metal it stalled: offscreen at render distance 12, a tenth to a half of the frame rate
 /// with 20-180 ms p99 frames, against the same binary without it. Windows is not measured yet.
 pub fn wanted() -> bool {
-    match horizon_platform::env::var("HORIZON_SUBMIT_THREAD").as_deref() {
+    match horizon_std::env::var("HORIZON_SUBMIT_THREAD").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
         _ => cfg!(target_os = "linux"),
@@ -40,7 +40,7 @@ pub struct Job {
 
 struct Thread {
     jobs: Option<mpsc::Sender<Job>>,
-    handle: Option<horizon_platform::thread::JoinHandle<()>>,
+    handle: Option<horizon_std::thread::JoinHandle<()>>,
 }
 
 /// What the submit thread sent back, once it is taken in by [`Queue::wait`].
@@ -73,7 +73,7 @@ impl Queue {
             waited: AtomicU64::new(0),
         };
         // WebGPU's objects never leave the page's thread: no submit thread there.
-        if !threaded || horizon_platform::WEB {
+        if !threaded || horizon_std::WEB {
             return this;
         }
         #[cfg(not(target_family = "wasm"))]
@@ -86,7 +86,7 @@ impl Queue {
         let (jobs, job_rx) = mpsc::channel::<Job>();
         let (done_tx, done) = mpsc::channel();
         let queue = this.queue.clone();
-        let spawned = horizon_platform::thread::Builder::new()
+        let spawned = horizon_std::thread::Builder::new()
             .name("Render submit".into())
             .spawn(move || {
                 for job in job_rx {

@@ -6,7 +6,7 @@
 //! unless the equipment asset's `trim_overrides` pick another texture or
 //! palette (iron armour with an iron trim uses `trim/iron_darker`).
 use horizon_assets::palette::apply_palette;
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 

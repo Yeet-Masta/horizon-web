@@ -21,8 +21,8 @@
 //!   pool, data offset (u64, from the start of the file) and length (u64);
 //! - the name pool: `/`-separated paths from the root;
 //! - the files' bytes.
-use horizon_platform::fs::{self, File};
-use horizon_platform::sync::Mutex;
+use horizon_std::fs::{self, File};
+use horizon_std::sync::Mutex;
 use std::{
     io::{self, BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -186,7 +186,7 @@ pub fn open(root: &Path) -> Option<Arc<PreparedFiles>> {
     if let Some((_, files)) = opened.iter().find(|(r, _)| r == root) {
         return files.clone();
     }
-    let files = if horizon_platform::env::var_os("HORIZON_NO_DATA_FILE").is_some() {
+    let files = if horizon_std::env::var_os("HORIZON_NO_DATA_FILE").is_some() {
         None
     } else {
         match PreparedFiles::open(root) {
@@ -280,7 +280,7 @@ pub fn write(root: &Path) -> io::Result<()> {
         + pad(source.len() as u64)
         + (files.len() * ENTRY) as u64
         + pad(pool_len as u64);
-    let tmp = root.join(format!("{FILE_NAME}.{}.tmp", horizon_platform::process::id()));
+    let tmp = root.join(format!("{FILE_NAME}.{}.tmp", horizon_std::process::id()));
     let result = (|| {
         let mut out = BufWriter::new(File::create(&tmp)?);
         out.write_all(&MAGIC)?;
@@ -402,8 +402,8 @@ mod tests {
 
     /// A prepared root with a few files, as `horizon-prepare` leaves it.
     fn root(tag: &str) -> PathBuf {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("hz-prepared-{tag}-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("hz-prepared-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for (name, bytes) in [
             (SOURCE, &b"{\"client_sha256\":\"a\"}"[..]),
@@ -493,8 +493,8 @@ mod tests {
         write(&root).unwrap();
         // A mirror of the root (a resource pack's, a content mod's) holding a
         // copy of its file and its horizon-resources.json.
-        let mirror = horizon_platform::env::temp_dir()
-            .join(format!("hz-prepared-mirror-{}", std::process::id()));
+        let mirror =
+            horizon_std::env::temp_dir().join(format!("hz-prepared-mirror-{}", std::process::id()));
         let _ = fs::remove_dir_all(&mirror);
         fs::create_dir_all(&mirror).unwrap();
         fs::copy(&bin, mirror.join(FILE_NAME)).unwrap();

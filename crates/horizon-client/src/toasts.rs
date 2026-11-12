@@ -1,7 +1,7 @@
 //! `ToastManager`'s slide, shared by the game's toasts and the title
 //! screens' system toasts.
 use crate::hud::{HudAtlas, HudBatch};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 
 /// `ToastManager.ToastInstance`: slides a toast in and out over 600 ms,
 /// eased by the square, and counts how long it has been fully shown.

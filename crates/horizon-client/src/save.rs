@@ -26,9 +26,9 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     ticks::{SavedTick, TickPriority, TickTypeId},
 };
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
 use horizon_world::attachments::{ATTACHMENTS_KEY, attachment_compound};
 use horizon_world::{
     DATA_VERSION,
@@ -2094,8 +2094,8 @@ fn write_region_records(
     folder: &str,
     records: &[((i32, i32), &Record)],
 ) -> Result<()> {
-    let timestamp = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let timestamp = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
     let compressed = compress_records(records, timestamp);
     let mut by_region: BTreeMap<(i32, i32), Vec<(ChunkPos, Option<ChunkRecord>)>> = BTreeMap::new();
@@ -2150,7 +2150,7 @@ fn compress_records(
             .map(|tag| ChunkRecord::from_nbt(&tag, Compression::Zlib, timestamp, Limits::saved()))
             .transpose()
     };
-    let helpers = horizon_platform::thread::scoped_threads(horizon_threads::worker_count())
+    let helpers = horizon_std::thread::scoped_threads(horizon_threads::worker_count())
         .div_ceil(2)
         .min(records.len() / CHUNKS_PER_HELPER);
     if helpers <= 1 {
@@ -2182,11 +2182,11 @@ fn share_out<R: Send>(
             out.push((i, job(i)));
         }
     };
-    let mut done: Vec<(usize, R)> = horizon_platform::thread::scope(|scope| {
+    let mut done: Vec<(usize, R)> = horizon_std::thread::scope(|scope| {
         let threads: Vec<_> = (1..helpers)
             .filter(|_| start())
             .filter_map(|_| {
-                horizon_platform::thread::Builder::new()
+                horizon_std::thread::Builder::new()
                     .spawn_scoped(scope, work)
                     .ok()
             })
@@ -2394,7 +2394,7 @@ impl Folder {
 /// submission order. The threaded web build's is a Web Worker, which isn't joined.
 struct Writer {
     send: mpsc::Sender<WriteBatch>,
-    thread: Option<horizon_platform::thread::JoinHandle<()>>,
+    thread: Option<horizon_std::thread::JoinHandle<()>>,
 }
 
 /// What the writer writes into: one batch at a time, in submission order.
@@ -2489,24 +2489,22 @@ fn is_forced_ticket(ticket: &Tag) -> bool {
 }
 #[derive(Default)]
 struct LodDecoded {
-    chunks: crate::fast_hash::FxHashMap<(i32, i32), (horizon_platform::time::Instant, LodSurfaces)>,
+    chunks: crate::fast_hash::FxHashMap<(i32, i32), (horizon_std::time::Instant, LodSurfaces)>,
     order: std::collections::VecDeque<(i32, i32)>,
 }
 /// Saved chunks kept decoded for far terrain (each tens of kilobytes), and
 /// for how long: edits saved later show after it.
 const LOD_DECODED: usize = 1024;
-const LOD_DECODED_TTL: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(30);
+const LOD_DECODED_TTL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(30);
 /// A region file's saved chunks (bit `x + z * 32`), `None` without the file,
 /// as of `checked`.
 struct LodRegion {
-    checked: horizon_platform::time::Instant,
+    checked: horizon_std::time::Instant,
     chunks: Option<[u64; 16]>,
 }
 /// How long far terrain trusts a region file's chunk list: chunks saved after
 /// it was read show in the far view this long after.
-const LOD_REGION_TTL: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(10);
+const LOD_REGION_TTL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(10);
 impl SaveDir {
     /// This dimension's server-owned mod attachments: `data/horizon/attachments.dat`, Horizon's
     /// own namespace. A file that doesn't read is moved aside to `attachments.dat.corrupt`, with
@@ -2647,7 +2645,7 @@ impl SaveDir {
             regions.insert(
                 key,
                 LodRegion {
-                    checked: horizon_platform::time::Instant::now(),
+                    checked: horizon_std::time::Instant::now(),
                     chunks,
                 },
             );
@@ -2909,14 +2907,14 @@ impl SaveDir {
         };
         #[cfg(not(target_family = "wasm"))]
         let thread = Some(
-            horizon_platform::thread::Builder::new()
+            horizon_std::thread::Builder::new()
                 .name("horizon-region-writer".into())
                 .spawn(write)
                 .expect("spawn region writer"),
         );
         #[cfg(target_family = "wasm")]
         let thread = {
-            horizon_platform::thread::spawn_worker("horizon-region-writer", write)
+            horizon_std::thread::spawn_worker("horizon-region-writer", write)
                 .expect("spawn region writer");
             None
         };
@@ -3320,10 +3318,10 @@ pub fn random_uuid() -> [i32; 4] {
     };
     static NEXT: OnceLock<AtomicU64> = OnceLock::new();
     let next = NEXT.get_or_init(|| {
-        let t = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let t = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
-        AtomicU64::new(t ^ (horizon_platform::process::id() as u64).rotate_left(32))
+        AtomicU64::new(t ^ (horizon_std::process::id() as u64).rotate_left(32))
     });
     // SplitMix64: distinct steps give distinct outputs.
     let split = || {
@@ -4522,8 +4520,8 @@ impl Level {
             "locked",
             Tag::Byte(i8::from(self.difficulty_locked)),
         );
-        let now = horizon_platform::time::SystemTime::now()
-            .duration_since(horizon_platform::time::UNIX_EPOCH)
+        let now = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         for (key, value) in [
             ("DataVersion", Tag::Int(DATA_VERSION)),
@@ -5047,7 +5045,7 @@ impl SaveDir {
         }
         let columns = self.lod_surfaces(x, z, assets, biomes)?;
         let mut decoded = self.lod_decoded.lock().unwrap();
-        let fresh = (horizon_platform::time::Instant::now(), columns.clone());
+        let fresh = (horizon_std::time::Instant::now(), columns.clone());
         if decoded.chunks.insert((x, z), fresh).is_none() {
             decoded.order.push_back((x, z));
             while decoded.order.len() > LOD_DECODED {
@@ -5254,8 +5252,8 @@ mod tests {
 
     #[test]
     fn a_server_falls_back_to_level_dat_old_and_restores_it() {
-        let world = horizon_platform::env::temp_dir()
-            .join(format!("horizon-dat-old-{}", std::process::id()));
+        let world =
+            horizon_std::env::temp_dir().join(format!("horizon-dat-old-{}", std::process::id()));
         let _ = fs::remove_dir_all(&world);
         fs::create_dir_all(&world).unwrap();
         let level = |name: &str| {
@@ -5290,7 +5288,7 @@ mod tests {
 
     #[test]
     fn points_of_interest_save_as_poi_sections() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let assets = crate::assets::Assets::load(&PathBuf::from(root)).expect("assets");
@@ -5352,15 +5350,15 @@ mod tests {
 
     #[test]
     fn a_chunk_that_loses_its_last_poi_saves_empty_sections() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
         let assets = crate::assets::Assets::load(&root).expect("assets");
         let biomes = Arc::new(Biomes::load(&root).expect("biomes"));
         let bell = assets.registry.default_state("minecraft:bell").unwrap().0;
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-poi-save-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-poi-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let _ = save.tables.set(Arc::new(SaveTables::new(&assets)));
@@ -5425,7 +5423,7 @@ mod tests {
         use horizon_world::attachments::{
             AttachmentCodec, AttachmentError, AttachmentType, Attachments,
         };
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-level-attachments-{}", std::process::id()));
         let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let key = AttachmentType {
@@ -5446,13 +5444,13 @@ mod tests {
         map.set(&key, 7).unwrap();
         save.save_attachments(&map).unwrap();
         assert_eq!(save.load_attachments().get(&key), Ok(7));
-        horizon_platform::fs::remove_dir_all(dir).unwrap();
+        horizon_std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn chunk_attachments_survive_save_and_load() {
         use horizon_world::attachments::{AttachmentCodec, AttachmentError, AttachmentType};
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5500,7 +5498,7 @@ mod tests {
 
     #[test]
     fn unopened_rolled_containers_save_their_loot_table() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5578,7 +5576,7 @@ mod tests {
 
     #[test]
     fn a_tall_level_saves_and_loads_its_whole_height() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5633,7 +5631,7 @@ mod tests {
 
     #[test]
     fn nether_and_end_chunks_save_with_their_own_height() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5692,7 +5690,7 @@ mod tests {
     /// cache; none for a chunk not saved, or saved without its light.
     #[test]
     fn far_reads_take_saved_lit_chunks_only() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5704,8 +5702,8 @@ mod tests {
         let mut dark = lit.clone();
         dark.x = 5;
         lit.lit = true;
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-far-save-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-far-save-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let records =
@@ -5725,7 +5723,7 @@ mod tests {
 
     #[test]
     fn saved_far_surface_reads_builds_and_water_without_gameplay_chunks() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -5787,10 +5785,8 @@ mod tests {
             "block_entities",
             Tag::String("not decoded by far sampling".into()),
         );
-        let dir = horizon_platform::env::temp_dir().join(format!(
-            "horizon-lod-save-{}",
-            horizon_platform::process::id()
-        ));
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-lod-save-{}", horizon_std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         save.write_records("region", vec![((-2, 3), Some(saved))], true)
@@ -6099,9 +6095,9 @@ mod tests {
 
     #[test]
     fn older_worlds_are_upgraded_on_opening() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-dv-{}", horizon_platform::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-dv-{}", horizon_std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let level =
             |v: i32| Tag::compound([("Data", Tag::compound([("DataVersion", Tag::Int(v))]))]);
         let version = |dir: &std::path::Path| {
@@ -6119,14 +6115,14 @@ mod tests {
         super::upgrade_older_world(&dir).unwrap();
         assert_eq!(version(&dir), Some(i64::from(super::DATA_VERSION)));
         super::upgrade_older_world(&dir).unwrap();
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn region_files_kept_open_stay_under_vanillas_cache_size() {
-        let open_fds = || horizon_platform::fs::read_dir("/dev/fd").map_or(0, |d| d.count());
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-save-fds-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let open_fds = || horizon_std::fs::read_dir("/dev/fd").map_or(0, |d| d.count());
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-save-fds-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let before = open_fds();
         let held = super::cached_region(
@@ -6175,15 +6171,13 @@ mod tests {
             assert_eq!(save.load_entities(i * 32, 0), vec![entity(i)]);
         }
         drop(held);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn write_completion_polls_without_waiting_and_keeps_latest_snapshot() {
-        let dir = horizon_platform::env::temp_dir().join(format!(
-            "horizon-save-poll-{}",
-            horizon_platform::process::id()
-        ));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-save-poll-{}", horizon_std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let lock = super::SessionLock::acquire(&dir).unwrap();
         let path = save.region_path("entities", 0, 0);
@@ -6213,19 +6207,19 @@ mod tests {
                 .is_empty()
         );
         drop((reopened, save, lock));
-        let _ = horizon_platform::fs::remove_dir_all(dir);
+        let _ = horizon_std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn failed_async_writes_are_readable_and_never_reported_durable() {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-save-failure-{}",
-            horizon_platform::process::id()
+            horizon_std::process::id()
         ));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         // A file where a directory is needed causes a real writer I/O error.
-        horizon_platform::fs::write(dir.join("entities"), b"blocked").unwrap();
+        horizon_std::fs::write(dir.join("entities"), b"blocked").unwrap();
         let save = super::SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
         let entity = Tag::compound([("version", Tag::Int(3))]);
         save.save_entities_later(vec![((0, 0), vec![entity.clone()])])
@@ -6236,40 +6230,38 @@ mod tests {
         // The failure stays visible on subsequent barriers too.
         assert!(save.flush().is_err());
         drop(save);
-        let _ = horizon_platform::fs::remove_dir_all(dir);
+        let _ = horizon_std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn session_lock_is_exclusive() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-lock-{}", horizon_platform::process::id()));
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-lock-{}", horizon_std::process::id()));
         let first = super::SessionLock::acquire(&dir).expect("first lock");
         assert!(super::SessionLock::acquire(&dir).is_err());
         drop(first);
         // Windows refuses a read through another handle while the file is
         // locked, so the bytes are read once the lock is released.
         assert_eq!(
-            horizon_platform::fs::read(dir.join("session.lock")).unwrap(),
+            horizon_std::fs::read(dir.join("session.lock")).unwrap(),
             [0x26, 0x03]
         );
         assert!(super::SessionLock::acquire(&dir).is_ok());
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
     /// #749: a copy of the lock's descriptor (a child process spawned on
     /// another thread holds one until it execs) must not keep a released
     /// world locked.
     #[test]
     fn session_lock_releases_while_a_descriptor_copy_lives() {
-        let dir = horizon_platform::env::temp_dir().join(format!(
-            "horizon-lock-copy-{}",
-            horizon_platform::process::id()
-        ));
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-lock-copy-{}", horizon_std::process::id()));
         let lock = super::SessionLock::acquire(&dir).expect("first lock");
         let copy = lock.0.try_clone().unwrap();
         drop(lock);
         assert!(super::SessionLock::acquire(&dir).is_ok());
         drop(copy);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn crafter_block_entity_round_trips() {
@@ -6998,8 +6990,8 @@ mod tests {
     /// made with.
     #[test]
     fn the_level_data_holds_the_difficulty() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-difficulty-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-difficulty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut level = Level {
             name: "Test".into(),
@@ -7026,7 +7018,7 @@ mod tests {
     /// Dedicated world saves must not overwrite separately managed player data.
     #[test]
     fn dedicated_world_save_preserves_player_file() {
-        let dir = horizon_platform::env::temp_dir().join(format!(
+        let dir = horizon_std::env::temp_dir().join(format!(
             "horizon-dedicated-player-save-{}",
             std::process::id()
         ));
@@ -7069,8 +7061,8 @@ mod tests {
 
     #[test]
     fn level_round_trips_through_the_vanilla_files() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-level-{}", horizon_platform::process::id()));
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-level-{}", horizon_std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut level = Level {
             name: "Test".into(),
@@ -7307,9 +7299,9 @@ mod tests {
     #[test]
     fn level_save_keeps_changed_rules() {
         use crate::gamerules::{GameRules, Value};
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-gamerules-level-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let mut level = super::Level::default();
         level.write(&dir).unwrap();
         // Rules changed while playing, then saved and loaded again.
@@ -7324,7 +7316,7 @@ mod tests {
         let read = super::Level::read(&dir).unwrap();
         assert_eq!(read.game_rules, rules.by_name());
         assert_eq!(read.game_rule("advance_time"), 0);
-        let _ = horizon_platform::fs::remove_dir_all(dir);
+        let _ = horizon_std::fs::remove_dir_all(dir);
     }
 
     /// A save written before the key was namespaced holds an id twice, once bare: vanilla
@@ -7394,8 +7386,8 @@ mod tests {
     }
 
     fn gen_world(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-{name}-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -7575,7 +7567,7 @@ mod tests {
     #[test]
     fn low_disk_space_is_under_64_mib_usable() {
         assert_eq!(LOW_DISK_SPACE, 64 * 1024 * 1024);
-        let dir = horizon_platform::env::temp_dir();
+        let dir = horizon_std::env::temp_dir();
         assert!(estimate_disk_space(&dir) > 0);
         assert_eq!(
             low_disk_space(&dir),
@@ -7592,8 +7584,8 @@ mod tests {
     #[test]
     fn mod_attachments_save_in_horizons_namespace_only_when_some() {
         use horizon_world::attachments::Attachments;
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-attach-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-attach-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let save = SaveDir::new(root.clone(), LevelShape::OVERWORLD);
         let file = root.join("data/horizon/attachments.dat");
@@ -7619,8 +7611,8 @@ mod tests {
 
     #[test]
     fn forced_chunks_survive_dimension_restarts_and_removals() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-forced-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-forced-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let dimensions = [
             "minecraft:overworld",
@@ -7741,9 +7733,9 @@ mod tests {
 
     #[test]
     fn older_records_of_a_current_world_upgrade_as_they_are_read() {
-        let world = horizon_platform::env::temp_dir()
-            .join(format!("horizon-lazy-dv-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let world =
+            horizon_std::env::temp_dir().join(format!("horizon-lazy-dv-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&world);
         let save = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
@@ -7795,7 +7787,7 @@ mod tests {
         );
         // Decoded, it keeps its blocks: read raw, the 26.x decoder finds no `id` in a
         // 1.20 palette (`Name`) and the whole column is air.
-        if let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") {
+        if let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") {
             let root = PathBuf::from(root);
             let assets = crate::assets::Assets::load(&root).expect("assets");
             let biomes = Biomes::load(&root).expect("biomes");
@@ -7834,14 +7826,14 @@ mod tests {
         let item = entities[0].get("Item").expect("the item stack");
         assert_eq!(item.get("count"), Some(&Tag::Int(3)));
         assert!(item.get("Count").is_none());
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let _ = horizon_std::fs::remove_dir_all(&world);
     }
 
     #[test]
     fn old_chunks_are_found_in_the_saved_records_and_old_poi_upgrade() {
-        let world = horizon_platform::env::temp_dir()
-            .join(format!("horizon-lazy-old-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let world =
+            horizon_std::env::temp_dir().join(format!("horizon-lazy-old-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&world);
         let nether = SaveDir::new(
             super::dimension_dir(&world, "minecraft:the_nether"),
             LevelShape::NETHER,
@@ -7908,14 +7900,14 @@ mod tests {
             number(poi.tag.get("DataVersion")),
             Some(i64::from(DATA_VERSION))
         );
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let _ = horizon_std::fs::remove_dir_all(&world);
     }
 
     #[test]
     fn a_chunk_from_before_1_18_is_brought_to_the_current_layout() {
-        let world = horizon_platform::env::temp_dir()
-            .join(format!("horizon-lazy-117-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let world =
+            horizon_std::env::temp_dir().join(format!("horizon-lazy-117-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&world);
         let save = SaveDir::new(
             super::dimension_dir(&world, "minecraft:overworld"),
             LevelShape::OVERWORLD,
@@ -7961,7 +7953,7 @@ mod tests {
         assert_eq!(number(chunk.tag.get("xPos")), Some(0));
         // 1.18's height fix: an Overworld chunk older than the new heights blends with them.
         assert!(chunk.tag.get("blending_data").is_some());
-        let _ = horizon_platform::fs::remove_dir_all(&world);
+        let _ = horizon_std::fs::remove_dir_all(&world);
     }
 
     /// A chunk as Bobby leaves it on disk, its palettes in both shapes: a
@@ -7971,7 +7963,7 @@ mod tests {
     #[test]
     fn far_terrain_reads_and_keeps_bobby_chunks() {
         use crate::server_terrain::{Bobby, DecodeChunk, ServerTerrain};
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES") else {
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
             return;
         };
         let root = PathBuf::from(root);
@@ -7979,7 +7971,7 @@ mod tests {
         let biomes = Arc::new(Biomes::load(&root).expect("biomes"));
         let facts = crate::blocks::BlockFacts::load(&root, assets.registry).expect("facts");
         let dir =
-            horizon_platform::env::temp_dir().join(format!("horizon-bobby-{}", std::process::id()));
+            horizon_std::env::temp_dir().join(format!("horizon-bobby-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let (own, bobby) = (dir.join("own"), dir.join("bobby"));
         fs::create_dir_all(&bobby).unwrap();
@@ -8082,8 +8074,8 @@ mod tests {
     fn far_terrain_reads_a_real_bobby_cache() {
         use crate::server_terrain::{Bobby, DecodeChunk, ServerTerrain, bobby_level_dir};
         let (Some(resources), Some(cache)) = (
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES"),
-            horizon_platform::env::var_os("HORIZON_TEST_BOBBY"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_BOBBY"),
         ) else {
             return;
         };
@@ -8113,7 +8105,7 @@ mod tests {
                 "{address} {seed}: {} chunks",
                 chunks.len()
             );
-            let own = horizon_platform::env::temp_dir()
+            let own = horizon_std::env::temp_dir()
                 .join(format!("horizon-real-bobby-{seed}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&own);
             let biomes = biomes.clone();
@@ -8271,7 +8263,7 @@ mod far_census {
                         let n = name(span.state);
                         if kind(&n) == "fluid" && (k == 0 || spans[k - 1].max < span.min) {
                             out.water_over_air += 1;
-                            if horizon_platform::env::var_os("HORIZON_FAR_DEBUG").is_some() {
+                            if horizon_std::env::var_os("HORIZON_FAR_DEBUG").is_some() {
                                 println!(
                                     "  fluid over air at {} {} y {}..{} {n}",
                                     origin.0 + x as i32 * origin.2,
@@ -8293,7 +8285,7 @@ mod far_census {
             out.cells += cells[root];
             let (y, state) = top[root].unwrap();
             *out.kinds.entry(kind(&name(state))).or_default() += 1;
-            if horizon_platform::env::var_os("HORIZON_FAR_DEBUG").is_some() {
+            if horizon_std::env::var_os("HORIZON_FAR_DEBUG").is_some() {
                 println!(
                     "  floating at {:?} top {y} {} ({} cells)",
                     at[root],
@@ -8307,8 +8299,7 @@ mod far_census {
     #[test]
     #[ignore = "requires prepared data and a save (see the module docs)"]
     fn far_floating_cells_per_level() {
-        let var =
-            |name: &str| horizon_platform::env::var(name).unwrap_or_else(|_| panic!("{name}"));
+        let var = |name: &str| horizon_std::env::var(name).unwrap_or_else(|_| panic!("{name}"));
         let root = PathBuf::from(var("HORIZON_TEST_RESOURCES"));
         let world = PathBuf::from(var("HORIZON_FAR_SAVE"));
         let seed: i64 = var("HORIZON_FAR_SEED").parse().unwrap();
@@ -8339,7 +8330,7 @@ mod far_census {
                 .state(state)
                 .map_or_else(String::new, |s| s.name.to_string())
         };
-        let limit: usize = horizon_platform::env::var("HORIZON_FAR_TILES")
+        let limit: usize = horizon_std::env::var("HORIZON_FAR_TILES")
             .ok()
             .and_then(|n| n.parse().ok())
             .unwrap_or(48);
@@ -8362,7 +8353,7 @@ mod far_census {
             let step = tiles.len().div_ceil(limit).max(1);
             let mut saved = Census::default();
             let mut seeded = Census::default();
-            let started = horizon_platform::time::Instant::now();
+            let started = horizon_std::time::Instant::now();
             for &(tx, tz) in tiles.iter().step_by(step) {
                 let (x, z) = (tx * size - width, tz * size - width);
                 let columns = sampler.grid(x, z, width, 18);

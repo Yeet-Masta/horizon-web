@@ -6,7 +6,7 @@
 use super::keyframes::Animation;
 use super::path::PathType;
 use crate::blocks::{BlockFacts, Fluid};
-use horizon_platform::fs;
+use horizon_std::fs;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 
@@ -48,17 +48,16 @@ pub struct MobData {
     pub heightmaps: HashMap<String, String>,
     pub animations: HashMap<String, Animation>,
     /// Replaced when the resource packs change (the rest of `MobData` never is).
-    pub villager_hats: horizon_platform::sync::RwLock<super::villager_hats::VillagerHats>,
+    pub villager_hats: horizon_std::sync::RwLock<super::villager_hats::VillagerHats>,
     /// The packs' custom entity models (OptiFine CEM); replaced when the resource packs change.
-    pub cem: horizon_platform::sync::RwLock<std::sync::Arc<super::cem::CemModels>>,
+    pub cem: horizon_std::sync::RwLock<std::sync::Arc<super::cem::CemModels>>,
     /// The packs' random entity textures, replaced with them too.
     pub random_textures:
-        horizon_platform::sync::RwLock<horizon_optifine::random_textures::RandomTextures>,
+        horizon_std::sync::RwLock<horizon_optifine::random_textures::RandomTextures>,
     /// The packs' emissive overlays of entity textures, replaced with them too.
-    pub emissive:
-        horizon_platform::sync::RwLock<std::sync::Arc<horizon_optifine::emissive::Emissive>>,
+    pub emissive: horizon_std::sync::RwLock<std::sync::Arc<horizon_optifine::emissive::Emissive>>,
     /// ETF's blinking textures, replaced with the packs too.
-    pub blinks: horizon_platform::sync::RwLock<horizon_optifine::blink::Blinks>,
+    pub blinks: horizon_std::sync::RwLock<horizon_optifine::blink::Blinks>,
     /// Biome tags (spawns_warm_variant_farm_animals, is_ocean...) by tag id.
     pub biome_tags: HashMap<String, std::collections::HashSet<String>>,
     /// Entity type tags (`data/*/tags/entity_type`).
@@ -95,14 +94,14 @@ impl MobData {
             crate::items::load_tags(root, "entity_type", &horizon_world::loot::PackOverlay::NONE)
                 .unwrap_or_default();
         data.villager_hats =
-            horizon_platform::sync::RwLock::new(super::villager_hats::VillagerHats::load(root));
+            horizon_std::sync::RwLock::new(super::villager_hats::VillagerHats::load(root));
         let random = horizon_optifine::random_textures::RandomTextures::scan(root);
         let blinks = horizon_optifine::blink::Blinks::scan(root, &random);
         let mut emissive = horizon_optifine::emissive::Emissive::scan(root, &random);
         emissive.pair_beside(root, blinks.files());
-        data.emissive = horizon_platform::sync::RwLock::new(std::sync::Arc::new(emissive));
-        data.blinks = horizon_platform::sync::RwLock::new(blinks);
-        data.random_textures = horizon_platform::sync::RwLock::new(random);
+        data.emissive = horizon_std::sync::RwLock::new(std::sync::Arc::new(emissive));
+        data.blinks = horizon_std::sync::RwLock::new(blinks);
+        data.random_textures = horizon_std::sync::RwLock::new(random);
         data
     }
     /// Only the keyframe animation definitions of `mob-data.json`.

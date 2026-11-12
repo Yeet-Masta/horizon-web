@@ -986,16 +986,16 @@ mod tests {
     /// for keeps what `load_tags` read.
     #[test]
     fn world_packs_tags_reach_every_synchronized_registry() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-pack-tags-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-pack-tags-{}", std::process::id()));
         let block_tags = root.join("tags/block");
-        horizon_platform::fs::create_dir_all(block_tags.join("mineable")).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(block_tags.join("mineable")).unwrap();
+        horizon_std::fs::write(
             block_tags.join("climbable.json"),
             r#"{"values":["minecraft:ladder"]}"#,
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             block_tags.join("mineable/pickaxe.json"),
             r#"{"values":["minecraft:stone"]}"#,
         )
@@ -1040,7 +1040,7 @@ mod tests {
         ];
         let overlay = horizon_world::loot::PackOverlay { files: &files };
         SyncData::merge_pack_tags(&mut tags, &root, &overlay, &builtin, &dynamic);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let sent = |registry: &str, tag: &str| -> Vec<i32> {
             tags.registries
                 .iter()

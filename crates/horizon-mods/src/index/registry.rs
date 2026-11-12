@@ -119,7 +119,7 @@ impl Cache {
     /// `<registry>/versions/<id>.json`; empty when there is none.
     pub fn read(registry: &Path, id: &str) -> Result<Cache, String> {
         let path = registry.join(CACHE).join(format!("{id}.json"));
-        match horizon_platform::fs::read_to_string(&path) {
+        match horizon_std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Cache::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
@@ -275,7 +275,7 @@ pub fn load(registry: &Path) -> Result<(Vec<Entry>, Vec<Revoked>), Vec<String>> 
     let mut errors = Vec::new();
     let mut entries = Vec::new();
     let dir = registry.join(ENTRIES);
-    let mut paths: Vec<PathBuf> = match horizon_platform::fs::read_dir(&dir) {
+    let mut paths: Vec<PathBuf> = match horizon_std::fs::read_dir(&dir) {
         Ok(read) => read.filter_map(|e| e.ok().map(|e| e.path())).collect(),
         Err(e) => return Err(vec![format!("{}: {e}", dir.display())]),
     };
@@ -286,7 +286,7 @@ pub fn load(registry: &Path) -> Result<(Vec<Entry>, Vec<Revoked>), Vec<String>> 
             errors.push(format!("{ENTRIES}/{name}: only <id>.toml files go here"));
             continue;
         };
-        let parsed = horizon_platform::fs::read_to_string(&path)
+        let parsed = horizon_std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|text| toml::from_str::<Entry>(&text).map_err(|e| e.to_string()));
         match parsed {
@@ -298,7 +298,7 @@ pub fn load(registry: &Path) -> Result<(Vec<Entry>, Vec<Revoked>), Vec<String>> 
             Err(e) => errors.push(format!("{ENTRIES}/{name}: {e}")),
         }
     }
-    let revoked = match horizon_platform::fs::read_to_string(registry.join(REVOKED)) {
+    let revoked = match horizon_std::fs::read_to_string(registry.join(REVOKED)) {
         Ok(text) => match toml::from_str::<RevokedFile>(&text) {
             Ok(file) => file.revoked,
             Err(e) => {
@@ -434,13 +434,13 @@ fn image(
     } else {
         rules::MAX_SCREENSHOT
     };
-    let checked = horizon_platform::fs::metadata(src.registry.join(path))
+    let checked = horizon_std::fs::metadata(src.registry.join(path))
         .map_err(|e| format!("{path}: {e}"))
         .and_then(|m| {
             if m.len() > max {
                 return Err(format!("{path} is over {} KiB", max >> 10));
             }
-            let bytes = horizon_platform::fs::read(src.registry.join(path))
+            let bytes = horizon_std::fs::read(src.registry.join(path))
                 .map_err(|e| format!("{path}: {e}"))?;
             if icon {
                 rules::check_icon(&bytes).map_err(|e| format!("{path}: {e}"))
@@ -486,7 +486,7 @@ fn version_at(
         return Err(format!("published {:?} is not YYYY-MM-DD", v.published));
     }
     hex64(&v.sha256)?;
-    let size = horizon_platform::fs::metadata(path)
+    let size = horizon_std::fs::metadata(path)
         .map_err(|e| format!("its file {}: {e}", v.sha256))?
         .len();
     if super::sha256_file(path)? != v.sha256 {

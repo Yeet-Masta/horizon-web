@@ -5,7 +5,7 @@
 //! pack that fails is refused with its problems in the chat while the last good one keeps
 //! drawing.
 
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::{
     hash::{Hash, Hasher},
     path::Path,
@@ -161,10 +161,10 @@ fn not_drawn(m: &Manifest) -> Option<String> {
 /// option values (`None` when the pack is unreadable).
 fn fingerprint(path: &Path) -> Option<u64> {
     fn walk(path: &Path, hasher: &mut std::hash::DefaultHasher) -> Option<()> {
-        let meta = horizon_platform::fs::metadata(path).ok()?;
+        let meta = horizon_std::fs::metadata(path).ok()?;
         path.hash(hasher);
         if meta.is_dir() {
-            let mut entries: Vec<_> = horizon_platform::fs::read_dir(path)
+            let mut entries: Vec<_> = horizon_std::fs::read_dir(path)
                 .ok()?
                 .flatten()
                 .map(|e| e.path())

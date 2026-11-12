@@ -1921,7 +1921,7 @@ mod footer_label_tests {
     #[test]
     #[ignore = "requires prepared language data in HORIZON_TEST_RESOURCES or .local/horizon-client/26.3"]
     fn the_footer_draws_in_every_language_file() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1930,14 +1930,13 @@ mod footer_label_tests {
         let atlas = crate::hud::HudAtlas::build(&root).unwrap();
         let m = Measure(&atlas.font);
         let before = lang::code();
-        let mut codes: Vec<String> =
-            horizon_platform::fs::read_dir(root.join("assets/minecraft/lang"))
-                .unwrap()
-                .filter_map(|e| {
-                    let name = e.ok()?.file_name().into_string().ok()?;
-                    name.strip_suffix(".json").map(str::to_owned)
-                })
-                .collect();
+        let mut codes: Vec<String> = horizon_std::fs::read_dir(root.join("assets/minecraft/lang"))
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".json").map(str::to_owned)
+            })
+            .collect();
         codes.sort();
         assert!(codes.len() >= 143, "{}", codes.len());
         let mut scrolling = Vec::new();

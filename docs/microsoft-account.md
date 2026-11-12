@@ -294,7 +294,7 @@ the session service as above (`auth::join_server_web`).
 A page can't call these services itself (they allow no other site's pages), so every request goes
 through the web build's relay (`horizon-web-relay`, which opens TCP connections to the hosts in
 `ACCOUNT_HOSTS`, port 443 only) with TLS spoken in the game's module (rustls with RustCrypto's
-algorithms, `horizon_platform::web::https`): the relay carries ciphertext and never sees a token.
+algorithms, `horizon_std::web::https`): the relay carries ciphertext and never sees a token.
 The account's tokens stay in the browser's IndexedDB, encrypted with a non-extractable WebCrypto
 key the page makes, apart from the game folder; Sign out deletes them. The client ID is Horizon's,
 built in (`CLIENT_ID` in `web_account.rs`); the build's `HORIZON_MSA_CLIENT_ID` or the page's

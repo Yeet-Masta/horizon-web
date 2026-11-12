@@ -706,12 +706,12 @@ mod tests {
                 simulation_distance: distance,
             };
             let rounds = 20;
-            let t = horizon_platform::time::Instant::now();
+            let t = horizon_std::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(compute_sparse(std::hint::black_box(&s)));
             }
             let map_build = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
-            let t = horizon_platform::time::Instant::now();
+            let t = horizon_std::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(compute(std::hint::black_box(&s)));
             }
@@ -719,7 +719,7 @@ mod tests {
             let mut tickets = ChunkTickets::default();
             tickets.update(Some(s.clone()));
             let mut moved = s.clone();
-            let t = horizon_platform::time::Instant::now();
+            let t = horizon_std::time::Instant::now();
             for _ in 0..rounds {
                 moved.players[0].0 += 1;
                 tickets.update(Some(moved.clone()));
@@ -730,13 +730,13 @@ mod tests {
             // A tick's questions: every chunk within 12 of every player.
             let (map, selected) = (Map::Sparse(compute_sparse(&s)), compute(&s));
             let tiled = Map::Tiled(Tiled::new(&s));
-            let t = horizon_platform::time::Instant::now();
+            let t = horizon_std::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(Tiled::new(std::hint::black_box(&s)));
             }
             let tiled_build = t.elapsed().as_secs_f64() * 1e3 / rounds as f64;
             let ask = |m: &Map| {
-                let t = horizon_platform::time::Instant::now();
+                let t = horizon_std::time::Instant::now();
                 let mut n = 0u32;
                 for _ in 0..rounds {
                     for &(px, pz) in &at {

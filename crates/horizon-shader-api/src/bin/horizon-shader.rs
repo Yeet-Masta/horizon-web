@@ -3,8 +3,8 @@
 //! - `new <dir> [--template post|sky|material] [--name "Name"]`: a pack from a template.
 //! - `check <pack>... [--json]`: the check the game, the launcher and the registry run.
 //! - `pack <dir> [--out <file.hshader>]`: check, then write the reproducible `.hshader`.
-use horizon_platform::fs::PathExt as _;
 use horizon_shader_api::{EXTENSION, MANIFEST, Pack, Problem, check, package::sha256_hex};
+use horizon_std::fs::PathExt as _;
 use serde::Serialize;
 use std::{path::Path, process::ExitCode};
 
@@ -48,7 +48,7 @@ const TEMPLATES: [(&str, [(&str, &str); 2]); 3] = [
 ];
 
 fn main() -> ExitCode {
-    let args: Vec<String> = horizon_platform::env::args().skip(1).collect();
+    let args: Vec<String> = horizon_std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("new") => new(&args[1..]),
         Some("check") => check_command(&args[1..]),
@@ -111,13 +111,13 @@ fn new(args: &[String]) -> Result<(), String> {
         .collect();
     id.truncate(64);
     let name = flag(args, "--name").map_or_else(|| base.replace(['-', '_'], " "), str::to_owned);
-    horizon_platform::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    horizon_std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for (file, text) in files {
         let text = text
             .replace("{{id}}", &id)
             .replace("{{name}}", &name.replace('"', "'"));
         let path = dir.join(file);
-        horizon_platform::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        horizon_std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     println!(
         "Made {} from the {template} template. Edit it, then: horizon-shader check {}",
@@ -188,9 +188,7 @@ fn check_one(path: &Path) -> CheckJson {
     out.sha256 = if path.fs_is_dir() {
         pack.sha256().ok()
     } else {
-        horizon_platform::fs::read(path)
-            .ok()
-            .map(|b| sha256_hex(&b))
+        horizon_std::fs::read(path).ok().map(|b| sha256_hex(&b))
     };
     match check(&pack) {
         Ok(report) => {
@@ -304,7 +302,7 @@ fn pack(args: &[String]) -> Result<(), String> {
         },
         Into::into,
     );
-    horizon_platform::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    horizon_std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
     println!("Wrote {} (sha256 {})", out.display(), sha256_hex(&bytes));
     Ok(())
 }

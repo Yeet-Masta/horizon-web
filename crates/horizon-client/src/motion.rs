@@ -8,7 +8,7 @@ use horizon_core::{
     position::BlockPos,
     random::RandomSource,
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::{
     attribute_map::ValueKind,
     attributes::{Modifier, Operation, entity::Catalog, live::LiveAttributes},
@@ -3084,7 +3084,7 @@ mod tests {
 
     #[test]
     fn a_glide_that_just_ended_moves_slowly_until_the_pose_changes() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3115,7 +3115,7 @@ mod tests {
 
     #[test]
     fn sword_sweep_requires_charge_ground_and_slow_horizontal_movement() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3153,7 +3153,7 @@ mod tests {
     fn max_health_modifier_changes_clamp_health() {
         // #8573: LivingEntity.onAttributeUpdated clamps health to max_health
         // for every modifier change, with no explicit clamp call.
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3234,7 +3234,7 @@ mod tests {
     fn attribute_bases_survive_a_save_and_reload() {
         // #4425: LivingEntity.addAdditionalSaveData writes AttributeMap.pack
         // and readAdditionalSaveData applies it (before the health).
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3293,7 +3293,7 @@ mod tests {
 
     #[test]
     fn player_stands_walks_sneaks_and_jumps_on_ghast() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3435,7 +3435,7 @@ mod tests {
 
     #[test]
     fn a_lava_cauldron_burns_the_player_inside_it() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3484,7 +3484,7 @@ mod tests {
 
     #[test]
     fn a_water_cauldron_puts_out_a_burning_player() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3542,7 +3542,7 @@ mod tests {
 
     #[test]
     fn standing_in_a_wither_rose_asks_for_its_effect() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3618,7 +3618,7 @@ mod tests {
     /// which reads `ticks_frozen`, never shows.
     #[test]
     fn a_passenger_in_powder_snow_freezes_and_thaws() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3692,7 +3692,7 @@ mod tests {
 
     #[test]
     fn walking_through_powder_snow_asks_for_a_snowflake() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4070,7 +4070,7 @@ mod tests {
 
     #[test]
     fn creative_and_spectator_preserve_hunger_when_switching_from_survival() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -4139,7 +4139,7 @@ mod tests {
 
     #[test]
     fn player_fire_damage_queues_hurt_sound_only_for_fresh_hits() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5020,7 +5020,7 @@ mod tests {
 
     #[test]
     fn resident_water_and_lava_are_not_treated_as_air() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))

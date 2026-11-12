@@ -8,14 +8,14 @@ use super::hub::{HostEvent, Hub, TickCtx};
 use crate::collisions::SceneCollisions;
 use horizon_anticheat::{Check, Config, Strikes};
 use horizon_core::geometry::{Aabb, Vec3};
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 use horizon_world::nbt::{JavaString, Tag};
 use std::io::Write;
 
 pub struct Anticheat {
     pub config: Config,
     /// `log`, opened at the first flag.
-    log: Option<horizon_platform::fs::File>,
+    log: Option<horizon_std::fs::File>,
     /// The players' kicks by check, read from `strikes` at the first kick.
     strikes: Option<Strikes>,
     /// When the previous server tick started, for the timer's balance.
@@ -41,9 +41,9 @@ impl Anticheat {
         if self.log.is_none() {
             let path = std::path::Path::new(&self.config.log);
             if let Some(dir) = path.parent() {
-                let _ = horizon_platform::fs::create_dir_all(dir);
+                let _ = horizon_std::fs::create_dir_all(dir);
             }
-            self.log = horizon_platform::fs::OpenOptions::new()
+            self.log = horizon_std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
@@ -60,7 +60,7 @@ impl Anticheat {
     fn strike(&mut self, uuid: u128, check: Check) -> (u32, bool) {
         let path = std::path::Path::new(&self.config.strikes);
         let strikes = self.strikes.get_or_insert_with(|| {
-            horizon_platform::fs::read(path)
+            horizon_std::fs::read(path)
                 .ok()
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
                 .unwrap_or_default()
@@ -70,7 +70,7 @@ impl Anticheat {
         if !self.config.strikes.is_empty()
             && let Ok(json) = serde_json::to_vec_pretty(strikes)
         {
-            let _ = horizon_platform::fs::write(path, json);
+            let _ = horizon_std::fs::write(path, json);
         }
         kick
     }

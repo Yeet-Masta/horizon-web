@@ -1,8 +1,8 @@
 //! Vanilla's `context_int_provider` and `context_float_provider` values (furnace
 //! fuel times, brewing times), evaluated from the data pack's JSON.
 use crate::items::{ItemStack, Items};
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path};
 

@@ -7,7 +7,7 @@ use crate::{
     items::{ItemStack, Items},
     providers::Providers,
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::loot::PackOverlay;
 use serde_json::Value;
 use std::{collections::HashSet, path::Path};

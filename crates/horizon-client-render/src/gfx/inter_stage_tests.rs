@@ -144,7 +144,7 @@ fn composed() -> Vec<(&'static str, Vec<&'static str>, String)> {
 }
 
 fn wgsl_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in horizon_platform::fs::read_dir(dir).unwrap().flatten() {
+    for entry in horizon_std::fs::read_dir(dir).unwrap().flatten() {
         let path = entry.path();
         if path.is_dir() {
             wgsl_files(&path, out);
@@ -171,7 +171,7 @@ fn audited() -> Vec<(String, Vec<Interface>)> {
         .collect();
     for file in files {
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
-        let source = horizon_platform::fs::read_to_string(&file).unwrap();
+        let source = horizon_std::fs::read_to_string(&file).unwrap();
         let alone = naga::front::wgsl::parse_str(&source).is_ok();
         let part = composed.iter().any(|(_, parts, _)| parts.contains(&&*name));
         assert!(

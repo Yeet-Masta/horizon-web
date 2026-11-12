@@ -4,7 +4,7 @@
 //! thread so gameplay frame rates and latency are unaffected.
 
 use super::mcpr::{McprWriter, Metadata, TimestampedPacket};
-use horizon_platform::{
+use horizon_std::{
     thread::{self, ThreadHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -45,7 +45,7 @@ pub struct StudioRecorder {
     packet_count: Arc<AtomicU64>,
     bytes_written: Arc<AtomicU64>,
     sender: SyncSender<RecordCommand>,
-    failure: Arc<horizon_platform::sync::Mutex<Option<String>>>,
+    failure: Arc<horizon_std::sync::Mutex<Option<String>>>,
     worker: Option<ThreadHandle<io::Result<PathBuf>>>,
     start_time: Instant,
     dest_path: PathBuf,
@@ -72,7 +72,7 @@ impl StudioRecorder {
         let worker_active = active.clone();
         let worker_count = packet_count.clone();
         let worker_bytes = bytes_written.clone();
-        let failure = Arc::new(horizon_platform::sync::Mutex::new(None));
+        let failure = Arc::new(horizon_std::sync::Mutex::new(None));
         let worker_failure = failure.clone();
         let thread_dest = dest_path.clone();
 
@@ -241,11 +241,11 @@ pub fn generate_recording_filename(name: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::fs;
+    use horizon_std::fs;
 
     #[test]
     fn test_studio_recorder_lifecycle() {
-        let temp_dir = horizon_platform::env::temp_dir().join(format!(
+        let temp_dir = horizon_std::env::temp_dir().join(format!(
             "studio_rec_{}_{}",
             std::process::id(),
             SystemTime::now()

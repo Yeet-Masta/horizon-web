@@ -1071,7 +1071,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/horizon-ctl-commands.md"
         );
-        let on_disk = horizon_platform::fs::read_to_string(path).unwrap_or_default();
+        let on_disk = horizon_std::fs::read_to_string(path).unwrap_or_default();
         assert!(
             on_disk == markdown(),
             "docs/horizon-ctl-commands.md is out of date: run `horizon-ctl help --markdown > docs/horizon-ctl-commands.md`"

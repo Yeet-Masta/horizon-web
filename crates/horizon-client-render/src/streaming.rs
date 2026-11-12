@@ -13,7 +13,7 @@ use crate::{
     world::World,
 };
 use horizon_core::biome::BiomeZoom;
-use horizon_platform::sync::{Mutex, RwLock};
+use horizon_std::sync::{Mutex, RwLock};
 use horizon_threads::jobs::{Class, PerWorker, Rank, Registration, Source};
 use horizon_world::block_render::FaceVisibility;
 use horizon_world::worldgen::decoration_order::DecorationOrder;
@@ -24,8 +24,7 @@ use std::{
 
 /// How long a worker waits with nothing to do before it gives back its
 /// generator's scratch buffers ([`ChunkGenerator::idle`]).
-pub const IDLE_RELEASE: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_secs(5);
+pub const IDLE_RELEASE: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(5);
 
 /// Worker CPU time and job counts by kind, for benchmarks
 /// (`examples/gen_light_bench.rs`). Off unless enabled: a relaxed load per
@@ -409,7 +408,7 @@ impl Mailbox {
         self.try_lock()?.pop_front()
     }
     #[cfg(not(target_family = "wasm"))]
-    fn recv_timeout(&self, timeout: horizon_platform::time::Duration) -> Option<Done> {
+    fn recv_timeout(&self, timeout: horizon_std::time::Duration) -> Option<Done> {
         let done = self.done.lock().unwrap();
         let (mut done, _) = self
             .arrived
@@ -422,8 +421,8 @@ impl Mailbox {
     /// worker (an integrated server's) and spinning on the page. Without
     /// threads the jobs it waits for run here meanwhile.
     #[cfg(target_family = "wasm")]
-    fn recv_timeout(&self, timeout: horizon_platform::time::Duration) -> Option<Done> {
-        use horizon_platform::time::{Duration, Instant};
+    fn recv_timeout(&self, timeout: horizon_std::time::Duration) -> Option<Done> {
+        use horizon_std::time::{Duration, Instant};
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(done) = self.try_recv() {
@@ -433,11 +432,11 @@ impl Mailbox {
             if now >= deadline {
                 return None;
             }
-            if !horizon_platform::THREADS {
+            if !horizon_std::THREADS {
                 let mut once = true;
                 horizon_threads::jobs::pool().run_here(0, || std::mem::take(&mut once));
-            } else if horizon_platform::thread::may_block() {
-                horizon_platform::thread::sleep((deadline - now).min(Duration::from_micros(500)));
+            } else if horizon_std::thread::may_block() {
+                horizon_std::thread::sleep((deadline - now).min(Duration::from_micros(500)));
             } else {
                 std::hint::spin_loop();
             }
@@ -446,8 +445,7 @@ impl Mailbox {
 }
 /// How long the web build's frame takes in finished jobs (`Streaming::update`).
 #[cfg(target_family = "wasm")]
-const WEB_RESULTS_TIME: horizon_platform::time::Duration =
-    horizon_platform::time::Duration::from_millis(4);
+const WEB_RESULTS_TIME: horizon_std::time::Duration = horizon_std::time::Duration::from_millis(4);
 /// [`Streaming::proto_census`].
 #[derive(Debug, Default)]
 pub struct ProtoCensus {
@@ -872,7 +870,7 @@ impl<G: ChunkGenerator> Source for Jobs<G> {
             // The other jobs (saves, light views, freed meshes) are many and short: counted, not
             // timed, so the clock reads don't cost more than they do.
             let cpu = if kind == 6 {
-                horizon_platform::time::Duration::ZERO
+                horizon_std::time::Duration::ZERO
             } else {
                 crate::spans::thread_cpu().unwrap_or_default()
             };
@@ -1682,9 +1680,9 @@ impl Streaming {
         #[cfg(target_family = "wasm")]
         let received = {
             let shared = self.shared.clone();
-            let until = horizon_platform::time::Instant::now() + WEB_RESULTS_TIME;
+            let until = horizon_std::time::Instant::now() + WEB_RESULTS_TIME;
             std::iter::from_fn(move || {
-                (horizon_platform::time::Instant::now() < until)
+                (horizon_std::time::Instant::now() < until)
                     .then(|| shared.done.try_recv())
                     .flatten()
             })
@@ -2340,8 +2338,8 @@ impl Streaming {
             self.save_checked_out(written);
             return;
         }
-        let deadline = horizon_platform::time::Instant::now()
-            + horizon_platform::time::Duration::from_secs(30);
+        let deadline =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(30);
         let aborted = self
             .shared
             .aborted
@@ -2350,7 +2348,7 @@ impl Streaming {
             || (!aborted
                 && (self.decorating > 0 || !self.finishing.is_empty() || !self.viewing.is_empty()))
         {
-            let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
+            let left = deadline.saturating_duration_since(horizon_std::time::Instant::now());
             match self.shared.done.recv_timeout(left) {
                 Some(Done::Decorated(x, z, region, finals, writes)) => {
                     self.receive_decorated(x, z, *region, finals, writes, world)
@@ -2382,7 +2380,7 @@ impl Streaming {
     /// Proto snapshots are checked out to workers before chunk writes, just as
     /// in `save(true)`, so older generation cannot overwrite the final chunks.
     pub fn poll_save(&mut self, world: &mut World) -> bool {
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         while let Some(done) = self.shared.done.try_recv() {
             match done {
                 Done::Decorated(x, z, region, finals, writes) => {
@@ -2393,7 +2391,7 @@ impl Streaming {
                 Done::LightView(x, z, proto, view) => self.receive_light_view(x, z, proto, view),
                 other => self.deferred.push(other),
             }
-            if started.elapsed() >= horizon_platform::time::Duration::from_millis(2) {
+            if started.elapsed() >= horizon_std::time::Duration::from_millis(2) {
                 return false;
             }
         }
@@ -2493,10 +2491,10 @@ impl Streaming {
     /// jobs, most urgent first, for a slice of the frame (`HORIZON_WEB_WORK_MS`).
     #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
     fn pump(&mut self) {
-        use horizon_platform::time::{Duration, Instant};
+        use horizon_std::time::{Duration, Instant};
         static BUDGET: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
         let budget = *BUDGET.get_or_init(|| {
-            let ms = horizon_platform::env::var("HORIZON_WEB_WORK_MS")
+            let ms = horizon_std::env::var("HORIZON_WEB_WORK_MS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8u64);
@@ -2507,7 +2505,7 @@ impl Streaming {
     }
     /// Wait up to `timeout` for a worker to finish a job; the next `update`
     /// takes it. A server pumps generation with this between its ticks.
-    pub fn wait(&mut self, timeout: horizon_platform::time::Duration) {
+    pub fn wait(&mut self, timeout: horizon_std::time::Duration) {
         if let Some(done) = self.shared.done.recv_timeout(timeout) {
             self.deferred.push(done);
         }
@@ -2524,7 +2522,7 @@ pub fn in_view_distance(center: (i32, i32), radius: i32, x: i32, z: i32) -> bool
 }
 /// How long a view's columns are waited for (`ViewArrival`): a server may never
 /// fill it.
-const VIEW_WAIT: horizon_platform::time::Duration = horizon_platform::time::Duration::from_secs(30);
+const VIEW_WAIT: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(30);
 /// Whether the columns of a view (centre, radius) have all arrived, as a client
 /// sees them come: a server forgets the old view's columns, then sends the new
 /// ones nearest first, so the view's outermost ones come last. Single player
@@ -2533,7 +2531,7 @@ const VIEW_WAIT: horizon_platform::time::Duration = horizon_platform::time::Dura
 #[derive(Default)]
 pub struct ViewArrival {
     view: ((i32, i32), i32),
-    since: Option<horizon_platform::time::Instant>,
+    since: Option<horizon_std::time::Instant>,
     arrived: bool,
 }
 impl ViewArrival {
@@ -2544,7 +2542,7 @@ impl ViewArrival {
     pub fn arriving(
         &mut self,
         view: ((i32, i32), i32),
-        now: horizon_platform::time::Instant,
+        now: horizon_std::time::Instant,
         has: impl Fn((i32, i32)) -> bool,
     ) -> bool {
         if self.since.is_none() || view != self.view {
@@ -2570,7 +2568,7 @@ impl ViewArrival {
     }
     /// Whether the view `arriving` was last given changed less than `VIEW_WAIT`
     /// ago: until then sections meshed are its terrain coming in, later an edit's.
-    pub fn recent(&self, now: horizon_platform::time::Instant) -> bool {
+    pub fn recent(&self, now: horizon_std::time::Instant) -> bool {
         self.since
             .is_some_and(|since| now.saturating_duration_since(since) < VIEW_WAIT)
     }
@@ -2974,10 +2972,10 @@ impl Drop for Streaming {
     fn drop(&mut self) {
         self.abort_generation();
         // Saves in flight hold proto chunks nothing else would save.
-        let deadline = horizon_platform::time::Instant::now()
-            + horizon_platform::time::Duration::from_secs(30);
+        let deadline =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(30);
         while self.saving > 0 {
-            let left = deadline.saturating_duration_since(horizon_platform::time::Instant::now());
+            let left = deadline.saturating_duration_since(horizon_std::time::Instant::now());
             match self.shared.done.recv_timeout(left) {
                 Some(Done::Saved(_)) => self.saving -= 1,
                 Some(_) => {}
@@ -3332,13 +3330,13 @@ mod tests {
             .collect();
         assert_eq!(seqs, [1, 2]);
         assert!(mailbox.take().is_empty());
-        let waiting = horizon_platform::time::Instant::now();
+        let waiting = horizon_std::time::Instant::now();
         assert!(
             mailbox
-                .recv_timeout(horizon_platform::time::Duration::from_millis(10))
+                .recv_timeout(horizon_std::time::Duration::from_millis(10))
                 .is_none()
         );
-        assert!(waiting.elapsed() >= horizon_platform::time::Duration::from_millis(10));
+        assert!(waiting.elapsed() >= horizon_std::time::Duration::from_millis(10));
     }
 
     /// Whether the forgotten columns are few (looked up by key) or many
@@ -3614,7 +3612,7 @@ mod tests {
     /// `VIEW_WAIT` at most, and one of no radius not at all.
     #[test]
     fn a_view_has_arrived_once_its_outermost_columns_are_in() {
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         let center = (3, -4);
         for r in 0..=16 {
             let view: FxHashSet<(i32, i32)> = (-r - 1..=r + 1)
@@ -3641,7 +3639,7 @@ mod tests {
         // Moved: waited for again, until `VIEW_WAIT` after the move.
         let (late, ms) = (
             start + VIEW_WAIT,
-            horizon_platform::time::Duration::from_millis(1),
+            horizon_std::time::Duration::from_millis(1),
         );
         assert!(arrival.arriving(((1, 0), 2), start, none));
         assert!(arrival.arriving(((1, 0), 2), late - ms, none));
@@ -3977,7 +3975,7 @@ mod tests {
     #[test]
     #[ignore = "reproducible actual generation scheduler benchmark; run with --ignored --nocapture"]
     fn generation_scan_benchmark() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         let mut f = GenerationFixture::new(32, true);
         f.fill_steady();
@@ -4446,7 +4444,7 @@ mod cover_tests {
                 .collect();
             let rounds = 100;
             let time = |r: &Ranges| {
-                let t = horizon_platform::time::Instant::now();
+                let t = horizon_std::time::Instant::now();
                 let mut n = 0usize;
                 for _ in 0..rounds {
                     for &(x, z) in &columns {
@@ -4458,7 +4456,7 @@ mod cover_tests {
                 std::hint::black_box(n);
                 t.elapsed().as_secs_f64() * 1e3 / f64::from(rounds)
             };
-            let t = horizon_platform::time::Instant::now();
+            let t = horizon_std::time::Instant::now();
             for _ in 0..rounds {
                 std::hint::black_box(ExtraCover::new(std::hint::black_box(&extra)));
             }

@@ -12,7 +12,7 @@ use horizon_client::{
     spans::{self, Span},
     streaming::job_stats,
 };
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -394,7 +394,7 @@ impl Game<'_> {
         });
         let text = summary(&report);
         // The machine's description runs commands: off the tick.
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let mut report = report;
             let hw = horizon_bench::Hardware::detect();
             report["machine"] = json!({
@@ -537,7 +537,7 @@ fn summary(r: &Value) -> String {
 /// a container puts on them and on memory. A server out of threads fails to
 /// start the ones it needs (EAGAIN). Read on Linux; null elsewhere.
 fn process_limits() -> Value {
-    let read = |path: &str| horizon_platform::fs::read_to_string(path).ok();
+    let read = |path: &str| horizon_std::fs::read_to_string(path).ok();
     let threads = read("/proc/self/status").and_then(|s| {
         s.lines()
             .find_map(|l| l.strip_prefix("Threads:"))
@@ -561,11 +561,11 @@ fn process_limits() -> Value {
 }
 
 fn write_report(dir: &Path, report: &Value, text: &str) -> std::io::Result<PathBuf> {
-    horizon_platform::fs::create_dir_all(dir)?;
+    horizon_std::fs::create_dir_all(dir)?;
     let stamp = chrono::Utc::now().format("%Y-%m-%d_%H-%M-%SZ");
     let path = dir.join(format!("perf-{stamp}.json"));
-    horizon_platform::fs::write(&path, serde_json::to_string_pretty(report)? + "\n")?;
-    horizon_platform::fs::write(path.with_extension("txt"), format!("{text}\n"))?;
+    horizon_std::fs::write(&path, serde_json::to_string_pretty(report)? + "\n")?;
+    horizon_std::fs::write(path.with_extension("txt"), format!("{text}\n"))?;
     Ok(path)
 }
 

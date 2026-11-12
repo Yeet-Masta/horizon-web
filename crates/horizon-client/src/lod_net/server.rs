@@ -6,8 +6,8 @@ use super::{
     Bucket, IN_FLIGHT, MAX_DISTANCE, Offer, PER_SECOND, Request, SIDE, encode_reply, refusal,
 };
 use crate::streaming::{LodSampler, LodSource};
-use horizon_platform::sync::Mutex;
-use horizon_platform::{thread, time::Instant};
+use horizon_std::sync::Mutex;
+use horizon_std::{thread, time::Instant};
 use std::{
     collections::{HashMap, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
@@ -274,7 +274,7 @@ fn same_source(a: &Arc<dyn LodSource>, b: &Arc<dyn LodSource>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::time::Duration;
+    use horizon_std::time::Duration;
 
     fn request(id: u32, x: i32) -> Vec<u8> {
         Request {

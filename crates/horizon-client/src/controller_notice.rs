@@ -6,7 +6,7 @@ use crate::gamepad::{Button, GlyphStyle};
 use crate::hud::{HudAtlas, HudBatch, rgba};
 use crate::pad_glyph;
 use crate::toasts::Slide;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 
 /// What a notice is about: another with the same id takes its place at once, whatever its
 /// priority (a controller reconnecting replaces its disconnect) and without sliding in again.
@@ -212,7 +212,7 @@ mod tests {
     fn a_notice_raised_while_nothing_draws_is_gone_when_its_time_has_passed() {
         let mut slot = NoticeSlot::default();
         slot.raise(notice(NoticeId::Connection, Priority::Info, "old"));
-        horizon_platform::thread::sleep(Duration::from_millis(2));
+        horizon_std::thread::sleep(Duration::from_millis(2));
         assert!(!slot.update(Duration::ZERO));
         assert_eq!(slot.showing(), None);
     }
@@ -222,7 +222,7 @@ mod tests {
         let mut slot = NoticeSlot::default();
         slot.raise(notice(NoticeId::Connection, Priority::Info, "new"));
         assert!(slot.update(Duration::from_secs(60)));
-        horizon_platform::thread::sleep(Duration::from_millis(2));
+        horizon_std::thread::sleep(Duration::from_millis(2));
         // Past its time it slides out rather than vanishing.
         assert!(slot.update(Duration::ZERO));
         assert!(slot.showing().is_some());

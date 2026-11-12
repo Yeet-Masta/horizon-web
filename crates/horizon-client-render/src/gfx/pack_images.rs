@@ -493,7 +493,7 @@ pub(super) struct Dump {
 
 impl Dump {
     pub(super) fn new() -> Option<Self> {
-        let name = horizon_platform::env::var("HORIZON_SHADER_PACK_DUMP").ok()?;
+        let name = horizon_std::env::var("HORIZON_SHADER_PACK_DUMP").ok()?;
         Some(Self {
             name,
             frame: 0,

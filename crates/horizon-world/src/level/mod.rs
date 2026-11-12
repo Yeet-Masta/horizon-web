@@ -93,7 +93,7 @@ use horizon_core::{
     position::{BlockPos, ChunkPos},
     random::LegacyRandom,
 };
-use horizon_platform::sync::RwLock;
+use horizon_std::sync::RwLock;
 use std::{collections::HashMap, io, path::Path, sync::Arc};
 
 pub mod classes;

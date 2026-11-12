@@ -128,7 +128,7 @@ impl ArmorStandAssets {
             .chain(horizon_client::mod_content::namespaces(root));
         for namespace in namespaces {
             let Ok(entries) =
-                horizon_platform::fs::read_dir(root.join(format!("assets/{namespace}/equipment")))
+                horizon_std::fs::read_dir(root.join(format!("assets/{namespace}/equipment")))
             else {
                 continue;
             };
@@ -137,7 +137,7 @@ impl ArmorStandAssets {
                 let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                     continue;
                 };
-                let Ok(v) = horizon_platform::fs::read(&path)
+                let Ok(v) = horizon_std::fs::read(&path)
                     .map(|b| serde_json::from_slice::<serde_json::Value>(&b))
                 else {
                     continue;

@@ -670,15 +670,15 @@ mod tests {
 
     /// A resources dir with those registries and the given recipe files.
     fn resources(name: &str, recipes: &[(&str, &str)]) -> PathBuf {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-recipe-book-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let dir = root.join("data/minecraft/recipe");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(root.join("registries.json"), REGISTRIES).unwrap();
-        horizon_platform::fs::write(root.join("items.json"), "{}").unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(root.join("registries.json"), REGISTRIES).unwrap();
+        horizon_std::fs::write(root.join("items.json"), "{}").unwrap();
         for (id, json) in recipes {
-            horizon_platform::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+            horizon_std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
         }
         root
     }
@@ -726,7 +726,7 @@ mod tests {
             }
             other => panic!("not an item list: {other:?}"),
         }
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// A recipe whose ingredient kind no loader knows stays out of the book:
@@ -791,7 +791,7 @@ mod tests {
             !add.entries.is_empty(),
             "{name}: the crafted recipe reaches the book after rejoining"
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
                 .book_entries("minecraft:mymod_kind", &sync, NOTIFY_AND_HIGHLIGHT)
                 .is_empty()
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// The property sets and the stonecutter read a NeoForge shape's items
@@ -881,7 +881,7 @@ mod tests {
         assert!(len >= 2, "an item list, not empty ({len}) nor a tag");
         assert_eq!(len - 1, 1, "the compound's one item");
         assert_eq!(r.varint().unwrap(), raw);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// The stonecutter's recipes go out in registration order (path, then
@@ -928,7 +928,7 @@ mod tests {
                 vec![item("minecraft:raw_copper")]
             ]
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// `RecipeManager.getRecipeFromDisplay`, which
@@ -968,7 +968,7 @@ mod tests {
             None,
             "past the last display"
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1020,7 +1020,7 @@ mod tests {
         assert_eq!(station, SlotDisplay::Item(item("minecraft:furnace")));
         assert_eq!(duration, 200);
         assert_eq!(experience, 0.7);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// A recipe filter's `replace_input` (#5910) reaches the book swapped:
@@ -1071,7 +1071,7 @@ mod tests {
             SlotDisplay::Tag(HolderSet::Items(vec![item("minecraft:redstone")])),
             "the display shows the swapped input too"
         );
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1113,6 +1113,6 @@ mod tests {
         assert_eq!(station, SlotDisplay::Item(item("minecraft:blast_furnace")));
         assert_eq!(duration, 200);
         assert_eq!(experience, 0.7);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 }

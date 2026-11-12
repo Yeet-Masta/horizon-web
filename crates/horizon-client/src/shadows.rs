@@ -236,7 +236,7 @@ mod tests {
         use crate::chunk::Chunk;
         use horizon_world::level::data;
         use std::{path::PathBuf, sync::Arc};
-        let root = horizon_platform::env::var_os("HORIZON_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))

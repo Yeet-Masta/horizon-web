@@ -1862,7 +1862,7 @@ mod tests {
     #[test]
     #[ignore = "microbenchmark; run with --ignored --nocapture"]
     fn benchmark_worker_light_results() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         use std::hint::black_box;
         let mut fixture = Chunk::empty(0, 0);
         for (si, s) in fixture.sections.iter_mut().enumerate() {
@@ -1964,7 +1964,7 @@ mod tests {
             rng ^= rng << 5;
             (rng % n as u32) as i32
         };
-        let start = horizon_platform::time::Instant::now();
+        let start = horizon_std::time::Instant::now();
         let mut changed = LightChanges::default();
         for round in 0..400 {
             let state = [TORCH, SLAB, AIR][round % 3];
@@ -1986,7 +1986,7 @@ mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn benchmark_light_chunk() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
         let t = tables();
         let layout = ColumnLayout::VANILLA;
         let mut chunks = Vec::new();

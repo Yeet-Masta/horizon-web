@@ -364,12 +364,11 @@ mod tests {
 
     #[test]
     fn a_saved_player_file_round_trips_its_inventory_and_keeps_the_rest() {
-        let dir =
-            horizon_platform::env::temp_dir().join(format!("native-inv-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let dir = horizon_std::env::temp_dir().join(format!("native-inv-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let uuid = 0x1234_u128;
         let file = playerdata::path(&dir, uuid);
-        horizon_platform::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        horizon_std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let mut level = Level {
             health: 13.0,
             xp_level: 7,
@@ -400,6 +399,6 @@ mod tests {
                 .all(Option::is_none)
         );
         assert_eq!(again.xp_level, 7);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

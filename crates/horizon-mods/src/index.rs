@@ -457,7 +457,7 @@ fn plain_name(name: &str) -> bool {
 /// The SHA-256 of a file, lowercase hex.
 pub fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file =
-        horizon_platform::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        horizon_std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -484,8 +484,7 @@ pub fn verify_signature(key: &str, signature: &str, path: &Path) -> Result<(), S
         minisign_verify::PublicKey::from_base64(key.trim()).map_err(|e| format!("key: {e}"))?;
     let sig =
         minisign_verify::Signature::decode(signature).map_err(|e| format!("signature: {e}"))?;
-    let file =
-        horizon_platform::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file = horizon_std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut verifier = key
         .verify_stream(&sig)
         .map_err(|e| format!("signature: {e}"))?;
@@ -512,7 +511,7 @@ pub fn check_file(
     version: &Version,
     path: &Path,
 ) -> Result<Trust, String> {
-    let size = horizon_platform::fs::metadata(path)
+    let size = horizon_std::fs::metadata(path)
         .map_err(|e| format!("{}: {e}", path.display()))?
         .len();
     if size != version.file.size {
@@ -711,11 +710,8 @@ fn check_resource_pack(path: &Path) -> Result<String, String> {
 }
 
 /// A zip whose paths are all plain, and those paths.
-fn plain_zip(
-    path: &Path,
-) -> Result<(zip::ZipArchive<horizon_platform::fs::File>, Vec<String>), String> {
-    let file =
-        horizon_platform::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+fn plain_zip(path: &Path) -> Result<(zip::ZipArchive<horizon_std::fs::File>, Vec<String>), String> {
+    let file = horizon_std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let mut names = Vec::with_capacity(zip.len());
     for i in 0..zip.len() {
@@ -771,7 +767,7 @@ pub fn zip_kind(path: &Path) -> Kind {
 
 /// `pack.mcmeta`'s pack format (`pack_format`, or `min_format` in newer packs), empty when it
 /// names none; refused when it has no `pack` object.
-fn pack_format(zip: &mut zip::ZipArchive<horizon_platform::fs::File>) -> Result<String, String> {
+fn pack_format(zip: &mut zip::ZipArchive<horizon_std::fs::File>) -> Result<String, String> {
     let mut meta = String::new();
     zip.by_name("pack.mcmeta")
         .map_err(|_| "pack.mcmeta: missing".to_string())?

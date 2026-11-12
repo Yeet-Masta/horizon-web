@@ -4,8 +4,8 @@
 //! sizes and modification times and the format version is the same; anything
 //! else (missing, corrupt, stale, unwritable) means the normal decoding path.
 use crate::mipmap::Strategy;
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
@@ -99,7 +99,7 @@ impl SpriteCache {
         self.dirty = false;
         let temporary = self
             .path
-            .with_extension(format!("{}.tmp", horizon_platform::process::id()));
+            .with_extension(format!("{}.tmp", horizon_std::process::id()));
         if fs::write(&temporary, serialize(self.fingerprint, &self.entries)).is_ok()
             && fs::rename(&temporary, &self.path).is_err()
         {
@@ -219,7 +219,7 @@ mod tests {
         }
     }
     fn scratch(tag: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-sprite-cache-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("assets/minecraft/textures/block")).unwrap();
@@ -273,7 +273,7 @@ mod tests {
                 .is_some()
         );
         // Same length, new content and time: still stale.
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(30));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(30));
         fs::write(&png, b"two").unwrap();
         assert!(
             SpriteCache::open(&root)
@@ -332,7 +332,7 @@ mod tests {
             decoded,
             "cache hit differs from decoding"
         );
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(30));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(30));
         write_png(&png, [0, 255, 0, 255]);
         let fresh = sprite_pixels(&root);
         assert_eq!(&fresh[..4], &[0, 255, 0, 255]);

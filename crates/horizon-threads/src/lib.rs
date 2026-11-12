@@ -24,11 +24,9 @@ use std::sync::{
 pub fn worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
-        // A browser tells std nothing of its cores: horizon-platform asks it.
-        parse_worker_count(horizon_platform::env::var("HORIZON_WORKER_THREADS").ok())
-            .unwrap_or_else(|| {
-                horizon_platform::thread::available_parallelism().map_or(1, |n| n.get())
-            })
+        // A browser tells std nothing of its cores: horizon-std asks it.
+        parse_worker_count(horizon_std::env::var("HORIZON_WORKER_THREADS").ok())
+            .unwrap_or_else(|| horizon_std::thread::available_parallelism().map_or(1, |n| n.get()))
     })
 }
 
@@ -302,7 +300,7 @@ pub fn catch_stop_signals() {}
 /// World generation, meshing and the tick allocate and free small blocks on
 /// every worker at once; the system heaps serialise them (Windows' heap was
 /// 16% of a chunk's generation time), mimalloc keeps a heap per thread. Not on
-/// the web build, which keeps its own (horizon-platform's web/alloc.rs).
+/// the web build, which keeps its own (horizon-std's web/alloc.rs).
 #[cfg(not(target_family = "wasm"))]
 pub type Allocator = mimalloc::MiMalloc;
 /// The game's mimalloc allocator.

@@ -577,7 +577,7 @@ fn apply_vanilla_order(d: &mut Dispatcher) {
 /// the server turned them on (`set_horizon_commands`).
 pub fn game_dispatcher() -> &'static Dispatcher {
     game_tree(
-        horizon_platform::env::var_os("HORIZON_DEV_COMMANDS").is_some(),
+        horizon_std::env::var_os("HORIZON_DEV_COMMANDS").is_some(),
         HORIZON_COMMANDS.load(std::sync::atomic::Ordering::Relaxed),
         DEDICATED_COMMANDS.load(std::sync::atomic::Ordering::Relaxed),
     )
@@ -589,7 +589,7 @@ pub fn game_dispatcher_with_features(features: &[String]) -> &'static Dispatcher
         return game_dispatcher();
     }
     static TREES: [std::sync::OnceLock<Dispatcher>; 8] = [const { std::sync::OnceLock::new() }; 8];
-    let dev = horizon_platform::env::var_os("HORIZON_DEV_COMMANDS").is_some();
+    let dev = horizon_std::env::var_os("HORIZON_DEV_COMMANDS").is_some();
     let horizon = HORIZON_COMMANDS.load(std::sync::atomic::Ordering::Relaxed);
     let dedicated = DEDICATED_COMMANDS.load(std::sync::atomic::Ordering::Relaxed);
     TREES[usize::from(dev) | usize::from(horizon) << 1 | usize::from(dedicated) << 2].get_or_init(

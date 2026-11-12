@@ -2,7 +2,7 @@
 # and some of what they bring hangs or crashes the web build where native builds are fine (a loop on a
 # thread spawned in place, a blocking wait on the page's thread, std's clocks). Every few hours:
 #   merge:  merges upstream's main into a copy of `web` (the `upstream-sync` branch), routes the new
-#           std calls through horizon_platform (tools/web_rewrite.py), and lists what a person must
+#           std calls through horizon_std (tools/web_rewrite.py), and lists what a person must
 #           look at: thread spawns, blocking waits, clocks, sockets and crates the merge brings, and
 #           the open upstream pull requests that add them (tools/upstream_watch.py). A merge that
 #           conflicts opens (or updates) an issue naming the files instead.
@@ -71,13 +71,13 @@ jobs:
             echo "conflicts=$(wc -l < report/conflicts.txt)" >> "$GITHUB_OUTPUT"
             git merge --abort
           fi
-      - name: Route upstream's std calls through horizon_platform
+      - name: Route upstream's std calls through horizon_std
         if: steps.merge.outputs.conflicts == '0'
         run: |
           python3 tools/web_rewrite.py --changed "${{ steps.behind.outputs.base }}" upstream/main > report/rewritten.txt
           git add -A -- . ':!report'
           git commit -q -m "Merge upstream/main into web (${{ steps.behind.outputs.count }} commits)" \
-            -m "std calls in upstream's new code go through horizon_platform (tools/web_rewrite.py: $(wc -l < report/rewritten.txt) files)."
+            -m "std calls in upstream's new code go through horizon_std (tools/web_rewrite.py: $(wc -l < report/rewritten.txt) files)."
           git push -f origin upstream-sync
       - name: What a person must look at
         if: steps.behind.outputs.count != '0'
@@ -242,7 +242,7 @@ jobs:
             echo
             echo "The run, its logs and the page's zip: $RUN_URL"
             echo
-            echo "Rewritten for horizon_platform (tools/web_rewrite.py): $(wc -l < in/upstream-sync-merge/rewritten.txt) files."
+            echo "Rewritten for horizon_std (tools/web_rewrite.py): $(wc -l < in/upstream-sync-merge/rewritten.txt) files."
             echo
             cat in/upstream-sync-merge/watch.md
             for log in wasm32 wasm64 smoke; do

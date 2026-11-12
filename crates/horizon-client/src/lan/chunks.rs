@@ -110,9 +110,9 @@ pub struct ChunkEncoder {
     /// The save's tables, for the heightmaps.
     pub tables: Option<Arc<crate::save::SaveTables>>,
     /// Sections already looked at, by address (see `Encoded`).
-    cache: horizon_platform::sync::Mutex<FxHashMap<usize, Encoded>>,
+    cache: horizon_std::sync::Mutex<FxHashMap<usize, Encoded>>,
     /// Each column's heightmaps, with the sections they were made from.
-    heights: horizon_platform::sync::Mutex<HashMap<(i32, i32), Heights>>,
+    heights: horizon_std::sync::Mutex<HashMap<(i32, i32), Heights>>,
     /// The level's sections among a column's: all of them in the Overworld,
     /// y 0 to 255 in the Nether and the End (`DimensionType` min_y and height).
     sections: std::ops::Range<usize>,
@@ -423,7 +423,7 @@ impl Prepared {
 struct Bodies {
     columns: Vec<Prepared>,
     next: AtomicUsize,
-    done: Vec<OnceLock<horizon_platform::sync::Mutex<Vec<u8>>>>,
+    done: Vec<OnceLock<horizon_std::sync::Mutex<Vec<u8>>>>,
 }
 impl Bodies {
     /// Take work until none is left.
@@ -433,7 +433,7 @@ impl Bodies {
             let Some(column) = self.columns.get(i) else {
                 return;
             };
-            self.done[i].get_or_init(|| horizon_platform::sync::Mutex::new(column.write()));
+            self.done[i].get_or_init(|| horizon_std::sync::Mutex::new(column.write()));
         }
     }
 }
@@ -463,7 +463,7 @@ impl Job {
 /// The warm-up threads (one per core besides the tick's) and the job they
 /// take: its number, and the job while it has work left to take.
 struct WarmPool {
-    job: horizon_platform::sync::Mutex<(u64, Option<Job>)>,
+    job: horizon_std::sync::Mutex<(u64, Option<Job>)>,
     ready: std::sync::Condvar,
 }
 impl WarmPool {
@@ -491,7 +491,7 @@ impl WarmPool {
 /// chunk alone, 30 to 80 ms of a tick as a player flew; none without threads.
 fn warm_threads() -> usize {
     #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
-    return horizon_platform::thread::worker_count();
+    return horizon_std::thread::worker_count();
     #[allow(unreachable_code)]
     horizon_threads::worker_count().saturating_sub(1)
 }
@@ -510,25 +510,22 @@ fn warm_pool() -> Option<&'static WarmPool> {
             .filter(|i| {
                 let pool = pool.clone();
                 // A worker on the web build: `Builder` runs its closure there and then.
-                horizon_platform::thread::spawn_worker(
-                    &format!("horizon-chunk-encode-{i}"),
-                    move || {
-                        let mut done = 0;
-                        loop {
-                            let job = {
-                                let mut slot = pool.job.lock().unwrap();
-                                while slot.0 == done {
-                                    slot = pool.ready.wait(slot).unwrap();
-                                }
-                                done = slot.0;
-                                slot.1.clone()
-                            };
-                            if let Some(job) = job {
-                                job.run();
+                horizon_std::thread::spawn_worker(&format!("horizon-chunk-encode-{i}"), move || {
+                    let mut done = 0;
+                    loop {
+                        let job = {
+                            let mut slot = pool.job.lock().unwrap();
+                            while slot.0 == done {
+                                slot = pool.ready.wait(slot).unwrap();
                             }
+                            done = slot.0;
+                            slot.1.clone()
+                        };
+                        if let Some(job) = job {
+                            job.run();
                         }
-                    },
-                )
+                    }
+                })
                 .is_ok()
             })
             .count();
@@ -1015,7 +1012,7 @@ impl ChunkEncoder {
             .iter()
             .zip(&job.done)
             .map(|(c, done)| {
-                let body = done.get_or_init(|| horizon_platform::sync::Mutex::new(c.write()));
+                let body = done.get_or_init(|| horizon_std::sync::Mutex::new(c.write()));
                 std::mem::take(&mut *body.lock().unwrap())
             })
             .collect()

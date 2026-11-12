@@ -8,7 +8,7 @@
 //! for a player it moves between two servers (transfer.rs).
 use super::{ServerState, capture_log};
 use crate::game::Game;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 

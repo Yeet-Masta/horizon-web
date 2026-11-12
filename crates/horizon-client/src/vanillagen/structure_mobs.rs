@@ -317,14 +317,14 @@ mod tests {
     /// createSpawnWeapon) and saves what Piglin.addAdditionalSaveData writes.
     #[test]
     fn bastion_crossbow_piglin_finalizes_as_structure() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
         else {
             return;
         };
         let file = root.join("worldgen/structure/minecraft/bastion/mobs/crossbow_piglin.nbt");
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(
-            &mut flate2::read::GzDecoder::new(horizon_platform::fs::File::open(file).unwrap()),
+            &mut flate2::read::GzDecoder::new(horizon_std::fs::File::open(file).unwrap()),
             &mut bytes,
         )
         .unwrap();
@@ -481,7 +481,7 @@ mod tests {
     /// memories are as placed: vanilla saved them 13 brain ticks later.
     #[test]
     fn bastion_chunk_mobs_match_vanilla() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
         else {
             return;
         };
@@ -506,7 +506,7 @@ mod tests {
     /// trident drowned on a zombie nautilus, as vanilla saved chunk (3, 26).
     #[test]
     fn ocean_ruin_drowned_match_vanilla() {
-        let Some(root) = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES").map(PathBuf::from)
         else {
             return;
         };

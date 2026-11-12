@@ -34,7 +34,7 @@ use super::{
 use horizon_client::gamepad::Button;
 use horizon_client::split_layout::{self as layout, MAX_PLAYERS, Placement, Spot, View};
 use horizon_client::{Result, gfx::compositor::Compositor, widgets};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::{
     cell::RefCell,
     path::{Path, PathBuf},
@@ -170,7 +170,7 @@ pub(super) struct Split<'a> {
 
 impl<'a> Split<'a> {
     pub(super) fn new(host: Game<'a>) -> Self {
-        let split = horizon_platform::env::var("HORIZON_SPLIT").ok();
+        let split = horizon_std::env::var("HORIZON_SPLIT").ok();
         let test_players = split
             .as_ref()
             .and_then(|n| n.parse::<usize>().ok())
@@ -193,7 +193,7 @@ impl<'a> Split<'a> {
             screens: Vec::new(),
             main_screen: None,
             screens_read: None,
-            window_plan: horizon_platform::env::var("HORIZON_SPLIT_WINDOWS")
+            window_plan: horizon_std::env::var("HORIZON_SPLIT_WINDOWS")
                 .map(|w| w.split(',').map(|s| s.trim().to_owned()).collect())
                 .unwrap_or_default(),
             applied: Vec::new(),
@@ -205,7 +205,7 @@ impl<'a> Split<'a> {
             turn: 0,
             host_widgets: Default::default(),
             accounts: launcher::accounts(),
-            stats: horizon_platform::env::var_os("HORIZON_SPLIT_STATS").map(|_| Instant::now()),
+            stats: horizon_std::env::var_os("HORIZON_SPLIT_STATS").map(|_| Instant::now()),
             spent: Default::default(),
             spent_frames: 0,
             frame_started: None,
@@ -525,7 +525,7 @@ impl<'a> Split<'a> {
         }
         if self.in_world() && self.test_players > 0 {
             // HORIZON_SPLIT_PICK: they pick a profile like a controller's player, else P2...
-            let name = horizon_platform::env::var_os("HORIZON_SPLIT_PICK")
+            let name = horizon_std::env::var_os("HORIZON_SPLIT_PICK")
                 .is_none()
                 .then(|| format!("P{}", self.free_seat().unwrap_or(0)));
             match self.join(None, name) {

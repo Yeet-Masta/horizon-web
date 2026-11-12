@@ -304,7 +304,7 @@ fn visibility_preserves_every_face_pair() {
 #[test]
 #[ignore = "opt-in optimized microbenchmark; see docs/visibility-benchmark.md"]
 fn visibility_benchmark() {
-    use horizon_platform::time::Instant;
+    use horizon_std::time::Instant;
     use std::hint::black_box;
     const WARMUP: usize = 200;
     const ITERATIONS: usize = 1000;

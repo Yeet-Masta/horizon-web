@@ -2,7 +2,7 @@
 exclude = ["launcher", "crates/horizon-telemetry-server", "crates/horizon-mod-registry", "third_party/wgpu", "third_party/wgpu-core", "third_party/wgpu-hal", "third_party/wgpu-types", "third_party/naga", "third_party/libmimalloc-sys", "third_party/xxhash-rust", "third_party/winit", "third_party/wasm-bindgen", "third_party/chrono"]
 members = [
     "crates/horizon-core",
-    "crates/horizon-platform",
+    "crates/horizon-std",
     "crates/horizon-dualsense",
     "crates/horizon-narrator",
     "crates/horizon-threads",

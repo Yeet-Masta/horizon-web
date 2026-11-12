@@ -15,14 +15,14 @@ fn live_glow_frame_adoption_keeps_type_without_saved_id() {
 
 fn frame_adoption(glow_first: bool) {
     let root =
-        std::path::PathBuf::from(horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
     let loaded = load_resources(
         root.clone(),
         None,
         &root,
         &settings,
-        horizon_platform::time::Instant::now(),
+        horizon_std::time::Instant::now(),
         false,
         true,
         &Progress::new(),

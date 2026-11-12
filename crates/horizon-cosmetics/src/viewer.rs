@@ -13,7 +13,7 @@
 
 use crate::Pose;
 use crate::preview::Camera;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::sync::Arc;
 
 /// The game's ticks, which item animations count in.

@@ -12,8 +12,6 @@
 //! over a WebSocket ([`web_route`]).
 use crate::auth::AuthSession;
 use crate::studio::{Metadata, RecorderStatus, StudioRecorder};
-use horizon_platform::sync::Mutex;
-use horizon_platform::{thread::JoinHandle, time::Duration};
 use horizon_protocol::{
     PROTOCOL_VERSION,
     buf::Reader,
@@ -25,6 +23,8 @@ use horizon_protocol::{
     servers::parse_address,
     text::{Language, plain, translatable},
 };
+use horizon_std::sync::Mutex;
+use horizon_std::{thread::JoinHandle, time::Duration};
 use horizon_world::nbt::{JavaString, Tag};
 use std::{
     collections::HashMap,
@@ -240,34 +240,32 @@ impl Session {
         let thread = match local {
             // A memory connection blocks on its pipe: a thread of its own, a
             // worker on the web build with threads.
-            Some(pipe) => {
-                horizon_platform::thread::spawn_blocking_task("horizon-net", async move {
-                    let result = login(
-                        address_owned,
-                        0,
-                        Connection::local(pipe),
-                        &name_owned,
-                        auth.as_deref(),
-                        info,
-                        &lang,
-                        &send,
-                        &thread_writer,
-                        &thread_configuring,
-                        &thread_counters,
-                        &thread_cookies,
-                        &thread_far,
-                        transferred,
-                        &resources,
-                        lan,
-                        &thread_recorder,
-                    )
-                    .await;
-                    ended(result, &thread_writer, &thread_far, &send);
-                })
-            }
+            Some(pipe) => horizon_std::thread::spawn_blocking_task("horizon-net", async move {
+                let result = login(
+                    address_owned,
+                    0,
+                    Connection::local(pipe),
+                    &name_owned,
+                    auth.as_deref(),
+                    info,
+                    &lang,
+                    &send,
+                    &thread_writer,
+                    &thread_configuring,
+                    &thread_counters,
+                    &thread_cookies,
+                    &thread_far,
+                    transferred,
+                    &resources,
+                    lan,
+                    &thread_recorder,
+                )
+                .await;
+                ended(result, &thread_writer, &thread_far, &send);
+            }),
             // A network one runs beside the page's event loop on the web
             // build, where its socket lives.
-            None => horizon_platform::thread::spawn_task("horizon-net", async move {
+            None => horizon_std::thread::spawn_task("horizon-net", async move {
                 let result = run(
                     &address_owned,
                     &name_owned,
@@ -290,7 +288,7 @@ impl Session {
             }),
         }
         .ok();
-        let debug = horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some();
+        let debug = horizon_std::env::var_os("HORIZON_NET_DEBUG").is_some();
         Self {
             events,
             writer,
@@ -476,14 +474,14 @@ pub fn shown_address(address: &str) -> String {
 /// The relay the player set (`friendsRelay` in horizon.txt, beside
 /// options.txt), else `HORIZON_RELAY_URL`. None by default.
 pub fn friends_relay_setting() -> Option<String> {
-    let dir = horizon_platform::env::current_dir().ok()?;
+    let dir = horizon_std::env::current_dir().ok()?;
     crate::ui_theme::preference(&dir, "friendsRelay")
         .filter(|r| !r.is_empty())
         .or_else(horizon_friends::relay_url)
 }
 /// Remember the relay typed on Join a friend (empty forgets it).
 pub fn save_friends_relay(relay: &str) {
-    if let Ok(dir) = horizon_platform::env::current_dir() {
+    if let Ok(dir) = horizon_std::env::current_dir() {
         crate::ui_theme::set_preference(&dir, "friendsRelay", (!relay.is_empty()).then_some(relay));
     }
 }
@@ -637,7 +635,7 @@ fn connect_tcp(
 /// Whether joining servers of older releases is on (roadmap `older-servers`): off by default while the
 /// adapter is incomplete; `HORIZON_OLDER_SERVERS=1` turns it on.
 pub fn older_servers_enabled() -> bool {
-    horizon_platform::env::var_os("HORIZON_OLDER_SERVERS").is_some_and(|v| v == "1")
+    horizon_std::env::var_os("HORIZON_OLDER_SERVERS").is_some_and(|v| v == "1")
 }
 
 /// The older release a server speaks, by its status ping, when Horizon can translate it; `None` for the
@@ -724,7 +722,7 @@ pub fn web_relay_download(relay: &str, url: &str, headers: &[(&str, String)]) ->
 pub fn web_relay() -> Option<String> {
     friends_relay_setting()
         .filter(|r| r.starts_with("ws://") || r.starts_with("wss://"))
-        .or_else(|| horizon_platform::env::var("HORIZON_WEB_RELAY").ok())
+        .or_else(|| horizon_std::env::var("HORIZON_WEB_RELAY").ok())
         .map(|r| r.trim().to_owned())
         .filter(|r| !r.is_empty())
 }
@@ -732,7 +730,7 @@ pub fn web_relay() -> Option<String> {
 /// The STUN servers a browser's peer connections ask for their public
 /// address: `HORIZON_STUN_SERVERS` (`none` for none), else Play with Friends'.
 pub fn web_stun_servers() -> Vec<String> {
-    match horizon_platform::env::var("HORIZON_STUN_SERVERS") {
+    match horizon_std::env::var("HORIZON_STUN_SERVERS") {
         Ok(list) => horizon_friends::stun::parse_servers(&list),
         Err(_) => horizon_friends::stun::DEFAULT_SERVERS
             .iter()
@@ -786,7 +784,7 @@ async fn run(
     recorder: &Arc<Mutex<Option<StudioRecorder>>>,
 ) -> Result<Reason, Reason> {
     let (host, port, c) =
-        if let (true, Some(code)) = (horizon_platform::WEB, address.strip_prefix(FRIEND)) {
+        if let (true, Some(code)) = (horizon_std::WEB, address.strip_prefix(FRIEND)) {
             // A world shared from a browser: its page answers over WebRTC.
             let Some(relay) = web_relay() else {
                 return Ok(Reason::plain(NO_WEB_RELAY.to_owned()));
@@ -794,7 +792,7 @@ async fn run(
             status(send, "Finding your friend's world...");
             let c = web_join_friend(&relay, code).await.map_err(Reason::plain)?;
             ("127.0.0.1".to_owned(), 25565, c)
-        } else if horizon_platform::WEB {
+        } else if horizon_std::WEB {
             // The web build reaches servers through WebSockets (`web_route`).
             let (url, host, port) = match web_route(address) {
                 Ok(route) => route,
@@ -1048,7 +1046,7 @@ async fn login(
 async fn web_connect(url: &str, timeout: Duration) -> Result<Connection, String> {
     #[cfg(target_family = "wasm")]
     {
-        let socket = horizon_platform::web::socket::Socket::connect(url, timeout).await?;
+        let socket = horizon_std::web::socket::Socket::connect(url, timeout).await?;
         Ok(Connection::web(socket))
     }
     #[cfg(not(target_family = "wasm"))]
@@ -1062,7 +1060,7 @@ async fn web_connect(url: &str, timeout: Duration) -> Result<Connection, String>
 async fn web_join_friend(relay: &str, code: &str) -> Result<Connection, String> {
     #[cfg(target_family = "wasm")]
     {
-        let socket = horizon_platform::web::rtc::join(relay, code, &web_stun_servers()).await?;
+        let socket = horizon_std::web::rtc::join(relay, code, &web_stun_servers()).await?;
         Ok(Connection::web(socket))
     }
     #[cfg(not(target_family = "wasm"))]
@@ -1399,7 +1397,7 @@ fn fill_known_entries(r: &mut cfg::RegistryData, resources: &Path) {
             .join(ns)
             .join(&dir)
             .join(format!("{path}.json"));
-        let json = horizon_platform::fs::read(&file)
+        let json = horizon_std::fs::read(&file)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
         if let Some(json) = json {
@@ -1489,7 +1487,7 @@ pub fn load_language(resources: &std::path::Path) -> Language {
 /// round trip time in milliseconds.
 pub async fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value, u128), String> {
     use horizon_protocol::packets::status;
-    let (host, port, mut c) = if horizon_platform::WEB {
+    let (host, port, mut c) = if horizon_std::WEB {
         let (url, host, port) = web_route(address)?;
         (host, port, web_connect(&url, timeout).await?)
     } else {
@@ -1520,7 +1518,7 @@ pub async fn ping(address: &str, timeout: Duration) -> Result<(serde_json::Value
         }
         _ => return Err("unexpected status reply".into()),
     };
-    let start = horizon_platform::time::Instant::now();
+    let start = horizon_std::time::Instant::now();
     c.send(&status::Serverbound::PingRequest(status::Ping { time: 1 }).encode())
         .map_err(e)?;
     let _ = c.recv_async().await.map_err(e)?;
@@ -1651,11 +1649,11 @@ mod tests {
 
     #[test]
     fn a_known_entry_takes_its_data_from_the_clients_pack() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("hz-known-entries-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("hz-known-entries-{}", std::process::id()));
         let dir = root.join("data/minecraft/damage_type");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(
             dir.join("in_fire.json"),
             br#"{"message_id": "inFire", "exhaustion": 0.1, "scaling": "when_caused_by_living_non_player"}"#,
         )
@@ -1682,7 +1680,7 @@ mod tests {
             ],
         };
         fill_known_entries(&mut r, &root);
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         let Some(Tag::Compound(filled)) = &r.entries[0].data else {
             panic!("in_fire was not filled: {:?}", r.entries[0].data);
         };
@@ -2033,13 +2031,12 @@ mod tests {
         // or a network gone without a reset.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let held =
-            horizon_platform::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        let held = horizon_std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
         let (c, _, _) = connect_tcp("127.0.0.1", port, true, Duration::from_millis(300)).unwrap();
         let _server = held.join().unwrap().unwrap();
         let (mut reader, writer) = c.split();
         let (done, result) = channel();
-        horizon_platform::thread::spawn(move || {
+        horizon_std::thread::spawn(move || {
             let (send, _events) = channel();
             let _ = done.send(receive_play(
                 &mut reader,
@@ -2096,10 +2093,10 @@ mod tests {
 
     #[test]
     fn configuration_answers_the_content_identity_challenge() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-content-identity-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&root).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&root).unwrap();
+        horizon_std::fs::write(
             root.join("facts.json"),
             br#"{"states":[["minecraft:stone",false,false,"Block{minecraft:stone}",{"id":"minecraft:stone"}]]}"#,
         )
@@ -2108,9 +2105,9 @@ mod tests {
         let (client, server) = horizon_protocol::connection::Pipe::pair();
         let (mut reader, writer) = Connection::local(client).split();
         let writer = Mutex::new(Some(writer));
-        let thread = horizon_platform::thread::spawn(move || {
+        let thread = horizon_std::thread::spawn(move || {
             let (send, _events) = channel();
-            horizon_platform::block_on(configure(
+            horizon_std::block_on(configure(
                 &mut reader,
                 &writer,
                 &AtomicBool::new(true),
@@ -2155,8 +2152,8 @@ mod tests {
             cfg::Serverbound::FinishConfiguration(Empty)
         );
         assert!(thread.join().unwrap().is_ok());
-        horizon_platform::fs::remove_dir_all(
-            horizon_platform::env::temp_dir()
+        horizon_std::fs::remove_dir_all(
+            horizon_std::env::temp_dir()
                 .join(format!("horizon-content-identity-{}", std::process::id())),
         )
         .unwrap();
@@ -2173,8 +2170,8 @@ mod tests {
             let (_send, events) = channel();
             let (release, stalled) = channel();
             let (finished, completed) = channel();
-            let thread = horizon_platform::thread::spawn(move || {
-                let _ = stalled.recv_timeout(horizon_platform::time::Duration::from_secs(3));
+            let thread = horizon_std::thread::spawn(move || {
+                let _ = stalled.recv_timeout(horizon_std::time::Duration::from_secs(3));
                 let _ = finished.send(());
             });
             let mut session = Session {
@@ -2190,7 +2187,7 @@ mod tests {
                 far: Arc::default(),
                 recorder: Arc::new(Mutex::new(None)),
             };
-            let started = horizon_platform::time::Instant::now();
+            let started = horizon_std::time::Instant::now();
             if explicit_disconnect {
                 session.disconnect();
                 session.disconnect(); // Repeated cleanup is harmless.
@@ -2203,7 +2200,7 @@ mod tests {
             let _ = release.send(());
             if reader_still_pending {
                 completed
-                    .recv_timeout(horizon_platform::time::Duration::from_secs(2))
+                    .recv_timeout(horizon_std::time::Duration::from_secs(2))
                     .unwrap();
             }
             assert!(
@@ -2215,7 +2212,7 @@ mod tests {
                 "disconnect waited for the stalled reader"
             );
             assert!(
-                elapsed < horizon_platform::time::Duration::from_secs(1),
+                elapsed < horizon_std::time::Duration::from_secs(1),
                 "disconnect took {elapsed:?}"
             );
         }
@@ -2228,8 +2225,8 @@ mod tests {
         let writer = Arc::new(Mutex::new(Some(writer)));
         let (send, events) = channel();
         let thread_writer = writer.clone();
-        let thread = horizon_platform::thread::spawn(move || {
-            horizon_platform::block_on(receive_play(
+        let thread = horizon_std::thread::spawn(move || {
+            horizon_std::block_on(receive_play(
                 &mut reader,
                 &thread_writer,
                 &AtomicBool::new(false),
@@ -2298,8 +2295,8 @@ mod tests {
             session.configuring.clone(),
             session.recorder.clone(),
         );
-        let thread = horizon_platform::thread::spawn(move || {
-            horizon_platform::block_on(receive_play(
+        let thread = horizon_std::thread::spawn(move || {
+            horizon_std::block_on(receive_play(
                 &mut reader,
                 &thread_writer,
                 &thread_configuring,
@@ -2347,8 +2344,8 @@ mod tests {
         let (send, events) = channel();
         let cookies = Cookies::default();
         let (thread_writer, thread_cookies) = (writer.clone(), cookies.clone());
-        let thread = horizon_platform::thread::spawn(move || {
-            horizon_platform::block_on(receive_play(
+        let thread = horizon_std::thread::spawn(move || {
+            horizon_std::block_on(receive_play(
                 &mut reader,
                 &thread_writer,
                 &AtomicBool::new(false),
@@ -2430,7 +2427,7 @@ mod tests {
         for lan in [true, false] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
-            let worker = horizon_platform::thread::spawn(move || {
+            let worker = horizon_std::thread::spawn(move || {
                 let (stream, _) = listener.accept().unwrap();
                 // Generous: a debug build's key generation on a busy CI runner takes seconds. A pass
                 // never waits for these.
@@ -2540,15 +2537,15 @@ mod tests {
             recorder: Arc::new(Mutex::new(None)),
         };
 
-        let temp_dir = horizon_platform::env::temp_dir().join(format!(
+        let temp_dir = horizon_std::env::temp_dir().join(format!(
             "horizon-studio-test-{}_{}",
             std::process::id(),
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
-        let _ = horizon_platform::fs::create_dir_all(&temp_dir);
+        let _ = horizon_std::fs::create_dir_all(&temp_dir);
         let mcpr_path = temp_dir.join("test_tap.mcpr");
 
         let meta = Metadata::new("Singleplayer World".into(), true, "26.3".into());
@@ -2560,7 +2557,7 @@ mod tests {
             session.configuring.clone(),
             session.recorder.clone(),
         );
-        let thread = horizon_platform::thread::spawn(move || {
+        let thread = horizon_std::thread::spawn(move || {
             receive_play(
                 &mut reader,
                 &thread_writer,
@@ -2611,6 +2608,6 @@ mod tests {
         let decoded1 = play::Clientbound::decode(packet1.id, &packet1.payload).unwrap();
         assert_eq!(decoded1, pos_pkt);
 
-        let _ = horizon_platform::fs::remove_dir_all(&temp_dir);
+        let _ = horizon_std::fs::remove_dir_all(&temp_dir);
     }
 }

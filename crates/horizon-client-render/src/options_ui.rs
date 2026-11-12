@@ -2,7 +2,7 @@
 //! Controls, Key Binds, Mouse Settings, Chat Settings, Accessibility,
 //! Language and Resource Packs, laid out like vanilla's HeaderAndFooter /
 //! OptionsList screens and drawn with the shared widgets.
-use horizon_platform::time::Instant;
+use horizon_std::time::Instant;
 
 pub use crate::settings::Opt;
 
@@ -1649,7 +1649,7 @@ pub struct OptionsUi {
     /// The folder's entries when its packs were listed, and when they were
     /// last compared with it.
     data_pack_stamp: (
-        Vec<(String, Option<horizon_platform::time::SystemTime>)>,
+        Vec<(String, Option<horizon_std::time::SystemTime>)>,
         Instant,
     ),
     /// A reload failure, dismissed before returning to the current page.
@@ -6726,8 +6726,7 @@ mod tests {
     fn the_new_video_options_read_as_vanilla_words_them() {
         use crate::graphics::GraphicsApi;
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         lang::set(lang::Language::load(&[&root], "en_us"));
         let mut s = Settings::default();
@@ -6806,8 +6805,7 @@ mod tests {
     #[ignore = "requires prepared language data in HORIZON_TEST_RESOURCES; run alone"]
     fn classic_hover_draws_the_selected_options_wrapped_tooltip() {
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         lang::set(lang::Language::load(&[&root], "en_us"));
         let atlas = atlas();
@@ -7316,7 +7314,7 @@ mod tests {
         ui.slider_value = Some((
             Opt::RenderDistance,
             0.51,
-            Instant::now() - horizon_platform::time::Duration::from_millis(600),
+            Instant::now() - horizon_std::time::Duration::from_millis(600),
         ));
         assert_eq!(ui.slider_shown(Opt::RenderDistance, 0.5), 0.5);
     }

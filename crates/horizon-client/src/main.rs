@@ -1,7 +1,7 @@
 //! Horizon: native Rust client for Minecraft Java Edition 26.3 gameplay.
 #![forbid(unsafe_code)]
 
-// The web build keeps the browser's allocator (horizon-platform's web/alloc.rs).
+// The web build keeps the browser's allocator (horizon-std's web/alloc.rs).
 #[cfg(not(any(
     feature = "system-allocator",
     feature = "alloc-census",

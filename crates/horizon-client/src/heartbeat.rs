@@ -4,9 +4,9 @@
 //! play-with-friends world is open, every minute and at once when that last one changes.
 //! It sends nothing when sending is turned off (`HORIZON_TELEMETRY_URL=off`) or with
 //! `HORIZON_NO_HEARTBEAT=1` (automated runs).
-use horizon_platform::thread::Thread;
+use horizon_std::thread::Thread;
 #[cfg(not(target_family = "wasm"))]
-use horizon_platform::time::Duration;
+use horizon_std::time::Duration;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -29,13 +29,13 @@ pub fn start() {}
 /// benchmark or an automated run).
 #[cfg(not(target_family = "wasm"))]
 pub fn start() {
-    if PINGER.get().is_some() || horizon_platform::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
+    if PINGER.get().is_some() || horizon_std::env::var_os("HORIZON_NO_HEARTBEAT").is_some() {
         return;
     }
     let Some(endpoint) = horizon_telemetry::endpoint() else {
         return;
     };
-    let spawned = horizon_platform::thread::Builder::new()
+    let spawned = horizon_std::thread::Builder::new()
         .name("Heartbeat".into())
         .spawn(move || run(&endpoint));
     match spawned {
@@ -78,6 +78,6 @@ fn run(endpoint: &str) {
             }
         }
         // Woken early by `set_lan`; a spurious wake only sends one ping more.
-        horizon_platform::thread::park_timeout(wait);
+        horizon_std::thread::park_timeout(wait);
     }
 }

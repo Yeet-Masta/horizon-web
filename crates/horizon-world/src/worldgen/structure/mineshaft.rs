@@ -6,7 +6,7 @@ use super::{
 use crate::nbt::Tag;
 use crate::worldgen::biome::BiomeId;
 use horizon_core::{geometry::Direction, random::RandomSource};
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{collections::BTreeSet, sync::Arc};
 
 /// MineshaftStructure.Type: wood, planks, fence, and the blocks pieces keep.

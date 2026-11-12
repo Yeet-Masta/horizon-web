@@ -6,7 +6,7 @@ use crate::{
         XoroshiroPositionalRandom, XoroshiroRandom,
     },
 };
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 
 #[derive(Debug)]
 enum Factory {

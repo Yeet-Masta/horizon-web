@@ -5,9 +5,9 @@
 //! which connects when Discord runs, retries every 15 s when it doesn't, keeps under Discord's
 //! update limit and clears the activity on quit. Nothing is sent with the setting off,
 //! or with `HORIZON_NO_DISCORD=1`.
-use horizon_platform::sync::Mutex;
-use horizon_platform::thread::Thread;
-use horizon_platform::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use horizon_std::sync::Mutex;
+use horizon_std::thread::Thread;
+use horizon_std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -113,11 +113,11 @@ static THREAD: OnceLock<Thread> = OnceLock::new();
 /// Starts the presence thread, once: when the game starts, never for a dedicated server.
 /// `automated` runs (offscreen, benchmarks) only talk to a test's fake Discord.
 pub fn start(enabled: bool, automated: bool) {
-    let fake_discord = horizon_platform::env::var_os(IPC_DIR_ENV).is_some();
+    let fake_discord = horizon_std::env::var_os(IPC_DIR_ENV).is_some();
     // A browser has no Discord to reach (the web build).
-    if horizon_platform::WEB
+    if horizon_std::WEB
         || THREAD.get().is_some()
-        || horizon_platform::env::var_os("HORIZON_NO_DISCORD").is_some_and(|v| v != "0")
+        || horizon_std::env::var_os("HORIZON_NO_DISCORD").is_some_and(|v| v != "0")
         || (automated && !fake_discord)
     {
         return;
@@ -125,7 +125,7 @@ pub fn start(enabled: bool, automated: bool) {
     if !enabled {
         lock().wanted.status = Status::Off;
     }
-    match horizon_platform::thread::Builder::new()
+    match horizon_std::thread::Builder::new()
         .name("Discord presence".into())
         .spawn(run)
     {
@@ -188,13 +188,13 @@ fn run() {
                 STOPPED.notify_all();
                 return;
             }
-            horizon_platform::thread::park();
+            horizon_std::thread::park();
             continue;
         }
         let now = Instant::now();
         if client.is_none() {
             if let Some(wait) = last_try.and_then(|t| RETRY.checked_sub(now - t)) {
-                horizon_platform::thread::park_timeout(wait);
+                horizon_std::thread::park_timeout(wait);
                 continue;
             }
             last_try = Some(now);
@@ -206,12 +206,12 @@ fn run() {
         let due = sent.is_none_or(|(w, at)| w != wanted || now - at >= REFRESH);
         if !due {
             let (_, at) = sent.expect("sent");
-            horizon_platform::thread::park_timeout(REFRESH - (now - at));
+            horizon_std::thread::park_timeout(REFRESH - (now - at));
             continue;
         }
         let wait = limit.wait(now);
         if !wait.is_zero() {
-            horizon_platform::thread::park_timeout(wait);
+            horizon_std::thread::park_timeout(wait);
             continue;
         }
         limit.record(now);
@@ -396,7 +396,7 @@ impl Client {
 /// Where Discord listens: `discord-ipc-0..9` in the temporary folders (and Flatpak's and
 /// Snap's subfolders) on Linux and macOS, named pipes on Windows.
 fn sockets() -> Vec<PathBuf> {
-    sockets_with(|key| horizon_platform::env::var_os(key), cfg!(windows))
+    sockets_with(|key| horizon_std::env::var_os(key), cfg!(windows))
 }
 
 fn sockets_with(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Vec<PathBuf> {
@@ -439,7 +439,7 @@ fn open(_path: &std::path::Path) -> io::Result<Box<dyn Pipe>> {
 
 #[cfg(windows)]
 fn open(path: &std::path::Path) -> io::Result<Box<dyn Pipe>> {
-    let pipe = horizon_platform::fs::OpenOptions::new()
+    let pipe = horizon_std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(path)?;
@@ -590,13 +590,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn talks_to_discord_over_its_socket() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-discord-{}", std::process::id()));
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-discord-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("discord-ipc-0");
-        let _ = horizon_platform::fs::remove_file(&path);
+        let _ = horizon_std::fs::remove_file(&path);
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let server = horizon_platform::thread::spawn(move || {
+        let server = horizon_std::thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             let (op, hello) = read_frame(&mut s).unwrap();
             assert_eq!((op, &hello["v"]), (HANDSHAKE, &json!(1)));
@@ -628,6 +628,6 @@ mod tests {
         assert_eq!(got[0]["args"]["activity"], shown.unwrap());
         assert_eq!(got[1]["args"]["activity"], Value::Null);
         assert_ne!(got[0]["nonce"], got[1]["nonce"]);
-        let _ = horizon_platform::fs::remove_dir_all(dir);
+        let _ = horizon_std::fs::remove_dir_all(dir);
     }
 }

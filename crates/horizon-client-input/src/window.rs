@@ -34,8 +34,8 @@ pub fn on_page(attributes: winit::window::WindowAttributes) -> winit::window::Wi
 /// seeing the key.
 #[cfg(target_family = "wasm")]
 pub mod pointer_lock {
-    use horizon_platform::sync::Mutex;
-    use horizon_platform::time::{Duration, Instant};
+    use horizon_std::sync::Mutex;
+    use horizon_std::time::{Duration, Instant};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum Lock {
@@ -250,12 +250,12 @@ pub trait LimiterClock {
 /// `LockSupport.parkNanos` and a CPU spin hint for `Thread.onSpinWait`.
 #[derive(Clone, Copy, Debug)]
 pub struct SystemClock {
-    origin: horizon_platform::time::Instant,
+    origin: horizon_std::time::Instant,
 }
 impl Default for SystemClock {
     fn default() -> Self {
         Self {
-            origin: horizon_platform::time::Instant::now(),
+            origin: horizon_std::time::Instant::now(),
         }
     }
 }
@@ -269,9 +269,7 @@ impl LimiterClock for SystemClock {
             end,
             || self.nanos(),
             |step| {
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_nanos(
-                    step as u64,
-                ));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_nanos(step as u64));
             },
         );
     }
@@ -311,7 +309,7 @@ impl LimiterClock for SleepingClock {
         self.0.park(nanos);
     }
     fn spin(&mut self) {
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_micros(50));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_micros(50));
     }
 }
 
@@ -323,7 +321,7 @@ pub fn end_frame(
     clock: &mut impl LimiterClock,
 ) {
     // The web build's frames are paced by the page's requestAnimationFrame.
-    if framerate_limit < 260 && !horizon_platform::WEB {
+    if framerate_limit < 260 && !horizon_std::WEB {
         limiter.limit_display_fps(framerate_limit, clock);
     }
 }
@@ -337,7 +335,7 @@ pub fn end_frame_on_grid(
 ) {
     // The web build's too (`skip_frame`): its page thread can't sleep, so this spun on the
     // clock until the slot, 40% of the page's time at 120 FPS.
-    if framerate_limit < 260 && !horizon_platform::WEB {
+    if framerate_limit < 260 && !horizon_std::WEB {
         limiter.limit_on_grid(framerate_limit, clock);
     }
 }

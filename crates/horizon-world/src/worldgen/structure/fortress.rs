@@ -9,7 +9,7 @@ use horizon_core::{
     geometry::Direction,
     random::{LegacyRandom, RandomSource},
 };
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {

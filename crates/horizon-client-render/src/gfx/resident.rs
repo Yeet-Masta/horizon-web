@@ -821,7 +821,7 @@ mod tests {
     #[test]
     #[ignore = "timing, not a check"]
     fn column_walk_speed() {
-        use horizon_platform::time::{Duration, Instant};
+        use horizon_std::time::{Duration, Instant};
         let mut r = Resident::default();
         let mut map = HashMap::new();
         for x in -33i32..=33 {
@@ -906,7 +906,7 @@ mod tests {
     #[test]
     #[ignore = "benchmark"]
     fn tight_bounds_benchmark() {
-        use horizon_platform::time::Instant;
+        use horizon_std::time::Instant;
 
         let mut r_fallback = Resident::default();
         let mut r_tight = Resident::default();

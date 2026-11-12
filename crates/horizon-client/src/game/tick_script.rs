@@ -8,7 +8,7 @@
 //! writes the scenario's name to PATH with the extension `done`.
 use super::Game;
 use super::event_loop::EventLoopCtl;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Default)]
@@ -28,7 +28,7 @@ struct Running {
 impl TickScript {
     pub(super) fn from_env() -> Self {
         Self {
-            path: horizon_platform::env::var_os("HORIZON_TICK_SCRIPT").map(PathBuf::from),
+            path: horizon_std::env::var_os("HORIZON_TICK_SCRIPT").map(PathBuf::from),
             running: None,
         }
     }
@@ -69,8 +69,8 @@ impl Game<'_> {
             if self.remote.is_none() || !go.fs_exists() {
                 return;
             }
-            let _ = horizon_platform::fs::remove_file(&go);
-            let Some(script) = horizon_platform::fs::read_to_string(&path)
+            let _ = horizon_std::fs::remove_file(&go);
+            let Some(script) = horizon_std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|t| parse(&t))
             else {
@@ -94,7 +94,7 @@ impl Game<'_> {
         }
         if let Some(name) = finished {
             self.tick_script.running = None;
-            let _ = horizon_platform::fs::write(path.with_extension("done"), name);
+            let _ = horizon_std::fs::write(path.with_extension("done"), name);
         }
     }
 }

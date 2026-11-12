@@ -1127,7 +1127,7 @@ impl Game<'_> {
         let (w, left) = (b.width, ((b.width - 192.0) / 2.0).floor());
         let (mx, my) = self.cursor;
         // MouseHandler: a click within 250 ms of the last one on this screen is a double click.
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let double = self
             .book_last_click
             .is_some_and(|at| now.duration_since(at).as_millis() < 250);

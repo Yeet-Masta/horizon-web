@@ -139,7 +139,7 @@ impl NativeSky {
             &present,
             format,
         );
-        if let Some(e) = horizon_platform::block_on_or(scope.pop(), None) {
+        if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(Self {

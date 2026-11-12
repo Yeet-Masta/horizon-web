@@ -4,7 +4,7 @@
 //! leave a gap between the entity going and the mesh catching up).
 use super::Game;
 use horizon_client::mesher::Vertex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use horizon_world::registry::BlockStateId;
 use std::collections::{HashMap, VecDeque};
 

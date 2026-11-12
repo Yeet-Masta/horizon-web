@@ -10,8 +10,8 @@
 //! (`native_config_reloading`). A server's configs are dropped when it stops
 //! (`native_config_unloading`).
 use super::Game;
-use horizon_platform::fs;
-use horizon_platform::time::{Duration, Instant, SystemTime};
+use horizon_std::fs;
+use horizon_std::time::{Duration, Instant, SystemTime};
 use std::path::{Component, Path, PathBuf};
 
 /// How often the files' modification times are read.
@@ -317,7 +317,7 @@ mod tests {
 
     impl Folder {
         fn new(name: &str) -> Self {
-            let dir = horizon_platform::env::temp_dir().join(format!(
+            let dir = horizon_std::env::temp_dir().join(format!(
                 "horizon-native-configs-{name}-{}",
                 std::process::id()
             ));

@@ -1038,7 +1038,7 @@ use horizon_core::{
     random::LegacyRandom,
     ticks::{ScheduleResult, TickPriority},
 };
-use horizon_platform::{fs, time::Duration};
+use horizon_std::{fs, time::Duration};
 use horizon_world::{
     consumable::UseAnimation,
     fluid::{FluidKind, FluidState},
@@ -10536,14 +10536,14 @@ mod tests {
         use horizon_mods::content::{Block, Content};
 
         let base = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
                 .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
         );
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-sign-constructor-{}-{}",
             std::process::id(),
-            horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -10585,7 +10585,7 @@ mod tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -10626,7 +10626,7 @@ mod tests {
             game.new_block_entity("minecraft:white_banner"),
             Some(super::BlockEntity::Banner(_))
         ));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// A mod's own screen opens only over the world, never over another
@@ -11027,11 +11027,11 @@ mod tests {
         let mut hooks = catalog["hooks"].as_array().unwrap().clone();
         let fragments = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../tools/native-hook-fragments");
-        for entry in horizon_platform::fs::read_dir(fragments).unwrap() {
+        for entry in horizon_std::fs::read_dir(fragments).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "json") {
                 let fragment: serde_json::Value =
-                    serde_json::from_slice(&horizon_platform::fs::read(path).unwrap()).unwrap();
+                    serde_json::from_slice(&horizon_std::fs::read(path).unwrap()).unwrap();
                 hooks.extend(fragment["hooks"].as_array().unwrap().iter().cloned().map(
                     |mut hook| {
                         hook["version"] = 1.into();
@@ -11241,15 +11241,15 @@ mod tests {
         // Callable without a game, from any hook.
         let _: fn() -> Result<std::path::PathBuf, String> = super::Game::native_config_dir;
         use super::config_dir;
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-config-dir-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-config-dir-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&root);
         assert!(!root.join("config").exists());
         let dir = config_dir(&root).unwrap();
         assert_eq!(dir, root.join("config"));
         assert!(dir.is_dir());
         assert_eq!(config_dir(&root).unwrap(), dir);
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
     }
 
     /// Vanilla's F3 draws a column in each top corner (`extractLines`, left

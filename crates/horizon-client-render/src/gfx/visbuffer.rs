@@ -29,7 +29,7 @@ const IDS: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 
 /// Whether the visibility buffer is asked for, and the device binds storage buffers enough.
 pub fn wanted(device: &wgpu::Device) -> bool {
-    horizon_platform::env::var("HORIZON_VISBUFFER").as_deref() == Ok("1")
+    horizon_std::env::var("HORIZON_VISBUFFER").as_deref() == Ok("1")
         && device.limits().max_storage_buffers_per_shader_stage >= STORAGE_BUFFERS
 }
 

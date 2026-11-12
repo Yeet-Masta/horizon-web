@@ -2,7 +2,7 @@
 //! snapshots are prepared in small batches and the region workers drain.
 use super::{Game, loading_frame};
 use horizon_client::{Result, hud::HudBatch};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::collections::{HashSet, VecDeque};
 
 pub(super) struct ClosingSave {

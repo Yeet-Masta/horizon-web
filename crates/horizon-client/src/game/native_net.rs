@@ -233,7 +233,7 @@ mod tests {
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn mod_packets_need_a_joined_player_and_a_payload_within_the_limit() {
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
                 .expect("set HORIZON_TEST_RESOURCES to prepared resources"),
         );
         let settings = Settings::default();
@@ -242,7 +242,7 @@ mod tests {
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),

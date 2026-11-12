@@ -5,8 +5,8 @@
 //! the same id and a filter removes the matching ones.
 use horizon_assets::palette::apply_palette;
 use horizon_client_core::pattern::Pattern;
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use serde_json::Value;
 use std::{
     collections::BTreeMap,

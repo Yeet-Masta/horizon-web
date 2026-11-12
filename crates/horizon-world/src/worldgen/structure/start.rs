@@ -1155,7 +1155,7 @@ fn generate(
             let stub = top_of_chunk_center(context, chunk, HeightmapType::OceanFloorWg)?;
             let piece = super::simple::BuriedTreasurePiece {
                 position: [chunk.x * 16 + 9, 90, chunk.z * 16 + 9],
-                found: horizon_platform::sync::Mutex::new(None),
+                found: horizon_std::sync::Mutex::new(None),
             };
             (stub, legacy(vec![piece]))
         }

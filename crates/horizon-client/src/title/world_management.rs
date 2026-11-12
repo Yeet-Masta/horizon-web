@@ -1,7 +1,7 @@
 //! World-list operations. Metadata edits preserve every other NBT field;
 //! backups use vanilla's ZIP layout and never include the session lock.
 use crate::save::{read_dat, write_dat};
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::nbt::Tag;
 use std::{
     io::{self, Seek, Write},
@@ -81,7 +81,7 @@ pub fn delete(saves: &Path, folder: &str) -> crate::Result<()> {
             Err(e) if attempt >= 5 => return Err(e.into()),
             Err(e) => {
                 log::warn!("Failed to delete {}: {e}", world.display());
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(500));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(500));
             }
         }
     }
@@ -131,7 +131,7 @@ pub(super) fn open_folder(path: &Path) -> crate::Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    horizon_platform::thread::spawn(move || {
+    horizon_std::thread::spawn(move || {
         let _ = child.wait();
     });
     Ok(())

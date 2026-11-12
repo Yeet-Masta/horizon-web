@@ -3,7 +3,7 @@
 //! columns (`BlendingData.calculateData`) and the biomes they keep.
 use crate::{biome::Biomes, chunk::Chunk, save::SaveDir};
 use horizon_core::position::ChunkPos;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use horizon_world::{
     nbt::Tag,
     registry::BlockStateId,

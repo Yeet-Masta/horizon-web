@@ -2,9 +2,9 @@
 //! contents as built by the game's own display generators
 //! (`creative-inventory.json`), a 9x5 scrolling grid and the search tab.
 use crate::{Result, items::ItemStack, ui::EditBox};
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path, sync::Arc};
 

@@ -21,7 +21,7 @@ use horizon_optifine::fusion::{
     predicate::Query,
     texture::{Kind, Meta},
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::block_state_properties::BlockProperties;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use std::{
@@ -612,7 +612,7 @@ mod tests {
 
     #[test]
     fn models_name_the_predicates_their_faces_draw() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-fusion-models-{}", std::process::id()));
         let models = root.join("assets/demo/models/block");
         fs::create_dir_all(&models).unwrap();
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn faces_of_one_sprite_join_by_their_own_keys() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-fusion-keys-{}", std::process::id()));
         let models = root.join("assets/demo/models/block");
         fs::create_dir_all(&models).unwrap();

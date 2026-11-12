@@ -2,7 +2,7 @@
 //! docs/api/server.md): players joining, leaving and kicked, chat, and deaths. The log says the same in
 //! vanilla's words; these carry the player's UUID and the parts apart, so a bot needn't parse lines.
 //! `server-events SINCE` on the control endpoint answers the events after the SINCE-th.
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
@@ -37,8 +37,8 @@ fn push(kind: &str, mut fields: Value) {
     let mut events = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
     fields["seq"] = events.next.into();
     fields["type"] = kind.into();
-    fields["time"] = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    fields["time"] = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
         .into();
     events.next += 1;

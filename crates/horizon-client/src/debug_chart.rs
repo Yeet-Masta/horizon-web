@@ -8,7 +8,7 @@ use crate::{
     hud_layout::{GuiDraw, argb, fill},
     text::Text,
 };
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use std::collections::VecDeque;
 
 /// `LocalSampleLogger.CAPACITY`.

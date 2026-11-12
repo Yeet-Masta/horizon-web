@@ -10,8 +10,8 @@
 //! they do for containers.
 use crate::{lazy_json::LazyJson, nbt::Tag};
 use horizon_core::random::{LegacyRandom, RandomSource};
-use horizon_platform::fs;
-use horizon_platform::sync::Mutex;
+use horizon_std::fs;
+use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{
     cell::RefCell,
@@ -1919,8 +1919,8 @@ mod namespace_tests {
     /// get their own.
     #[test]
     fn loot_tables_are_shared_per_root_and_packs() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-share-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-share-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("data/minecraft/loot_table/chests")).unwrap();
         fs::write(
@@ -1962,8 +1962,8 @@ mod namespace_tests {
     /// the load.
     #[test]
     fn loot_tables_read_back_as_loaded() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-text-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-text-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let dir = root.join("data/minecraft/loot_table/blocks");
         fs::create_dir_all(&dir).unwrap();
@@ -1988,8 +1988,8 @@ mod namespace_tests {
     /// vanilla's, under their own namespaces.
     #[test]
     fn loads_every_namespace() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-ns-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-ns-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let files = [
             ("items.json", r#"{"minecraft:bread": {}}"#),
@@ -2034,8 +2034,8 @@ mod namespace_tests {
     /// `SetInstrumentFunction`: a goat horn from a loot table gets one of the options as its instrument.
     #[test]
     fn set_instrument_picks_one_of_its_options() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-horn-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-horn-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let table = r##"{"pools": [{"rolls": 1, "entries": [{"type": "minecraft:item", "name": "minecraft:goat_horn",
             "modifier": [{"type": "minecraft:set_instrument", "options": ["minecraft:ponder_goat_horn", "minecraft:sing_goat_horn"]}]}]}]}"##;
@@ -2096,8 +2096,8 @@ mod namespace_tests {
     /// `replace` drops what the lower sources put in.
     #[test]
     fn pack_tags_join_and_replace_the_game_own() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-loot-tag-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-loot-tag-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("data/minecraft/tags/item")).unwrap();
         fs::write(root.join("items.json"), "{}").unwrap();
@@ -2128,16 +2128,15 @@ mod native_kinds_tests {
     use super::*;
 
     fn table(name: &str, json: &str) -> LootData {
-        let root =
-            horizon_platform::env::temp_dir().join(format!("loot-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let root = horizon_std::env::temp_dir().join(format!("loot-{name}-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let dir = root.join("data/minecraft/loot_table");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join("test.json"), json).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join("test.json"), json).unwrap();
         // LootData::load reads items.json too.
-        horizon_platform::fs::write(root.join("items.json"), "{}").unwrap();
+        horizon_std::fs::write(root.join("items.json"), "{}").unwrap();
         let data = LootData::load(&root, &PackOverlay::NONE).unwrap();
-        let _ = horizon_platform::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&root);
         data
     }
 
@@ -2348,8 +2347,8 @@ mod location_check_biome_tests {
     /// A table that drops one stone where `biomes` matches, read with a
     /// jungle biome tag of the game's own and `packs` over it.
     fn table(name: &str, biomes: &str, packs: &[(String, Vec<Vec<u8>>)]) -> LootData {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("loot-biomes-{name}-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("loot-biomes-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let dir = root.join("data/minecraft/loot_table");
         fs::create_dir_all(&dir).unwrap();

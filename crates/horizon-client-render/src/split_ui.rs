@@ -1569,9 +1569,9 @@ mod tests {
         // The language table is process-wide. Run this test alone in a child so
         // other UI tests cannot observe its temporary French language.
         const CHILD: &str = "HORIZON_TEST_SPLIT_SETUP_LOCALE";
-        if horizon_platform::env::var_os(CHILD).is_none() {
+        if horizon_std::env::var_os(CHILD).is_none() {
             let module = module_path!().split_once("::").unwrap().1;
-            let output = std::process::Command::new(horizon_platform::env::current_exe().unwrap())
+            let output = std::process::Command::new(horizon_std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     &format!("{module}::locale_switch_and_pack_overrides_keep_the_same_draft"),

@@ -2,7 +2,7 @@ use super::*;
 
 fn fixture() -> (BlockRegistry, Biomes) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let root = horizon_platform::env::temp_dir().join(format!(
+    let root = horizon_std::env::temp_dir().join(format!(
         "horizon-opened-loot-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -159,11 +159,9 @@ fn opened_loot_parity_fixture() {
     use std::io::Write;
     let (registry, biomes) = fixture();
     let input =
-        fs::read_to_string(horizon_platform::env::var("HORIZON_OPENED_LOOT_INPUT").unwrap())
-            .unwrap();
+        fs::read_to_string(horizon_std::env::var("HORIZON_OPENED_LOOT_INPUT").unwrap()).unwrap();
     let mut output =
-        fs::File::create(horizon_platform::env::var("HORIZON_OPENED_LOOT_OUTPUT").unwrap())
-            .unwrap();
+        fs::File::create(horizon_std::env::var("HORIZON_OPENED_LOOT_OUTPUT").unwrap()).unwrap();
     for line in input.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
         let mode = fields[2].parse().unwrap();

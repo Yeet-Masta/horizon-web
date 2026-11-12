@@ -5,7 +5,7 @@ use horizon_client::controller_notice::{NoticeSlot, panel};
 use horizon_client::gamepad::Button;
 use horizon_client::hud::{HudBatch, rgba};
 use horizon_client::pad_glyph;
-use horizon_platform::time::Duration;
+use horizon_std::time::Duration;
 
 /// What splitscreen draws over a player's view (`Game::split_hud`): its corner badge (who, for a
 /// moment, with why), a question its controller answers, and notices nobody has to answer.

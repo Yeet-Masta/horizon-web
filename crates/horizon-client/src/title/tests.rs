@@ -1,5 +1,5 @@
 use super::*;
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::nbt::Tag;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -10,7 +10,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-world-menu-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -85,10 +85,10 @@ impl Fixture {
     fn finish_backup(&mut self) {
         self.title.backup_shown.set(true);
         let deadline =
-            horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(5);
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(5);
         while matches!(self.title.mode, Mode::Backup { .. }) {
-            assert!(horizon_platform::time::Instant::now() < deadline);
-            horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(10));
+            assert!(horizon_std::time::Instant::now() < deadline);
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(10));
             self.title.poll_backup();
         }
     }
@@ -498,7 +498,7 @@ fn backup_toast_slides_in_and_out_with_its_sounds() {
     let age = |f: &mut Fixture, ms: u64| {
         let (slide, _) = f.title.toast.as_mut().unwrap();
         let origin = slide.origin.as_mut().unwrap();
-        *origin -= horizon_platform::time::Duration::from_millis(ms);
+        *origin -= horizon_std::time::Duration::from_millis(ms);
     };
     // Half way in: (300 / 600)² of its width shows.
     age(&mut f, 300);
@@ -1921,11 +1921,10 @@ fn chunk_version(file: &Path) -> i32 {
 }
 
 fn wait_while_optimizing(f: &mut Fixture) {
-    let deadline =
-        horizon_platform::time::Instant::now() + horizon_platform::time::Duration::from_secs(10);
+    let deadline = horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(10);
     while matches!(f.title.mode, Mode::Optimize { .. }) {
-        assert!(horizon_platform::time::Instant::now() < deadline);
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(10));
+        assert!(horizon_std::time::Instant::now() < deadline);
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(10));
         f.title.poll_backup();
     }
 }

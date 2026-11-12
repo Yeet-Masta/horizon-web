@@ -1,6 +1,6 @@
 //! The namespaces content mods add to a resource root, which loaders read
 //! besides `minecraft`.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::path::Path;
 
 /// In a root built here: the namespaces the content mods own (their ids and

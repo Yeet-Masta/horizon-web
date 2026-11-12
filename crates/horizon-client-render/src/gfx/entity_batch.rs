@@ -187,7 +187,7 @@ impl EntityBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::time::Instant;
+    use horizon_std::time::Instant;
     use std::hint::black_box;
     #[test]
     fn world_canvas_sorts_after_oit_eyes_before_frame_tails() {

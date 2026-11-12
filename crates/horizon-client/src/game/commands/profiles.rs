@@ -19,7 +19,7 @@ impl Game<'_> {
     /// not exist.
     fn dedicated_lists(
         &self,
-    ) -> R<std::sync::Arc<horizon_platform::sync::Mutex<super::super::dedicated::Lists>>> {
+    ) -> R<std::sync::Arc<horizon_std::sync::Mutex<super::super::dedicated::Lists>>> {
         match (&self.server_lists, self.options.dedicated.is_some()) {
             (Some(lists), true) => Ok(lists.clone()),
             _ => Err(err("command.unknown.command", &[])),

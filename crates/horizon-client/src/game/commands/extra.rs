@@ -11,11 +11,11 @@ use horizon_client::{
     snbt,
     text::{self, ClickEvent, InlineObject, Style, Text},
 };
-use horizon_platform::time::Instant;
 use horizon_protocol::packets::{
     Empty,
     play::{self, Clientbound as C, DialogHolder},
 };
+use horizon_std::time::Instant;
 use horizon_world::nbt::Tag;
 use std::collections::HashMap;
 
@@ -166,8 +166,8 @@ fn two_places(v: f64) -> String {
 }
 /// `Util.getFilenameFormattedDateTime` (`yyyy-MM-dd_HH.mm.ss`, local time).
 fn filename_date_time() -> String {
-    let secs = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let secs = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let (y, mo, d, h, mi, s) = civil(secs);
     format!("{y:04}-{mo:02}-{d:02}_{h:02}.{mi:02}.{s:02}")
@@ -946,8 +946,7 @@ impl Game<'_> {
             Some(Arg::Int(p)) => *p,
             // HttpUtil.getAvailablePort.
             _ => std::net::TcpListener::bind((
-                if horizon_platform::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1")
-                {
+                if horizon_std::env::var_os("HORIZON_TEST_LOOPBACK").is_some_and(|v| v == "1") {
                     "127.0.0.1"
                 } else {
                     "0.0.0.0"
@@ -1053,7 +1052,7 @@ impl Game<'_> {
         };
         let functions = self.functions_named(&id)?;
         let output = format!("debug-trace-{}.txt", filename_date_time());
-        let dir = horizon_platform::env::current_dir()
+        let dir = horizon_std::env::current_dir()
             .unwrap_or_default()
             .join("debug");
         let mut trace = String::new();
@@ -1079,8 +1078,8 @@ impl Game<'_> {
             trace.push('\n');
             self.trace_function(&f.id, &lines, 0, &mut trace);
         }
-        let written = horizon_platform::fs::create_dir_all(&dir)
-            .and_then(|()| horizon_platform::fs::write(dir.join(&output), trace))
+        let written = horizon_std::fs::create_dir_all(&dir)
+            .and_then(|()| horizon_std::fs::write(dir.join(&output), trace))
             .is_ok();
         if !written {
             self.command_failure(Text::translate("commands.debug.function.traceFailed", &[]));
@@ -1142,7 +1141,7 @@ impl Game<'_> {
             ));
         };
         let relative = format!("debug/client-{stamp}.json");
-        let path = horizon_platform::env::current_dir()
+        let path = horizon_std::env::current_dir()
             .unwrap_or_default()
             .join(&relative);
         let report = serde_json::json!({
@@ -1152,8 +1151,8 @@ impl Game<'_> {
         });
         let written = path
             .parent()
-            .map_or(Ok(()), horizon_platform::fs::create_dir_all)
-            .and_then(|()| horizon_platform::fs::write(&path, report.to_string()));
+            .map_or(Ok(()), horizon_std::fs::create_dir_all)
+            .and_then(|()| horizon_std::fs::write(&path, report.to_string()));
         if let Err(e) = written {
             return Err(tr_error(
                 "commands.jfr.dump.failed",

@@ -346,8 +346,8 @@ pub struct FrameUniforms {
     pub values: Vec<Value>,
     /// The block atlas's size (`atlasSize`), 0 without one.
     pub atlas: [u32; 2],
-    start: horizon_platform::time::Instant,
-    last: Option<horizon_platform::time::Instant>,
+    start: horizon_std::time::Instant,
+    last: Option<horizon_std::time::Instant>,
     frame: u32,
     /// The last frame's `PackInputs::still_ticks`, for `eval_custom`.
     still_ticks: Option<u64>,
@@ -366,7 +366,7 @@ impl Default for FrameUniforms {
         Self {
             values: Vec::new(),
             atlas: [0; 2],
-            start: horizon_platform::time::Instant::now(),
+            start: horizon_std::time::Instant::now(),
             last: None,
             frame: 0,
             still_ticks: None,
@@ -679,7 +679,7 @@ fn smooth(value: f32, target: f32, half_life: f32, dt: f32) -> f32 {
 impl FrameUniforms {
     /// This frame's values for a render size of `size` pixels.
     pub fn update(&mut self, frame: &Frame, inputs: &PackInputs, size: [u32; 2]) {
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let measured = self.last.map_or(0.0, |l| (now - l).as_secs_f32());
         self.last = Some(now);
         self.still_ticks = inputs.still_ticks;
@@ -1174,20 +1174,20 @@ mod tests {
 
     /// A dimension type of `attributes` (JSON), loaded as the game loads one and sampled at noon.
     fn sky_of(name: &str, attributes: &str) -> crate::environment::Sky {
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-cloud-height-{}-{name}",
             std::process::id()
         ));
         let dir = root.join("data/minecraft/dimension_type");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(
             dir.join(format!("{name}.json")),
             format!(r#"{{"attributes": {attributes}}}"#),
         )
         .unwrap();
         let environment =
             crate::environment::Environment::load_dimension(&root, name, false).unwrap();
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
         environment.sample(6000, None, None)
     }
 
@@ -2123,8 +2123,8 @@ mod initial_history_tests {
         // The next frame comes `seconds` after the last (and a few microseconds of the test).
         let after = |u: &mut FrameUniforms, seconds: f32| {
             u.last = Some(
-                horizon_platform::time::Instant::now()
-                    - horizon_platform::time::Duration::from_secs_f32(seconds),
+                horizon_std::time::Instant::now()
+                    - horizon_std::time::Duration::from_secs_f32(seconds),
             );
         };
         let mut input = PackInputs {
@@ -2172,9 +2172,8 @@ mod initial_history_tests {
         input.eye_light = [0, 0];
         input.rain = 1.0;
         u.center_depth_raw = Some(0.0);
-        u.last = Some(
-            horizon_platform::time::Instant::now() - horizon_platform::time::Duration::from_secs(3),
-        );
+        u.last =
+            Some(horizon_std::time::Instant::now() - horizon_std::time::Duration::from_secs(3));
         u.update(&f, &input, [800, 450]);
         assert_eq!(
             float(&u, "frameTimeCounter")[0],

@@ -5,7 +5,7 @@
 
 use super::{Game, Screen};
 use horizon_client::{hud::HudBatch, text::Text};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 

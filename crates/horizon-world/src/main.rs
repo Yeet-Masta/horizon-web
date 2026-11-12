@@ -1,5 +1,5 @@
 use horizon_core::position::BlockPos;
-use horizon_platform::fs::{File, OpenOptions};
+use horizon_std::fs::{File, OpenOptions};
 use horizon_world::{
     chunk::{BlockState, ChunkData},
     compression::Compression,
@@ -39,7 +39,7 @@ fn write_new(path: &str, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
         drop(file);
-        let _ = horizon_platform::fs::remove_file(path);
+        let _ = horizon_std::fs::remove_file(path);
         return Err(error.into());
     }
     Ok(())
@@ -170,8 +170,8 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                     properties: properties.into(),
                 },
             )?;
-            let timestamp = horizon_platform::time::SystemTime::now()
-                .duration_since(horizon_platform::time::UNIX_EPOCH)?
+            let timestamp = horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)?
                 .as_secs() as u32;
             let next = ChunkRecord::from_nbt(
                 &chunk.into_nbt(),
@@ -191,7 +191,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() {
-    if let Err(error) = run(&horizon_platform::env::args().skip(1).collect::<Vec<_>>()) {
+    if let Err(error) = run(&horizon_std::env::args().skip(1).collect::<Vec<_>>()) {
         eprintln!("Horizon: {error}");
         std::process::exit(2);
     }

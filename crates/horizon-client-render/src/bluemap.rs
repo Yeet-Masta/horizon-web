@@ -20,9 +20,9 @@ use crate::{
     fast_hash::{FxHashMap, FxHashSet},
     lod::{Column, Span},
 };
-use horizon_platform::fs::PathExt as _;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant, SystemTime};
+use horizon_std::fs::PathExt as _;
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant, SystemTime};
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use std::{
     path::{Path, PathBuf},
@@ -774,15 +774,15 @@ impl BlueMap {
             state: Mutex::default(),
             wake: Condvar::new(),
         });
-        let map = inner.map_info(|_, name| horizon_platform::fs::read(inner.dir.join(name)).ok());
+        let map = inner.map_info(|_, name| horizon_std::fs::read(inner.dir.join(name)).ok());
         inner.state.lock().unwrap().map = map.map(Arc::new);
         Self { inner }
     }
     /// Downloads what lookups want, on a thread that ends with the map.
     pub fn start(&self) {
         let inner = Arc::downgrade(&self.inner);
-        // A Web Worker on the web build, whose requests wait there (horizon_platform's HTTP).
-        if let Err(e) = horizon_platform::thread::spawn_worker("BlueMap", move || fetch(inner)) {
+        // A Web Worker on the web build, whose requests wait there (horizon_std's HTTP).
+        if let Err(e) = horizon_std::thread::spawn_worker("BlueMap", move || fetch(inner)) {
             log::warn!("Horizon: BlueMap worker: {e}");
         }
     }
@@ -1138,14 +1138,14 @@ impl Inner {
 fn write_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
-    horizon_platform::fs::write(&part, bytes)?;
-    horizon_platform::fs::rename(&part, path)
+    horizon_std::fs::write(&part, bytes)?;
+    horizon_std::fs::rename(&part, path)
 }
 /// A cached tile (`None` inside: the server has none there) and whether it
 /// is fresh; `None`: not cached.
 fn read_cached(file: &Path, lowres: &Lowres) -> Option<(Option<Tile>, bool)> {
     let fresh = |path: &Path| {
-        horizon_platform::fs::metadata(path)
+        horizon_std::fs::metadata(path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| SystemTime::now().duration_since(t).ok())
@@ -1154,7 +1154,7 @@ fn read_cached(file: &Path, lowres: &Lowres) -> Option<(Option<Tile>, bool)> {
     // One that doesn't decode (cut short, or of an older `tileSize`) is
     // fetched again: the worker keeps only those that do.
     let png = file.with_extension("png");
-    if let Ok(bytes) = horizon_platform::fs::read(&png) {
+    if let Ok(bytes) = horizon_std::fs::read(&png) {
         return decode_tile(&bytes, lowres).map(|tile| (Some(tile), fresh(&png)));
     }
     let none = file.with_extension("none");
@@ -1199,7 +1199,7 @@ fn fetch(inner: Weak<Inner>) {
         let pause = worker.step(&inner);
         drop(inner);
         if !pause.is_zero() {
-            horizon_platform::thread::sleep(pause);
+            horizon_std::thread::sleep(pause);
         }
     }
 }
@@ -1209,13 +1209,13 @@ impl Worker {
     #[cfg(target_family = "wasm")]
     fn get(&self, inner: &Inner, path: &str) -> Result<Option<Vec<u8>>, ()> {
         let base = inner.base.get().ok_or(())?;
-        let request = horizon_platform::web::http::Request::get(&format!("{base}/{path}"))
+        let request = horizon_std::web::http::Request::get(&format!("{base}/{path}"))
             .header(
                 "User-Agent",
                 &format!("Horizon/{}", horizon_core::release::VERSION),
             )
             .timeout(Duration::from_secs(10));
-        match horizon_platform::web::http::request(request) {
+        match horizon_std::web::http::request(request) {
             Ok(r) if r.status == 204 || r.status == 404 => Ok(None),
             Ok(r) if (200..300).contains(&r.status) && r.body.len() <= 8 << 20 => Ok(Some(r.body)),
             _ => Err(()),
@@ -1313,15 +1313,15 @@ impl Worker {
             self.settings = true;
             self.answered();
             // Not gone (a file held open): no map this visit, not the wrong one.
-            if stale && horizon_platform::fs::remove_dir_all(&tiles).is_err() && tiles.fs_exists() {
+            if stale && horizon_std::fs::remove_dir_all(&tiles).is_err() && tiles.fs_exists() {
                 return self.found_nothing(inner);
             }
             for (name, body) in files {
-                let _ = horizon_platform::fs::create_dir_all(&inner.dir);
+                let _ = horizon_std::fs::create_dir_all(&inner.dir);
                 // Not kept (a file held open): none cached rather than the
                 // old, which would read the new tiles wrong next time.
                 if write_whole(&inner.dir.join(&name), &body).is_err() {
-                    let _ = horizon_platform::fs::remove_file(inner.dir.join(name));
+                    let _ = horizon_std::fs::remove_file(inner.dir.join(name));
                 }
             }
             let mut state = inner.state.lock().unwrap();
@@ -1383,24 +1383,22 @@ impl Worker {
         self.answered();
         let tile = body.as_deref().and_then(|b| decode_tile(b, &map.lowres));
         let file = inner.tile_file(&map, key);
-        let _ = horizon_platform::fs::create_dir_all(file.parent().unwrap_or(&inner.dir));
+        let _ = horizon_std::fs::create_dir_all(file.parent().unwrap_or(&inner.dir));
         let (png, none) = (file.with_extension("png"), file.with_extension("none"));
         // Whether what is cached (and drawn) stays as it was, and the bytes
         // written (`None` also when a write failed: the new tile is still
         // drawn this visit).
         let (unchanged, written) = match (&tile, &body) {
-            (Some(_), Some(body))
-                if horizon_platform::fs::read(&png).is_ok_and(|old| old == *body) =>
-            {
+            (Some(_), Some(body)) if horizon_std::fs::read(&png).is_ok_and(|old| old == *body) => {
                 // Unchanged: fresh for another `MAX_AGE`.
-                let _ = horizon_platform::fs::File::options()
+                let _ = horizon_std::fs::File::options()
                     .append(true)
                     .open(&png)
                     .and_then(|f| f.set_modified(SystemTime::now()));
                 (true, None)
             }
             (Some(_), Some(body)) => {
-                let _ = horizon_platform::fs::remove_file(&none);
+                let _ = horizon_std::fs::remove_file(&none);
                 (
                     false,
                     write_whole(&png, body).ok().map(|()| body.len() as u64),
@@ -1409,7 +1407,7 @@ impl Worker {
             // Not a tile (an error page): a cached one is kept.
             (None, Some(_)) if png.fs_exists() => (true, None),
             _ => {
-                let _ = horizon_platform::fs::remove_file(&png);
+                let _ = horizon_std::fs::remove_file(&png);
                 (false, write_whole(&none, &[]).ok().map(|()| 0))
             }
         };
@@ -1522,7 +1520,7 @@ impl Worker {
 }
 
 fn cached_files(dir: &Path, out: &mut Vec<(SystemTime, u64, PathBuf)>) {
-    for entry in horizon_platform::fs::read_dir(dir)
+    for entry in horizon_std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -1555,7 +1553,7 @@ fn prune(dir: &Path, keep: u64) -> u64 {
         if total <= keep {
             break;
         }
-        if horizon_platform::fs::remove_file(&path).is_ok() {
+        if horizon_std::fs::remove_file(&path).is_ok() {
             total -= len;
         }
     }
@@ -1842,9 +1840,9 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-bluemap-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         dir
     }
 
@@ -1853,18 +1851,18 @@ mod tests {
     #[test]
     fn cached_tiles_serve_and_far_ones_are_not_wanted() {
         let dir = scratch("cache");
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
-        horizon_platform::fs::write(dir.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
-        horizon_platform::fs::write(dir.join("world.json"), br#"{"lowres":{}}"#).unwrap();
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        horizon_std::fs::write(dir.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
+        horizon_std::fs::write(dir.join("world.json"), br#"{"lowres":{}}"#).unwrap();
         let green = |_: usize, _: usize| Pixel {
             color: 0xFF57_7133,
             height: 70,
             block_light: 0,
         };
         let tiles = dir.join("world/1");
-        horizon_platform::fs::create_dir_all(&tiles).unwrap();
-        horizon_platform::fs::write(tiles.join("0_-1.png"), tile_png(&LOWRES, green)).unwrap();
-        horizon_platform::fs::write(tiles.join("1_-1.none"), []).unwrap();
+        horizon_std::fs::create_dir_all(&tiles).unwrap();
+        horizon_std::fs::write(tiles.join("0_-1.png"), tile_png(&LOWRES, green)).unwrap();
+        horizon_std::fs::write(tiles.join("1_-1.none"), []).unwrap();
         let map = BlueMap::new(
             "https://map.example.net/",
             "minecraft:overworld",
@@ -1908,7 +1906,7 @@ mod tests {
         map.set_center(40 * 16 + 100, 40 * 16);
         assert!(queued((1, 30, 20)));
         assert!(map.take_changed().is_empty());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Real chunks the server sent come first; BlueMap fills the rest.
@@ -1917,9 +1915,9 @@ mod tests {
         use crate::{server_terrain::ServerTerrain, streaming::LodSource};
         let dir = scratch("terrain");
         let maps = dir.join("map");
-        horizon_platform::fs::create_dir_all(&maps).unwrap();
-        horizon_platform::fs::write(maps.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
-        horizon_platform::fs::write(maps.join("world.json"), br#"{"lowres":{}}"#).unwrap();
+        horizon_std::fs::create_dir_all(&maps).unwrap();
+        horizon_std::fs::write(maps.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
+        horizon_std::fs::write(maps.join("world.json"), br#"{"lowres":{}}"#).unwrap();
         let green = |_: usize, _: usize| Pixel {
             color: 0xFF57_7133,
             height: 70,
@@ -1927,8 +1925,8 @@ mod tests {
         };
         for level in 1..=3 {
             let tiles = maps.join(format!("world/{level}"));
-            horizon_platform::fs::create_dir_all(&tiles).unwrap();
-            horizon_platform::fs::write(tiles.join("0_0.png"), tile_png(&LOWRES, green)).unwrap();
+            horizon_std::fs::create_dir_all(&tiles).unwrap();
+            horizon_std::fs::write(tiles.join("0_0.png"), tile_png(&LOWRES, green)).unwrap();
         }
         let map = BlueMap::new(
             "http://map.example.net",
@@ -1967,7 +1965,7 @@ mod tests {
         assert_eq!(details[0].1, columns);
         assert_eq!(details[1].1[0].surface.map(|s| s.height), Some(71));
         assert_eq!(details[2].1[0], Column::default());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The finest level on its way: a chunk-sized cell is drawn from a
@@ -1977,9 +1975,9 @@ mod tests {
         use crate::{server_terrain::ServerTerrain, streaming::LodSource};
         let dir = scratch("coarser");
         let maps = dir.join("map");
-        horizon_platform::fs::create_dir_all(&maps).unwrap();
-        horizon_platform::fs::write(maps.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
-        horizon_platform::fs::write(maps.join("world.json"), br#"{"lowres":{}}"#).unwrap();
+        horizon_std::fs::create_dir_all(&maps).unwrap();
+        horizon_std::fs::write(maps.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
+        horizon_std::fs::write(maps.join("world.json"), br#"{"lowres":{}}"#).unwrap();
         // The finest coarser level wins: level 3 is lower.
         for (level, height) in [(2, 70), (3, 50)] {
             let green = |_: usize, _: usize| Pixel {
@@ -1988,8 +1986,8 @@ mod tests {
                 block_light: 0,
             };
             let tiles = maps.join(format!("world/{level}"));
-            horizon_platform::fs::create_dir_all(&tiles).unwrap();
-            horizon_platform::fs::write(tiles.join("0_0.png"), tile_png(&LOWRES, green)).unwrap();
+            horizon_std::fs::create_dir_all(&tiles).unwrap();
+            horizon_std::fs::write(tiles.join("0_0.png"), tile_png(&LOWRES, green)).unwrap();
         }
         let map = Arc::new(BlueMap::new(
             "http://map.example.net",
@@ -2039,7 +2037,7 @@ mod tests {
         // Nowhere near any level: nothing to stand in, and not waited for.
         assert_eq!(sampler.reduced_column(-4000, 0, 1), Column::default());
         assert!(!sampler.waited());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2076,16 +2074,16 @@ mod tests {
     #[test]
     fn chunks_are_as_deep_as_their_neighbours() {
         let dir = scratch("depth");
-        horizon_platform::fs::create_dir_all(dir.join("world/1")).unwrap();
-        horizon_platform::fs::write(dir.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
-        horizon_platform::fs::write(dir.join("world.json"), br#"{"lowres":{}}"#).unwrap();
+        horizon_std::fs::create_dir_all(dir.join("world/1")).unwrap();
+        horizon_std::fs::write(dir.join("settings.json"), br#"{"maps":["world"]}"#).unwrap();
+        horizon_std::fs::write(dir.join("world.json"), br#"{"lowres":{}}"#).unwrap();
         // A step down at x = 8, and nothing rendered from x = 24.
         let step = |x: usize, _: usize| Pixel {
             color: if x >= 24 { 0 } else { 0xFF57_7133 },
             height: if x < 8 { 90 } else { 70 },
             block_light: 0,
         };
-        horizon_platform::fs::write(dir.join("world/1/0_0.png"), tile_png(&LOWRES, step)).unwrap();
+        horizon_std::fs::write(dir.join("world/1/0_0.png"), tile_png(&LOWRES, step)).unwrap();
         let map = BlueMap::new(
             "http://map.example.net",
             "minecraft:overworld",
@@ -2109,29 +2107,29 @@ mod tests {
             "by the map's edge"
         );
         assert_eq!(right[16 + 8], Column::default());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn the_oldest_tiles_go_past_the_cap() {
         let dir = scratch("prune");
-        horizon_platform::fs::create_dir_all(dir.join("a/1")).unwrap();
+        horizon_std::fs::create_dir_all(dir.join("a/1")).unwrap();
         for (i, name) in ["old", "mid", "new"].iter().enumerate() {
             let path = dir.join(format!("a/1/{name}.png"));
-            horizon_platform::fs::write(&path, [0u8; 100]).unwrap();
+            horizon_std::fs::write(&path, [0u8; 100]).unwrap();
             let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000 + i as u64);
-            horizon_platform::fs::File::options()
+            horizon_std::fs::File::options()
                 .append(true)
                 .open(&path)
                 .unwrap()
                 .set_modified(time)
                 .unwrap();
         }
-        horizon_platform::fs::write(dir.join("settings.json"), [0u8; 50]).unwrap();
+        horizon_std::fs::write(dir.join("settings.json"), [0u8; 50]).unwrap();
         assert_eq!(folder_size(&dir), 300);
         assert_eq!(prune(&dir, 150), 100);
         assert!(dir.join("a/1/new.png").exists() && !dir.join("a/1/mid.png").exists());
         assert!(dir.join("settings.json").exists(), "only tiles are pruned");
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 }

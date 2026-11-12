@@ -1,7 +1,7 @@
 //! Vanilla 26.3's CubeMapTexture and CubeMap, separate from the pixel-filtered GUI atlas.
 use crate::{Result, hud::decode_bytes};
 use glam::Mat4;
-use horizon_platform::sync::Mutex;
+use horizon_std::sync::Mutex;
 use std::{path::Path, sync::Arc};
 use wgpu::util::DeviceExt;
 
@@ -99,7 +99,7 @@ impl Faces {
 /// The faces' files decoded, side by side, into one array of six layers of
 /// equal squares.
 fn decode_faces(files: &[Vec<u8>]) -> Result<(u32, Vec<u8>)> {
-    let decoded: Vec<_> = horizon_platform::thread::scope(|scope| {
+    let decoded: Vec<_> = horizon_std::thread::scope(|scope| {
         let threads: Vec<_> = files
             .iter()
             .map(|file| scope.spawn(|| decode_bytes(file).map_err(|e| e.to_string())))
@@ -149,7 +149,7 @@ fn load_face(
         if tried.first().is_some_and(|(seen, _)| *seen == path) {
             continue;
         }
-        let read = horizon_platform::fs::read(&path)
+        let read = horizon_std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|file| {
                 let image = decode_bytes(&file).map_err(|e| e.to_string())?;
@@ -391,7 +391,7 @@ impl Rotation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::fs;
+    use horizon_std::fs;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// One resource root: a pack overlay, or the game's own resources.
@@ -407,7 +407,7 @@ mod tests {
         /// A root with the faces' folder and none of the faces.
         fn bare() -> Self {
             static NEXT: AtomicU32 = AtomicU32::new(0);
-            let root = horizon_platform::env::temp_dir().join(format!(
+            let root = horizon_std::env::temp_dir().join(format!(
                 "horizon-panorama-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),

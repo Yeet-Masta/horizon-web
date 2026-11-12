@@ -213,7 +213,7 @@ pub struct Guest {
     /// The movement prediction's replay of the client's own moves (only while it runs).
     pub replay: Option<Box<super::prediction::Replay>>,
     /// What the server sent this tick that changes how the client moves (only while it records).
-    pub changes: horizon_platform::sync::Mutex<Vec<horizon_anticheat::prediction::Change>>,
+    pub changes: horizon_std::sync::Mutex<Vec<horizon_anticheat::prediction::Change>>,
     /// It accepted a move since the last entity range checks
     /// (ServerChunkCache.move), which then check all of its pairs again.
     pub moved: bool,

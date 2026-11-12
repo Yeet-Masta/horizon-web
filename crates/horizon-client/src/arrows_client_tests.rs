@@ -88,20 +88,20 @@ fn run_with(
     ]))
     .unwrap();
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let root = horizon_platform::env::temp_dir().join(format!(
+    let root = horizon_std::env::temp_dir().join(format!(
         "horizon-client-arrow-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    horizon_platform::fs::create_dir(&root).unwrap();
-    horizon_platform::fs::write(
+    horizon_std::fs::create_dir(&root).unwrap();
+    horizon_std::fs::write(
         root.join("gameplay-facts.json"),
         serde_json::json!({"states":(0..states.len()).map(|id|serde_json::json!({"id":id})).collect::<Vec<_>>()} ).to_string(),
     )
     .unwrap();
     let behaviours = serde_json::json!({"states":(0..states.len()).map(|id|if id==1{[63,0]}else{[0,0]}).collect::<Vec<_>>(),"blocks":(["air","stone","water","bubble_column"].iter().map(|name|serde_json::json!({"name":format!("minecraft:{name}"),"class":["Block"]})).collect::<Vec<_>>())});
     let facts = BlockFacts::load_with_behaviour_json(&root, &registry, &behaviours).unwrap();
-    horizon_platform::fs::remove_dir_all(root).unwrap();
+    horizon_std::fs::remove_dir_all(root).unwrap();
     let table = Tag::compound([
         ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
         ("states", Tag::List(states)),
@@ -193,12 +193,12 @@ fn first_water_tick_moves_before_water_inertia_and_keeps_synced_flames() {
 #[ignore = "run by client-arrow differential harness"]
 fn client_arrow_parity_fixture() {
     use std::io::Write;
-    let input = horizon_platform::fs::read_to_string(
-        horizon_platform::env::var("HORIZON_CLIENT_ARROW_INPUT").unwrap(),
+    let input = horizon_std::fs::read_to_string(
+        horizon_std::env::var("HORIZON_CLIENT_ARROW_INPUT").unwrap(),
     )
     .unwrap();
-    let mut output = horizon_platform::fs::File::create(
-        horizon_platform::env::var("HORIZON_CLIENT_ARROW_OUTPUT").unwrap(),
+    let mut output = horizon_std::fs::File::create(
+        horizon_std::env::var("HORIZON_CLIENT_ARROW_OUTPUT").unwrap(),
     )
     .unwrap();
     let bits = |v: Vec3| {

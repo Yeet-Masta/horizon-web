@@ -116,8 +116,8 @@ pub struct Modpack {
 
 impl Modpack {
     pub fn read(path: &Path) -> Result<Modpack, String> {
-        let file = horizon_platform::fs::File::open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let file =
+            horizon_std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut text = String::new();
         zip.by_name(MANIFEST)
@@ -159,8 +159,8 @@ impl Modpack {
     /// `home`, each checked again.
     pub fn extract_overrides(path: &Path, home: &Path) -> Result<Vec<PathBuf>, String> {
         let pack = Modpack::read(path)?;
-        let file = horizon_platform::fs::File::open(path)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let file =
+            horizon_std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let mut written = Vec::new();
         let mut total = 0u64;
@@ -172,7 +172,7 @@ impl Modpack {
                 Ok(target) => written.push(target),
                 Err(e) => {
                     for target in &written {
-                        let _ = horizon_platform::fs::remove_file(target);
+                        let _ = horizon_std::fs::remove_file(target);
                     }
                     return Err(e);
                 }
@@ -182,7 +182,7 @@ impl Modpack {
     }
 
     fn extract_one(
-        zip: &mut zip::ZipArchive<horizon_platform::fs::File>,
+        zip: &mut zip::ZipArchive<horizon_std::fs::File>,
         name: &str,
         home: &Path,
         total: &mut u64,
@@ -192,16 +192,15 @@ impl Modpack {
             .map_err(|e| format!("{name}: {e}"))?;
         let target = home.join(name);
         if let Some(dir) = target.parent() {
-            horizon_platform::fs::create_dir_all(dir)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
+            horizon_std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let mut out = horizon_platform::fs::File::create(&target)
+        let mut out = horizon_std::fs::File::create(&target)
             .map_err(|e| format!("{}: {e}", target.display()))?;
         let copied = std::io::copy(&mut (&mut entry).take(MAX_OVERRIDE + 1), &mut out)
             .map_err(|e| format!("{}: {e}", target.display()))?;
         *total += copied;
         if copied > MAX_OVERRIDE || *total > MAX_OVERRIDES {
-            let _ = horizon_platform::fs::remove_file(&target);
+            let _ = horizon_std::fs::remove_file(&target);
             return Err(if copied > MAX_OVERRIDE {
                 format!("{name} is over {} MiB", MAX_OVERRIDE >> 20)
             } else {
@@ -261,7 +260,7 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 
     fn write_pack(dir: &Path, manifest: &str, files: &[(&str, &[u8])]) -> PathBuf {
         let path = dir.join("cozy.hpack");
-        let mut zip = zip::ZipWriter::new(horizon_platform::fs::File::create(&path).unwrap());
+        let mut zip = zip::ZipWriter::new(horizon_std::fs::File::create(&path).unwrap());
         let options = zip::write::SimpleFileOptions::default();
         zip.start_file(MANIFEST, options).unwrap();
         zip.write_all(manifest.as_bytes()).unwrap();
@@ -274,10 +273,10 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-hpack-{name}-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
-        horizon_platform::fs::create_dir_all(&dir).unwrap();
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        horizon_std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
@@ -300,11 +299,11 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
         assert_eq!(pack.overrides.len(), 3);
         let home = dir.join("home");
         Modpack::extract_overrides(&path, &home).unwrap();
-        let options = horizon_platform::fs::read_to_string(home.join("options.txt")).unwrap();
+        let options = horizon_std::fs::read_to_string(home.join("options.txt")).unwrap();
         assert_eq!(options, "renderDistance:8\n");
         let corner = home.join(format!("horizon-mods/{STORAGE_DIR}/coords_hud/corner.txt"));
         assert!(corner.is_file());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -328,6 +327,6 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
         assert!(Manifest::parse(&newer).unwrap_err().contains("format 2"));
         let short = PACK.replace("0000000000000000", "00");
         assert!(Manifest::parse(&short).is_err());
-        horizon_platform::fs::remove_dir_all(&dir).unwrap();
+        horizon_std::fs::remove_dir_all(&dir).unwrap();
     }
 }

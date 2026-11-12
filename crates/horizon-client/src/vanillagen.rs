@@ -11,7 +11,7 @@ use horizon_core::{
     position::ChunkPos,
     ticks::{ProtoChunkTicks, SavedTick, TickTypeId},
 };
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs::PathExt as _;
 use horizon_world::{
     heightmap::HeightmapType,
     loot::PackOverlay,
@@ -43,7 +43,7 @@ pub struct VanillaTerrain {
     loot: Option<Arc<horizon_world::loot::LootData>>,
     structure_mobs: Arc<StructureMobFinalizer>,
     /// A worker for structure queries from the game thread.
-    query: horizon_platform::sync::Mutex<Option<GeneratorWorker>>,
+    query: horizon_std::sync::Mutex<Option<GeneratorWorker>>,
     /// Block state id -> block index, the game's block tick type: worldgen
     /// schedules block ticks by default state id.
     tick_blocks: Vec<u32>,
@@ -53,9 +53,9 @@ pub struct VanillaTerrain {
     block_entity_types: Vec<Option<&'static str>>,
     seed: i64,
     /// The starts (structure name, chunk) an exploration map pointed at.
-    referenced: horizon_platform::sync::Mutex<std::collections::HashSet<(String, i32, i32)>>,
-    reference_file: horizon_platform::sync::Mutex<Option<std::path::PathBuf>>,
-    saved_references: horizon_platform::sync::Mutex<Option<SavedReferences>>,
+    referenced: horizon_std::sync::Mutex<std::collections::HashSet<(String, i32, i32)>>,
+    reference_file: horizon_std::sync::Mutex<Option<std::path::PathBuf>>,
+    saved_references: horizon_std::sync::Mutex<Option<SavedReferences>>,
     /// The world preset the terrain was generated with (`minecraft:normal`
     /// unless a saved world says otherwise); far decoration uses it too.
     preset: String,
@@ -63,7 +63,7 @@ pub struct VanillaTerrain {
     /// When the last proto chunk was generated, in milliseconds since
     /// `created`: the ring search waits for a pause in generation.
     last_proto: std::sync::atomic::AtomicU64,
-    created: horizon_platform::time::Instant,
+    created: horizon_std::time::Instant,
     /// A superflat generator (`FlatLevelSource`).
     flat: bool,
 }
@@ -319,7 +319,7 @@ impl VanillaTerrain {
                 dir.parent().unwrap_or(dir).to_owned(),
                 dimension,
             )),
-            query: horizon_platform::sync::Mutex::new(None),
+            query: horizon_std::sync::Mutex::new(None),
             tick_blocks,
             tick_states,
             block_entity_types,
@@ -330,7 +330,7 @@ impl VanillaTerrain {
             preset: preset.to_owned(),
             dimension: dimension.to_owned(),
             last_proto: std::sync::atomic::AtomicU64::new(0),
-            created: horizon_platform::time::Instant::now(),
+            created: horizon_std::time::Instant::now(),
             flat: false,
         })
     }
@@ -555,7 +555,7 @@ impl VanillaTerrain {
     /// start nobody visited has no file for.
     pub fn set_reference_file(&self, path: std::path::PathBuf) {
         let mut referenced = self.referenced.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(list) = horizon_platform::fs::read(&path)
+        if let Some(list) = horizon_std::fs::read(&path)
             .ok()
             .and_then(|b| serde_json::from_slice::<Vec<(String, i32, i32)>>(&b).ok())
         {
@@ -584,15 +584,15 @@ impl VanillaTerrain {
         let mut list: Vec<_> = referenced.iter().collect();
         list.sort();
         if let Some(dir) = path.parent() {
-            let _ = horizon_platform::fs::create_dir_all(dir);
+            let _ = horizon_std::fs::create_dir_all(dir);
         }
         // Written beside the file and renamed over it: a crash half way must
         // not leave truncated JSON, which loads as no references at all.
         let tmp = path.with_extension("json.tmp");
         let saved = serde_json::to_vec(&list)
             .map_err(std::io::Error::from)
-            .and_then(|b| horizon_platform::fs::write(&tmp, b))
-            .and_then(|()| horizon_platform::fs::rename(&tmp, path));
+            .and_then(|b| horizon_std::fs::write(&tmp, b))
+            .and_then(|()| horizon_std::fs::rename(&tmp, path));
         if let Err(e) = saved {
             log::warn!("Horizon: could not save {}: {e}", path.display());
         }
@@ -645,16 +645,16 @@ impl VanillaTerrain {
         const LATEST: u64 = 60_000;
         // The one-thread web build has no thread to wait on: a chunk or a
         // query that needs the rings searches them then.
-        if !horizon_platform::THREADS {
+        if !horizon_std::THREADS {
             return;
         }
         let terrain = Arc::downgrade(self);
         // A Web Worker on the web build with threads (a spawned thread runs
         // where it is spawned there, and this one waits).
-        let spawned = horizon_platform::thread::spawn_worker("Ring search", move || {
+        let spawned = horizon_std::thread::spawn_worker("Ring search", move || {
             horizon_threads::idle_current();
             loop {
-                horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(500));
+                horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(500));
                 // The world closed: nothing to search for.
                 let Some(terrain) = terrain.upgrade() else {
                     return;
@@ -682,8 +682,8 @@ impl VanillaTerrain {
 }
 /// A bundle directory, the data packs over it, and what loading them gave.
 type SharedEntry = (std::path::PathBuf, WorldgenOverrides, Arc<GeneratorData>);
-static SHARED_DATA: horizon_platform::sync::Mutex<Vec<SharedEntry>> =
-    horizon_platform::sync::Mutex::new(Vec::new());
+static SHARED_DATA: horizon_std::sync::Mutex<Vec<SharedEntry>> =
+    horizon_std::sync::Mutex::new(Vec::new());
 /// Bundles with data packs kept besides the plain ones: a world's dimensions
 /// share one, and returning to a world finds it.
 const SHARED_WITH_PACKS: usize = 2;
@@ -717,7 +717,7 @@ pub fn shared_data_with(
     {
         return Ok(data.clone());
     }
-    let started = horizon_platform::time::Instant::now();
+    let started = horizon_std::time::Instant::now();
     let data = GeneratorData::load_with(dir, registry, overrides)?;
     log::info!("Horizon: worldgen data loaded in {:?}", started.elapsed());
     for warning in data.warnings() {

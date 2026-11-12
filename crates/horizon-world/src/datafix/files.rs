@@ -11,8 +11,8 @@ use super::{CURRENT, update};
 use crate::compression::Compression;
 use crate::nbt::{self, Compound, JavaString, Limits, NamedTag, Tag};
 use crate::region::{ChunkRecord, RegionFile, RegionWriter};
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -576,8 +576,8 @@ fn fix_4899(base: &Path) -> io::Result<()> {
 /// `FileFixerUpper.addVersionsToLevelData`.
 fn add_versions(data: &mut Tag) {
     set(data, "DataVersion", Tag::Int(CURRENT));
-    let now = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let now = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
     set(data, "LastPlayed", Tag::Long(now));
     set(
@@ -1082,8 +1082,8 @@ mod upgrade_tests {
     /// file fixing does not open the screen.
     #[test]
     fn upgrade_reports_one_operation_per_file() {
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-progress-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-progress-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let level = Tag::compound([("Data", Tag::compound([("DataVersion", Tag::Int(4899))]))]);
         write_dat(&base.join("level.dat"), &level).unwrap();
@@ -1105,8 +1105,8 @@ mod upgrade_tests {
     /// next file, and the DataVersion stays old so the next open retries.
     #[test]
     fn cancel_stops_the_data_upgrade_and_keeps_the_version() {
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-cancel-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-cancel-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let level = Tag::compound([("Data", Tag::compound([("DataVersion", Tag::Int(4899))]))]);
         write_dat(&base.join("level.dat"), &level).unwrap();
@@ -1129,8 +1129,8 @@ mod upgrade_tests {
     /// retries, and a later successful run stamps the current one.
     #[test]
     fn failed_upgrade_keeps_old_data_version() {
-        let base = horizon_platform::env::temp_dir()
-            .join(format!("horizon-upgrade-{}", std::process::id()));
+        let base =
+            horizon_std::env::temp_dir().join(format!("horizon-upgrade-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let old = 4899;
         let level = Tag::compound([("Data", Tag::compound([("DataVersion", Tag::Int(old))]))]);

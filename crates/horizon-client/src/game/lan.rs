@@ -17,12 +17,12 @@ use horizon_client::{
     text::Text,
     world::World,
 };
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::Instant;
 use horizon_protocol::{
     entity_data::{Value, serializer},
     packets::play::{self, Clientbound as C},
 };
+use horizon_std::sync::Mutex;
+use horizon_std::time::Instant;
 use horizon_world::block_collision::BlockCollisionRegistry;
 use std::{collections::HashMap, sync::Arc};
 
@@ -178,7 +178,7 @@ impl Game<'_> {
 /// on a helper thread while a server's world prepares: most worlds have no
 /// packs, so it is what `sync_data` would load once the world is open.
 pub(super) struct SyncPreload(
-    horizon_platform::thread::JoinHandle<std::result::Result<SyncData, String>>,
+    horizon_std::thread::JoinHandle<std::result::Result<SyncData, String>>,
 );
 
 /// Start reading the server's data beside the world's preparation; `None`
@@ -191,7 +191,7 @@ pub(super) fn preload_sync_data(root: &std::path::Path) -> Option<SyncPreload> {
         return None;
     }
     let root = root.to_owned();
-    horizon_platform::thread::Builder::new()
+    horizon_std::thread::Builder::new()
         .name("Server data preload".into())
         .spawn(move || SyncData::load(&root, &horizon_world::loot::PackOverlay::NONE))
         .map(SyncPreload)
@@ -1343,7 +1343,7 @@ impl Game<'_> {
             return Err("no world of this game to open".into());
         };
         // No port on the web: Play with Friends says how friends join.
-        if horizon_platform::WEB {
+        if horizon_std::WEB {
             return Ok(());
         }
         self.system_message(Text::translate(
@@ -1484,7 +1484,7 @@ impl Game<'_> {
         self.save_leaving_guests(&mut host);
         host.hub.disconnect_all();
         // Give the network threads a moment to flush the disconnect packets.
-        horizon_platform::thread::sleep(horizon_platform::time::Duration::from_millis(100));
+        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(100));
         self.world.block_log = None;
         self.world.light_log = None;
         self.audio.capture = None;
@@ -1703,10 +1703,10 @@ impl Game<'_> {
             .advancements
             .to_json(&self.adv.tree, horizon_world::DATA_VERSION);
         if let Some(dir) = path.parent() {
-            let _ = horizon_platform::fs::create_dir_all(dir);
+            let _ = horizon_std::fs::create_dir_all(dir);
         }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = horizon_platform::fs::write(path, text);
+            let _ = horizon_std::fs::write(path, text);
         }
         if let Some(play) = host.play.get(&guest.conn) {
             play.stats
@@ -1757,7 +1757,7 @@ impl Game<'_> {
         };
         let tree = self.advancement_tree();
         let path = super::stats::player_json(&self.world_root, "advancements", uuid);
-        let saved = horizon_platform::fs::read_to_string(path)
+        let saved = horizon_std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
         if let Some(g) = host.hub.guest_mut(conn)
@@ -3436,7 +3436,7 @@ mod tests {
     #[ignore = "requires prepared vanilla resources"]
     fn datapack_damage_world_open_replaces_preload_atomically() {
         use super::{SyncCache, SyncData, cached_sync_data, initialize_world_sync_data};
-        use horizon_platform::sync::Mutex;
+        use horizon_std::sync::Mutex;
         use horizon_world::loot::PackOverlay;
         use std::{
             path::Path,
@@ -3455,7 +3455,7 @@ mod tests {
             let cache = cache.clone();
             let barrier = barrier.clone();
             let root = root.clone();
-            horizon_platform::thread::spawn(move || {
+            horizon_std::thread::spawn(move || {
                 barrier.wait();
                 for _ in 0..32 {
                     cached_sync_data(&mut cache.lock().unwrap(), &root, &PackOverlay::NONE)

@@ -257,11 +257,11 @@ impl ProgressTracker {
 /// server thread writes and the window's loading screen reads.
 #[derive(Debug, Default)]
 pub struct ServerLoadView {
-    tracker: horizon_platform::sync::Mutex<ProgressTracker>,
+    tracker: horizon_std::sync::Mutex<ProgressTracker>,
     /// `serverStage != null`.
     has_progress: std::sync::atomic::AtomicBool,
     /// `statusView.get(x, z)` for x and z in `0..=2 * STATUS_RADIUS`.
-    cells: horizon_platform::sync::Mutex<Vec<Option<Status>>>,
+    cells: horizon_std::sync::Mutex<Vec<Option<Status>>>,
 }
 impl ServerLoadView {
     /// `LevelLoadListener.start`.
@@ -303,7 +303,7 @@ impl ServerLoadView {
             .copied()
             .flatten()
     }
-    fn lock<T>(m: &horizon_platform::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    fn lock<T>(m: &horizon_std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         m.lock().unwrap_or_else(|e| e.into_inner())
     }
 }

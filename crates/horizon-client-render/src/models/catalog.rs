@@ -14,7 +14,7 @@ use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, position_seed},
 };
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::{
     chunk::BlockState,
     registry::{BlockRegistry, BlockStateId},
@@ -545,8 +545,7 @@ mod tests {
     #[test]
     fn standalone_models_bake_once_and_skip_what_does_not_read() -> Result<()> {
         let fixture = Fixture(
-            horizon_platform::env::temp_dir()
-                .join(format!("horizon-standalone-{}", std::process::id())),
+            horizon_std::env::temp_dir().join(format!("horizon-standalone-{}", std::process::id())),
         );
         // A half shaft: one element, two faces; a child with its parent's elements.
         fixture.write(
@@ -608,7 +607,7 @@ mod tests {
         models.baked.push((variant([0, 90, 0]), empty()));
         models.baked.push((variant([0; 3]), empty()));
         let names = vec!["lanef:block/shared".to_owned()];
-        let root = horizon_platform::env::temp_dir().join("horizon-standalone-none");
+        let root = horizon_std::env::temp_dir().join("horizon-standalone-none");
         models.bake_standalone(
             &root,
             &mut Sprites::default(),

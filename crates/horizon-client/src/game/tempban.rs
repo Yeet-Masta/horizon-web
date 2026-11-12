@@ -278,9 +278,9 @@ mod tests {
         }
     }
     fn list(tag: &str) -> BanList {
-        let file = horizon_platform::env::temp_dir()
+        let file = horizon_std::env::temp_dir()
             .join(format!("horizon-tempban-{tag}-{}.json", std::process::id()));
-        let _ = horizon_platform::fs::remove_file(&file);
+        let _ = horizon_std::fs::remove_file(&file);
         BanList::new(file)
     }
 
@@ -444,7 +444,7 @@ mod tests {
             .unwrap()
             .expires
             .unwrap();
-        let text = horizon_platform::fs::read_to_string(&bans.file).unwrap();
+        let text = horizon_std::fs::read_to_string(&bans.file).unwrap();
         // The file writes `expires` to the second, as vanilla's ban list does.
         assert!(text.contains(&format_date(end)), "{text}");
         // A restart: the list reads it back, still banned, still ending then.
@@ -455,7 +455,7 @@ mod tests {
         // `/pardon` is `remove`, as for any ban.
         assert!(after.remove(&user(9, "Dee")));
         assert!(after.get(&user(9, "Dee")).is_none());
-        let _ = horizon_platform::fs::remove_file(&bans.file);
+        let _ = horizon_std::fs::remove_file(&bans.file);
     }
     #[test]
     fn a_ban_that_has_ended_lets_the_player_in_after_a_restart() {
@@ -465,7 +465,7 @@ mod tests {
         let mut after = BanList::new(bans.file.clone());
         after.load().unwrap();
         assert!(after.get(&user(4, "Eve")).is_none());
-        let _ = horizon_platform::fs::remove_file(&bans.file);
+        let _ = horizon_std::fs::remove_file(&bans.file);
     }
 
     fn ban(

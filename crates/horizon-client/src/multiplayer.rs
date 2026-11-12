@@ -6,9 +6,9 @@ use crate::hud::{HudAtlas, HudBatch, rgba};
 use crate::lan::discovery::Scanner;
 use crate::text::{DARK_GRAY, GRAY, Text, format_translation};
 use crate::title::confirm_top;
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::servers::{self, ServerEntry};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -231,7 +231,7 @@ fn ping_all(servers: &[ServerEntry], pings: &Pings, icons: &Icons, file: &Path) 
             icons.lock().unwrap().insert(address.clone(), pixels);
         }
         let (pings, icons, file) = (pings.clone(), icons.clone(), file.to_owned());
-        let _ = horizon_platform::thread::spawn_task("horizon-ping", async move {
+        let _ = horizon_std::thread::spawn_task("horizon-ping", async move {
             let result = match crate::net::ping(&address, Duration::from_secs(5)).await {
                 Ok((json, ms)) => {
                     let motd =
@@ -369,7 +369,7 @@ pub fn add_official_server(game_dir: &Path) -> std::io::Result<()> {
     let (name, address) = OFFICIAL_SERVER;
     let marker = game_dir.join(OFFICIAL_MARKER);
     // A marker that is there but can't be read: offered already, at an address not known.
-    let offered = match horizon_platform::fs::read_to_string(&marker) {
+    let offered = match horizon_std::fs::read_to_string(&marker) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => Some(String::new()),
@@ -394,7 +394,7 @@ pub fn add_official_server(game_dir: &Path) -> std::io::Result<()> {
     {
         servers::prepend(&file, &ServerEntry::new(name, address))?;
     }
-    horizon_platform::fs::write(marker, format!("{address}\n"))
+    horizon_std::fs::write(marker, format!("{address}\n"))
 }
 
 /// Servers Horizon partners with, offered once below the official server: a name (with the
@@ -409,7 +409,7 @@ const PARTNER_MARKER: &str = "horizon_partner_servers.txt";
 /// official server (last when the list doesn't have it), unless the list has its address.
 pub fn add_partner_servers(game_dir: &Path) -> std::io::Result<()> {
     let marker = game_dir.join(PARTNER_MARKER);
-    let offered = match horizon_platform::fs::read_to_string(&marker) {
+    let offered = match horizon_std::fs::read_to_string(&marker) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         // Can't tell what was offered: offer nothing rather than twice.
@@ -443,7 +443,7 @@ pub fn add_partner_servers(game_dir: &Path) -> std::io::Result<()> {
         text.push_str(address);
         text.push('\n');
     }
-    horizon_platform::fs::write(marker, text)
+    horizon_std::fs::write(marker, text)
 }
 
 /// Points the entries for an earlier official address at `address`, each
@@ -1129,8 +1129,8 @@ impl Screen {
                     )
                     .key(crate::widgets::key_of(&"multiplayer/servers"))
                 });
-                let millis = horizon_platform::time::SystemTime::now()
-                    .duration_since(horizon_platform::time::UNIX_EPOCH)
+                let millis = horizon_std::time::SystemTime::now()
+                    .duration_since(horizon_std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
                 let gray = rgba(128, 128, 128, 255);
                 for (i, row) in rows(servers.len(), games.len()).enumerate() {
@@ -1469,7 +1469,7 @@ impl Screen {
                     centered(batch, line, l.message + i as f32 * 9.0, u32::MAX);
                 }
                 if let Some(r) = retry {
-                    let text = r.text(horizon_platform::time::Instant::now());
+                    let text = r.text(horizon_std::time::Instant::now());
                     centered(batch, &text, l.retry, rgba(170, 170, 170, 255));
                 }
             }
@@ -1889,7 +1889,7 @@ impl Screen {
         let Self::Disconnected { retry, .. } = self else {
             return None;
         };
-        if !retry.as_ref()?.due(horizon_platform::time::Instant::now()) {
+        if !retry.as_ref()?.due(horizon_std::time::Instant::now()) {
             return None;
         }
         retry.take()
@@ -2365,14 +2365,14 @@ mod tests {
 
     #[test]
     fn the_official_server_is_added_once_at_the_top() {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-mp-official-{}", std::process::id()));
         let (name, address) = OFFICIAL_SERVER;
         let file = dir.join("servers.dat");
         let ips = || -> Vec<String> { servers::load(&file).into_iter().map(|s| s.ip).collect() };
         let fresh = |list: &[ServerEntry]| {
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
-            horizon_platform::fs::create_dir_all(&dir).unwrap();
+            let _ = horizon_std::fs::remove_dir_all(&dir);
+            horizon_std::fs::create_dir_all(&dir).unwrap();
             if !list.is_empty() {
                 servers::save(&file, list).unwrap();
             }
@@ -2405,20 +2405,20 @@ mod tests {
         servers::save(&file, &mine).unwrap();
         add_official_server(&dir).unwrap();
         assert_eq!(ips(), ["127.0.0.1:2", "example.org"]);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn partner_servers_are_offered_once_below_the_official_server() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-partner-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-partner-{}", std::process::id()));
         let official = OFFICIAL_SERVER.1;
         let (name, partner) = PARTNER_SERVERS[0];
         let file = dir.join("servers.dat");
         let ips = || -> Vec<String> { servers::load(&file).into_iter().map(|s| s.ip).collect() };
         let fresh = |list: &[ServerEntry]| {
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
-            horizon_platform::fs::create_dir_all(&dir).unwrap();
+            let _ = horizon_std::fs::remove_dir_all(&dir);
+            horizon_std::fs::create_dir_all(&dir).unwrap();
             if !list.is_empty() {
                 servers::save(&file, list).unwrap();
             }
@@ -2453,22 +2453,22 @@ mod tests {
         servers::save(&file, &[]).unwrap();
         add_partner_servers(&dir).unwrap();
         assert!(ips().is_empty());
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_moved_official_server_moves_the_old_entry_once() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-moved-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-moved-{}", std::process::id()));
         let address = OFFICIAL_SERVER.1;
         let file = dir.join("servers.dat");
         let marker = dir.join(OFFICIAL_MARKER);
         let ips = || -> Vec<String> { servers::load(&file).into_iter().map(|s| s.ip).collect() };
         let offered_before = |list: &[ServerEntry]| {
-            let _ = horizon_platform::fs::remove_dir_all(&dir);
-            horizon_platform::fs::create_dir_all(&dir).unwrap();
+            let _ = horizon_std::fs::remove_dir_all(&dir);
+            horizon_std::fs::create_dir_all(&dir).unwrap();
             servers::save(&file, list).unwrap();
-            horizon_platform::fs::write(&marker, "horizon.bunchy7s.dev\n").unwrap();
+            horizon_std::fs::write(&marker, "horizon.bunchy7s.dev\n").unwrap();
         };
         // The old address under the player's own name and spelling: moved, name and place kept.
         let mut old = ServerEntry::new("Our SMP", "Horizon.Bunchy7s.dev:25565");
@@ -2482,7 +2482,7 @@ mod tests {
             ("Our SMP", Some("AAAA"))
         );
         assert_eq!(
-            horizon_platform::fs::read_to_string(&marker).unwrap(),
+            horizon_std::fs::read_to_string(&marker).unwrap(),
             format!("{address}\n")
         );
         // Once: the old address added back afterwards is the player's.
@@ -2500,15 +2500,15 @@ mod tests {
         offered_before(&[ServerEntry::new("Test", "horizon.bunchy7s.dev:25570")]);
         add_official_server(&dir).unwrap();
         assert_eq!(ips(), ["horizon.bunchy7s.dev:25570"]);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn arrow_keys_select_servers_and_shift_moves_them() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-keys-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-keys-{}", std::process::id()));
         let saves = dir.join("saves");
-        horizon_platform::fs::create_dir_all(&saves).unwrap();
+        horizon_std::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let list: Vec<ServerEntry> = ["a", "b", "c"]
             .iter()
@@ -2550,15 +2550,15 @@ mod tests {
         screen.arrow(true, true, size, &saves);
         assert_eq!(state(&screen).1, Some(0));
         assert_eq!(state(&screen).0[0], "c");
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn enter_joins_the_selected_server() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-enter-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-enter-{}", std::process::id()));
         let saves = dir.join("saves");
-        horizon_platform::fs::create_dir_all(&saves).unwrap();
+        horizon_std::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let list = vec![
             ServerEntry::new("a", "127.0.0.1:2"),
@@ -2586,15 +2586,15 @@ mod tests {
             }
             _ => panic!("Enter did not join the second server"),
         }
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn icon_arrows_join_and_move_servers() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-arrows-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-arrows-{}", std::process::id()));
         let saves = dir.join("saves");
-        horizon_platform::fs::create_dir_all(&saves).unwrap();
+        horizon_std::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let names = ["a", "b", "c"];
         let list: Vec<ServerEntry> = names
@@ -2646,15 +2646,15 @@ mod tests {
             }
             _ => panic!("the join arrow connects"),
         }
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn delete_asks_before_removing_the_server() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-delete-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-delete-{}", std::process::id()));
         let saves = dir.join("saves");
-        horizon_platform::fs::create_dir_all(&saves).unwrap();
+        horizon_std::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let list = vec![
             ServerEntry::new("Keep", "127.0.0.1:2"),
@@ -2713,15 +2713,15 @@ mod tests {
             matches!(&screen, Screen::List { selected: None, servers, .. } if servers.len() == 1)
         );
         assert_eq!(names(), ["Keep"]);
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn edit_cycles_and_saves_the_server_resource_pack_setting() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-mp-packs-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-mp-packs-{}", std::process::id()));
         let saves = dir.join("saves");
-        horizon_platform::fs::create_dir_all(&saves).unwrap();
+        horizon_std::fs::create_dir_all(&saves).unwrap();
         let file = servers_file(&saves);
         let mut entry = ServerEntry::new("Packs", "127.0.0.1:4");
         entry.accept_textures = Some(false);
@@ -2768,6 +2768,6 @@ mod tests {
         // A new server asks.
         screen.click(Some(42), 0.0, 0.0, size, &saves);
         assert_eq!(cycle(&screen).unwrap().3, "Server Resource Packs: Prompt");
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

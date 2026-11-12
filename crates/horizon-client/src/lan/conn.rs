@@ -12,8 +12,6 @@ use super::{
     forwarding,
     io_pool::{self, Session as _},
 };
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
 use horizon_protocol::{
     PROTOCOL_VERSION,
     connection::{ConnWriter, Connection, Counters},
@@ -25,6 +23,8 @@ use horizon_protocol::{
     },
     text::translatable,
 };
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::{
     cell::Cell,
     net::TcpStream,
@@ -480,16 +480,16 @@ pub fn serve_local(
 /// end on a worker, as the integrated server's own player is.
 #[cfg(target_family = "wasm")]
 pub fn serve_web(
-    socket: horizon_platform::web::socket::Socket,
+    socket: horizon_std::web::socket::Socket,
     address: std::net::SocketAddr,
     shared: Arc<Shared>,
 ) -> std::io::Result<()> {
     let (near, far) = horizon_protocol::connection::Pipe::pair();
-    horizon_platform::thread::spawn_task("horizon-lan-bridge", bridge(socket, near))?;
-    horizon_platform::thread::spawn_worker("horizon-lan-conn", move || {
+    horizon_std::thread::spawn_task("horizon-lan-bridge", bridge(socket, near))?;
+    horizon_std::thread::spawn_worker("horizon-lan-conn", move || {
         let c = Connection::local(far.bridged());
         if let Err(e) = serve_connection(c, address, shared, None)
-            && horizon_platform::env::var_os("HORIZON_NET_DEBUG").is_some()
+            && horizon_std::env::var_os("HORIZON_NET_DEBUG").is_some()
         {
             log::warn!("[lan] friend: {e}");
         }
@@ -500,7 +500,7 @@ pub fn serve_web(
 /// `socket`, until either ends; then the other ends too.
 #[cfg(target_family = "wasm")]
 async fn bridge(
-    socket: horizon_platform::web::socket::Socket,
+    socket: horizon_std::web::socket::Socket,
     mut pipe: horizon_protocol::connection::Pipe,
 ) {
     use std::io::{ErrorKind, Read, Write};
@@ -552,7 +552,7 @@ async fn bridge(
         }
         // Wait for either side, and look again after a while whatever happens.
         let readable = socket.readable();
-        let later = horizon_platform::thread::sleep_task(Duration::from_millis(50));
+        let later = horizon_std::thread::sleep_task(Duration::from_millis(50));
         let (mut readable, mut later) = (std::pin::pin!(readable), std::pin::pin!(later));
         std::future::poll_fn(|cx| {
             {
@@ -892,7 +892,7 @@ fn serve_login(
         table
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take_until(uuid, horizon_platform::time::Instant::now())
+            .take_until(uuid, horizon_std::time::Instant::now())
     });
     // A login that does not reach play (it failed in configuration) gives the
     // expectation back, so the proxy's next attempt is still expected.
@@ -901,7 +901,7 @@ fn serve_login(
             table.lock().unwrap_or_else(|e| e.into_inner()).put_back(
                 uuid,
                 deadline,
-                horizon_platform::time::Instant::now(),
+                horizon_std::time::Instant::now(),
             );
         }
     };
@@ -1330,12 +1330,12 @@ fn wait_alive<T>(
     c: &mut Connection,
     mut answer: impl FnMut(Result<cfg::Serverbound, String>) -> Option<Result<T, String>>,
 ) -> Result<T, String> {
-    horizon_platform::thread::scope(|scope| {
+    horizon_std::thread::scope(|scope| {
         let (stop, stopped) = channel::<()>();
         let writer = &mut c.writer;
         scope.spawn(move || {
             let start = Instant::now();
-            while horizon_platform::sync::recv_timeout(&stopped, KEEP_ALIVE_EVERY)
+            while horizon_std::sync::recv_timeout(&stopped, KEEP_ALIVE_EVERY)
                 == Err(RecvTimeoutError::Timeout)
             {
                 let id = i64::try_from(start.elapsed().as_millis()).unwrap_or(0);
@@ -1969,7 +1969,7 @@ mod tests {
         let frames = SharedFrames::new(usize::MAX);
         let body: Vec<u8> = (0..400_000u32).map(|i| (i * 7 % 251) as u8).collect();
         let start = std::sync::Barrier::new(8);
-        let made: Vec<Arc<[u8]>> = horizon_platform::thread::scope(|scope| {
+        let made: Vec<Arc<[u8]>> = horizon_std::thread::scope(|scope| {
             let threads: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(|| {

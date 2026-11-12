@@ -34,7 +34,7 @@ impl Game<'_> {
                 columns.len()
             ));
         }
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let out = self.surface_heights(columns, heightmap);
         self.native_read_logged(started, "height query", columns.len());
         Ok(out)
@@ -57,18 +57,13 @@ impl Game<'_> {
         if !self.native_level_open(dimension) {
             return Err(format!("{dimension} is not the level being ticked"));
         }
-        let started = horizon_platform::time::Instant::now();
+        let started = horizon_std::time::Instant::now();
         let out = self.read_columns(columns, heightmap, below, above)?;
         self.native_read_logged(started, "column read", columns.len());
         Ok(out)
     }
     /// A read's time logged with `HORIZON_SPIKES`, as an edit's is.
-    fn native_read_logged(
-        &self,
-        started: horizon_platform::time::Instant,
-        what: &str,
-        columns: usize,
-    ) {
+    fn native_read_logged(&self, started: horizon_std::time::Instant, what: &str, columns: usize) {
         let ms = started.elapsed().as_secs_f32() * 1000.0;
         if self.options.spikes.is_some_and(|threshold| ms > threshold) {
             log::info!("Horizon: slow mod {what} {ms:.1} ms ({columns} columns)");

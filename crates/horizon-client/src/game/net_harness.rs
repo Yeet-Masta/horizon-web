@@ -11,7 +11,7 @@
 //! seconds for any chat they bring.
 use super::Game;
 use horizon_client::Result;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::json;
 use std::path::Path;
 
@@ -26,10 +26,10 @@ impl Game<'_> {
         let mut step_at = Instant::now();
         let mut chat_at = 0;
         let mut position = None;
-        let quiet: Vec<String> = horizon_platform::env::var("HORIZON_NET_QUIET")
+        let quiet: Vec<String> = horizon_std::env::var("HORIZON_NET_QUIET")
             .map(|v| v.split(';').map(str::to_owned).collect())
             .unwrap_or_default();
-        let lines: Vec<String> = horizon_platform::env::var("HORIZON_NET_CHAT")
+        let lines: Vec<String> = horizon_std::env::var("HORIZON_NET_CHAT")
             .map(|v| v.split(';').map(str::to_owned).collect())
             .unwrap_or_else(|_| vec!["hello from the horizon client".into(), "/list".into()]);
         let mut sent = 0;
@@ -123,7 +123,7 @@ impl Game<'_> {
                 }
                 _ => {}
             }
-            horizon_platform::thread::sleep(Duration::from_millis(5));
+            horizon_std::thread::sleep(Duration::from_millis(5));
         }
         if step < 3 && error.is_none() {
             error = Some(format!("timed out at step {step}"));
@@ -136,7 +136,7 @@ impl Game<'_> {
         if self.remote.is_some() {
             self.leave_server(None)?;
         }
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             report,
             json!({
                 "position": position,

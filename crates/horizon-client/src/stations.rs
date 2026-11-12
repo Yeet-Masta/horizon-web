@@ -9,7 +9,7 @@ use crate::{
     items::{ItemStack, Items},
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
-use horizon_platform::fs;
+use horizon_std::fs;
 use horizon_world::loot::PackOverlay;
 use serde_json::Value;
 use std::{path::Path, sync::Arc};
@@ -1059,7 +1059,7 @@ mod tests {
     /// order (path, then namespace), not a place after the game's own.
     #[test]
     fn stonecutter_lists_recipes_in_registration_order() {
-        let root = horizon_platform::env::temp_dir()
+        let root = horizon_std::env::temp_dir()
             .join(format!("horizon-stonecutter-order-{}", std::process::id()));
         let dir = root.join("data/minecraft/recipe");
         fs::create_dir_all(&dir).unwrap();

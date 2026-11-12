@@ -8,7 +8,7 @@ description = "The dedicated server's vanilla files: server.properties, eula.txt
 
 [dependencies]
 # std::fs, std::time and std::thread, or the browser's on the web build.
-horizon-platform = { path = "../horizon-platform" }
+horizon-std = { path = "../horizon-std" }
 horizon-core = { path = "../horizon-core" }
 horizon-protocol = { path = "../horizon-protocol" }
 horizon-world = { path = "../horizon-world" }

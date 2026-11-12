@@ -10,7 +10,7 @@
 //! (game/repro.rs).
 use super::{Game, Screen};
 use horizon_client::{Result, keybinds};
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::VecDeque, sync::mpsc::Sender};

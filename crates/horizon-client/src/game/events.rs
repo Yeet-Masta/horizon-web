@@ -3,7 +3,7 @@
 //! what the game does.
 use super::Game;
 use horizon_client::Result;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, VecDeque},

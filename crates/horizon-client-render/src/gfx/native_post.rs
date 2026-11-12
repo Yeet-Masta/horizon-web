@@ -135,16 +135,16 @@ pub struct NativeFrame {
     /// is drawn and `has_reflection` stays 0.
     pub reflects: bool,
     /// Last frame's view-projection, camera and time (`write`).
-    last: Option<([[f32; 4]; 4], glam::DVec3, horizon_platform::time::Instant)>,
+    last: Option<([[f32; 4]; 4], glam::DVec3, horizon_std::time::Instant)>,
     /// The eased eye light (block, sky) and being in water and lava (`write`); NaN until the
     /// first frame sets them.
     eye: [f32; 4],
     /// A post stage must use black history after a long gap until it has rendered a frame.
     history_reset: bool,
-    start: horizon_platform::time::Instant,
+    start: horizon_std::time::Instant,
     frames: u32,
     /// `frame.wetness`, and when it was last written.
-    wetness: (f32, Option<horizon_platform::time::Instant>),
+    wetness: (f32, Option<horizon_std::time::Instant>),
 }
 
 /// A depth texture of `size` the world's depth is copied into.
@@ -350,7 +350,7 @@ impl NativeFrame {
             last: None,
             eye: [f32::NAN; 4],
             history_reset: true,
-            start: horizon_platform::time::Instant::now(),
+            start: horizon_std::time::Instant::now(),
             frames: 0,
             wetness: (0.0, None),
         }
@@ -518,7 +518,7 @@ impl NativeFrame {
             || self.start.elapsed().as_secs_f32() % 3600.0,
             |ticks| (ticks as f32 / 20.0) % 3600.0,
         );
-        let now = horizon_platform::time::Instant::now();
+        let now = horizon_std::time::Instant::now();
         let since = match still {
             Some(_) => f32::INFINITY,
             None => self.wetness.1.map_or(0.0, |t| (now - t).as_secs_f32()),
@@ -763,7 +763,7 @@ impl NativePost {
                 multiview_mask: None,
                 cache: None,
             });
-            if let Some(e) = horizon_platform::block_on_or(scope.pop(), None) {
+            if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
                 return Err(format!("{}: {e}", stage.file));
             }
             passes.push((stage.label, pipeline));

@@ -111,7 +111,7 @@ fn padded_fill_reads_every_neighbour_and_its_light_like_chunk_reads() {
 #[test]
 #[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
 fn a_shader_pack_lights_the_faces_itself() {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -166,7 +166,7 @@ fn a_shader_pack_lights_the_faces_itself() {
 #[test]
 #[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
 fn a_shader_pack_lights_every_nether_face_like_an_up_face() {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -218,7 +218,7 @@ fn a_shader_pack_lights_every_nether_face_like_an_up_face() {
 #[test]
 #[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
 fn separate_ao_passes_ao_in_alpha_without_darkening_rgb() {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -267,7 +267,7 @@ fn separate_ao_passes_ao_in_alpha_without_darkening_rgb() {
 #[test]
 #[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
 fn reused_mesh_matches_fresh_geometry_across_sections_and_resource_reload() {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -409,7 +409,7 @@ fn benchmark_padded_reuse() {
     for sample in 0..9 {
         // Alternate execution order to expose, rather than hide, order effects.
         for reused in [sample % 2 == 0, sample % 2 != 0] {
-            let start = horizon_platform::time::Instant::now();
+            let start = horizon_std::time::Instant::now();
             for _ in 0..ITERATIONS {
                 if reused {
                     pad.fill(std::hint::black_box(&region), 0, &mut own);
@@ -437,7 +437,7 @@ fn benchmark_padded_reuse() {
 #[test]
 #[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
 fn a_shader_pack_s_still_water_top_starts_at_its_south_west_corner() {
-    let root = horizon_platform::env::var_os("HORIZON_MESH_TEST_RESOURCES")
+    let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

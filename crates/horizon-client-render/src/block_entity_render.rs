@@ -24,7 +24,7 @@ use horizon_core::geometry::{
     Direction,
     trig::{self, Mth},
 };
-use horizon_platform::sync::{Mutex, RwLock};
+use horizon_std::sync::{Mutex, RwLock};
 use horizon_world::{
     block_render::FaceVisibility,
     registry::{BlockRegistry, BlockStateId},
@@ -1345,9 +1345,8 @@ impl BlockEntityRenderer {
         registry: &BlockRegistry,
         visibility: FaceVisibility,
     ) -> Result<Self> {
-        let all: Value = serde_json::from_slice(&horizon_platform::fs::read(
-            root.join("entity-models.json"),
-        )?)?;
+        let all: Value =
+            serde_json::from_slice(&horizon_std::fs::read(root.join("entity-models.json"))?)?;
         let models = MODELS
             .iter()
             .filter_map(|(key, layer)| all.get(*layer).map(|v| (*key, ModelPart::parse(v))))
@@ -1368,7 +1367,7 @@ impl BlockEntityRenderer {
             };
             let name = pattern.strip_prefix("minecraft:").unwrap_or(pattern);
             let file = root.join(format!("data/minecraft/decorated_pot_pattern/{name}.json"));
-            let Ok(def) = horizon_platform::fs::read(file) else {
+            let Ok(def) = horizon_std::fs::read(file) else {
                 continue;
             };
             let def: Value = serde_json::from_slice(&def)?;
@@ -3507,8 +3506,7 @@ mod tests {
         use crate::{models::catalog::StateModels, sprites::Sprites};
         use horizon_world::{DATA_VERSION, chunk::BlockState, nbt::Tag};
         let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
-                .expect("HORIZON_TEST_RESOURCES"),
+            horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
         let names = [
             "white_banner",
@@ -3519,7 +3517,7 @@ mod tests {
             "copper_chest",
         ];
         let mut facts: std::collections::BTreeMap<String, Value> =
-            serde_json::from_slice(&horizon_platform::fs::read(root.join("model-states.json"))?)?;
+            serde_json::from_slice(&horizon_std::fs::read(root.join("model-states.json"))?)?;
         let states = names.map(|name| {
             let name = format!("minecraft:{name}");
             let mut first = facts[&name]["states"][0].clone();
@@ -3561,9 +3559,8 @@ mod tests {
             };
             assert_eq!(models[0].1.particle, Some(sprites.layers[particle]));
         }
-        let all: Value = serde_json::from_slice(&horizon_platform::fs::read(
-            root.join("entity-models.json"),
-        )?)?;
+        let all: Value =
+            serde_json::from_slice(&horizon_std::fs::read(root.join("entity-models.json"))?)?;
         let renderer = BlockEntityRenderer::new(
             MODELS
                 .iter()
@@ -4411,8 +4408,8 @@ mod tests {
             )],
         );
         renderer.set_shapes(renderer.shapes_for(&root));
-        let _ = horizon_platform::fs::remove_dir_all(&root);
-        let _ = horizon_platform::fs::remove_dir_all(&empty);
+        let _ = horizon_std::fs::remove_dir_all(&root);
+        let _ = horizon_std::fs::remove_dir_all(&empty);
         let rect = |u0: f32| Rect {
             u0,
             v0: 0.0,

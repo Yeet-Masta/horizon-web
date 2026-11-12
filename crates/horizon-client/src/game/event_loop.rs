@@ -5,7 +5,7 @@
 //! (#4951) has no display, so it cannot have that loop: it runs its own, and hands the same
 //! methods this trait instead. winit's loop implements it, so a window's game is unchanged.
 
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::time::{Duration, Instant};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 /// A successful frame only permits polling until the next idle iteration. If
@@ -15,7 +15,7 @@ pub(super) fn redraw_flow(frame_drawn: &mut bool, offscreen: bool, now: Instant)
     let drew_frame = std::mem::take(frame_drawn);
     // On the web the page's requestAnimationFrame brings the next frame
     // (`request_redraw`): the loop waits for it.
-    if horizon_platform::WEB {
+    if horizon_std::WEB {
         return ControlFlow::Wait;
     }
     if offscreen || drew_frame {

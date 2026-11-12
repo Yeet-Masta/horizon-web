@@ -1,5 +1,5 @@
 //! Instance-local picker entries. Hiding an entry never removes settings or world saves.
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::{io, path::Path};
 
 const HIDDEN: &str = ".hidden";
@@ -72,8 +72,8 @@ mod tests {
 
     #[test]
     fn hide_and_restore_preserve_settings_and_stay_in_one_instance() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("hz-profile-store-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("hz-profile-store-{}", std::process::id()));
         let (a, b) = (root.join("a"), root.join("b"));
         restore(&a, "jordank").unwrap();
         let options = a.join("jordank/options.txt");

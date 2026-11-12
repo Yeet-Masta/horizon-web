@@ -12,8 +12,8 @@ use horizon_client::{
 };
 use horizon_core::geometry::Vec3;
 use horizon_core::random::RandomSource;
-use horizon_platform::time::Instant;
 use horizon_protocol::packets::play::Clientbound as C;
+use horizon_std::time::Instant;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -121,7 +121,7 @@ pub(super) struct AdvState {
     pub(super) announced: Vec<Text>,
     /// The tree being read on another thread since the world opened
     /// (`prefetch_advancement_tree`), taken by the first `advancement_tree`.
-    pub(super) pending_tree: Option<horizon_platform::thread::ThreadHandle<Arc<Tree>>>,
+    pub(super) pending_tree: Option<horizon_std::thread::ThreadHandle<Arc<Tree>>>,
     /// `inventory_changed`'s criteria by item, built for `tree`.
     inventory_index: Option<(Arc<Tree>, Arc<adv::InventoryIndex>)>,
 }
@@ -260,8 +260,8 @@ fn vanilla_structure_tags(root: &std::path::Path) -> &'static Tags {
     })
 }
 fn now_text() -> String {
-    let secs = horizon_platform::time::SystemTime::now()
-        .duration_since(horizon_platform::time::UNIX_EPOCH)
+    let secs = horizon_std::time::SystemTime::now()
+        .duration_since(horizon_std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs()) as i64;
     adv::date_text(secs)
 }
@@ -372,7 +372,7 @@ impl Game<'_> {
         };
         // A Web Worker on the web build with threads.
         self.adv.pending_tree =
-            horizon_platform::thread::spawn_thread("horizon-advancements", move || {
+            horizon_std::thread::spawn_thread("horizon-advancements", move || {
                 Tree::shared(&data, &horizon_world::loot::PackOverlay { files: &files })
             })
             .ok();
@@ -385,7 +385,7 @@ impl Game<'_> {
         self.advancement_tree();
         let progress = self
             .adv_path()
-            .and_then(|p| horizon_platform::fs::read_to_string(p).ok())
+            .and_then(|p| horizon_std::fs::read_to_string(p).ok())
             .and_then(|t| serde_json::from_str::<Value>(&t).ok())
             .map(|v| Progress::from_json(&v))
             .unwrap_or_default();
@@ -407,10 +407,10 @@ impl Game<'_> {
             .progress
             .to_json(&self.adv.tree, horizon_world::DATA_VERSION);
         if let Some(dir) = path.parent() {
-            let _ = horizon_platform::fs::create_dir_all(dir);
+            let _ = horizon_std::fs::create_dir_all(dir);
         }
         if let Ok(text) = serde_json::to_string_pretty(&json) {
-            let _ = horizon_platform::fs::write(path, text);
+            let _ = horizon_std::fs::write(path, text);
         }
     }
     /// The player as predicates see it.
@@ -2395,9 +2395,8 @@ mod tests {
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn mob_predicate_view_reads_active_effect_instances() {
         use crate::game::{Audio, Options, Settings, commands::Target, load_resources};
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
@@ -2764,16 +2763,15 @@ mod structure_tag_tests {
     #[test]
     #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
     fn location_structure_tags_hold_their_structures() {
-        let root = std::path::PathBuf::from(
-            horizon_platform::env::var_os("HORIZON_TEST_RESOURCES").unwrap(),
-        );
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
         let settings = Settings::default();
         let loaded = load_resources(
             root.clone(),
             None,
             &root,
             &settings,
-            horizon_platform::time::Instant::now(),
+            horizon_std::time::Instant::now(),
             false,
             true,
             &Progress::new(),
@@ -2809,27 +2807,27 @@ mod structure_tag_tests {
         assert!(!View(&game).in_tag("worldgen/structure", "mypack:village", "minecraft:igloo"));
 
         // A pack's own tag (nesting the game's) and an addition to the game's.
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-structure-tags-{}", std::process::id()));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
         let pack = dir.join("datapacks").join("mypack");
         let tags = pack.join("data/mypack/tags/worldgen/structure");
         let game_tags = pack.join("data/minecraft/tags/worldgen/structure");
-        horizon_platform::fs::create_dir_all(&tags).unwrap();
-        horizon_platform::fs::create_dir_all(&game_tags).unwrap();
-        horizon_platform::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::create_dir_all(&tags).unwrap();
+        horizon_std::fs::create_dir_all(&game_tags).unwrap();
+        horizon_std::fs::write(pack.join("pack.mcmeta"), "{}").unwrap();
+        horizon_std::fs::write(
             tags.join("village.json"),
             r##"{"values": ["#minecraft:village", "minecraft:igloo"]}"##,
         )
         .unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(
             game_tags.join("shipwreck.json"),
             r#"{"values": ["minecraft:ocean_ruin_cold"]}"#,
         )
         .unwrap();
         let settings = json!({"enabled": ["file/mypack"], "disabled": []});
-        horizon_platform::fs::write(dir.join("datapacks.json"), settings.to_string()).unwrap();
+        horizon_std::fs::write(dir.join("datapacks.json"), settings.to_string()).unwrap();
         game.world_root = dir.clone();
         let (tables, _) = game.build_world_tables(false, &[]).unwrap();
         game.world_tables = tables;
@@ -2843,6 +2841,6 @@ mod structure_tag_tests {
             "minecraft:ocean_ruin_cold"
         ));
         assert!(holds(&game, "#minecraft:shipwreck", "minecraft:shipwreck"));
-        let _ = horizon_platform::fs::remove_dir_all(&dir);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 }

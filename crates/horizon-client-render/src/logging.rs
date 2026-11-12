@@ -10,9 +10,9 @@
 //! warnings are mostly the Vulkan loader's startup chatter).
 // The web build has no log file: its writer goes unused there.
 #![cfg_attr(target_family = "wasm", allow(dead_code))]
-use horizon_platform::fs::{self, File, OpenOptions};
-use horizon_platform::sync::Mutex;
-use horizon_platform::time::{Duration, Instant};
+use horizon_std::fs::{self, File, OpenOptions};
+use horizon_std::sync::Mutex;
+use horizon_std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -30,18 +30,18 @@ const RECENT: usize = 50;
 const FLOOD_LINES: u32 = 100;
 const FLOOD_WINDOW: Duration = Duration::from_secs(60);
 
-/// `Local::now()`. Through `horizon_platform::time`: chrono reads std's clock,
+/// `Local::now()`. Through `horizon_std::time`: chrono reads std's clock,
 /// which panics on the web build.
 pub fn local_now() -> DateTime<Local> {
-    DateTime::from(horizon_platform::time::to_std(
-        horizon_platform::time::SystemTime::now(),
+    DateTime::from(horizon_std::time::to_std(
+        horizon_std::time::SystemTime::now(),
     ))
 }
 
 /// The platform data folder (what the `dirs` crate's data_dir gives).
 pub fn data_dir() -> PathBuf {
     let env = |k: &str| {
-        horizon_platform::env::var_os(k)
+        horizon_std::env::var_os(k)
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
@@ -59,7 +59,7 @@ pub fn data_dir() -> PathBuf {
     } else if let Some(h) = &home {
         return h.join(".local/share");
     }
-    horizon_platform::env::temp_dir()
+    horizon_std::env::temp_dir()
 }
 
 /// `--home DIR`, set once at start; it wins over `HORIZON_HOME`.
@@ -90,7 +90,7 @@ pub fn player_dir() -> PathBuf {
     PLAYER
         .get()
         .cloned()
-        .unwrap_or_else(|| horizon_platform::env::current_dir().unwrap_or_default())
+        .unwrap_or_else(|| horizon_std::env::current_dir().unwrap_or_default())
 }
 
 /// `--player-dir`, if given.
@@ -103,7 +103,7 @@ pub fn player_dir_override() -> Option<&'static Path> {
 /// out of the game folder.
 pub fn shared_dir(options_dir: &Path) -> PathBuf {
     shared_dir_of(PLAYER.get().map(PathBuf::as_path), options_dir, || {
-        horizon_platform::env::current_dir().unwrap_or_default()
+        horizon_std::env::current_dir().unwrap_or_default()
     })
 }
 
@@ -125,7 +125,7 @@ pub fn game_home() -> PathBuf {
     if let Some(home) = HOME.get() {
         return home.clone();
     }
-    match horizon_platform::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
+    match horizon_std::env::var_os("HORIZON_HOME").filter(|h| !h.is_empty()) {
         Some(h) => PathBuf::from(h),
         None => data_dir().join("horizon"),
     }
@@ -273,7 +273,7 @@ pub fn open_latest(dir: &Path) -> io::Result<Option<Latest>> {
         .truncate(false)
         .open(dir.join("latest.log"))?;
     let modified = file.metadata()?.modified()?;
-    let date = DateTime::<Local>::from(horizon_platform::time::to_std(modified)).date_naive();
+    let date = DateTime::<Local>::from(horizon_std::time::to_std(modified)).date_naive();
     roll(&mut file, dir, date)?;
     Ok(Some(Latest { file, _lock: lock }))
 }
@@ -421,7 +421,7 @@ impl log::Log for Logger {
             return;
         }
         let message = record.args().to_string();
-        let current = horizon_platform::thread::current();
+        let current = horizon_std::thread::current();
         let thread = match current.name() {
             Some("main") => self.main_thread,
             Some(name) => name,
@@ -464,7 +464,7 @@ impl log::Log for Logger {
     fn flush(&self) {
         let (done, wait) = mpsc::sync_channel(1);
         if self.out.send(Out::Flush(done)).is_ok() {
-            let _ = wait.recv_timeout(horizon_platform::time::Duration::from_secs(1));
+            let _ = wait.recv_timeout(horizon_std::time::Duration::from_secs(1));
         }
     }
 }
@@ -500,7 +500,7 @@ impl Logger {
         #[cfg(target_family = "wasm")]
         {
             let _ = stderr;
-            horizon_platform::web::console(level as u8, &lines.join("\n"));
+            horizon_std::web::console(level as u8, &lines.join("\n"));
         }
         #[cfg(not(target_family = "wasm"))]
         let msg = Out::Write {
@@ -555,7 +555,7 @@ pub fn init(home: &Path, main_thread: &'static str) {
         #[cfg(target_family = "wasm")]
         drop((writer, receive));
         #[cfg(not(target_family = "wasm"))]
-        if let Err(e) = horizon_platform::thread::Builder::new()
+        if let Err(e) = horizon_std::thread::Builder::new()
             .name("Log writer".into())
             .spawn(move || writer.run(receive))
         {
@@ -576,7 +576,7 @@ pub fn init(home: &Path, main_thread: &'static str) {
 /// A line in the log from code that prints it elsewhere itself (the dedicated server console).
 pub fn write_only(level: log::Level, message: &str) {
     if let Some(logger) = LOGGER.get() {
-        let current = horizon_platform::thread::current();
+        let current = horizon_std::thread::current();
         let thread = match current.name() {
             Some("main") | None => logger.main_thread,
             Some(name) => name,
@@ -753,8 +753,8 @@ mod tests {
 
     #[test]
     fn startup_archives_the_last_runs_log() {
-        let dir = horizon_platform::env::temp_dir()
-            .join(format!("horizon-logs-test-{}", std::process::id()));
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-logs-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         // Empty: nothing is archived (OnStartupTriggeringPolicy's minSize is 1 byte).
@@ -790,8 +790,8 @@ mod tests {
 
     #[test]
     fn the_newest_crash_report_is_found_by_name() {
-        let home = horizon_platform::env::temp_dir()
-            .join(format!("horizon-crash-test-{}", std::process::id()));
+        let home =
+            horizon_std::env::temp_dir().join(format!("horizon-crash-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         assert!(newest_crash_report(&home).is_none());
         let dir = crash_reports_dir(&home);

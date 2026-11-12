@@ -7,7 +7,7 @@
 
 use horizon_assets::model::{CuboidModel, TextureSlot};
 use horizon_optifine::cit::{Kind, Rule};
-use horizon_platform::fs;
+use horizon_std::fs;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn rule_models_load_with_their_relative_textures_and_parents() {
-        let root = horizon_platform::env::temp_dir()
-            .join(format!("horizon-cit-models-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-cit-models-{}", std::process::id()));
         let cit = root.join("assets/minecraft/optifine/cit");
         fs::create_dir_all(cit.join("swords")).unwrap();
         let write = |rel: &str, text: &str| fs::write(cit.join(rel), text).unwrap();

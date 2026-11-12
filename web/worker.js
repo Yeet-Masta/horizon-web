@@ -1,5 +1,5 @@
 // One of the threaded web build's threads (web/README.md): the page's module, over the page's
-// memory, running the work the game handed this worker (horizon_platform::thread::spawn_worker).
+// memory, running the work the game handed this worker (horizon_std::thread::spawn_worker).
 // The module's start (`main`) runs only on the page's thread.
 import init, { horizon_thread_entry } from "./pkg/horizon-client.js";
 
@@ -8,11 +8,11 @@ globalThis.horizonSpawnThread = (name, _module, _memory, work) => postMessage({ 
 // What goes over the page (a crash on the integrated server's thread, say): the page shows it.
 globalThis.horizonStatus = (text, error) => postMessage({ status: [text, error] });
 // Work for the page's thread, whose event loop has fetch and the relay's sockets
-// (horizon_platform::web::run_on_page): the page runs it by its number.
+// (horizon_std::web::run_on_page): the page runs it by its number.
 globalThis.horizonRunOnPage = (task) => postMessage({ page: task });
 
 // The page's Blobs (horizon.js): the resources zip and the game folder's larger files, read as
-// the game opens them (crates/horizon-platform/src/web/blobs.rs).
+// the game opens them (crates/horizon-std/src/web/blobs.rs).
 const reader = new FileReaderSync();
 globalThis.horizonReadBlob = (id, start, end) =>
   new Uint8Array(reader.readAsArrayBuffer(globalThis.horizonBlobs[id].slice(start, end)));

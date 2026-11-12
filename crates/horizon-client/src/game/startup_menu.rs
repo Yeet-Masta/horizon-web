@@ -98,7 +98,7 @@ impl StartupMenu {
         self.root = root;
         if self.title.is_none() {
             let mut title = Title::new(
-                horizon_platform::env::current_dir()
+                horizon_std::env::current_dir()
                     .unwrap_or_default()
                     .join("saves"),
                 &self.root,
@@ -353,17 +353,14 @@ pub(super) fn spawn_loader(
     vanilla_root: &std::path::Path,
     started: Instant,
     progress: &Progress,
-) -> Result<(
-    Receiver<LoaderMsg>,
-    horizon_platform::thread::ThreadHandle<()>,
-)> {
+) -> Result<(Receiver<LoaderMsg>, horizon_std::thread::ThreadHandle<()>)> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let settings = settings.clone();
     let vanilla_root = vanilla_root.to_path_buf();
     let dev_mods = options.dev_mods.clone();
     let world = launch_world(options).map(str::to_owned);
     let progress = progress.clone();
-    let handle = horizon_platform::thread::spawn_thread("resource-loader", move || {
+    let handle = horizon_std::thread::spawn_thread("resource-loader", move || {
         let mut pack_error = None;
         let root = packs::startup_root(&vanilla_root, &settings.resource_packs, &[])
             .unwrap_or_else(|error| {
@@ -413,7 +410,7 @@ impl Loading {
                         let reason = match self
                             .handle
                             .take()
-                            .map(horizon_platform::thread::ThreadHandle::join)
+                            .map(horizon_std::thread::ThreadHandle::join)
                         {
                             Some(Err(payload)) => panic_text(payload.as_ref()).to_owned(),
                             Some(Ok(())) => "it returned without a result".into(),
@@ -553,7 +550,7 @@ impl Loading {
                 }
                 Event::OpenPackFolder => {
                     let dir = packs::packs_dir();
-                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    let _ = horizon_std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::DownloadPack(i) => {
@@ -571,12 +568,12 @@ impl Loading {
                     }
                 }
                 Event::OpenDataPackFolder(dir) => {
-                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    let _ = horizon_std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::OpenModFolder => {
                     let dir = Game::game_dir().join(horizon_client::mod_list::DIR);
-                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    let _ = horizon_std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::BrowseMods => {
@@ -612,7 +609,7 @@ impl Loading {
                 }
                 Event::OpenShaderPackFolder => {
                     let dir = Game::shader_packs_dir();
-                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    let _ = horizon_std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
                 Event::Credits => {
@@ -654,7 +651,7 @@ impl Loading {
                 | Event::Volume(..) => {}
                 Event::OpenStudioFolder => {
                     let dir = std::path::PathBuf::from("recordings");
-                    let _ = horizon_platform::fs::create_dir_all(&dir);
+                    let _ = horizon_std::fs::create_dir_all(&dir);
                     packs::open_folder(&dir);
                 }
             }
@@ -1367,13 +1364,12 @@ mod tests {
 
     #[test]
     fn menu_is_usable_while_the_core_worker_is_blocked() {
-        let root =
-            horizon_platform::env::temp_dir().join("horizon-startup-menu-no-world-resources");
+        let root = horizon_std::env::temp_dir().join("horizon-startup-menu-no-world-resources");
         let (sender, receiver) = std::sync::mpsc::channel();
         let (release, wait) = std::sync::mpsc::channel();
         let (published, published_rx) = std::sync::mpsc::channel();
         let worker_root = root.clone();
-        let worker = horizon_platform::thread::spawn(move || {
+        let worker = horizon_std::thread::spawn(move || {
             sender
                 .send(LoaderMsg::Ui(gui(&worker_root), worker_root))
                 .unwrap();
@@ -1440,7 +1436,7 @@ mod tests {
     #[test]
     fn a_failed_generation_keeps_its_error_after_the_loader_ends() {
         let (sender, receiver) = std::sync::mpsc::channel();
-        let worker = horizon_platform::thread::spawn(move || {
+        let worker = horizon_std::thread::spawn(move || {
             sender
                 .send(LoaderMsg::Done(Err("missing facts.json".into())))
                 .unwrap();
@@ -1456,9 +1452,9 @@ mod tests {
         while !loading
             .handle
             .as_ref()
-            .is_none_or(horizon_platform::thread::ThreadHandle::is_finished)
+            .is_none_or(horizon_std::thread::ThreadHandle::is_finished)
         {
-            horizon_platform::thread::yield_now();
+            horizon_std::thread::yield_now();
         }
         loading.poll_menu_resources().unwrap();
         assert!(loading.loaded.is_none());
@@ -1467,12 +1463,12 @@ mod tests {
     #[test]
     fn a_panicking_loader_reports_its_panic() {
         let (sender, receiver) = std::sync::mpsc::channel::<LoaderMsg>();
-        let worker = horizon_platform::thread::spawn(move || {
+        let worker = horizon_std::thread::spawn(move || {
             let _sender = sender;
             panic!("atlas has no fonts");
         });
         while !worker.is_finished() {
-            horizon_platform::thread::yield_now();
+            horizon_std::thread::yield_now();
         }
         let mut loading = loading(receiver);
         loading.handle = Some(worker);

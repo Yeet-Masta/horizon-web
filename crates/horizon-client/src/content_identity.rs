@@ -2,8 +2,8 @@
 //! the item, mob effect, entity type and menu registries once content mods
 //! add to them (item stacks, effect, entity and open screen packets carry
 //! their network ids).
-use horizon_platform::sync::Mutex;
 use horizon_protocol::registry::Builtin;
+use horizon_std::sync::Mutex;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use sha2::{Digest, Sha256};
 use std::{
@@ -61,10 +61,10 @@ pub fn identity(root: &Path) -> Result<[u8; 32], IdentityError> {
     if let Some(hash) = identities.get(root) {
         return Ok(*hash);
     }
-    let bytes = horizon_platform::fs::read(root.join("facts.json")).map_err(IdentityError::Read)?;
+    let bytes = horizon_std::fs::read(root.join("facts.json")).map_err(IdentityError::Read)?;
     let mut hash = hash_facts(&bytes)?;
     // A root without mod entries keeps its block-only identity.
-    if let Ok(registries) = horizon_platform::fs::read(root.join("registries.json")) {
+    if let Ok(registries) = horizon_std::fs::read(root.join("registries.json")) {
         let report = parse_registries(&registries)?;
         for registry in REGISTRIES {
             let entries = mod_entries(&report, registry);
@@ -188,19 +188,19 @@ mod tests {
     #[test]
     fn a_mod_menu_type_joins_the_identity() {
         let root = |name: &str, extra: &str| {
-            let root = horizon_platform::env::temp_dir().join(format!(
+            let root = horizon_std::env::temp_dir().join(format!(
                 "horizon-content-identity-menu-{name}-{}",
                 std::process::id()
             ));
-            horizon_platform::fs::create_dir_all(&root).unwrap();
+            horizon_std::fs::create_dir_all(&root).unwrap();
             let facts = br#"{"states":[["minecraft:stone",false,false,"Block{minecraft:stone}",{"id":"minecraft:stone"}]]}"#;
-            horizon_platform::fs::write(root.join("facts.json"), facts).unwrap();
+            horizon_std::fs::write(root.join("facts.json"), facts).unwrap();
             let report = format!(
                 r#"{{"minecraft:menu":{{"entries":{{"minecraft:generic_9x1":{{"protocol_id":0}}{extra}}}}}}}"#
             );
-            horizon_platform::fs::write(root.join("registries.json"), report).unwrap();
+            horizon_std::fs::write(root.join("registries.json"), report).unwrap();
             let hash = identity(&root).unwrap();
-            horizon_platform::fs::remove_dir_all(&root).unwrap();
+            horizon_std::fs::remove_dir_all(&root).unwrap();
             hash
         };
         let vanilla = root("vanilla", "");
@@ -211,21 +211,21 @@ mod tests {
 
     #[test]
     fn a_root_without_mod_entries_keeps_its_block_identity() {
-        let root = horizon_platform::env::temp_dir().join(format!(
+        let root = horizon_std::env::temp_dir().join(format!(
             "horizon-content-identity-vanilla-{}",
             std::process::id()
         ));
-        horizon_platform::fs::create_dir_all(&root).unwrap();
+        horizon_std::fs::create_dir_all(&root).unwrap();
         let facts = br#"{"states":[["minecraft:stone",false,false,"Block{minecraft:stone}",{"id":"minecraft:stone"}]]}"#;
-        horizon_platform::fs::write(root.join("facts.json"), facts).unwrap();
-        horizon_platform::fs::write(
+        horizon_std::fs::write(root.join("facts.json"), facts).unwrap();
+        horizon_std::fs::write(
             root.join("registries.json"),
             br#"{"minecraft:item":{"entries":{"minecraft:air":{"protocol_id":0}}},
             "minecraft:mob_effect":{"entries":{"minecraft:speed":{"protocol_id":0}}}}"#,
         )
         .unwrap();
         assert_eq!(identity(&root).unwrap(), hash_facts(facts).unwrap());
-        horizon_platform::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -53,11 +53,11 @@ pub use horizon_core::{
     position::BlockPos,
     random::{LegacyRandom, RandomSource},
 };
-use horizon_platform::time::Duration;
 /// The server's play packets `client_packet` hands over, decoded.
 pub use horizon_protocol::packets::play::Clientbound as ClientboundPlayPacket;
 /// The play packets a client sends, as `native_send_packet` takes them.
 pub use horizon_protocol::packets::play::Serverbound as ServerboundPlayPacket;
+use horizon_std::time::Duration;
 pub use horizon_world::consumable::UseAnimation;
 pub use horizon_world::player_inventory::EquipmentSlot;
 pub use horizon_world::{
@@ -803,7 +803,7 @@ pub use generated::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horizon_platform::sync::Mutex;
+    use horizon_std::sync::Mutex;
 
     struct Quiet;
     impl Hooks for Quiet {}

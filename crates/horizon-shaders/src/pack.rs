@@ -2,8 +2,8 @@
 //! the root (licences, readmes, decoy folders) is ignored (spec 1.1). Every path a pack uses is
 //! relative to that `shaders` folder, written with `/`.
 
-use horizon_platform::fs;
-use horizon_platform::fs::PathExt as _;
+use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Cursor, Read};
@@ -272,7 +272,7 @@ pub(crate) mod tests {
 
     /// A fresh empty folder under the system's temp folder.
     pub(crate) fn temp_dir(name: &str) -> PathBuf {
-        let dir = horizon_platform::env::temp_dir()
+        let dir = horizon_std::env::temp_dir()
             .join(format!("horizon-shaders-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

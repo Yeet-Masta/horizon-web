@@ -4165,7 +4165,7 @@ mod tests {
 
     #[test]
     fn loaded_item_lifetime_counters_tick_with_signed_sentinels() {
-        let root = horizon_platform::env::var_os("HORIZON_TEST_RESOURCES")
+        let root = horizon_std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -5689,7 +5689,7 @@ mod sheep_nbt_tests {
             .map(|(k, v)| (k.clone(), Arc::new(v.clone())))
             .collect();
         let registry = horizon_world::registry::BlockRegistry::from_facts_json(
-            horizon_platform::fs::File::open(root.join("facts.json")).unwrap(),
+            horizon_std::fs::File::open(root.join("facts.json")).unwrap(),
         )
         .unwrap();
         let new = |kind: &str| Mob::new(1, types[kind].clone(), Vec3::new(0.0, 4.0, 0.0), 0.0);
