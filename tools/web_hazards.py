@@ -28,7 +28,7 @@ def clippy_messages():
     env = dict(os.environ, CLIPPY_CONF_DIR=str(ROOT / "web" / "clippy-web"))
     cmd = [
         "cargo", "clippy", "--config", "web/simd.toml", "-p", "horizon-client",
-        "--bin", "horizon-client", "--no-default-features",
+        "--bin", "horizon-client", "--no-default-features", "--features", "horizon-extras",
         "--target", "wasm32-unknown-unknown", "--message-format", "json",
     ]
     run = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)

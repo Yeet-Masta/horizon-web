@@ -105,6 +105,9 @@ pub struct ChunkEncoder {
     mod_entities: Vec<bool>,
     /// The mods' update tags (`native_block_entity_update_tag`).
     pub mod_update_tag: Option<ModUpdateTag>,
+    /// The states with `trial_spawner_state=active`, whose trial spawner
+    /// update tag holds `next_mob_spawns_at`.
+    pub trial_active: Vec<u32>,
     /// The block registry id of each state's block, for BlockEvent.
     pub block_ids: Vec<i32>,
     /// The save's tables, for the heightmaps.
@@ -613,6 +616,7 @@ impl ChunkEncoder {
             entity_types,
             mod_entities,
             mod_update_tag: None,
+            trial_active: Vec::new(),
             block_ids,
             tables: None,
             cache: Default::default(),
@@ -660,6 +664,41 @@ impl ChunkEncoder {
         )
     }
 
+    /// The section entries and the column heightmaps cached, each as (entries, bytes).
+    pub fn cache_census(&self) -> [(usize, usize); 2] {
+        use std::mem::size_of;
+        let (entries, sections, wire) = {
+            let cache = self.cache.lock().unwrap();
+            let wire: usize = cache
+                .values()
+                .filter_map(|e| e.wire.as_ref())
+                .map(|(bytes, entities)| bytes.len() + entities.len() * size_of::<(u16, u32)>())
+                .sum();
+            (
+                cache.len(),
+                cache.capacity() * (size_of::<(usize, Encoded)>() + 1),
+                wire,
+            )
+        };
+        let heights = self.heights.lock().unwrap();
+        let maps: usize = heights
+            .values()
+            .map(|h| {
+                h.sections.capacity() * size_of::<std::sync::Weak<Section>>()
+                    + h.maps
+                        .iter()
+                        .map(|(_, v)| v.capacity() * 8 + 24)
+                        .sum::<usize>()
+            })
+            .sum();
+        [
+            (entries, sections + wire),
+            (
+                heights.len(),
+                maps + heights.capacity() * (size_of::<((i32, i32), Heights)>() + 1),
+            ),
+        ]
+    }
     /// The cached entry for a section, made with `non_air` when missing.
     fn cached<T>(&self, section: &Arc<Section>, read: impl FnOnce(&mut Encoded) -> T) -> T {
         read(self.entry(&mut self.cache.lock().unwrap(), section))
@@ -728,15 +767,21 @@ impl ChunkEncoder {
             .filter(|t| **t >= 0)
             .copied()
     }
-    /// The update tag of the block entity at `pos` (`getUpdateTag`): a
-    /// mod's from its hook, a vanilla one's from [`entity_tag`].
-    pub fn update_tag(&self, pos: (i32, i32, i32), entity: &BlockEntity) -> Option<Tag> {
+    /// The update tag of the block entity at `pos` in block `state`
+    /// (`getUpdateTag`): a mod's from its hook, a vanilla one's from
+    /// [`entity_tag`].
+    pub fn update_tag(
+        &self,
+        pos: (i32, i32, i32),
+        state: u32,
+        entity: &BlockEntity,
+    ) -> Option<Tag> {
         match entity {
             BlockEntity::Mod(m) => self
                 .mod_update_tag
                 .and_then(|tag| tag([pos.0, pos.1, pos.2], m))
                 .map(Tag::Compound),
-            _ => entity_tag(entity),
+            _ => entity_tag(entity, self.trial_active.contains(&state)),
         }
     }
     /// Whether the state holds a fluid (water, lava, or a waterlogged block).
@@ -824,6 +869,12 @@ impl ChunkEncoder {
         )
     }
 
+    /// A lit resident far column, with its live block entities and every light layer:
+    /// neighbours outside the loading buffer need not be loaded just to send it.
+    pub(super) fn body_far(&self, chunk: &Chunk, world: &crate::world::World) -> Vec<u8> {
+        self.body(chunk, &world.block_entities, SectionMask::ALL)
+    }
+
     /// An encoder of the same level with caches of its own, for threads that encode saved chunks no
     /// level holds (`lan::far`).
     pub fn detached(&self) -> Self {
@@ -832,6 +883,7 @@ impl ChunkEncoder {
             entity_types: self.entity_types.clone(),
             mod_entities: self.mod_entities.clone(),
             mod_update_tag: self.mod_update_tag,
+            trial_active: self.trial_active.clone(),
             block_ids: self.block_ids.clone(),
             tables: self.tables.clone(),
             cache: Default::default(),
@@ -1127,7 +1179,7 @@ impl ChunkEncoder {
                     kind,
                     // BlockEntityInfo.create: an empty update tag is not sent.
                     tag: entity
-                        .and_then(|e| self.update_tag(pos, e))
+                        .and_then(|e| self.update_tag(pos, state, e))
                         .or_else(|| pot_tag(chunk, pos))
                         .filter(|t| !matches!(t, Tag::Compound(c) if c.is_empty()))
                         .unwrap_or(Tag::End),
@@ -1233,7 +1285,9 @@ fn java_hash_order<T>(items: &mut Vec<T>, pos: impl Fn(&T) -> (i32, i32, i32)) {
 }
 
 /// The update tag of a block entity (getUpdateTag) for what the client shows.
-pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
+/// `trial_active`: its block state is `trial_spawner_state=active`, which a
+/// trial spawner's tag depends on.
+pub fn entity_tag(entity: &BlockEntity, trial_active: bool) -> Option<Tag> {
     match entity {
         BlockEntity::Sign(sign) => Some(Tag::compound(sign.encode())),
         BlockEntity::Spawner(s) => Some(s.update_tag()),
@@ -1277,13 +1331,18 @@ pub fn entity_tag(entity: &BlockEntity) -> Option<Tag> {
         }
         // VaultBlockEntity.getUpdateTag: the shared data, which holds the display item.
         BlockEntity::Vault(v) => Some(v.update_tag()),
-        // TrialSpawnerStateData.getUpdateTag: the spawn data the mob is drawn from.
-        // next_mob_spawns_at (ACTIVE only) is left out: nothing in the client
-        // reads it, and the block state it depends on is not known here.
-        BlockEntity::TrialSpawner(t) => t
-            .next_spawn_data
-            .as_ref()
-            .map(|d| Tag::compound([("spawn_data", d.encode())])),
+        // TrialSpawnerStateData.getUpdateTag: next_mob_spawns_at (ACTIVE only,
+        // 0 included) and the spawn data the mob is drawn from.
+        BlockEntity::TrialSpawner(t) => {
+            let mut entries = Vec::with_capacity(2);
+            if trial_active {
+                entries.push(("next_mob_spawns_at", Tag::Long(t.next_mob_spawns_at)));
+            }
+            if let Some(d) = &t.next_spawn_data {
+                entries.push(("spawn_data", d.encode()));
+            }
+            (!entries.is_empty()).then(|| Tag::compound(entries))
+        }
         // SkullBlockEntity: the profile is the whole reason a head differs.
         BlockEntity::Skull(s) => {
             let mut entries = Vec::new();
@@ -1591,6 +1650,48 @@ mod tests {
     /// A mod block's block entity goes out with its block's own type and the
     /// tag its mod gives; a mod block whose mod made none is left out.
     #[test]
+    fn a_loaded_chunks_update_tag_consumes_only_transient_client_fields() {
+        let builtin = Builtin::parse(
+            r#"{"minecraft:block_entity_type":{"entries":{"test:machine":{"protocol_id":49}}}}"#,
+        )
+        .unwrap();
+        let states = ["minecraft:air", "test:machine"].map(|n| (Arc::<str>::from(n), false));
+        let mut encoder = ChunkEncoder::new(states, &builtin, &[], &[]);
+        encoder.mod_update_tag = Some(|_, entity| {
+            let mut tag = entity.nbt.clone();
+            tag.extend(entity.take_client_update_fields());
+            Some(tag)
+        });
+        let mut chunk = Chunk::empty(0, 0);
+        let pos = (1, MIN_Y + 2, 3);
+        chunk.set(pos.0, pos.1, pos.2, 1);
+        let mut machine = ModBlockEntity::new(crate::containers::ModBlockEntityFields {
+            id: "test:machine".into(),
+            nbt: Compound::from([("progress".into(), Tag::Int(7))]),
+            ..Default::default()
+        });
+        let revision = machine.revision();
+        let effects = Tag::List(vec![Tag::Int(23)]);
+        machine.set_client_update_fields(Compound::from([("effects".into(), effects.clone())]));
+        let entities = HashMap::from([(pos, BlockEntity::Mod(Box::new(machine)))]);
+        let saved = crate::save::encode_block_entity(pos, &entities[&pos], "test:machine");
+        let first = encoder.encode(&chunk, &entities).chunk.block_entities;
+        assert_eq!(first[0].tag.get("effects"), Some(&effects));
+        assert_eq!(first[0].tag.get("progress"), Some(&Tag::Int(7)));
+        let second = encoder.encode(&chunk, &entities).chunk.block_entities;
+        assert!(second[0].tag.get("effects").is_none());
+        assert_eq!(second[0].tag.get("progress"), Some(&Tag::Int(7)));
+        assert_eq!(
+            crate::save::encode_block_entity(pos, &entities[&pos], "test:machine"),
+            saved
+        );
+        let BlockEntity::Mod(machine) = &entities[&pos] else {
+            unreachable!();
+        };
+        assert_eq!(machine.revision(), revision);
+    }
+
+    #[test]
     fn mod_block_entities_carry_their_blocks_type_and_the_mods_tag() {
         let builtin = Builtin::parse(
             r#"{"minecraft:block_entity_type": {"entries": {
@@ -1710,7 +1811,7 @@ mod tests {
         let entity = BlockEntity::Sign(sign);
         assert_eq!(encoder.entity_type(1), Some(7));
         assert_eq!(encoder.entity_type(2), Some(8));
-        let tag = encoder.update_tag(notice, &entity).unwrap();
+        let tag = encoder.update_tag(notice, 1, &entity).unwrap();
         let mut nbt = match tag {
             Tag::Compound(fields) => fields,
             _ => panic!("sign update is not a compound"),
@@ -1731,7 +1832,7 @@ mod tests {
             let sent = encoder.encode(&chunk, &changed).chunk.block_entities;
             assert_eq!(
                 sent.iter().find(|i| i.kind == 7).unwrap().tag,
-                encoder.update_tag(notice, &changed[&notice]).unwrap()
+                encoder.update_tag(notice, 1, &changed[&notice]).unwrap()
             );
         }
     }
@@ -2244,7 +2345,7 @@ mod tests {
         use crate::containers::{Beacon, CreakingHeart, EndGateway};
         // What a client loads from the tag (handleBlockEntityData).
         let load = |id: &str, entity: BlockEntity| {
-            let Some(Tag::Compound(mut tag)) = entity_tag(&entity) else {
+            let Some(Tag::Compound(mut tag)) = entity_tag(&entity, false) else {
                 panic!("no update tag for {id}");
             };
             tag.insert("id".into(), Tag::String(id.into()));
@@ -2261,12 +2362,16 @@ mod tests {
             secondary: Some("minecraft:regeneration".into()),
             ..Default::default()
         };
-        let BlockEntity::Beacon(b) =
-            load("minecraft:beacon", BlockEntity::Beacon(Box::new(beacon)))
-        else {
+        let beacon = BlockEntity::Beacon(Box::new(beacon));
+        // getUpdateTag (saveCustomOnly) carries Levels; loadAdditional never reads them.
+        assert_eq!(
+            entity_tag(&beacon, false).unwrap().get("Levels"),
+            Some(&Tag::Int(4))
+        );
+        let BlockEntity::Beacon(b) = load("minecraft:beacon", beacon) else {
             panic!("not a beacon");
         };
-        assert_eq!(b.levels, 4);
+        assert_eq!(b.levels, 0);
         assert_eq!(b.primary.as_deref(), Some("minecraft:speed"));
         assert_eq!(b.secondary.as_deref(), Some("minecraft:regeneration"));
         let gateway = EndGateway {
@@ -2274,7 +2379,7 @@ mod tests {
             exit_portal: Some([8, 100, 0]),
             exact_teleport: false,
         };
-        let tag = entity_tag(&BlockEntity::EndGateway(gateway.clone())).unwrap();
+        let tag = entity_tag(&BlockEntity::EndGateway(gateway.clone()), false).unwrap();
         assert_eq!(tag.get("ExactTeleport"), None);
         let BlockEntity::EndGateway(g) = load(
             "minecraft:end_gateway",
@@ -2287,7 +2392,7 @@ mod tests {
             exact_teleport: true,
             ..gateway
         };
-        let tag = entity_tag(&BlockEntity::EndGateway(exact.clone())).unwrap();
+        let tag = entity_tag(&BlockEntity::EndGateway(exact.clone()), false).unwrap();
         assert_eq!(tag.get("ExactTeleport"), Some(&Tag::Byte(1)));
         let BlockEntity::EndGateway(g) = load(
             "minecraft:end_gateway",
@@ -2308,10 +2413,48 @@ mod tests {
         };
         assert_eq!(h.creaking, Some((None, [1, 2, 3, 4])));
         // Without a protector the tag is empty.
-        let lone = entity_tag(&BlockEntity::CreakingHeart(Box::default()));
+        let lone = entity_tag(&BlockEntity::CreakingHeart(Box::default()), false);
         assert_eq!(
             lone,
             Some(Tag::Compound(horizon_world::nbt::Compound::new()))
         );
+    }
+
+    #[test]
+    fn trial_spawner_update_tag_has_the_countdown_only_when_active() {
+        let spawner = |next_mob_spawns_at| {
+            BlockEntity::TrialSpawner(Box::new(crate::chunk::block_entity::TrialSpawner {
+                next_mob_spawns_at,
+                ..Default::default()
+            }))
+        };
+        let countdown = |tag: Option<Tag>| tag.and_then(|t| t.get("next_mob_spawns_at").cloned());
+        // getUpdateTag(ACTIVE) writes it whatever its value, 0 included.
+        assert_eq!(
+            countdown(entity_tag(&spawner(1234), true)),
+            Some(Tag::Long(1234))
+        );
+        assert_eq!(countdown(entity_tag(&spawner(0), true)), Some(Tag::Long(0)));
+        // Any other state leaves it out: no spawn data either, so no tag.
+        assert_eq!(entity_tag(&spawner(1234), false), None);
+        // The encoder decides from the block state of the spawner.
+        let mut encoder = ChunkEncoder::new(
+            [
+                "minecraft:air",
+                "minecraft:trial_spawner",
+                "minecraft:trial_spawner",
+            ]
+            .map(|n| (Arc::<str>::from(n), false)),
+            &horizon_protocol::registry::Builtin::default(),
+            &[],
+            &[],
+        );
+        encoder.trial_active = vec![2];
+        let at = (0, 64, 0);
+        assert_eq!(
+            countdown(encoder.update_tag(at, 2, &spawner(7))),
+            Some(Tag::Long(7))
+        );
+        assert_eq!(encoder.update_tag(at, 1, &spawner(7)), None);
     }
 }

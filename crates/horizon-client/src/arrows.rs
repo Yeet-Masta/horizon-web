@@ -25,7 +25,7 @@ use horizon_world::{
         FluidSections, FluidTagId,
     },
     entity_fluid_tick::{self, EntityFluidTickWorld},
-    fluid::{FluidHeightWorld, FluidKind, FluidState},
+    fluid::{FluidHeightWorld, FluidKind, FluidState, FluidTemplate},
     fluid_flow::{FluidFlowWorld, flow_at},
     registry::BlockStateId,
     water_splash::{self, SplashParticle, WaterSplashWorld},
@@ -172,6 +172,8 @@ pub struct ArrowState {
     pub pickup: Pickup,
     /// Its entity type is `SpectralArrow` (the type is its own, not the pickup item's).
     pub spectral: bool,
+    /// `SpectralArrow` saved duration; its constructor default is 200.
+    pub spectral_duration: i32,
     /// `pickupItemStack`: what picking the arrow up gives.
     pub pickup_item: crate::items::ItemStack,
     /// `AbstractArrow.firedFromWeapon`: the crossbow or bow it was shot from.
@@ -194,6 +196,9 @@ pub struct ArrowState {
     pub was_eye_in_water: bool,
     pub first_tick: bool,
     pub has_been_shot: bool,
+    /// `Projectile.canBreak`: the decoded top-level projectile predicate,
+    /// independent of its pickup item and firing weapon.
+    pub can_break: Option<horizon_world::nbt::Tag>,
     /// `ThrownTrident.dealtDamage`: it has hit an entity (or sat in a block
     /// for over 4 ticks) and hits no more.
     pub dealt_damage: bool,
@@ -240,6 +245,7 @@ impl ArrowState {
             last_state: None,
             pickup: Pickup::Disallowed,
             spectral: false,
+            spectral_duration: 200,
             pickup_item: crate::items::ItemStack::new("minecraft:arrow", 1),
             fired_from_weapon: None,
             no_physics: false,
@@ -254,6 +260,7 @@ impl ArrowState {
             was_eye_in_water: false,
             first_tick: true,
             has_been_shot: false,
+            can_break: None,
             dealt_damage: false,
             removed: false,
             random,
@@ -267,8 +274,8 @@ impl ArrowState {
     /// `Arrow.getColor` of the server's own arrow: the colour of the potion on
     /// its pickup item, None for a plain arrow (`PotionContents.EMPTY`).
     pub fn potion_color(&self) -> Option<u32> {
-        let potion = self.pickup_item.potion()?;
-        Some(crate::brewing::potion_color(Some(potion)))
+        (!crate::brewing::contents_empty(&self.pickup_item))
+            .then(|| crate::brewing::contents_color(&self.pickup_item))
     }
     /// The `AbstractArrow` constructor's `pickupItemStack`: the drawn ammo
     /// (one item). Ammo drawn without being used up (`INTANGIBLE_PROJECTILE`)
@@ -331,9 +338,20 @@ pub struct ArrowScene<'a, 'r> {
     /// The `mob_griefing` and `tnt_explodes` game rules.
     pub mob_griefing: bool,
     pub tnt_explodes: bool,
+    pub owners: &'a dyn OwnerLookup,
+}
+/// `EntityReference.getEntity` for an owner the arrow only knows by UUID.
+pub trait OwnerLookup {
+    /// A loaded entity other than a player has this UUID.
+    fn non_player_entity(&self, uuid: [i32; 4]) -> bool;
+}
+impl OwnerLookup for () {
+    fn non_player_entity(&self, _: [i32; 4]) -> bool {
+        false
+    }
 }
 impl ArrowScene<'_, '_> {
-    fn block(&self, p: BlockPos) -> BlockStateId {
+    pub fn block(&self, p: BlockPos) -> BlockStateId {
         self.world.block(p.x, p.y, p.z)
     }
     fn is_air(&self, state: BlockStateId) -> bool {
@@ -370,6 +388,8 @@ impl ArrowScene<'_, '_> {
             binding: self.collision,
             subject: None,
         };
+        // CollisionContext.of(arrow): scaffolding is open from below.
+        let context = horizon_world::collision_context::CollisionContext::position(from.y);
         let hit = horizon_core::geometry::traverse_blocks(from, to, 1024, |p: BlockPos| {
             if Some(p) == ignored {
                 return None;
@@ -380,7 +400,7 @@ impl ArrowScene<'_, '_> {
             }
             let shape = self
                 .collision
-                .collision_shape(&mut scene, state, [p.x, p.y, p.z])
+                .collision_shape_with_context(&mut scene, state, p, &context)
                 .ok()?;
             shape.clip(from, to, p)
         });
@@ -388,7 +408,7 @@ impl ArrowScene<'_, '_> {
         Some((hit.location, hit.block, hit.direction.normal()))
     }
     /// `CollisionGetter.noCollision(null, box)` over blocks.
-    fn no_block_collision(&self, b: Aabb) -> bool {
+    pub fn no_block_collision(&self, b: Aabb) -> bool {
         let (lo, hi) = (b.min_position(), b.max_position());
         for x in (lo.x.floor() as i32 - 1)..=(hi.x.floor() as i32 + 1) {
             for y in (lo.y.floor() as i32 - 1)..=(hi.y.floor() as i32 + 1) {
@@ -447,13 +467,15 @@ pub fn clip_block_hit(
         binding: collision,
         subject: None,
     };
+    // CollisionContext.of(projectile): scaffolding is open from below.
+    let context = horizon_world::collision_context::CollisionContext::position(from.y);
     let hit = horizon_core::geometry::traverse_blocks(from, to, 1024, |p: BlockPos| {
         let state = world.block(p.x, p.y, p.z);
         if facts.is_air(state) {
             return None;
         }
         let shape = collision
-            .collision_shape(&mut scene, state, [p.x, p.y, p.z])
+            .collision_shape_with_context(&mut scene, state, p, &context)
             .ok()?;
         shape.clip(from, to, p)
     })
@@ -840,7 +862,7 @@ impl Ticker<'_, '_, '_, '_> {
         if !self.st.first_tick && self.st.fluids.is_in_fluid(&Tags, LAVA) {
             self.st.fall_distance *= 0.5;
         }
-        if self.position().y < f64::from(self.scene.world.bottom_y() - 64) {
+        if self.position().y < self.scene.world.below_world_y() {
             self.st.removed = true;
         }
         self.st.first_tick = false;
@@ -877,11 +899,8 @@ impl Ticker<'_, '_, '_, '_> {
     /// `AbstractArrow.startFalling`.
     fn start_falling(&mut self) {
         self.st.in_ground = false;
-        let v = self.p.velocity;
-        let x = f64::from(self.st.random.next_float() * 0.2);
-        let y = f64::from(self.st.random.next_float() * 0.2);
-        let z = f64::from(self.st.random.next_float() * 0.2);
-        self.p.velocity = Vec3::new(v.x * x, v.y * y, v.z * z);
+        self.p.velocity =
+            crate::projectiles::start_falling_velocity(self.p.velocity, &mut self.st.random);
         self.st.life = 0;
     }
     /// `AbstractArrow.stepMoveAndHit`: the nearest entity on the way, else the
@@ -1061,9 +1080,17 @@ impl Ticker<'_, '_, '_, '_> {
         self.st.pierce = 0;
         self.st.pierced.clear();
     }
-    /// `Projectile.mayInteract`: a mob's arrows need `mob_griefing`.
+    /// `Projectile.mayInteract`: an arrow owned by anything but a player needs `mob_griefing`.
     fn may_interact(&self) -> bool {
-        !matches!(self.p.owner, Some(Who::Mob(_))) || self.scene.mob_griefing
+        let by_entity = match self.p.owner {
+            Some(Who::Mob(_)) => true,
+            Some(Who::Player) => false,
+            None => self
+                .p
+                .owner_uuid
+                .is_some_and(|u| self.scene.owners.non_player_entity(u)),
+        };
+        !by_entity || self.scene.mob_griefing
     }
     /// `onProjectileHit` of the blocks a burning projectile lights.
     fn block_reaction(&self, state: BlockStateId) -> Option<BlockReaction> {
@@ -1291,15 +1318,15 @@ impl ArrowScene<'_, '_> {
             }
             if inside_fluid {
                 effects.advance(step);
-                match fluid.kind() {
+                match fluid.kind().template() {
                     // WaterFluid.entityInside.
-                    FluidKind::Water | FluidKind::FlowingWater => effects.apply(Effect::Extinguish),
+                    FluidTemplate::Water => effects.apply(Effect::Extinguish),
                     // LavaFluid.entityInside (lavaHurt does nothing to arrows).
-                    FluidKind::Lava | FluidKind::FlowingLava => {
+                    FluidTemplate::Lava => {
                         effects.apply(Effect::ClearFreeze);
                         effects.apply(Effect::LavaIgnite);
                     }
-                    FluidKind::Empty => {}
+                    FluidTemplate::Empty => {}
                 }
             }
         }

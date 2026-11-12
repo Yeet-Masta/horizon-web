@@ -1,23 +1,18 @@
 //! Play with friends, host side: "Start Sharing" on the Play with Friends
-//! screen (`friends_screen`, the pause menu's Friends button) opens the world to LAN if
+//! screen (`screen`, the pause menu's Friends button) opens the world to LAN if
 //! it isn't (with Open to LAN's defaults) and shares that port behind an
 //! invite code (horizon-friends). The code holds this computer's addresses
 //! and the key, so friends join with no server of ours; a relay the player
 //! configured adds a short code and a fallback. The integrated server is the
 //! LAN one, unchanged: tunnelled guests are LAN guests that connect from the
-//! loopback address.
+//! loopback address. The joining side is horizon-friends' (`game`), registered by
+//! horizon-official.
 //!
 //! The web build has no ports to share: the world gets a room on the page's
 //! WebSocket relay instead ([`WebHost`]), whose code friends join with from
 //! their own browsers over WebRTC (web/README.md).
 use super::{Game, lan::LanSettings};
-use horizon_client::{
-    Result,
-    friends_screen::{self, Action, FriendsView},
-    hud::HudBatch,
-    lang,
-    text::Text,
-};
+use horizon_client::{Result, hud::HudBatch, lang, text::Text};
 #[cfg(target_family = "wasm")]
 use horizon_friends::host::HostState;
 #[cfg(not(target_family = "wasm"))]
@@ -93,6 +88,11 @@ impl WebHost {
         self.room.stop();
     }
 }
+
+mod screen;
+
+use screen::{self as friends_screen, Action, FriendsView};
+pub use screen::{TITLE, title};
 
 pub(super) struct Sharing {
     host: Host,
@@ -343,6 +343,11 @@ impl Game<'_> {
             }
             Action::Done => self.screen = super::Screen::Paused,
         }
+    }
+
+    /// Whether the pause menu offers Play with Friends (a singleplayer world).
+    pub(super) fn friends_shown(&self) -> bool {
+        self.friends_view().shown
     }
 
     /// What Play with Friends shows.

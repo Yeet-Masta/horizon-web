@@ -3,13 +3,15 @@
 //! dropped items (`ItemEntityRenderer`) and items posed in the world (hands,
 //! frames, armour stands). This binds the resolver's host services
 //! (`ItemEnv`) and the special renderers' registries to the game.
-use super::{Dim, Game};
+use super::{Dim, Game, entity_culling::EntityCullDecision};
 use horizon_assets::item_model::{
-    Components, DisplayContext, GlobalPos, ItemEnv, LevelState, OwnerState, StackView,
+    Components, ComponentsView, DisplayContext, GlobalPos, ItemEnv, LevelState, OwnerState,
+    StackView,
 };
 use horizon_client::{
     block_entity_render::{diffuse_lights, vertex_light},
     cit::{Hand as CitHand, Kind as CitKind},
+    graphics::EntityCullingMode,
     hud::{HudBatch, Rect},
     item_render::{self, ItemRenderState, SpecialHost, WorldSink},
     items::ItemStack,
@@ -18,6 +20,43 @@ use horizon_client::{
 use horizon_core::geometry::{Aabb, Vec3};
 use serde_json::Value;
 use std::{cell::RefCell, collections::HashMap};
+
+/// The game's painter for the HUD kit's icons (`hud_kit::icon`): items by their models, the
+/// player's face from `face`, their skin's texture.
+pub(super) struct IconPainter<'g, 'a> {
+    pub(super) game: &'g Game<'a>,
+    pub(super) face: Option<&'g str>,
+}
+
+impl horizon_client::hud_kit::icon::IconPainter for IconPainter<'_, '_> {
+    fn item(&self, batch: &mut HudBatch, id: &str, [x, y, size]: [f32; 3]) -> bool {
+        let start = batch.vertices.len();
+        self.game
+            .draw_item_model(batch, &ItemStack::new(id, 1), x, y);
+        let scale = size / horizon_client::hud_kit::icon::ITEM_SIZE;
+        batch.scale_since(start, x, y, scale, scale);
+        batch.vertices.len() > start
+    }
+    fn face(&self, batch: &mut HudBatch, [x, y, size]: [f32; 3]) -> bool {
+        let Some(skin) = self.face else {
+            return false;
+        };
+        let mut draws = Vec::new();
+        // `PlayerFaceExtractor`: the face, then its hat layer.
+        horizon_client::tab_list::face(
+            &mut draws,
+            skin,
+            x as i32,
+            y as i32,
+            size as i32,
+            true,
+            false,
+            u32::MAX,
+        );
+        horizon_client::hud_layout::paint(batch, &self.game.gui.atlas, &draws);
+        true
+    }
+}
 
 /// The game's answers to what the resolver cannot read from the stack.
 pub(super) struct Env<'a, 'g> {
@@ -187,7 +226,7 @@ pub(super) fn owner_at(position: [f64; 3], yaw: f32, entity_type: &str) -> Owner
 }
 /// `UseDuration` of a stack (`Item.getUseDuration`): 72000 for drawn items
 /// and for `blocks_attacks` items (shields), the consume time for food.
-fn use_duration(components: &Components) -> i32 {
+fn use_duration(components: ComponentsView<'_>) -> i32 {
     if let Some(c) = components.get("minecraft:consumable") {
         let seconds = c["consume_seconds"].as_f64().unwrap_or(1.6);
         return (seconds * 20.0) as i32;
@@ -252,7 +291,10 @@ impl Game<'_> {
     fn level_state_now(&self, dimension: &'static str) -> LevelState {
         let sky = self
             .dim_environment()
-            .sample(self.world.day_time, None, None);
+            .sample(&horizon_client::environment::Sample {
+                day_time: self.world.day_time,
+                ..Default::default()
+            });
         LevelState {
             dimension: dimension.to_owned(),
             game_time: self.world.game_time,
@@ -285,7 +327,7 @@ impl Game<'_> {
             && self.stack_in(slot) == Some(stack)
         {
             let view = item_render::stack_view(stack);
-            let mut duration = use_duration(&self.pack.item_renderer.models.components(&view));
+            let mut duration = use_duration(self.pack.item_renderer.models.components_view(&view));
             self.native_use_duration(stack, &mut duration);
             owner.using_this_item = true;
             owner.use_duration = duration;
@@ -429,7 +471,7 @@ impl Game<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
-        let lights = diffuse_lights(self.dim == Dim::Nether);
+        let lights = diffuse_lights(self.nether_lighting());
         self.submit_item_lit(state, pose, light, lights, out);
     }
     /// [`Self::submit_item_world`] shaded by other diffuse lights (a
@@ -531,7 +573,7 @@ impl Game<'_> {
         light: u32,
         skinned: &mut super::creatures::Skinned,
     ) -> bool {
-        let lights = diffuse_lights(self.dim == Dim::Nether);
+        let lights = diffuse_lights(self.nether_lighting());
         let Some((mark, bounds)) = self.submit_item_skinned(state, &[pose], light, lights) else {
             return false;
         };
@@ -576,7 +618,7 @@ impl Game<'_> {
         let range =
             super::entity_culling::default_range(glam::DVec3::splat(0.25), self.view_scale());
         let skinning = self.skinning();
-        let lights = diffuse_lights(self.dim == Dim::Nether);
+        let lights = diffuse_lights(self.nether_lighting());
         for (item, at, partial, entity) in live.chain(taken) {
             let entity_start = out.len();
             self.mark_motion(entity_start, (2 << 32) | u64::from(item.id));
@@ -593,10 +635,12 @@ impl Game<'_> {
             // EntityRenderer.shouldRender: the item's 0.25 box, grown by 0.5,
             // in the view frustum. Checked before its model is resolved.
             if entity && let Some(view) = &self.view_frustum {
-                let feet = (glam::DVec3::new(q.x, q.y, q.z) - camera).as_vec3();
-                let half = glam::Vec3::new(0.125 + 0.5, 0.5, 0.125 + 0.5);
-                let lo = feet - half;
-                let hi = feet + glam::Vec3::new(half.x, 0.25 + 0.5, half.z);
+                let (lo, hi) = dropped_item_cull_box(
+                    glam::DVec3::new(item.previous.x, item.previous.y, item.previous.z),
+                    glam::DVec3::new(q.x, q.y, q.z),
+                    alpha,
+                    camera,
+                );
                 if !view.intersects(lo, hi) {
                     continue;
                 }
@@ -613,30 +657,48 @@ impl Game<'_> {
                 continue;
             }
             let age = item.age as f32 + partial;
-            let (lo, _) = state.bounding_box();
+            let (lo, hi) = state.bounding_box();
             let min_offset_y = -lo.y + 0.0625;
             let bob = (age / 10.0 + item.bob_offset).sin() * 0.1 + 0.1;
             let spin = item_render::item_spin(age, item.bob_offset);
             let pose = glam::Mat4::from_translation(pos.as_vec3())
                 * glam::Mat4::from_translation(glam::Vec3::new(0.0, bob + min_offset_y, 0.0))
                 * glam::Mat4::from_rotation_y(spin);
-            let packed = self.world.light(
-                q.x.floor() as i32,
-                (q.y + 0.1).floor() as i32,
-                q.z.floor() as i32,
-            );
+            // `EntityRenderer.getPackedLightCoords`: an item entity is lit from
+            // the block its light probe (its eye, 0.2125 up) is in, at 15 block
+            // light while it burns. A pickup particle is not an entity and keeps
+            // the cell it is drawn in.
+            let packed = if entity {
+                let probe = item.light_probe(alpha);
+                item.render_light(self.world.light(
+                    probe[0].floor() as i32,
+                    probe[1].floor() as i32,
+                    probe[2].floor() as i32,
+                ))
+            } else {
+                vertex_light(self.world.light(
+                    q.x.floor() as i32,
+                    (q.y + 0.1).floor() as i32,
+                    q.z.floor() as i32,
+                ))
+            };
             let seed = i64::from(self.pack.item_renderer.item_id(&item.stack.item))
                 + i64::from(item.stack.damage);
-            let copies = item_render::cluster_poses(
-                &state,
+            let copies = item_render::cluster_poses_with_depth(
                 pose,
                 item_render::rendered_amount(item.stack.count),
                 seed,
+                hi.z - lo.z,
             );
             // Use the same animated, spun, clustered transforms as the draw.
             // ItemEntity's collision box is only 0.25 blocks and cannot prove
             // that this larger rendered model stays behind an occluder.
             let culling = entity.then(|| {
+                // The posed envelope walks every model point in every copy;
+                // with culling off the decision is `Bypass` whatever it holds.
+                if self.settings.horizon.entity_culling == EntityCullingMode::Off {
+                    return EntityCullDecision::Bypass;
+                }
                 state
                     .posed_bounds(&copies)
                     .map(|(lo, hi)| {
@@ -664,11 +726,11 @@ impl Game<'_> {
             let outline = self.thing_outline(item.id, "minecraft:item");
             // Posed on the GPU when every layer can be, its silhouette too when it glows.
             let skinned = skinning
-                .then(|| self.submit_item_skinned(&state, &copies, vertex_light(packed), lights))
+                .then(|| self.submit_item_skinned(&state, &copies, packed, lights))
                 .flatten();
             if skinned.is_none() {
                 for &copy in &copies {
-                    self.submit_item_world(&state, copy, vertex_light(packed), out);
+                    self.submit_item_world(&state, copy, packed, out);
                 }
             }
             if let Some(rgb) = outline {
@@ -686,6 +748,25 @@ impl Game<'_> {
     }
 }
 
+/// `EntityRenderer.shouldRender`'s box for a dropped item, in camera space:
+/// `EntityRenderer.getBoundingBoxForCulling(entity, partialTick)` is
+/// `Entity.getInterpolatedBoundingBox(partialTick)` - the item's 0.25 box at
+/// the position the frame draws, `ItemEntity` overriding neither - grown by 0.5
+/// all round before the frustum test.
+fn dropped_item_cull_box(
+    previous: glam::DVec3,
+    position: glam::DVec3,
+    alpha: f64,
+    camera: glam::DVec3,
+) -> (glam::Vec3, glam::Vec3) {
+    let feet = (previous.lerp(position, alpha) - camera).as_vec3();
+    let half = glam::Vec3::new(0.125 + 0.5, 0.5, 0.125 + 0.5);
+    (
+        feet - half,
+        feet + glam::Vec3::new(half.x, 0.25 + 0.5, half.z),
+    )
+}
+
 /// The packed light of an item (sky low, block above it: `vertex_light`, entity.wgsl), its block
 /// light raised to what it glows with in HDR output.
 fn item_hdr_light(state: &ItemRenderState, light: u32) -> u32 {
@@ -697,6 +778,38 @@ fn item_hdr_light(state: &ItemRenderState, light: u32) -> u32 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `EntityRenderer.shouldRender` culls with `getBoundingBoxForCulling(entity,
+    /// partialTick)`, which is `Entity.getInterpolatedBoundingBox(partialTick)`:
+    /// an item's 0.25 box at the position the frame draws, grown by 0.5. The box
+    /// was built from the tick's own position, so an item crossing the frustum
+    /// edge mid-tick disappeared for the frames before it got there.
+    #[test]
+    fn a_dropped_item_is_culled_at_the_frame_s_position() {
+        let camera = glam::DVec3::ZERO;
+        let previous = glam::DVec3::new(0.0, 64.0, 0.0);
+        let position = glam::DVec3::new(1.0, 64.0, 0.0);
+        let bounds = |alpha: f64| {
+            let (lo, hi) = dropped_item_cull_box(previous, position, alpha, camera);
+            (lo.to_array(), hi.to_array())
+        };
+        // The frame's start: the box stands at the item's previous position.
+        assert_eq!(bounds(0.0), ([-0.625, 63.5, -0.625], [0.625, 64.75, 0.625]));
+        // Halfway through the tick the box has travelled half the block.
+        assert_eq!(bounds(0.5), ([-0.125, 63.5, -0.625], [1.125, 64.75, 0.625]));
+        // And at its end it is where the old code put it on every frame.
+        assert_eq!(bounds(1.0), ([0.375, 63.5, -0.625], [1.625, 64.75, 0.625]));
+        // A falling item moves in y the same way: halfway down a 66 -> 65 drop
+        // the box's floor is at 65.0, where the old code had the tick's 64.5.
+        let (lo, hi) = dropped_item_cull_box(
+            glam::DVec3::new(0.0, 66.0, 0.0),
+            glam::DVec3::new(0.0, 65.0, 0.0),
+            0.5,
+            camera,
+        );
+        assert!((lo.y - 65.0).abs() < 1e-6);
+        assert!((hi.y - 66.25).abs() < 1e-6);
+    }
 
     #[test]
     fn civil_dates_follow_the_gregorian_calendar() {
@@ -712,19 +825,19 @@ mod tests {
         // runs instead of ending at once (#2289).
         let mut shield = Components::new();
         shield.insert("minecraft:blocks_attacks".into(), json!({}));
-        assert_eq!(use_duration(&shield), 72_000);
+        assert_eq!(use_duration(ComponentsView::of(&shield)), 72_000);
         // Food is used for as long as it takes to eat it.
         let mut food = Components::new();
         food.insert(
             "minecraft:consumable".into(),
             json!({"consume_seconds": 1.6}),
         );
-        assert_eq!(use_duration(&food), 32);
+        assert_eq!(use_duration(ComponentsView::of(&food)), 32);
         // The bow keeps its own use time.
         let mut bow = Components::new();
         bow.insert("minecraft:item_model".into(), json!("minecraft:bow"));
-        assert_eq!(use_duration(&bow), 72_000);
+        assert_eq!(use_duration(ComponentsView::of(&bow)), 72_000);
         // Anything else is not used at all.
-        assert_eq!(use_duration(&Components::new()), 0);
+        assert_eq!(use_duration(ComponentsView::of(&Components::new())), 0);
     }
 }

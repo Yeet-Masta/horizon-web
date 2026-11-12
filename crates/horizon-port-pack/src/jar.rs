@@ -3,7 +3,7 @@
 //! census of its data, assets and classes. Legacy metadata contributes identity
 //! only; license and dependency fields are not interpreted.
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct JarInfo {
@@ -30,6 +30,12 @@ pub struct Census {
     pub sounds: usize,
     pub classes: usize,
     pub mixin_configs: usize,
+    /// Files under `data/<namespace>/`, of any kind.
+    #[serde(default)]
+    pub data_files: usize,
+    /// A `pack.mcmeta` at the top: the jar is also a data or resource pack.
+    #[serde(default)]
+    pub pack_mcmeta: bool,
 }
 
 const NOT_MODS: [&str; 5] = ["minecraft", "neoforge", "forge", "fabricloader", "java"];
@@ -37,27 +43,38 @@ const NOT_MODS: [&str; 5] = ["minecraft", "neoforge", "forge", "fabricloader", "
 pub fn read(path: &Path) -> Result<JarInfo, String> {
     let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{}: {e}", path.display()))?;
-    let text = |zip: &mut zip::ZipArchive<fs::File>, name: &str| -> Option<String> {
-        let mut s = String::new();
-        zip.by_name(name).ok()?.read_to_string(&mut s).ok()?;
-        Some(s)
-    };
-    let tomls: Vec<String> = ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"]
-        .iter()
-        .filter_map(|n| text(&mut zip, n))
-        .collect();
+    // A metadata file larger than any real one refuses the jar (crate::entry); a missing or
+    // non-UTF-8 one reads as absent.
+    let text =
+        |zip: &mut zip::ZipArchive<fs::File>, name: &str| -> Result<Option<String>, String> {
+            let Ok(file) = zip.by_name(name) else {
+                return Ok(None);
+            };
+            let declared = file.size();
+            match crate::entry::read_text(file, declared, crate::entry::MAX_TEXT) {
+                Ok(s) => Ok(Some(s)),
+                Err(e) if crate::entry::is_too_big(&e) => {
+                    Err(format!("{}: {name}: {e}", path.display()))
+                }
+                Err(_) => Ok(None),
+            }
+        };
+    let mut tomls = Vec::new();
+    for n in ["META-INF/neoforge.mods.toml", "META-INF/mods.toml"] {
+        tomls.extend(text(&mut zip, n)?);
+    }
     let mut info = if !tomls.is_empty() {
         metadata(&tomls)?
-    } else if let Some(t) = text(&mut zip, "fabric.mod.json") {
+    } else if let Some(t) = text(&mut zip, "fabric.mod.json")? {
         fabric(&t)?
-    } else if let Some(t) = text(&mut zip, "mcmod.info") {
+    } else if let Some(t) = text(&mut zip, "mcmod.info")? {
         mcmod_info(&t)?
     } else {
         JarInfo::default()
     };
     // `version = "${file.jarVersion}"` is filled in from the manifest at load.
     if info.version.starts_with("${") {
-        info.version = text(&mut zip, "META-INF/MANIFEST.MF")
+        info.version = text(&mut zip, "META-INF/MANIFEST.MF")?
             .and_then(|m| manifest_value(&m, "Implementation-Version"))
             .unwrap_or_default();
     }
@@ -104,10 +121,13 @@ pub fn metadata(tomls: &[String]) -> Result<JarInfo, String> {
             }
         }
     }
-    tomls
+    let lines: Vec<JarInfo> = tomls.iter().map(|t| mods_toml_lines(t)).collect();
+    // A lone template still names its (placeholder) mod id: last resort.
+    lines
         .iter()
-        .map(|t| mods_toml_lines(t))
-        .find(real)
+        .position(real)
+        .or_else(|| lines.iter().position(|i| !i.mod_id.is_empty()))
+        .map(|i| lines.into_iter().nth(i).unwrap_or_default())
         .ok_or_else(|| first_error.unwrap_or_else(|| "mods.toml: no [[mods]] modId".into()))
 }
 
@@ -262,6 +282,10 @@ pub fn census(names: &[String]) -> Census {
         } else if n.ends_with(".mixins.json") || (parts.len() == 1 && n.contains("mixins")) {
             c.mixin_configs += 1;
         }
+        c.pack_mcmeta |= n == "pack.mcmeta";
+        if parts.len() > 2 && parts[0] == "data" && !n.ends_with('/') {
+            c.data_files += 1;
+        }
         // assets/<ns>/<kind>/... and data/<ns>/<kind>/...
         let (Some(root), Some(kind)) = (parts.first(), parts.get(2)) else {
             continue;
@@ -362,6 +386,22 @@ mandatory = true
         assert_eq!(info.depends, ["geckolib", "curios"]);
     }
 
+    /// A jar whose only metadata file is an unfilled template (placeholder mod id and
+    /// `[[dependencies.${id}]]`) is read line by line, not refused with the TOML error.
+    #[test]
+    fn lone_placeholder_template_is_not_a_toml_error() {
+        let t = "[[mods]]
+modId = \"${mod_id}\"
+
+[[dependencies.${mod_id}]]
+modId = \"neoforge\"
+";
+        assert!(mods_toml(t).is_err());
+        let info = metadata(&[t.to_owned()]).unwrap();
+        assert_eq!(info.mod_id, "${mod_id}");
+        assert!(metadata(&[String::new()]).is_err());
+    }
+
     /// Drip Sounds' Forge jar carries an unfilled NeoForge template beside its
     /// `mods.toml`; a file no parser reads still gives its id line by line.
     #[test]
@@ -387,7 +427,9 @@ mandatory = true
             ),
             ("ruby", "Ruby", "MIT")
         );
-        assert!(metadata(&[template.to_owned()]).is_err());
+        // A lone template still names its placeholder id (see
+        // `lone_placeholder_template_is_not_a_toml_error`).
+        assert_eq!(metadata(&[template.to_owned()]).unwrap().mod_id, "${id}");
     }
 
     #[test]

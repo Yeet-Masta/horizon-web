@@ -320,11 +320,10 @@ fn check_values(level: &Level) -> Result<(), String> {
     if !(0.0..=40.0).contains(&level.food_exhaustion) {
         return Err("the record's food exhaustion is past what a player can have".into());
     }
-    if level
-        .active_effects
-        .iter()
-        .any(|(_, _, amplifier, _, _)| !(0..=255).contains(amplifier))
-    {
+    if level.active_effects.iter().any(|e| {
+        std::iter::successors(Some(e), |e| e.hidden.as_deref())
+            .any(|e| !(0..=255).contains(&e.amplifier))
+    }) {
         return Err("the record holds an effect no player can have".into());
     }
     Ok(())
@@ -344,7 +343,7 @@ struct Kept {
     effects: Option<crate::effects::PlayerEffects>,
     game_mode: Option<(i32, bool, f32)>,
     position: Option<([f64; 3], [f64; 3], f32, f32, f32, bool, Option<[i32; 4]>)>,
-    spawn: Option<(Option<[f64; 3]>, Option<(String, [i32; 3], f32, bool)>)>,
+    spawn: Option<(Option<[f64; 3]>, Option<(String, [i32; 3], f32, f32, bool)>)>,
     recipes: Option<crate::recipe_book::Settings>,
     /// The body's values: its fall goes with the position, its air and fire with the
     /// health.
@@ -485,8 +484,12 @@ impl Kept {
 /// statistics (`Imported::advancements`, `Imported::stats`) and its attachments.
 ///
 /// Nothing changes when it refuses: the record is read and checked first, and the
-/// guest is touched only once everything is known to be well.
+/// guest is touched only once everything is known to be well. It refuses everything once
+/// the server has begun to stop.
 pub fn import_player(hub: &mut Hub, uuid: u128, request: &Value) -> Result<Imported, String> {
+    if hub.transfers.as_ref().is_some_and(|t| t.stopping) {
+        return Err(super::arrivals::STOPPING.into());
+    }
     let request = read_request(request)?;
     let (tag, handover) = read_compound(request.record, uuid)?;
     let Some(i) = hub

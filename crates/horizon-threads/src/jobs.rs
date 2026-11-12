@@ -173,10 +173,11 @@ static CONFIGURED: AtomicUsize = AtomicUsize::new(0);
 static POOL: OnceLock<Pool> = OnceLock::new();
 
 /// The number of workers the machine gets by default: one thread per core
-/// but one, which the render and server threads share with them (they run
-/// ahead of the workers: [`crate::favour_current`], [`crate::behind_server`]).
+/// but one ([`crate::default_workers`]: per performance core on Apple silicon), which the
+/// render and server threads share with them (they run ahead of the workers:
+/// [`crate::favour_current`], [`crate::behind_server`]).
 pub fn default_threads() -> usize {
-    crate::worker_count().saturating_sub(1).max(1)
+    crate::default_workers()
 }
 
 /// Size the process's pool before its first use (later calls change
@@ -476,9 +477,9 @@ fn run_job(inner: &Inner, worker: usize, entry: &Entry, far: bool) {
 /// page's clock. True when it timed out.
 fn wait_timeout_while(
     wake: &Condvar,
-    mut sleep: MutexGuard<'_, ()>,
+    #[cfg_attr(not(target_family = "wasm"), allow(unused_mut))] mut sleep: MutexGuard<'_, ()>,
     left: Duration,
-    mut still: impl FnMut(&mut ()) -> bool,
+    #[cfg_attr(not(target_family = "wasm"), allow(unused_mut))] mut still: impl FnMut(&mut ()) -> bool,
 ) -> bool {
     #[cfg(not(target_family = "wasm"))]
     {

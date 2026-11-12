@@ -1,3 +1,8 @@
+# `cargo xtask …` runs the repository's task crate, so the commands in docs/perf-platform.md and
+# web/perf/README.md work as written. `cargo run -p xtask -- …` stays equivalent.
+[alias]
+xtask = "run --package xtask --"
+
 # The web build (web/README.md). getrandom draws from the browser's
 # crypto.getRandomValues: on wasm32 through its own `wasm_js` source (which zip
 # turns on), on wasm64 through horizon-std.

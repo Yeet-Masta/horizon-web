@@ -2,20 +2,9 @@
 #![forbid(unsafe_code)]
 
 // The web build keeps the browser's allocator (horizon-std's web/alloc.rs).
-#[cfg(not(any(
-    feature = "system-allocator",
-    feature = "alloc-census",
-    target_family = "wasm"
-)))]
+#[cfg(not(any(feature = "system-allocator", target_family = "wasm")))]
 #[global_allocator]
-static ALLOCATOR: horizon_threads::Allocator = horizon_threads::ALLOCATOR;
-#[cfg(all(
-    feature = "alloc-census",
-    not(feature = "system-allocator"),
-    not(target_family = "wasm")
-))]
-#[global_allocator]
-static ALLOCATOR: horizon_threads::CensusAllocator = horizon_threads::CensusAllocator;
+static ALLOCATOR: horizon_threads::GameAllocator = horizon_threads::GAME_ALLOCATOR;
 
 /// The mod API level this game serves, kept in the program for the launcher
 /// to read without running it (`horizon_mods::api_level::MARK`). `main`

@@ -3,10 +3,13 @@
 //! them last, over any screen, at the debug GUI scale.
 use crate::{
     font::Font,
+    hud::HudVertex,
     hud_layout::{GuiDraw, PoseOp, fill},
     java_text,
     text::Text,
 };
+use horizon_client_render::gfx::pack_timing::{Counters, DetailSupport, PartsMode, PassCounters};
+use horizon_std::time::{Duration, Instant};
 
 /// `extractLines`'s background: ARGB 0x90505050.
 const BACKGROUND: u32 = 0x9050_5050;
@@ -14,6 +17,39 @@ const BACKGROUND: u32 = 0x9050_5050;
 const TEXT: u32 = 0xFFE0_E0E0;
 /// `Font.lineHeight`.
 const LINE_HEIGHT: i32 = 9;
+
+/// How long the painted overlay is reused: 20 times a second, the tick rate most of its lines
+/// change at or below (fps once a second, memory twice).
+const REPAINT: Duration = Duration::from_millis(50);
+/// Least time between frames timed for the overlay's GPU lines. Their medians still span about
+/// 1.5 s of samples.
+pub const GPU_TIMING_GAP: Duration = Duration::from_millis(100);
+
+/// The overlay's painted vertices between rebuilds: copying them is far cheaper than formatting
+/// its lines and laying out their glyphs each frame.
+#[derive(Default)]
+pub struct PaintCache {
+    vertices: Vec<HudVertex>,
+    /// When they were painted, and for what layout (see [`PaintCache::fresh`]).
+    painted: Option<(Instant, PaintLayout)>,
+}
+
+/// What the painted vertices depend on besides the lines: the framebuffer size, the GUI scale's
+/// bits and `Font::epoch` (glyphs move in the atlas when it changes).
+pub type PaintLayout = ([u32; 2], u32, u64);
+
+impl PaintCache {
+    /// The vertices, while they are recent and painted for this `layout`.
+    pub fn fresh(&self, now: Instant, layout: PaintLayout) -> Option<&[HudVertex]> {
+        let (at, painted) = self.painted?;
+        (painted == layout && now.duration_since(at) < REPAINT).then_some(&self.vertices)
+    }
+    pub fn store(&mut self, now: Instant, layout: PaintLayout, vertices: &[HudVertex]) {
+        self.vertices.clear();
+        self.vertices.extend_from_slice(vertices);
+        self.painted = Some((now, layout));
+    }
+}
 
 /// What the enabled entries reported (`DebugScreenDisplayer`).
 #[derive(Default, Debug)]
@@ -109,6 +145,76 @@ pub fn labelled_pass_lines(label: &str, passes: &[(String, f32)]) -> Vec<String>
     if costliest.len() > SHOWN {
         let rest: f32 = costliest[SHOWN..].iter().map(|p| p.1).sum();
         lines.push(format!("{} more: {rest:.2} ms", costliest.len() - SHOWN));
+    }
+    lines
+}
+
+/// `n` in three digits and an SI suffix: `512`, `83.0k`, `6.30M`, `1.20G`.
+pub fn compact_count(n: u64) -> String {
+    let (mut value, mut unit) = (n as f64, 0);
+    while value >= 999.5 && unit < 4 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    let suffix = ["", "k", "M", "G", "T"][unit];
+    match value {
+        _ if unit == 0 => n.to_string(),
+        v if v < 9.995 => format!("{v:.2}{suffix}"),
+        v if v < 99.95 => format!("{v:.1}{suffix}"),
+        v => format!("{v:.0}{suffix}"),
+    }
+}
+
+/// F3's detail lines: each pass's parts, then the six passes with the most fragments and their segments.
+pub fn pass_detail_lines(
+    parts: &[(String, Vec<(String, f32)>)],
+    counters: &[(String, PassCounters)],
+    support: DetailSupport,
+) -> Vec<String> {
+    const SHOWN: usize = 6;
+    let tr = |key: &str, args: &[&dyn std::fmt::Display]| Text::tr(key, args).plain();
+    let mode = match support.parts {
+        PartsMode::InsidePasses => "horizon.debug.pass_detail.inside_passes",
+        PartsMode::SeparatePasses => "horizon.debug.pass_detail.separate_passes",
+    };
+    let mut lines = vec![tr("horizon.debug.pass_detail.title", &[&tr(mode, &[])])];
+    for (pass, parts) in parts {
+        for (part, ms) in parts {
+            let ms = format!("{ms:.2}");
+            lines.push(tr("horizon.debug.pass_detail.part", &[pass, part, &ms]));
+        }
+    }
+    if !support.counters {
+        lines.push(tr("horizon.debug.pass_detail.no_counters", &[]));
+        return lines;
+    }
+    let per_pixel = |fragments: u64, pixels: u64| match support.fragment_unit {
+        Some(unit) if pixels > 0 => {
+            format!("{:.2}", unit.pixels_of(fragments) as f64 / pixels as f64)
+        }
+        _ => "?".to_owned(),
+    };
+    let line = |name: &str, c: &Counters, pixels: u64| {
+        let (fragments, vertices) = (c.fragment_shader_invocations, c.vertex_shader_invocations);
+        tr(
+            "horizon.debug.pass_detail.counters",
+            &[
+                &name,
+                &compact_count(fragments),
+                &per_pixel(fragments, pixels),
+                &compact_count(vertices),
+                &compact_count(c.clipper_primitives_out),
+                &compact_count(c.clipper_invocations),
+            ],
+        )
+    };
+    let mut busiest: Vec<&(String, PassCounters)> = counters.iter().collect();
+    busiest.sort_by_key(|c| std::cmp::Reverse(c.1.total.fragment_shader_invocations));
+    for (pass, c) in busiest.into_iter().take(SHOWN) {
+        lines.push(line(pass, &c.total, c.pixels));
+        for (part, counted) in &c.parts {
+            lines.push(format!("  {}", line(part, counted, c.pixels)));
+        }
     }
     lines
 }
@@ -422,8 +528,9 @@ pub fn light_line(sky: u8, block: u8) -> String {
 }
 
 /// What the process holds, for `DebugEntryMemory` (Horizon has no JVM heap):
-/// anonymous resident memory for the heap's used part, all resident memory
-/// for its committed part, the machine's memory for its maximum.
+/// anonymous (on Windows, private) resident memory for the heap's used part,
+/// all resident memory for its committed part, the machine's memory for its
+/// maximum.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProcessMemory {
     pub used: u64,
@@ -432,14 +539,20 @@ pub struct ProcessMemory {
 }
 
 impl ProcessMemory {
-    /// From `/proc/self/status` and `/proc/meminfo`; `None` elsewhere.
+    /// From `/proc/self/status` and `/proc/meminfo` on Linux, the process's
+    /// counters on Windows; `None` elsewhere.
     pub fn read() -> Option<Self> {
-        if !cfg!(target_os = "linux") {
-            return None;
+        if cfg!(target_os = "linux") {
+            let status = horizon_std::fs::read_to_string("/proc/self/status").ok()?;
+            let meminfo = horizon_std::fs::read_to_string("/proc/meminfo").ok()?;
+            return Self::parse(&status, &meminfo);
         }
-        let status = horizon_std::fs::read_to_string("/proc/self/status").ok()?;
-        let meminfo = horizon_std::fs::read_to_string("/proc/meminfo").ok()?;
-        Self::parse(&status, &meminfo)
+        let [used, allocated, max] = horizon_threads::process_memory::usage()?;
+        Some(Self {
+            used,
+            allocated,
+            max: max.max(1),
+        })
     }
     fn parse(status: &str, meminfo: &str) -> Option<Self> {
         let kib = |text: &str, key: &str| -> Option<u64> {
@@ -505,9 +618,124 @@ pub fn memory_lines(m: ProcessMemory, rate: i64) -> [String; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_client_render::gfx::pack_timing;
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn painted_vertices_are_reused_until_stale_or_laid_out_again() {
+        let vertex = HudVertex {
+            pos: [1.0, 2.0],
+            uv: [0.0; 2],
+            color: 7,
+            depth: 0.0,
+            glint_uv: [0.0; 2],
+            text: 1,
+        };
+        let layout = ([1920, 1080], 2.0f32.to_bits(), 5);
+        let start = Instant::now();
+        let mut cache = PaintCache::default();
+        assert!(cache.fresh(start, layout).is_none());
+        cache.store(start, layout, &[vertex]);
+        let just_before = start + Duration::from_millis(49);
+        assert_eq!(cache.fresh(just_before, layout).map(<[_]>::len), Some(1));
+        // Stale after a twentieth of a second, so the stats keep moving.
+        assert!(cache.fresh(start + REPAINT, layout).is_none());
+        // Another window size, GUI scale or glyph layout repaints at once.
+        for other in [
+            ([1280, 720], layout.1, layout.2),
+            (layout.0, 3.0f32.to_bits(), layout.2),
+            (layout.0, layout.1, 6),
+        ] {
+            assert!(cache.fresh(just_before, other).is_none());
+        }
+        // A smaller repaint leaves nothing of the last one behind.
+        cache.store(start, layout, &[]);
+        assert_eq!(cache.fresh(start, layout).map(<[_]>::len), Some(0));
+    }
+
+    #[test]
+    fn counts_read_in_three_digits_with_an_si_suffix() {
+        for (n, want) in [
+            (0, "0"),
+            (999, "999"),
+            (1000, "1.00k"),
+            (83_049, "83.0k"),
+            (999_999, "1.00M"),
+            (6_300_000, "6.30M"),
+            (1_200_000_000, "1.20G"),
+        ] {
+            assert_eq!(compact_count(n), want, "{n}");
+        }
+    }
+
+    fn counted(fragments: u64, parts: &[(&str, u64)]) -> PassCounters {
+        let c = |fragment_shader_invocations| Counters {
+            vertex_shader_invocations: 1000,
+            clipper_invocations: 400,
+            clipper_primitives_out: 300,
+            fragment_shader_invocations,
+        };
+        PassCounters {
+            total: c(fragments),
+            pixels: 1000,
+            parts: parts.iter().map(|p| (p.0.to_owned(), c(p.1))).collect(),
+        }
+    }
+
+    #[test]
+    fn pass_detail_lines_list_parts_then_the_six_busiest_passes_with_segments() {
+        let support = DetailSupport {
+            parts: PartsMode::InsidePasses,
+            encoder_stamps: true,
+            counters: true,
+            fragment_unit: Some(pack_timing::FragmentUnit::Quad),
+        };
+        let parts = vec![("GPU culling".to_owned(), vec![("cull".to_owned(), 0.3141)])];
+        let mut counters: Vec<(String, PassCounters)> = (1..=7)
+            .map(|i| (format!("P{i}"), counted(i * 100, &[])))
+            .collect();
+        counters[2].1 = counted(1_000_000, &[("a", 600_000), ("b", 400_000)]);
+        let (lines, _) = crate::lang::scoped(crate::lang::Language::load(&[], "en_us"), || {
+            pass_detail_lines(&parts, &counters, support)
+        });
+        assert_eq!(
+            lines,
+            [
+                "Horizon pass detail (timestamps inside passes)",
+                "GPU culling › cull: 0.31 ms",
+                "P3: 1.00M fragments, 4000.00 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "  a: 600k fragments, 2400.00 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "  b: 400k fragments, 1600.00 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "P7: 700 fragments, 2.80 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "P6: 600 fragments, 2.40 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "P5: 500 fragments, 2.00 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "P4: 400 fragments, 1.60 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+                "P2: 200 fragments, 0.80 per pixel, 1.00k vertices, 300 of 400 triangles kept",
+            ]
+        );
+    }
+
+    #[test]
+    fn pass_detail_lines_say_so_when_the_device_has_no_counters() {
+        let support = DetailSupport {
+            parts: PartsMode::SeparatePasses,
+            encoder_stamps: false,
+            counters: false,
+            fragment_unit: None,
+        };
+        let (lines, _) = crate::lang::scoped(crate::lang::Language::load(&[], "en_us"), || {
+            pass_detail_lines(&[], &[], support)
+        });
+        assert_eq!(
+            lines,
+            [
+                "Horizon pass detail (separate passes, adds GPU time)",
+                "GPU counters: Vulkan only"
+            ]
+        );
     }
 
     #[test]
@@ -609,6 +837,20 @@ mod tests {
                 max: 8192 * 1024,
             })
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_memory_lines_show_on_windows() {
+        let m = ProcessMemory::read().expect("Windows reports the process's memory");
+        assert!(
+            0 < m.used && m.used <= m.allocated && m.allocated <= m.max,
+            "{m:?}"
+        );
+        let lines = MemoryMeter::default()
+            .lines()
+            .expect("the meter reads the same counters");
+        assert!(lines[0].starts_with("Mem: "), "{lines:?}");
     }
 
     #[test]

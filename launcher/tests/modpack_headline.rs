@@ -23,6 +23,7 @@ fn row(class: &str, tier: &str, status: Status) -> Row {
         reason: String::new(),
         plain: String::new(),
         waiting: 0,
+        old_layout: false,
     }
 }
 
@@ -38,6 +39,7 @@ fn pack_with(rows: Vec<Row>) -> Imported {
         portable: 0,
         resourcepacks: 0,
         indexed_resources: 0,
+        datapacks: 0,
     }
 }
 

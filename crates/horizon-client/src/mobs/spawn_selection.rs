@@ -22,9 +22,37 @@ use horizon_core::{
 };
 use horizon_std::fs;
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashMap, path::Path};
+use std::{
+    borrow::{Borrow, Cow},
+    collections::HashMap,
+    path::Path,
+};
 
 pub use crate::biome::{SpawnCost, parse_costs, parse_entries};
+
+thread_local! {
+    static ATTEMPT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+/// Reset or publish once per natural-spawn tick, not once per chunk.
+pub fn attempt_counters(publish: bool) {
+    if !crate::spans::enabled() {
+        return;
+    }
+    let counts = ATTEMPT_COUNTS.with(|c| c.replace([0; 2]));
+    if publish {
+        horizon_perf_format::counter("natural_spawning.attempts", &[]).add(counts[0]);
+        horizon_perf_format::counter("natural_spawning.spawns", &[]).add(counts[1]);
+    }
+}
+fn attempt_count(index: usize) {
+    if crate::spans::enabled() {
+        ATTEMPT_COUNTS.with(|c| {
+            let mut counts = c.get();
+            counts[index] += 1;
+            c.set(counts);
+        });
+    }
+}
 
 /// `MobCategory`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -342,6 +370,13 @@ pub trait NaturalLevel: SpawnLevel {
     /// Where the players `getNearestPlayer(x, y, z, -1, false)` measures to
     /// are: every one that is not a spectator.
     fn nearest_player_positions(&self) -> &[[f64; 3]];
+    /// Those of [`Self::nearest_player_positions`] within `extent` of
+    /// `(x, z)` on both axes, and possibly others: the caller tests each. A
+    /// level with many players indexes them ([`PlayerSquares`]).
+    fn player_positions_near(&self, x: f64, z: f64, extent: f64, out: &mut Vec<[f64; 3]>) {
+        let _ = (x, z, extent);
+        out.extend_from_slice(self.nearest_player_positions());
+    }
     /// The world spawn point, when it is in this dimension.
     fn respawn(&self) -> Option<[i32; 3]>;
     /// `ServerLevel.canSpawnEntitiesInChunk`.
@@ -556,7 +591,7 @@ pub fn spawn_aabb(s: Species, x: f64, y: f64, z: f64, width: f32, height: f32) -
 /// `checkSpawnObstruction` of a freshly created mob with the given box, with
 /// the mobs already `spawned` in the way; None in a generation region, which
 /// has no entities (`WorldGenRegion.getEntities`).
-pub(crate) fn spawn_obstruction<L: NaturalLevel>(
+pub fn spawn_obstruction<L: NaturalLevel>(
     s: Species,
     l: &L,
     bounds: Aabb,
@@ -850,13 +885,17 @@ impl SpawnState {
     /// `NaturalSpawner.createState`: every non-persistent entity of a
     /// spawning category in a loaded chunk adds its biome's spawn charge, its
     /// category count and (for mobs) the local caps of the players near it.
-    pub fn new<L: NaturalLevel>(
+    pub fn new<'a, L: NaturalLevel, I>(
         l: &L,
         spawnable_chunks: i32,
         players: Vec<SpawnPlayer>,
-        entities: &[Counted],
+        entities: I,
         chunk_loaded: impl Fn(i32, i32) -> bool,
-    ) -> Self {
+    ) -> Self
+    where
+        I: IntoIterator,
+        I::Item: std::borrow::Borrow<Counted<'a>>,
+    {
         let mut state = Self {
             spawnable_chunks,
             counts: [0; 8],
@@ -869,6 +908,7 @@ impl SpawnState {
             last_checked: None,
         };
         for e in entities {
+            let e = e.borrow();
             if e.is_mob && e.persistent || e.category == Category::Misc {
                 continue;
             }
@@ -885,6 +925,10 @@ impl SpawnState {
             state.counts[e.category.index()] += 1;
         }
         state
+    }
+    /// Reclaims the player buffer for reuse across passes.
+    pub fn into_players(self) -> Vec<SpawnPlayer> {
+        self.players
     }
     fn add_charge(&mut self, pos: [i32; 3], charge: f64) {
         if charge != 0.0 {
@@ -1071,7 +1115,7 @@ pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource>(
 ) {
     let x = chunk.0 * 16 + random.next_int_bound(16).unwrap_or(0);
     let z = chunk.1 * 16 + random.next_int_bound(16).unwrap_or(0);
-    let top = l.heightmap(Heightmap::WorldSurface, x, z) + 1;
+    let top = l.heightmap(Heightmap::WorldSurface, x, z);
     let min = l.min_y();
     let y = min + random.next_int_bound(top - min + 1).unwrap_or(0);
     trace(Event::Start(category, [x, y, z]));
@@ -1112,6 +1156,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             z += random.next_int_bound(6).unwrap_or(0) - random.next_int_bound(6).unwrap_or(0);
             let (xx, zz) = (f64::from(x) + 0.5, f64::from(z) + 0.5);
             trace(Event::Try(x, z));
+            attempt_count(0);
             let Some(distance) = nearest.distance_sqr(l, xx, f64::from(y), zz) else {
                 continue;
             };
@@ -1178,6 +1223,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             let Some(result) = spawn(l, &request) else {
                 continue;
             };
+            attempt_count(1);
             group_index += 1;
             spawned.push(result.bounds);
             cluster += 1;
@@ -1229,18 +1275,68 @@ impl Nearest {
             return all.iter().map(distance).reduce(f64::min);
         }
         // The others are farther than REACH, across, from every point within
-        // MARGIN of the start.
+        // MARGIN of the start. Every one of them is within MARGIN + REACH of
+        // the start on both axes: a level with many players hands over only
+        // those (the nearest is the same in any order).
         let nearby = self.nearby.get_or_insert_with(|| {
-            all.iter()
-                .filter(|p| {
-                    let dx = ((p[0] - sx).abs() - Self::MARGIN).max(0.0);
-                    let dz = ((p[2] - sz).abs() - Self::MARGIN).max(0.0);
-                    dx * dx + dz * dz <= Self::REACH * Self::REACH
-                })
-                .copied()
-                .collect()
+            let mut near = Vec::new();
+            l.player_positions_near(sx, sz, Self::MARGIN + Self::REACH, &mut near);
+            near.retain(|p| {
+                let dx = ((p[0] - sx).abs() - Self::MARGIN).max(0.0);
+                let dz = ((p[2] - sz).abs() - Self::MARGIN).max(0.0);
+                dx * dx + dz * dz <= Self::REACH * Self::REACH
+            });
+            near
         });
         Some(nearby.iter().map(distance).fold(f64::INFINITY, f64::min))
+    }
+}
+/// Player positions by the 256-block square they stand in, for
+/// [`NaturalLevel::player_positions_near`]: every spawn start asks for the
+/// players near it, and a server's players are spread over the map.
+pub struct PlayerSquares {
+    squares: FxHashMap<(i64, i64), Vec<[f64; 3]>>,
+    /// Positions too far out (or not numbers) for a square: always handed over.
+    unsquared: Vec<[f64; 3]>,
+}
+impl PlayerSquares {
+    const SIDE: f64 = 256.0;
+    /// Further out than any world border.
+    const FAR: f64 = 1.0e9;
+    pub fn new(positions: &[[f64; 3]]) -> Self {
+        let mut squares = FxHashMap::<(i64, i64), Vec<[f64; 3]>>::default();
+        let mut unsquared = Vec::new();
+        for &p in positions {
+            if p[0].abs() < Self::FAR && p[2].abs() < Self::FAR {
+                squares.entry(Self::square(p[0], p[2])).or_default().push(p);
+            } else {
+                unsquared.push(p);
+            }
+        }
+        Self { squares, unsquared }
+    }
+    fn square(x: f64, z: f64) -> (i64, i64) {
+        (
+            (x / Self::SIDE).floor() as i64,
+            (z / Self::SIDE).floor() as i64,
+        )
+    }
+    /// Every position within `extent` (at most a square's side) of `(x, z)`
+    /// on both axes, and some others.
+    pub fn near(&self, x: f64, z: f64, extent: f64, out: &mut Vec<[f64; 3]>) {
+        out.extend_from_slice(&self.unsquared);
+        if !(x.abs() < Self::FAR && z.abs() < Self::FAR && extent <= Self::SIDE) {
+            out.extend(self.squares.values().flatten().copied());
+            return;
+        }
+        let (sx, sz) = Self::square(x, z);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if let Some(square) = self.squares.get(&(sx + dx, sz + dz)) {
+                    out.extend_from_slice(square);
+                }
+            }
+        }
     }
 }
 /// `isRightDistanceToPlayerAndSpawnPoint`.
@@ -1459,6 +1555,26 @@ fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i
 mod tests {
     use super::*;
 
+    /// Attempts and spawns counted while spans are on reach the perf counters once published, and a reset publishes nothing.
+    #[test]
+    fn attempt_counters_publish_what_the_tick_counted() {
+        let attempts = horizon_perf_format::counter("natural_spawning.attempts", &[]);
+        let spawns = horizon_perf_format::counter("natural_spawning.spawns", &[]);
+        let before = (attempts.get(), spawns.get());
+        crate::spans::enable(true);
+        attempt_counters(false);
+        for _ in 0..7 {
+            attempt_count(0);
+        }
+        for _ in 0..3 {
+            attempt_count(1);
+        }
+        attempt_counters(true);
+        attempt_counters(true);
+        crate::spans::enable(false);
+        assert_eq!((attempts.get() - before.0, spawns.get() - before.1), (7, 3));
+    }
+
     /// The grid finds the players whose chunk is within 8 of a chunk on both
     /// axes, in their order, as a look at every player does.
     #[test]
@@ -1500,6 +1616,58 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(found, scan, "chunk ({cx}, {cz})");
+            }
+        }
+    }
+
+    /// The squares hand back every player within the extent of a point on
+    /// both axes, also for points on square edges and players past the
+    /// border; a nearest-player search over them finds what a full one does.
+    #[test]
+    fn player_squares_keep_every_near_player() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |m: f64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1_000_000) as f64 / 1_000_000.0 * 2.0 * m - m
+        };
+        let mut players: Vec<[f64; 3]> = (0..200)
+            .map(|_| [next(3_000.0), next(100.0), next(3_000.0)])
+            .collect();
+        players.extend([
+            [0.0, 64.0, 0.0],
+            [256.0, 64.0, -256.0],
+            [-1.0e-9, 64.0, 255.999],
+            [3.0e9, 64.0, 0.0],
+        ]);
+        let squares = PlayerSquares::new(&players);
+        let mut near = Vec::new();
+        let points = players.iter().map(|p| (p[0] + 100.0, p[2] - 200.0)).chain([
+            (0.0, 0.0),
+            (255.5, -0.5),
+            (2.0e9, 0.0),
+        ]);
+        for (x, z) in points {
+            for extent in [24.0, 160.0, 256.0, 300.0] {
+                near.clear();
+                squares.near(x, z, extent, &mut near);
+                for p in &players {
+                    if (p[0] - x).abs() <= extent && (p[2] - z).abs() <= extent {
+                        assert!(near.contains(p), "{p:?} near ({x}, {z}) within {extent}");
+                    }
+                }
+                let nearest = |list: &[[f64; 3]]| {
+                    list.iter()
+                        .map(|p| (p[0] - x).powi(2) + (p[2] - z).powi(2))
+                        .filter(|d| *d <= extent * extent)
+                        .fold(f64::INFINITY, f64::min)
+                };
+                assert_eq!(
+                    nearest(&near),
+                    nearest(&players),
+                    "({x}, {z}) within {extent}"
+                );
             }
         }
     }

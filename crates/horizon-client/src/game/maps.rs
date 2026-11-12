@@ -11,19 +11,50 @@ use horizon_client::{
     items::ItemStack,
     mesher::Vertex,
 };
-use horizon_world::nbt::Tag;
+use horizon_world::nbt::{JavaString, Tag};
 use std::collections::HashMap;
+
+/// `LodestoneTracker.tick`: existing native eligibility/loaded-block predicate.
+/// The POI/unloaded boundary is unchanged; callers mutate their actual stacks.
+pub(super) fn lodestone_target_gone(game: &Game<'_>, stack: &ItemStack, dim: &str) -> bool {
+    let Some(tracker) = stack
+        .data()
+        .and_then(|d| d.other("minecraft:lodestone_tracker"))
+    else {
+        return false;
+    };
+    let (Some(target), true) = (
+        tracker.get("target"),
+        horizon_client::save::number(tracker.get("tracked")).is_none_or(|v| v != 0),
+    ) else {
+        return false;
+    };
+    let Some(Tag::IntArray(pos)) = target.get("pos") else {
+        return false;
+    };
+    let [x, y, z] = [pos[0], pos[1], pos[2]];
+    horizon_client::save::text(target.get("dimension")).as_deref() == Some(dim)
+        && game.world.chunks.contains_key(&(x >> 4, z >> 4))
+        && game
+            .res
+            .facts()
+            .get(game.world.block(x, y, z))
+            .name
+            .as_ref()
+            != "minecraft:lodestone"
+}
 
 /// What a decoration is filed under in `MapItemSavedData.decorations` (a
 /// `LinkedHashMap<String, MapDecoration>`): a player's marker by their
 /// connection, the banner at a position (`MapBanner.getId`), a framed map's
 /// frame by its entity (`getFrameKey`).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(super) enum Key {
     Player(u32),
-    /// An item's `minecraft:map_decorations` (an explorer map's target), or a
-    /// decoration a server sent (`addClientSideDecorations`).
-    Item,
+    /// A named entry of an item's `minecraft:map_decorations`.
+    Item(JavaString),
+    /// A decoration a server sent (`addClientSideDecorations`).
+    Remote,
     Banner([i32; 3]),
     Frame(i32),
 }
@@ -252,6 +283,21 @@ impl MapData {
             texture_dirty: true,
         }
     }
+    /// The whole picture replaced by a mod (`native_paint_map`): saved with
+    /// the maps and sent in full to everyone carrying it or seeing it framed,
+    /// as `update_color` would over every pixel (`setColorsDirty`).
+    pub(super) fn paint(&mut self, colors: &[u8]) {
+        if self.colors.as_slice() == colors {
+            return;
+        }
+        self.colors.clear();
+        self.colors.extend_from_slice(colors);
+        self.dirty = true;
+        self.texture_dirty = true;
+        for h in &mut self.holders {
+            h.dirty = Some([0, 0, 127, 127]);
+        }
+    }
     fn update_color(&mut self, x: i32, y: i32, color: u8) -> bool {
         let i = (x + y * 128) as usize;
         if self.colors[i] == color {
@@ -286,8 +332,8 @@ impl MapData {
         self.holders.retain(|h| h.holds(now));
         let holders = &self.holders;
         let before = self.decorations.len();
-        self.decorations.retain(|d| match d.key {
-            Key::Player(w) => holders.iter().any(|h| h.who == w),
+        self.decorations.retain(|d| match &d.key {
+            Key::Player(w) => holders.iter().any(|h| h.who == *w),
             _ => true,
         });
         if self.decorations.len() != before {
@@ -350,7 +396,11 @@ impl MapData {
             name,
             key,
         };
-        match self.decorations.iter().position(|d| d.key == key) {
+        match self
+            .decorations
+            .iter()
+            .position(|d| d.key == decoration.key)
+        {
             Some(i) if self.decorations[i] == decoration => {}
             Some(i) => {
                 self.decorations[i] = decoration;
@@ -359,6 +409,24 @@ impl MapData {
             None => {
                 self.decorations.push(decoration);
                 self.decorations_changed();
+            }
+        }
+    }
+    /// `tickCarriedBy` adds only missing component keys. Another carried
+    /// copy without those entries must not erase an explorer map's target.
+    fn add_item_decorations(&mut self, targets: Vec<StaticDecoration>, game_time: i64) {
+        for (name, sprite, x, z, rotation) in targets {
+            let key = Key::Item(name);
+            if !self.decorations.iter().any(|d| d.key == key) {
+                self.add_decoration(
+                    sprite,
+                    Some(game_time),
+                    key,
+                    x,
+                    z,
+                    f64::from(rotation),
+                    None,
+                );
             }
         }
     }
@@ -428,7 +496,7 @@ impl MapData {
     }
     /// `MapItemSavedData.isTrackedCountOverLimit`: more than `limit`
     /// decorations count (`MapDecorationType.trackCount`).
-    fn tracked_over_limit(&self, limit: usize) -> bool {
+    pub(super) fn tracked_over_limit(&self, limit: usize) -> bool {
         self.decorations
             .iter()
             .filter(|d| tracks_count(d.sprite))
@@ -639,6 +707,17 @@ impl MapData {
         Some(map)
     }
 }
+/// What a read of a map gives: from the cache when the map is loaded, else from its saved file.
+fn map_read<T>(
+    cached: Option<&MapData>,
+    saved: impl FnOnce() -> Option<MapData>,
+    read: impl Fn(&MapData) -> T,
+) -> Option<T> {
+    match cached {
+        Some(map) => Some(read(map)),
+        None => saved().map(|map| read(&map)),
+    }
+}
 pub(super) struct Maps {
     pub data: HashMap<i32, MapData>,
     /// The highest map id handed out (`maps/last_id.dat`), loaded on first use.
@@ -770,9 +849,11 @@ fn decoration_type(sprite: &str) -> Option<&'static str> {
         .find(|(_, s)| *s == sprite)
         .map(|(name, _)| *name)
 }
-/// `minecraft:map_decorations` of a map item: (sprite, x, z, rotation), in
-/// the component's order.
-fn static_decorations(stack: &ItemStack) -> Vec<(&'static str, f64, f64, f32)> {
+/// A named `minecraft:map_decorations` entry: key, sprite, x, z, rotation.
+type StaticDecoration = (JavaString, &'static str, f64, f64, f32);
+
+/// `minecraft:map_decorations` of a map item, in the component's order.
+fn static_decorations(stack: &ItemStack) -> Vec<StaticDecoration> {
     let Some(Tag::Compound(entries)) = stack.data().and_then(|d| {
         d.other
             .iter()
@@ -788,13 +869,14 @@ fn static_decorations(stack: &ItemStack) -> Vec<(&'static str, f64, f64, f32)> {
         _ => None,
     };
     entries
-        .values()
-        .filter_map(|e| {
+        .iter()
+        .filter_map(|(key, e)| {
             let sprite = match e.get("type") {
                 Some(Tag::String(s)) => decoration_sprite(&s.to_string_lossy())?,
                 _ => return None,
             };
             Some((
+                key.clone(),
                 sprite,
                 number(e.get("x"))?,
                 number(e.get("z"))?,
@@ -855,6 +937,30 @@ impl Game<'_> {
     fn map_path(&self, name: &str) -> std::path::PathBuf {
         self.world_root.join("data/minecraft/maps").join(name)
     }
+    /// `native_map_colors`: the 128 x 128 colour ids of the world's map `map_id`, row by row (vanilla's
+    /// `MapItemSavedData.colors`), from the loaded map or its saved file, which is not loaded here. None for a map the
+    /// world never made or saved, and on a client of a server (as `native_paint_map`).
+    pub(super) fn native_map_colors(&self, map_id: i32) -> Option<Vec<u8>> {
+        self.native_map_read(map_id, |map| map.colors.clone())
+    }
+    /// `native_map_meta`: the scale, dimension and locked flag of the world's map `map_id`, read as
+    /// `native_map_colors` reads it.
+    pub(super) fn native_map_meta(&self, map_id: i32) -> Option<(u8, String, bool)> {
+        self.native_map_read(map_id, |map| (map.scale, map.dimension.clone(), map.locked))
+    }
+    fn native_map_read<T>(&self, map_id: i32, read: impl Fn(&MapData) -> T) -> Option<T> {
+        if self.remote.is_some() || self.world_root.as_os_str().is_empty() {
+            return None;
+        }
+        let saved = || {
+            if self.maps.missing.contains(&map_id) {
+                return None;
+            }
+            horizon_client::save::read_dat(&self.map_path(&format!("{map_id}.dat")))
+                .and_then(|t| MapData::from_nbt(&t))
+        };
+        map_read(self.maps.data.get(&map_id), saved, read)
+    }
     /// The map's data, loaded from `data/minecraft/maps/<id>.dat` on first use.
     pub(super) fn map(&mut self, id: i32) -> Option<&mut MapData> {
         if !self.maps.data.contains_key(&id) && !self.maps.missing.contains(&id) {
@@ -893,7 +999,7 @@ impl Game<'_> {
                             .name
                             .as_ref()
                             .map(|t| horizon_client::entity_nbt::name_text(t).plain()),
-                        key: Key::Item,
+                        key: Key::Remote,
                     })
                 })
                 .collect()
@@ -966,6 +1072,15 @@ impl Game<'_> {
         let Some(map) = horizon_client::structure_blocks::take_pending_map(item) else {
             return true;
         };
+        self.materialize_exploration_map(item, &map, origin)
+    }
+    /// The existing exploration-map materialization, shared with command modifiers.
+    pub(super) fn materialize_exploration_map(
+        &mut self,
+        item: &mut ItemStack,
+        map: &horizon_world::loot::ExplorationMap,
+        origin: [f64; 3],
+    ) -> bool {
         let names = self.structure_tag(&map.destination);
         let from = origin.map(|v| v.floor() as i32);
         let found = self
@@ -1046,7 +1161,7 @@ impl Game<'_> {
         let scale = 1i32 << m.scale;
         let start_x = m.center[0] / scale - 64;
         let start_z = m.center[1] / scale - 64;
-        let sea_level = 63;
+        let sea_level = horizon_world::level::sea_level_of(self.level_key());
         let quarts: Vec<[i32; 3]> = (0..128)
             .flat_map(|row| {
                 (0..128).map(move |column| {
@@ -1171,9 +1286,7 @@ impl Game<'_> {
         let Some(id) = map_id(stack) else {
             return false;
         };
-        // ItemStack.useOn passes in adventure mode (its `can_place_on`
-        // exception is not ported).
-        if !self.may_build() {
+        if !self.may_build() && !self.can_place_on_in_adventure(hit.pos) {
             return false;
         }
         let [x, y, z] = hit.pos;
@@ -1244,38 +1357,28 @@ impl Game<'_> {
     /// lodestone is gone loses its target. A target in an unloaded chunk waits.
     pub(super) fn tick_lodestone_compasses(&mut self) {
         let dim = self.dimension_id();
-        let gone = |game: &Self, stack: &ItemStack| -> bool {
-            let Some(tracker) = stack
-                .data()
-                .and_then(|d| d.other("minecraft:lodestone_tracker"))
-            else {
-                return false;
-            };
-            let (Some(target), true) = (
-                tracker.get("target"),
-                horizon_client::save::number(tracker.get("tracked")).is_none_or(|v| v != 0),
-            ) else {
-                return false;
-            };
-            let Some(Tag::IntArray(pos)) = target.get("pos") else {
-                return false;
-            };
-            let [x, y, z] = [pos[0], pos[1], pos[2]];
-            horizon_client::save::text(target.get("dimension")).as_deref() == Some(dim)
-                && game.world.chunks.contains_key(&(x >> 4, z >> 4))
-                && game
-                    .res
-                    .facts()
-                    .get(game.world.block(x, y, z))
-                    .name
-                    .as_ref()
-                    != "minecraft:lodestone"
-        };
         for slot in (0..self.inventory.len()).chain([super::shield::OFFHAND_SLOT]) {
-            if self.stack_in(slot).is_some_and(|s| gone(self, s))
+            if self
+                .stack_in(slot)
+                .is_some_and(|s| lodestone_target_gone(self, s, dim))
                 && let Some(s) = self.stack_in_mut(slot)
             {
                 s.data_mut().set_other(
+                    "minecraft:lodestone_tracker",
+                    Some(Tag::Compound(Default::default())),
+                );
+            }
+        }
+        // `LivingEntity.tick` ticks `EntityEquipment` (the armour slots) as
+        // well as the inventory, so a compass worn there loses its target too.
+        let gone = self.armor.each_ref().map(|stack| {
+            stack
+                .as_ref()
+                .is_some_and(|s| lodestone_target_gone(self, s, dim))
+        });
+        for (stack, gone) in self.armor.iter_mut().zip(gone) {
+            if gone && let Some(stack) = stack {
+                stack.data_mut().set_other(
                     "minecraft:lodestone_tracker",
                     Some(Tag::Compound(Default::default())),
                 );
@@ -1324,7 +1427,7 @@ impl Game<'_> {
             .flatten()
             .filter_map(|i| self.stack_in(i).and_then(map_id))
             .collect();
-        let carried: Vec<(i32, Vec<(&'static str, f64, f64, f32)>)> = self
+        let carried: Vec<(i32, Vec<StaticDecoration>)> = self
             .inventory
             .iter()
             .chain(std::iter::once(&self.offhand))
@@ -1332,7 +1435,7 @@ impl Game<'_> {
             .filter_map(|s| Some((map_id(s)?, static_decorations(s))))
             .collect();
         let (yaw, dim) = (self.yaw, self.dimension_id());
-        let (nether, game_time) = (self.dim == super::Dim::Nether, self.world.game_time);
+        let game_time = self.world.game_time;
         let invisible = self.map_invisibility_worn(&self.armor);
         // The guest whose turn it is, else the host.
         let me = self.lan_acting.unwrap_or(HOST);
@@ -1357,39 +1460,7 @@ impl Game<'_> {
                 m.remove_decoration(Key::Player(me));
             }
             m.hide_invisible(me);
-            // The item's MAP_DECORATIONS (an explorer map's target), added
-            // after the players as addDecoration would.
-            let s = (1 << m.scale) as f32;
-            let mut items: Vec<Decoration> = Vec::new();
-            for (sprite, x, z, rotation) in targets {
-                let dx = (x - f64::from(m.center[0])) as f32 / s;
-                let dz = (z - f64::from(m.center[1])) as f32 / s;
-                let inside = (-63.0..=63.0).contains(&dx) && (-63.0..=63.0).contains(&dz);
-                if !inside && !m.unlimited {
-                    continue;
-                }
-                let d = Decoration {
-                    sprite,
-                    x: clamp_map_coordinate(dx),
-                    y: clamp_map_coordinate(dz),
-                    rot: decoration_rotation(nether, game_time, f64::from(rotation)),
-                    name: None,
-                    key: Key::Item,
-                };
-                if !items.contains(&d) {
-                    items.push(d);
-                }
-            }
-            if !m
-                .decorations
-                .iter()
-                .filter(|d| d.key == Key::Item)
-                .eq(items.iter())
-            {
-                m.decorations.retain(|d| d.key != Key::Item);
-                m.decorations.extend(items);
-                m.decorations_changed();
-            }
+            m.add_item_decorations(targets, game_time);
         }
         for id in held {
             self.update_map(id);
@@ -1683,7 +1754,7 @@ impl Game<'_> {
         let slot = match self.maps.slots.show(&id) {
             Some(slot) => slot,
             None => {
-                let (slot, _) = self.maps.slots.claim(id);
+                let (slot, _) = self.maps.slots.claim(id)?;
                 if let Some(m) = self.maps.data.get_mut(&id) {
                     m.texture_dirty = true;
                 }
@@ -1937,6 +2008,8 @@ impl Game<'_> {
 #[cfg(test)]
 mod live_frame_tests;
 #[cfg(test)]
+mod native_read_tests;
+#[cfg(test)]
 mod save_tests;
 
 #[cfg(test)]
@@ -1952,7 +2025,7 @@ mod tests {
             y: -30,
             rot: 4,
             name: None,
-            key: Key::Item,
+            key: Key::Remote,
         };
         assert_eq!(
             decoration_pose(&vanilla, -0.02),
@@ -2005,11 +2078,151 @@ mod tests {
         ));
         assert_eq!(map_id(&stack), Some(3));
         let found = static_decorations(&stack);
-        assert_eq!(found, vec![("map/decorations/red_x", 120.0, -300.0, 180.0)]);
+        assert_eq!(
+            found,
+            vec![("+".into(), "map/decorations/red_x", 120.0, -300.0, 180.0)]
+        );
         // calculateRotation(180): (byte) (188 * 16 / 360) = 8.
         assert_eq!(decoration_rotation(false, 0, 180.0), 8);
         assert_eq!(decoration_rotation(false, 0, -90.0), 12);
         assert_eq!(clamp_map_coordinate(-70.0), -128);
         assert_eq!(clamp_map_coordinate(10.25), 21);
     }
+    #[test]
+    fn an_undecorated_copy_does_not_erase_the_treasure_target() {
+        let mut map = MapData::fresh(0.0, 0.0, 0, "minecraft:overworld");
+        let mut treasure = ItemStack::new("minecraft:filled_map", 1);
+        treasure.data_mut().map_id = Some(7);
+        treasure.data_mut().other.push((
+            "minecraft:map_decorations".into(),
+            target_decoration("minecraft:red_x", [20, 40, 30]),
+        ));
+        let mut copy = ItemStack::new("minecraft:filled_map", 1);
+        copy.data_mut().map_id = Some(7);
+        map.add_item_decorations(static_decorations(&treasure), 0);
+        map.add_item_decorations(static_decorations(&copy), 0);
+        assert_eq!(map.decorations.len(), 1);
+        assert_eq!(map.decorations[0].sprite, "map/decorations/red_x");
+        assert_eq!((map.decorations[0].x, map.decorations[0].y), (40, 60));
+    }
+    #[test]
+    fn named_map_targets_are_added_once_without_replacing_other_targets() {
+        let mut map = MapData::fresh(0.0, 0.0, 0, "minecraft:overworld");
+        let target = |key: JavaString, x| (key, "map/decorations/red_x", x, 30.0, 180.0);
+        let first_key = JavaString(vec![0xd800]);
+        let second_key = JavaString(vec![0xd801]);
+        map.add_item_decorations(vec![target(first_key.clone(), 20.0)], 0);
+        map.add_item_decorations(vec![target(first_key, 40.0), target(second_key, 25.0)], 1);
+        assert_eq!(map.decorations.len(), 2);
+        assert_eq!((map.decorations[0].x, map.decorations[1].x), (40, 50));
+        // Both entries are off the map: neither may remove an existing target.
+        map.add_item_decorations(vec![target("absent".into(), 200.0)], 2);
+        assert_eq!(map.decorations.len(), 2);
+    }
+
+    /// `ItemStack.useOn` / `MapItem.useOn`: in adventure mode, a map whose
+    /// `can_place_on` component includes the banner block toggles that banner's
+    /// marker, while one without does not.
+    #[test]
+    fn map_on_banner_in_adventure_mode_honours_can_place_on() {
+        use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+        use horizon_client::{chunk::Chunk, command::args::GameMode};
+        use std::sync::Arc;
+
+        let Some(root) = horizon_std::env::var_os("HORIZON_TEST_RESOURCES") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            horizon_std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        options.execution_role = crate::game::execution_role::ExecutionRole::IntegratedServer;
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+
+        let pos = [0, 64, 0];
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        let banner_state = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:red_banner")
+            .unwrap();
+        game.world
+            .set(pos[0], pos[1], pos[2], banner_state)
+            .unwrap();
+        game.world.block_entities.insert(
+            (pos[0], pos[1], pos[2]),
+            horizon_client::containers::BlockEntity::Banner(horizon_client::containers::Banner {
+                layers: Vec::new(),
+                name: None,
+                components: Default::default(),
+            }),
+        );
+
+        let map_id = 42;
+        game.maps
+            .data
+            .insert(map_id, MapData::fresh(0.0, 0.0, 0, "minecraft:overworld"));
+        game.set_mode(GameMode::Adventure);
+        let hit = super::super::Hit {
+            pos,
+            face: [0, 1, 0],
+            point: [
+                pos[0] as f64 + 0.5,
+                pos[1] as f64 + 0.5,
+                pos[2] as f64 + 0.5,
+            ],
+        };
+        let mut stack = ItemStack::new("minecraft:filled_map", 1);
+        stack.data_mut().map_id = Some(map_id);
+
+        // Without can_place_on, use_map_on_banner fails in adventure mode.
+        *game.held_mut() = Some(stack.clone());
+        assert!(!game.use_map_on_banner(&hit, &stack));
+        assert!(game.map(map_id).unwrap().banners.is_empty());
+
+        // With can_place_on listing the banner block, the marker toggles.
+        stack.data_mut().other.push((
+            "minecraft:can_place_on".into(),
+            Tag::compound([(
+                "blocks",
+                Tag::List(vec![Tag::String("minecraft:red_banner".into())]),
+            )]),
+        ));
+        *game.held_mut() = Some(stack.clone());
+        assert!(game.use_map_on_banner(&hit, &stack));
+        assert_eq!(game.map(map_id).unwrap().banners.len(), 1);
+        assert_eq!(game.map(map_id).unwrap().banners[0].pos, pos);
+        assert_eq!(game.map(map_id).unwrap().banners[0].color, "red");
+
+        // Second use toggles the marker off.
+        assert!(game.use_map_on_banner(&hit, &stack));
+        assert!(game.map(map_id).unwrap().banners.is_empty());
+    }
 }
+
+#[cfg(test)]
+mod command_exploration_map_test_file;

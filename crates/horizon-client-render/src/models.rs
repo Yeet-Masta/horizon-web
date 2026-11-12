@@ -93,7 +93,7 @@ pub(crate) fn prepare_with_models(
     models: &crate::model_library::ParsedModels,
 ) -> Result<PreparedModels> {
     let facts: std::collections::BTreeMap<String, Value> =
-        serde_json::from_slice(&horizon_std::fs::read(root.join("model-states.json"))?)?;
+        horizon_world::json_file::read(&root.join("model-states.json"))?;
     let blocks: Vec<&str> = facts
         .keys()
         .filter(|name| registry.default_state(name).is_some())
@@ -153,7 +153,6 @@ pub fn load_visibility(
     root: &Path,
     registry: &BlockRegistry,
 ) -> Result<horizon_world::block_render::FaceVisibility> {
-    use horizon_std::fs;
     use horizon_world::{
         block_render::{FaceVisibility, RenderDefinition, SkipRendering},
         collision::CachedCollisionRegistry,
@@ -163,7 +162,7 @@ pub fn load_visibility(
     let file = BlockTableFile::open(&root.join("occlusion.nbt"), registry)?;
     let occlusion = CachedCollisionRegistry::from_table(file.table("occlusion")?)?;
     let raw: BTreeMap<String, Value> =
-        serde_json::from_slice(&fs::read(root.join("render-definitions.json"))?)?;
+        horizon_world::json_file::read(&root.join("render-definitions.json"))?;
     let definitions = raw
         .into_iter()
         .map(|(name, v)| {

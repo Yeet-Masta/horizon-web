@@ -58,8 +58,9 @@ if [ "$have" != "$pinned" ]; then
   exit 1
 fi
 
-# No sound, controllers or mod runtime in a browser (web/README.md).
-args=(-p horizon-client --bin horizon-client --no-default-features --target "$target" --profile "$profile"
+# No sound, controllers or mod runtime in a browser (web/README.md); Horizon's own extras
+# (cosmetics, Play with Friends, its settings pages) as in the official game.
+args=(-p horizon-client --bin horizon-client --no-default-features --features horizon-extras --target "$target" --profile "$profile"
   --config web/simd.toml "${extra[@]}")
 # Builds that make std (threads, wasm64) can unwind; the one-thread wasm32 build, on stable's
 # prebuilt std, aborts.

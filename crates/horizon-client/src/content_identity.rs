@@ -1,7 +1,7 @@
 //! Identity of the ordered block-state registry used by chunk packets, and of
-//! the item, mob effect, entity type and menu registries once content mods
-//! add to them (item stacks, effect, entity and open screen packets carry
-//! their network ids).
+//! the item, mob effect, fluid, entity type and menu registries once content
+//! mods add to them (item stacks, effect, entity and open screen packets carry
+//! their network ids, fluid tags their fluids').
 use horizon_protocol::registry::Builtin;
 use horizon_std::sync::Mutex;
 use serde::{Deserialize, Serialize, de::IgnoredAny};
@@ -110,9 +110,10 @@ fn hash_facts(bytes: &[u8]) -> Result<[u8; 32], IdentityError> {
 }
 
 /// The built-in registries whose network ids content mods extend besides blocks.
-const REGISTRIES: [&str; 4] = [
+const REGISTRIES: [&str; 5] = [
     "minecraft:item",
     "minecraft:mob_effect",
+    "minecraft:fluid",
     "minecraft:entity_type",
     "minecraft:menu",
 ];
@@ -207,6 +208,33 @@ mod tests {
         let press = root("press", r#","ruby:press":{"protocol_id":25}"#);
         assert_ne!(press, vanilla);
         assert_ne!(press, root("mill", r#","ruby:mill":{"protocol_id":25}"#));
+    }
+
+    /// a mod fluid in the report changes the identity: fluid tags are sent by
+    /// fluid id, and a client without the fluid would read another's.
+    #[test]
+    fn a_mod_fluid_joins_the_identity() {
+        let root = |name: &str, extra: &str| {
+            let root = horizon_std::env::temp_dir().join(format!(
+                "horizon-content-identity-fluid-{name}-{}",
+                std::process::id()
+            ));
+            horizon_std::fs::create_dir_all(&root).unwrap();
+            let facts = br#"{"states":[["minecraft:stone",false,false,"Block{minecraft:stone}",{"id":"minecraft:stone"}]]}"#;
+            horizon_std::fs::write(root.join("facts.json"), facts).unwrap();
+            let report = format!(
+                r#"{{"minecraft:fluid":{{"entries":{{"minecraft:water":{{"protocol_id":2}}{extra}}}}}}}"#
+            );
+            horizon_std::fs::write(root.join("registries.json"), report).unwrap();
+            let hash = identity(&root).unwrap();
+            horizon_std::fs::remove_dir_all(&root).unwrap();
+            (hash, hash_facts(facts).unwrap())
+        };
+        let (vanilla, blocks) = root("vanilla", "");
+        assert_eq!(vanilla, blocks, "vanilla's fluids are not mod content");
+        let (honey, _) = root("honey", r#","ruby:honey":{"protocol_id":5}"#);
+        assert_ne!(honey, vanilla);
+        assert_ne!(honey, root("oil", r#","ruby:oil":{"protocol_id":5}"#).0);
     }
 
     #[test]

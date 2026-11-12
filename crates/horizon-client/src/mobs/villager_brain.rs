@@ -9,6 +9,10 @@
 //! the mob's own random drives positions, sounds and jumps. `RunOne` and the
 //! other `GateBehavior`s shuffle with a random of their own, seeded with
 //! `Brain::shuffle_seed` when the brain is built.
+mod reputation;
+pub use reputation::murder_witnesses;
+use reputation::targetable;
+
 use super::{
     Mob, MobEvent, MobWorld, Species, Who,
     brain::{Timed, living_near},
@@ -435,12 +439,15 @@ fn make_brain(m: &mut Mob, packed: Memories, shuffle_seed: i64, w_times: (i64, i
 /// Builds the villager's brain as its constructor does, at this game time:
 /// the memories it remembers (job site, bed, bell) come from the mob.
 pub fn init(m: &mut Mob, game_time: i64, day_time: i64, shuffle_seed: i64) {
-    let mut packed = Memories::default();
-    packed.job_site.set_opt(m.extra.home);
-    packed.home.set_opt(m.extra.bed);
-    packed.meeting_point.set_opt(m.extra.meeting);
-    if let Some(t) = super::villager::ext(m).and_then(|e| e.last_slept) {
-        packed.last_slept.set(t);
+    let saved = super::villager::ext_mut(m).saved_memories.take();
+    let mut packed = saved.as_deref().cloned().unwrap_or_default();
+    if saved.is_none() {
+        packed.job_site.set_opt(m.extra.home);
+        packed.home.set_opt(m.extra.bed);
+        packed.meeting_point.set_opt(m.extra.meeting);
+        if let Some(t) = super::villager::ext(m).and_then(|e| e.last_slept) {
+            packed.last_slept.set(t);
+        }
     }
     let b = make_brain(m, packed, shuffle_seed, (game_time, day_time));
     super::villager::ext_mut(m).brain = Some(Box::new(b));
@@ -456,7 +463,7 @@ pub struct Bx<'a, 'w> {
     refresh: bool,
 }
 
-/// `Brain.tick` (from `Villager.customServerAiStep`).
+/// `Brain.tick`, called from the villager's server AI phase.
 pub fn tick(m: &mut Mob, w: &MobWorld, lr: &mut LegacyRandom, events: &mut Vec<MobEvent>) {
     if brain(m).is_none() {
         let seed = i64::from(m.id);
@@ -605,17 +612,6 @@ fn sense_living(m: &mut Mob, w: &MobWorld) {
         list,
         cache: Vec::new(),
     });
-}
-/// `Sensor.isEntityTargetable`: `TargetingConditions.forNonCombat()` within
-/// the follow range, in sight.
-fn targetable(m: &mut Mob, w: &MobWorld, who: Who) -> bool {
-    match who {
-        Who::Player => m.can_see_player(w, FOLLOW_RANGE),
-        Who::Mob(id) => {
-            let Some(s) = w.seen(id) else { return false };
-            s.alive && m.distance_sqr(s.position) <= FOLLOW_RANGE * FOLLOW_RANGE && m.sees(w, who)
-        }
-    }
 }
 /// The visible-entities memory's line-of-sight test, cached per memory.
 fn visible_test(m: &mut Mob, w: &MobWorld, who: Who) -> bool {
@@ -925,12 +921,12 @@ fn chunk_pois(
         return;
     };
     let kind = |state: u32| poi_of_state(w, horizon_world::registry::BlockStateId(state));
-    let min = w.world.bottom_y();
-    for s in (y0 - min) >> 4..=(y1 - min) >> 4 {
-        let section = &chunk.sections[s as usize];
-        for &(i, poi) in w.world.pois.get((qx, s, qz), section, kind).iter() {
+    let (min, mut lists) = (w.world.bottom_y(), Vec::new());
+    w.world.pois.column(chunk, min, (y0, y1), kind, &mut lists);
+    for (base, pois) in &lists {
+        for &(i, poi) in pois.iter() {
             let i = i32::from(i);
-            let y = min + s * 16 + (i >> 8);
+            let y = base + (i >> 8);
             if (y0..=y1).contains(&y) {
                 visit(poi, [qx * 16 + (i & 15), y, qz * 16 + (i >> 4 & 15)]);
             }
@@ -3038,6 +3034,11 @@ impl B {
                         if let Some(first) = items.first() {
                             *look_time = 900;
                             m.extra.set_main_hand_stack(Some(first.clone()));
+                            super::finalize::set_drop_chance(
+                                m,
+                                super::equip::Slot::MainHand.index(),
+                                0.0,
+                            );
                         }
                     }
                 }
@@ -3052,11 +3053,21 @@ impl B {
                                 *index = 0;
                             }
                             m.extra.set_main_hand_stack(Some(items[*index].clone()));
+                            super::finalize::set_drop_chance(
+                                m,
+                                super::equip::Slot::MainHand.index(),
+                                0.0,
+                            );
                         }
                     }
                 } else {
                     // clearHeldItem; no offer matches: look for a while only.
                     m.extra.set_main_hand(None);
+                    super::finalize::set_drop_chance(
+                        m,
+                        super::equip::Slot::MainHand.index(),
+                        0.085,
+                    );
                     *look_time = (*look_time).min(40);
                 }
                 *look_time -= 1;
@@ -3315,6 +3326,7 @@ impl B {
                 mem(m).interaction_target.clear();
                 // clearHeldItem
                 m.extra.set_main_hand(None);
+                super::finalize::set_drop_chance(m, super::equip::Slot::MainHand.index(), 0.085);
                 *player_item = None;
             }
             B::TradeWithVillager(t) => {
@@ -3365,7 +3377,7 @@ fn same_path(a: Option<&Path>, b: Option<&Path>) -> bool {
 }
 /// `Swim`: deeper than the jump threshold, or in lava.
 fn swim_condition(m: &Mob) -> bool {
-    m.fluids.water > m.fluid_jump_threshold() || m.fluids.in_lava
+    m.floats()
 }
 fn panic_condition(m: &Mob) -> bool {
     mem_ref(m).is_some_and(|mm| mm.hurt_by.present() || mm.nearest_hostile.present())
@@ -3584,6 +3596,12 @@ fn harvest_tick(
             }
             cx.events.push(MobEvent::SetBlock {
                 pos: p,
+                state: crop,
+            });
+            cx.events.push(MobEvent::GameEvent {
+                event: "minecraft:block_place",
+                at: p.map(|v| f64::from(v) + 0.5),
+                source: m.id,
                 state: crop,
             });
             cx.events.push(MobEvent::Sound(
@@ -4580,3 +4598,10 @@ pub fn seen_memories(
         mm.last_slept.value(),
     )
 }
+
+#[cfg(test)]
+#[path = "villager_trades_tests.rs"]
+mod trades_tests;
+
+#[cfg(test)]
+mod reputation_witness_tests;

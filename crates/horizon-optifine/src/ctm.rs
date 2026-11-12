@@ -203,7 +203,7 @@ pub fn load(root: &Path) -> Vec<Rule> {
     let mut rules: Vec<Rule> = crate::properties_files(root, "ctm")
         .into_iter()
         .filter_map(|path| {
-            let bytes = std::fs::read(root.join(&path))
+            let bytes = horizon_std::fs::read(root.join(&path))
                 .map_err(|e| log::warn!("Horizon: connected textures {path}: {e}"))
                 .ok()?;
             // Java's `Properties.load(InputStream)` reads ISO-8859-1; UTF-8 when it is valid.
@@ -249,7 +249,7 @@ impl Rule {
                 None => match_tiles.extend(sprite_path(stem)),
             },
             (tiles, blocks) => {
-                match_tiles = tiles.map_or_else(Vec::new, sprite_list);
+                match_tiles = tiles.map_or_else(Vec::new, |v| sprite_list(path, v));
                 match_blocks = blocks.map_or_else(Vec::new, BlockMatch::parse_list);
             }
         }
@@ -351,7 +351,7 @@ impl Rule {
                 None => None,
             },
             connect,
-            connect_tiles: get("connectTiles").map_or_else(Vec::new, sprite_list),
+            connect_tiles: get("connectTiles").map_or_else(Vec::new, |v| sprite_list(path, v)),
             connect_blocks: get("connectBlocks").map_or_else(Vec::new, BlockMatch::parse_list),
             inner_seams: flag("innerSeams") == Some(true),
             weights,
@@ -399,12 +399,19 @@ impl Rule {
     }
 }
 
-/// `matchTiles`/`connectTiles` entries as texture resource paths.
-fn sprite_list(value: &str) -> Vec<String> {
+/// `matchTiles`/`connectTiles` entries of the file `props` as texture resource paths. `./x` is
+/// beside the file and `~/x` under `optifine/`: tiles other rules output, matched to chain them.
+fn sprite_list(props: &str, value: &str) -> Vec<String> {
     value
         .split_whitespace()
         .take(MAX_TILES)
-        .filter_map(sprite_path)
+        .filter_map(|t| {
+            if !(t.starts_with("./") || t.starts_with("~/")) {
+                return sprite_path(t);
+            }
+            let t = t.strip_suffix(".png").unwrap_or(t);
+            crate::resolve(props, &format!("{t}.png"))
+        })
         .collect()
 }
 
@@ -590,6 +597,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(named.match_tiles.is_empty());
+    }
+
+    #[test]
+    fn match_tiles_name_another_rules_tiles_beside_the_file() {
+        // A rule over tiles a `repeat` rule beside it outputs (`./1.png`), or under `optifine/`.
+        let r = rule(
+            "random_1.properties",
+            "matchTiles=./1.png ./2 ~/ctm/other/3.png\nconnectTiles=./4.png\nmethod=random\nfaces=top\ntiles=17 33",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            r.match_tiles,
+            [
+                format!("{DIR}/1.png"),
+                format!("{DIR}/2.png"),
+                "assets/minecraft/optifine/ctm/other/3.png".to_owned(),
+            ]
+        );
+        assert_eq!(r.connect_tiles, [format!("{DIR}/4.png")]);
+        assert!(r.matches_tile(&format!("{DIR}/1.png")));
     }
 
     #[test]
@@ -848,20 +876,21 @@ mod tests {
 
     #[test]
     fn loading_a_pack() {
-        let root = std::env::temp_dir().join(format!("horizon-ctm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = horizon_std::env::temp_dir().join(format!("horizon-ctm-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let ctm = root.join("assets/minecraft/optifine/ctm");
-        std::fs::create_dir_all(ctm.join("b")).unwrap();
-        std::fs::write(
+        horizon_std::fs::create_dir_all(ctm.join("b")).unwrap();
+        horizon_std::fs::write(
             ctm.join("b/block_stone.properties"),
             "method=fixed\ntiles=0",
         )
         .unwrap();
-        std::fs::write(ctm.join("a.properties"), "matchBlocks=stone\nmethod=spiral").unwrap();
+        horizon_std::fs::write(ctm.join("a.properties"), "matchBlocks=stone\nmethod=spiral")
+            .unwrap();
         // ISO-8859-1, as Java reads it: "É" is one byte.
         let latin1 = b"matchBlocks=furnace\nmethod=fixed\ntiles=0\nname=\xc9p\xe9e\n";
-        std::fs::write(ctm.join("c.properties"), latin1).unwrap();
-        std::fs::write(ctm.join("z.properties"), "method=fixed\ntiles=0").unwrap();
+        horizon_std::fs::write(ctm.join("c.properties"), latin1).unwrap();
+        horizon_std::fs::write(ctm.join("z.properties"), "method=fixed\ntiles=0").unwrap();
         let rules = load(&root);
         let names: Vec<_> = rules
             .iter()
@@ -873,6 +902,6 @@ mod tests {
             ["z.properties", "block_stone.properties", "c.properties"]
         );
         assert!(rules[2].applies_at(faces::UP, 0, "plains", Some("Épée")));
-        std::fs::remove_dir_all(&root).unwrap();
+        horizon_std::fs::remove_dir_all(&root).unwrap();
     }
 }

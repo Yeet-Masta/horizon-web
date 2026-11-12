@@ -2,13 +2,12 @@
 //! (`gameplay-facts.json`), indexed by registry state ID.
 mod decode;
 use crate::Result;
-use horizon_std::fs::{self, File};
 use horizon_world::{
     level::{Behaviours, GameplayStateSource},
     registry::{BlockRegistry, BlockStateId},
 };
 use serde_json::Value;
-use std::{collections::HashMap, io::BufReader, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderShape {
@@ -122,6 +121,44 @@ impl StateFacts {
     pub fn has_class(&self, name: &str) -> bool {
         self.classes.iter().any(|c| &**c == name)
     }
+    /// `OffsetType.XZ`/`XYZ` with `getMaxHorizontalOffset` and
+    /// `getMaxVerticalOffset`, as (max horizontal, max vertical): vertical 0
+    /// for XZ. None without an offset function.
+    pub fn max_offset(&self) -> Option<(f32, f32)> {
+        self.random_offset.then(|| {
+            let horizontal = if self.has_class("SpeleothemBlock") {
+                0.125
+            } else {
+                0.25
+            };
+            let vertical = match self.name.strip_prefix("minecraft:").unwrap_or(&self.name) {
+                "small_dripleaf" => 0.1,
+                "short_grass" | "fern" | "short_dry_grass" | "tall_dry_grass" => 0.2,
+                _ => 0.0,
+            };
+            (horizontal, vertical)
+        })
+    }
+    /// `BlockState.getOffset(pos)`: the column's jitter, zero without an
+    /// offset function.
+    pub fn offset_at(&self, x: i32, z: i32) -> [f64; 3] {
+        self.max_offset()
+            .map_or([0.0; 3], |max| column_offset(max, x, z))
+    }
+}
+/// The `OffsetType.XZ`/`XYZ` jitter of column (x, z) from `Mth.getSeed(x, 0, z)`,
+/// for a block with `max` = (max horizontal, max vertical) offset.
+pub fn column_offset((horizontal, vertical): (f32, f32), x: i32, z: i32) -> [f64; 3] {
+    let seed = horizon_core::random::position_seed(horizon_core::position::BlockPos::new(x, 0, z));
+    let nibble = |shift: u32| ((seed >> shift) & 15) as f32 / 15.0;
+    let h = f64::from(horizontal);
+    [
+        ((f64::from(nibble(0)) - 0.5) * 0.5).clamp(-h, h),
+        (f64::from(nibble(4)) - 1.0) * f64::from(vertical),
+        ((f64::from(nibble(8)) - 0.5) * 0.5).clamp(-h, h),
+    ]
+}
+impl StateFacts {
     /// A `SignBlock`'s form, by class: a mod's sign has its template's,
     /// whatever its name.
     pub fn sign_form(&self) -> Option<SignForm> {
@@ -249,18 +286,16 @@ pub struct BlockFacts {
 }
 impl BlockFacts {
     pub fn load(root: &Path, registry: &BlockRegistry) -> Result<Self> {
-        let behaviours: Value = serde_json::from_reader(BufReader::new(File::open(
-            root.join("block-behaviours.json"),
-        )?))?;
+        let behaviours: Value =
+            horizon_world::json_file::read(&root.join("block-behaviours.json"))?;
         Self::load_with_behaviour_json(root, registry, &behaviours)
     }
 
     /// Load both tables from one resource root, sharing each JSON decode.
     /// No data is cached across calls: changes to prepared packs or mods are read again.
     pub fn load_pair(root: &Path, registry: &BlockRegistry) -> Result<(Self, Behaviours)> {
-        let behaviours: Value = serde_json::from_reader(BufReader::new(File::open(
-            root.join("block-behaviours.json"),
-        )?))?;
+        let behaviours: Value =
+            horizon_world::json_file::read(&root.join("block-behaviours.json"))?;
         Self::load_with_behaviours(root, registry, &behaviours)
     }
 
@@ -309,17 +344,19 @@ impl BlockFacts {
         parallel: bool,
         callback: impl FnOnce(&[decode::Entry<'_>]) -> Result<T>,
     ) -> Result<(Self, T)> {
-        let bytes = fs::read(root.join("gameplay-facts.json"))?;
-        let validate = || serde_json::from_slice::<decode::Validate>(&bytes).map(drop);
+        let path = root.join("gameplay-facts.json");
+        let bytes = horizon_world::json_file::read_bytes(&path)?;
+        let validate =
+            || horizon_world::json_file::parse::<decode::Validate>(&path, &bytes).map(drop);
         if !parallel {
             validate()?;
-            return Self::decode_with_callback(&bytes, registry, behaviours, callback);
+            return Self::decode_with_callback(&path, &bytes, registry, behaviours, callback);
         }
         // The validation pass (a third of the load) only reports errors: it
         // reads the file beside the decode, and its error still wins.
         horizon_std::thread::scope(|scope| {
             let validated = scope.spawn(validate);
-            let decoded = Self::decode_with_callback(&bytes, registry, behaviours, callback);
+            let decoded = Self::decode_with_callback(&path, &bytes, registry, behaviours, callback);
             validated
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
@@ -328,12 +365,13 @@ impl BlockFacts {
     }
 
     fn decode_with_callback<T>(
+        path: &Path,
         bytes: &[u8],
         registry: &BlockRegistry,
         behaviours: &Value,
         callback: impl FnOnce(&[decode::Entry<'_>]) -> Result<T>,
     ) -> Result<(Self, T)> {
-        let raw: decode::Gameplay<'_> = serde_json::from_slice(bytes)?;
+        let raw: decode::Gameplay<'_> = horizon_world::json_file::parse(path, bytes)?;
         let entries = raw
             .states
             .0

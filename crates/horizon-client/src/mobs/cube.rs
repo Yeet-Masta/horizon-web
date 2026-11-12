@@ -246,10 +246,9 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         // Player.touch: entities within the player's box grown by (1, 0.5, 1).
         && m.bounds().intersects(p.bounds.inflate(Vec3::new(1.0, 0.5, 1.0)))
     {
-        let reach = 2.04f32.sqrt() as f64 - 0.6;
-        if m.bounds()
-            .inflate(Vec3::new(reach, 0.0, reach))
-            .intersects(p.bounds)
+        // isWithinMeleeAttackRange, with what the cube holds.
+        if w.target_info(Who::Player)
+            .is_some_and(|t| m.melee_reaches(w, t.hitbox))
             && m.sees(w, Who::Player)
         {
             events.push(MobEvent::CubeHurtPlayer {
@@ -260,6 +259,17 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         }
     }
     hurt_touching_golems(m, w, events);
+}
+/// `AbstractCubeMob.tick` runs without AI too (only `serverAiStep` is
+/// skipped): the squish, the landing splash and `wasOnGround`. Contact damage
+/// inside `ai_step` is already gated on NoAI.
+pub fn no_ai_tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
+    if matches!(
+        m.species(),
+        Species::Slime | Species::MagmaCube | Species::SulfurCube
+    ) {
+        ai_step(m, w, events);
+    }
 }
 /// `AbstractCubeMob.getAttackDamage`: the attack damage attribute, plus 2 for
 /// a magma cube (`MagmaCube.getAttackDamage`).
@@ -274,7 +284,8 @@ fn attack_damage(m: &Mob) -> f32 {
 /// `AbstractCubeMob.push(entity)`: an iron golem whose `pushEntities` takes
 /// this cube (its box overlaps the cube's, `EntitySelector.pushableBy`) gets
 /// `dealDamage`: alive, `doTeamsAllowDamage`, `isWithinMeleeAttackRange`
-/// (always true for overlapping boxes) and `hasLineOfSight`, then a
+/// (true for overlapping boxes unless a held spear's minimum range refuses
+/// them) and `hasLineOfSight`, then a
 /// `mobAttack` hit for `getAttackDamage`.
 fn hurt_touching_golems(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
     // canDealDamage also needs Mob.isEffectiveAi: a NoAI cube never hurts.
@@ -292,6 +303,7 @@ fn hurt_touching_golems(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
                 && o.species == Species::IronGolem
                 && o.alive
                 && o.bounds.intersects(bounds)
+                && m.melee_reaches(w, o.hitbox)
                 && crate::scoreboard::pushable_by(theirs, own, pushable)
                 && crate::scoreboard::teams_allow_damage(own, theirs)
         })
@@ -421,8 +433,9 @@ impl Goal for CubeKeepJumping {
     fn flags(&self) -> u8 {
         JUMP | MOVE
     }
-    fn can_use(&mut self, _: &mut Mob, _: &mut Cx) -> bool {
-        true
+    fn can_use(&mut self, m: &mut Mob, _: &mut Cx) -> bool {
+        // `CubeMobKeepOnJumpingGoal.canUse`: not while it is a passenger.
+        !m.extra.passenger
     }
     fn tick(&mut self, m: &mut Mob, _: &mut Cx) {
         set_wanted(m, 1.0);
@@ -587,5 +600,80 @@ mod golem_touch_tests {
                 .any(|e| matches!(e, MobEvent::Sound("entity.slime.attack", ..))),
             "ai_step must not emit entity.slime.attack before hurtServer: {events:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod keep_jumping_tests {
+    use super::*;
+    use crate::mobs::world::with_test_world;
+    use horizon_core::random::LegacyRandom;
+    use std::sync::Arc;
+
+    /// `CubeMobKeepOnJumpingGoal.canUse` is `!isPassenger()`: a cube riding
+    /// a boat or another mob holds still, while one on its own keeps hopping.
+    #[test]
+    fn a_cube_that_rides_something_does_not_keep_jumping() {
+        let mut starts = None;
+        let ran = with_test_world(&[], |w, types| {
+            let mut lr = LegacyRandom::new(0);
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w,
+                lr: &mut lr,
+                events: &mut events,
+            };
+            starts = Some([true, false].map(|passenger| {
+                let mut m = Mob::new(
+                    1,
+                    Arc::new(types.types["minecraft:slime"].clone()),
+                    Vec3::ZERO,
+                    0.0,
+                );
+                m.extra.passenger = passenger;
+                m.ai.goals.add(5, CubeKeepJumping);
+                let mut goals = std::mem::take(&mut m.ai.goals);
+                goals.tick(&mut m, &mut cx);
+                let running = goals.is_running("CubeKeepJumping");
+                m.ai.goals = goals;
+                running
+            }));
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(
+            starts,
+            Some([false, true]),
+            "a cube riding anything must not start CubeMobKeepOnJumpingGoal"
+        );
+    }
+
+    /// `AbstractCubeMob.tick` is not gated by NoAI (only `serverAiStep` is):
+    /// a standing NoAI cube still records `wasOnGround`.
+    #[test]
+    fn a_no_ai_cube_updates_was_on_ground() {
+        let mut result = None;
+        let ran = with_test_world(&[], |w, types| {
+            for name in ["minecraft:slime", "minecraft:magma_cube"] {
+                let mut m = Mob::new(
+                    1,
+                    Arc::new(types.types[name].clone()),
+                    Vec3::new(0.5, 64.0, 0.5),
+                    0.0,
+                );
+                m.no_ai = true;
+                m.on_ground = true;
+                m.extra.flag2 = false;
+                let mut lr = LegacyRandom::new(0);
+                let mut events = Vec::new();
+                super::super::ai::tick(&mut m, w, &mut lr, &mut events);
+                result = Some(m.extra.flag2);
+                assert!(result.unwrap(), "{name}: wasOnGround stays false");
+            }
+        });
+        if ran {
+            assert_eq!(result, Some(true));
+        }
     }
 }

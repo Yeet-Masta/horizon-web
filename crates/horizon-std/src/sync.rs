@@ -162,3 +162,30 @@ mod spin {
         }
     }
 }
+
+/// `Condvar::wait_while` on a lock of this module's `Mutex`, which the page's thread may call too:
+/// a page may not wait, so there the lock is let go and taken again until `still` turns false.
+/// Natively and on a worker it is std's wait.
+pub fn wait_while<'a, T>(
+    ready: &std::sync::Condvar,
+    mutex: &'a Mutex<T>,
+    guard: std::sync::MutexGuard<'a, T>,
+    #[cfg_attr(not(target_family = "wasm"), allow(unused_mut))] mut still: impl FnMut(&mut T) -> bool,
+) -> std::sync::MutexGuard<'a, T> {
+    #[cfg(target_family = "wasm")]
+    if crate::web::on_page_thread() {
+        let mut guard = guard;
+        while still(&mut guard) {
+            drop(guard);
+            std::hint::spin_loop();
+            guard = mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        return guard;
+    }
+    let _ = mutex;
+    ready
+        .wait_while(guard, still)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

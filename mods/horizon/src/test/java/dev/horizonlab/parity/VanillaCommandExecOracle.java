@@ -92,6 +92,17 @@ public final class VanillaCommandExecOracle {
         @Override public void save() {}
     }
 
+    static JsonObject raidActor(net.minecraft.world.entity.LivingEntity entity, ServerLevel level) {
+        JsonObject raw=new JsonObject();UUID u=entity.getUUID();
+        JsonArray words=new JsonArray();for (int w:new int[]{(int)(u.getMostSignificantBits()>>32),(int)u.getMostSignificantBits(),(int)(u.getLeastSignificantBits()>>32),(int)u.getLeastSignificantBits()}) words.add(w);raw.add("uuid",words);
+        raw.addProperty("type",net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());raw.addProperty("health",entity.getHealth());
+        JsonArray pos=new JsonArray();pos.add(entity.getX());pos.add(entity.getY());pos.add(entity.getZ());raw.add("pos",pos);
+        raw.addProperty("noai",entity instanceof net.minecraft.world.entity.Mob mob && mob.isNoAi());
+        raw.addProperty("raid_id",entity instanceof net.minecraft.world.entity.raid.Raider r && r.getCurrentRaid()!=null ? level.getRaids().getId(r.getCurrentRaid()).orElse(-1):-1);
+        JsonArray home=new JsonArray();if (entity instanceof net.minecraft.world.entity.npc.villager.Villager v) v.getBrain().getMemory(net.minecraft.world.entity.ai.memory.MemoryModuleType.HOME).ifPresent(p->{home.add(p.pos().getX());home.add(p.pos().getY());home.add(p.pos().getZ());});raw.add("home",home);
+        var output=net.minecraft.world.level.storage.TagValueOutput.createWithContext(net.minecraft.util.ProblemReporter.DISCARDING,level.registryAccess());entity.saveWithoutId(output);raw.addProperty("nbt",output.buildResult().toString());return raw;
+    }
+
     static final class Server extends MinecraftServer {
         final Path script;
         final Path output;
@@ -103,7 +114,8 @@ public final class VanillaCommandExecOracle {
             WorldDataConfiguration config = WorldDataConfiguration.DEFAULT;
             LevelSettings settings = new LevelSettings("Harness", GameType.SURVIVAL, LevelSettings.DifficultySettings.DEFAULT, true, config);
             WorldLoader.PackConfig packConfig = new WorldLoader.PackConfig(packs, config, false, true);
-            WorldLoader.InitConfig init = new WorldLoader.InitConfig(packConfig, Commands.CommandSelection.INTEGRATED, LevelBasedPermissionSet.OWNER);
+            WorldLoader.InitConfig init = new WorldLoader.InitConfig(packConfig, Commands.CommandSelection.INTEGRATED,
+                Boolean.getBoolean("horizon.functionAdmissionFixture") ? LevelBasedPermissionSet.GAMEMASTER : LevelBasedPermissionSet.OWNER);
             boolean flat = Boolean.getBoolean("horizon.parity.flat");
             WorldOptions options = new WorldOptions(seed, !flat, false);
             WorldStem stem = Util.<WorldStem>blockUntilDone(executor -> WorldLoader.load(init, context -> {
@@ -198,6 +210,143 @@ public final class VanillaCommandExecOracle {
                 rows.add(row);
             }
             Files.writeString(output.resolveSibling("fishing-fallback-reference.json"), rows.toString());
+        }
+
+        void writeHappyGhastLeashReference() throws Exception {
+            if (!Boolean.getBoolean("horizon.happyGhastLeashReference")) return;
+            var level = this.overworld();
+            var fencePos = new net.minecraft.core.BlockPos(0, 64, 0);
+            var oldBlock = level.getBlockState(fencePos);
+            level.setBlockAndUpdate(fencePos, net.minecraft.world.level.block.Blocks.OAK_FENCE.defaultBlockState());
+            JsonArray rows = new JsonArray();
+            for (String kind : new String[] {"adult", "baby", "cow"}) {
+                for (int probe = 0; probe < 12; probe++) {
+                    double slack = kind.equals("cow") ? 6.0 : 10.0;
+                    double snap = kind.equals("cow") ? 12.0 : 16.0;
+                    double distance = probe < 6 ? new int[] {2, 4, 8, 11, 13, 17}[probe]
+                        : (probe < 9 ? slack : snap) + ((probe - 6) % 3 - 1) * 1.0e-6;
+                    String phase = probe < 6 ? "dispatch" : probe < 9 ? "elastic" : "snap";
+                    net.minecraft.world.entity.PathfinderMob mob;
+                    if (kind.equals("cow")) {
+                        mob = new net.minecraft.world.entity.animal.cow.Cow(net.minecraft.world.entity.EntityTypes.COW, level);
+                    } else {
+                        var ghast = new net.minecraft.world.entity.animal.happyghast.HappyGhast(net.minecraft.world.entity.EntityTypes.HAPPY_GHAST, level);
+                        ghast.setAge(kind.equals("baby") ? -24000 : 0);
+                        mob = ghast;
+                    }
+                    var knot = new net.minecraft.world.entity.decoration.LeashFenceKnotEntity(level, fencePos);
+                    if (phase.equals("elastic")) {
+                        mob.setPos(knot.getX() + distance, knot.getY() + knot.getBbHeight() / 2.0 - mob.getBbHeight() / 2.0,
+                            knot.getZ() - mob.getBbWidth() / 2.0);
+                    } else if (phase.equals("snap")) {
+                        var center = knot.getBoundingBox().getCenter();
+                        mob.setPos(center.x + distance, center.y - mob.getBbHeight() / 2.0, center.z);
+                    } else mob.setPos(0.5 + distance, 64, 0.5);
+                    mob.setYRot(0);
+                    mob.setOnGround(false);
+                    mob.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+                    var marker = new net.minecraft.core.BlockPos(8, 64, 8);
+                    var path = new net.minecraft.world.level.pathfinder.Path(
+                        List.of(new net.minecraft.world.level.pathfinder.Node(8, 64, 8)), marker, true);
+                    if (!mob.getNavigation().moveTo(path, 0.75)) throw new IllegalStateException("marker path rejected");
+                    mob.getMoveControl().setWantedPosition(20, 70, 20, 1.0);
+                    mob.setLeashedTo(knot, false);
+                    net.minecraft.world.entity.Leashable.tickLeash(level, mob);
+                    JsonObject row = new JsonObject();
+                    row.addProperty("kind", kind);
+                    row.addProperty("distance", distance);
+                    row.addProperty("phase", phase);
+                    JsonArray position = new JsonArray();
+                    position.add(mob.getX()); position.add(mob.getY()); position.add(mob.getZ());
+                    row.add("position", position);
+                    row.addProperty("snapped", !mob.isLeashed());
+                    row.addProperty("wanted", mob.getMoveControl().hasWanted());
+                    var currentPath = mob.getNavigation().getPath();
+                    if (currentPath == null) row.add("path", com.google.gson.JsonNull.INSTANCE);
+                    else {
+                        JsonArray target = new JsonArray();
+                        target.add(currentPath.getTarget().getX());
+                        target.add(currentPath.getTarget().getY());
+                        target.add(currentPath.getTarget().getZ());
+                        row.add("path", target);
+                    }
+                    JsonArray velocity = new JsonArray();
+                    var v = mob.getDeltaMovement();
+                    velocity.add(v.x); velocity.add(v.y); velocity.add(v.z);
+                    row.add("velocity", velocity);
+                    rows.add(row);
+                    mob.removeLeash();
+                    mob.discard();
+                    knot.discard();
+                }
+            }
+            level.setBlockAndUpdate(fencePos, oldBlock);
+            Files.writeString(output.resolveSibling("happy-ghast-leash-reference.json"), rows.toString());
+        }
+
+        void writeMountControlReference() throws Exception {
+            if (!Boolean.getBoolean("horizon.mountControlReference")) return;
+            var level = this.overworld();
+            var oldMain = player.getMainHandItem();
+            var oldOff = player.getOffhandItem();
+            var oldPosition = player.position();
+            JsonArray rows = new JsonArray();
+            for (String kind : new String[] {"pig", "strider"}) {
+                for (boolean saddled : new boolean[] {false, true}) {
+                    for (boolean first : new boolean[] {false, true}) {
+                        for (String hand : new String[] {"none", "wrong", "main", "off"}) {
+                            net.minecraft.world.entity.Mob mount = kind.equals("pig")
+                                ? new net.minecraft.world.entity.animal.pig.Pig(net.minecraft.world.entity.EntityTypes.PIG, level)
+                                : new net.minecraft.world.entity.monster.Strider(net.minecraft.world.entity.EntityTypes.STRIDER, level);
+                            mount.setPos(oldPosition);
+                            mount.setItemSlot(net.minecraft.world.entity.EquipmentSlot.SADDLE,
+                                saddled ? new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.SADDLE)
+                                    : net.minecraft.world.item.ItemStack.EMPTY);
+                            var stick = kind.equals("pig") ? net.minecraft.world.item.Items.CARROT_ON_A_STICK
+                                : net.minecraft.world.item.Items.WARPED_FUNGUS_ON_A_STICK;
+                            var wrong = kind.equals("pig") ? net.minecraft.world.item.Items.WARPED_FUNGUS_ON_A_STICK
+                                : net.minecraft.world.item.Items.CARROT_ON_A_STICK;
+                            player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND,
+                                hand.equals("main") ? new net.minecraft.world.item.ItemStack(stick)
+                                    : hand.equals("wrong") ? new net.minecraft.world.item.ItemStack(wrong)
+                                    : net.minecraft.world.item.ItemStack.EMPTY);
+                            player.setItemInHand(net.minecraft.world.InteractionHand.OFF_HAND,
+                                hand.equals("off") ? new net.minecraft.world.item.ItemStack(stick)
+                                    : net.minecraft.world.item.ItemStack.EMPTY);
+                            var other = new net.minecraft.world.entity.player.Player(level,
+                                new GameProfile(new UUID(0, 2), "OtherRider")) {
+                                public net.minecraft.world.level.GameType gameMode() {
+                                    return net.minecraft.world.level.GameType.SURVIVAL;
+                                }
+                            };
+                            if (!first && !other.startRiding(mount, true, true)) throw new IllegalStateException("first passenger rejected");
+                            if (!player.startRiding(mount, true, true)) throw new IllegalStateException("player passenger rejected");
+                            if ((mount.getFirstPassenger() == player) != first) throw new IllegalStateException("passenger order differs");
+                            var input = mount.getClass().getDeclaredMethod("getRiddenInput", net.minecraft.world.entity.player.Player.class,
+                                net.minecraft.world.phys.Vec3.class);
+                            input.setAccessible(true);
+                            var direction = (net.minecraft.world.phys.Vec3)input.invoke(mount, player, net.minecraft.world.phys.Vec3.ZERO);
+                            JsonObject row = new JsonObject();
+                            row.addProperty("kind", kind);
+                            row.addProperty("saddled", saddled);
+                            row.addProperty("first", first);
+                            row.addProperty("hand", hand);
+                            row.addProperty("controlled", mount.getControllingPassenger() == player);
+                            row.addProperty("server_simulates", mount.canSimulateMovement());
+                            row.addProperty("forward", direction.z);
+                            rows.add(row);
+                            player.stopRiding();
+                            other.stopRiding();
+                            other.discard();
+                            mount.discard();
+                        }
+                    }
+                }
+            }
+            player.setItemInHand(net.minecraft.world.InteractionHand.MAIN_HAND, oldMain);
+            player.setItemInHand(net.minecraft.world.InteractionHand.OFF_HAND, oldOff);
+            player.setPos(oldPosition);
+            Files.writeString(output.resolveSibling("mount-control-reference.json"), rows.toString());
         }
 
         // Direct reference for FishingHook.retrieve on a real server player and level.
@@ -345,6 +494,31 @@ public final class VanillaCommandExecOracle {
                 bobs.add(row);
                 hook.discard();
             }
+            // Dry block hits run on both sides: compare the client's movement
+            // prediction with the real hook before and after touching the floor.
+            level.setBlockAndUpdate(waterPos, net.minecraft.world.level.block.Blocks.STONE.defaultBlockState());
+            double[][] motions = {{0.2, -0.4, 0.1}, {-0.2, -0.4, 0.1}, {0.0, -0.6, -0.2}};
+            for (int c = 0; c < motions.length; c++) {
+                var hook = new net.minecraft.world.entity.projectile.FishingHook(player, level, 0, 0);
+                hook.setPos(0.5, 301.1, 0.5);
+                hook.setDeltaMovement(motions[c][0], motions[c][1], motions[c][2]);
+                for (int tick = 0; tick < 5; tick++) {
+                    hook.tick();
+                    var at = hook.position();
+                    var motion = hook.getDeltaMovement();
+                    JsonObject row = new JsonObject();
+                    row.addProperty("case", c);
+                    row.addProperty("tick", tick);
+                    JsonArray position = new JsonArray();
+                    position.add(at.x); position.add(at.y); position.add(at.z);
+                    JsonArray movement = new JsonArray();
+                    movement.add(motion.x); movement.add(motion.y); movement.add(motion.z);
+                    row.add("position", position);
+                    row.add("motion", movement);
+                    bobs.add(row);
+                }
+                hook.discard();
+            }
             player.snapTo(oldPos.x, oldPos.y, oldPos.z, originalYaw, originalPitch);
             level.setBlockAndUpdate(waterPos, oldBlock);
             Files.writeString(output.resolveSibling("fishing-bobbing-reference.json"), bobs.toString());
@@ -392,10 +566,18 @@ public final class VanillaCommandExecOracle {
                     messages.add(spans(chatType.decorate(message.content())));
                 }
             };
+            if(Boolean.getBoolean("horizon.merchantFixture")||Boolean.getBoolean("horizon.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
             Connection connection = new Connection(PacketFlow.SERVERBOUND);
-            EmbeddedChannel channel = new EmbeddedChannel(connection);
+            EmbeddedChannel channel = Boolean.getBoolean("horizon.merchantCraftedFixture") ? new EmbeddedChannel(
+                new io.netty.channel.ChannelInitializer<io.netty.channel.Channel>() {
+                    @Override protected void initChannel(io.netty.channel.Channel ch) {
+                        Connection.configureSerialization(ch.pipeline(),PacketFlow.SERVERBOUND,false,null);
+                        ch.pipeline().addLast("packet_handler",connection);
+                    }
+                }) : new EmbeddedChannel(connection);
             JsonObject login = new JsonObject();
-            if (Boolean.getBoolean("horizon.loadedFixture")) {
+            java.util.Map<Integer, JsonArray> sentMerchantOffers = new java.util.HashMap<>();
+            if (Boolean.getBoolean("horizon.loadedFixture") || Boolean.getBoolean("horizon.merchantCraftedFixture")) {
                 channel.pipeline().addLast(new io.netty.channel.ChannelOutboundHandlerAdapter() {
                     @Override public void write(io.netty.channel.ChannelHandlerContext context, Object message,
                             io.netty.channel.ChannelPromise promise) throws Exception {
@@ -403,11 +585,20 @@ public final class VanillaCommandExecOracle {
                             login.addProperty("view_distance", packet.chunkRadius());
                             login.addProperty("simulation_distance", packet.simulationDistance());
                         }
+                        if (message instanceof net.minecraft.network.protocol.game.ClientboundMerchantOffersPacket packet) {
+                            JsonArray offers = new JsonArray();
+                            for (var offer : packet.getOffers()) offers.add(merchantOffer(offer));
+                            sentMerchantOffers.put(packet.getContainerId(), offers);
+                        }
                         super.write(context, message, promise);
                     }
                 });
             }
+            if(Boolean.getBoolean("horizon.merchantCraftedFixture")) connection.setupOutboundProtocol(
+                net.minecraft.network.protocol.game.GameProtocols.CLIENTBOUND_TEMPLATE.bind(
+                    net.minecraft.network.RegistryFriendlyByteBuf.decorator(this.registryAccess())));
             this.getPlayerList().placeNewPlayer(connection, player, cookie);
+            if(Boolean.getBoolean("horizon.merchantCraftedFixture")) {channel.runPendingTasks();channel.flushOutbound();channel.checkException();if(!channel.isActive())throw new IllegalStateException("merchant channel inactive");}
             if (Boolean.getBoolean("horizon.loadedFixture")) {
                 new net.minecraft.network.protocol.game.ServerboundPlayerLoadedPacket().handle(player.connection);
             }
@@ -419,6 +610,8 @@ public final class VanillaCommandExecOracle {
                 Files.writeString(output.resolveSibling("client_config.json"), login.toString());
             }
             writeOrbWaterReference();
+            try { writeHappyGhastLeashReference(); } catch (Exception e) { throw new IOException(e); }
+            try { writeMountControlReference(); } catch (Exception e) { throw new IOException(e); }
             try { writeFishingReference(); } catch (Exception e) { throw new IOException(e); }
             try { writeFishingFallbackReference(); } catch (Exception e) { throw new IOException(e); }
             StringBuilder out = new StringBuilder();
@@ -433,7 +626,12 @@ public final class VanillaCommandExecOracle {
                         String command = op.get("cmd").getAsString();
                         messages.clear();
                         List<JsonArray> results = new ArrayList<>();
-                        var source = player.createCommandSourceStack().withCallback((success, value) -> {
+                        // Reuse the existing feedback receiver while retaining the actual
+                        // server stack's null entity, names, position and permissions.
+                        var baseSource = op.has("source") && op.get("source").getAsString().equals("console")
+                                ? this.createCommandSourceStack().withSource(player.commandSource())
+                                : player.createCommandSourceStack();
+                        var source = baseSource.withCallback((success, value) -> {
                             JsonArray r = new JsonArray();
                             r.add(success);
                             r.add(value);
@@ -452,6 +650,51 @@ public final class VanillaCommandExecOracle {
                             if (op.has("trace") && op.get("trace").getAsBoolean()) System.err.println("command trace: " + gson.toJson(record));
                             if (!op.has("record") || op.get("record").getAsBoolean()) out.append(gson.toJson(record)).append('\n');
                         }
+                    }
+                    case "projectile_saved_type" -> {
+                        var entity=level.getEntity(UUID.fromString(op.get("uuid").getAsString()));
+                        if (!(entity instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow) || !entity.isAlive())
+                            throw new IllegalStateException("projectile type: missing actual arrow");
+                        var uuid=entity.getUUID();
+                        int[] words={(int)(uuid.getMostSignificantBits()>>32),(int)uuid.getMostSignificantBits(),
+                            (int)(uuid.getLeastSignificantBits()>>32),(int)uuid.getLeastSignificantBits()};
+                        JsonObject state=new JsonObject();state.add("uuid",gson.toJsonTree(words));
+                        state.addProperty("kind",net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString());
+                        state.add("pos",gson.toJsonTree(new double[]{entity.getX(),entity.getY(),entity.getZ()}));
+                        state.addProperty("no_gravity",entity.isNoGravity());
+                        JsonObject record=new JsonObject();record.addProperty("cmd","#projectile_saved_type "+op.get("label").getAsString());
+                        record.add("messages",new JsonArray());record.add("results",new JsonArray());record.add("state",state);
+                        out.append(gson.toJson(record)).append('\n');
+                    }
+                    case "raid_state" -> {
+                        var raidLevel=player.level(); int id=op.get("id").getAsInt();
+                        var raid=raidLevel.getRaids().get(id);
+                        JsonObject state=new JsonObject(); state.addProperty("id",id); state.addProperty("present",raid!=null);
+                        if (raid!=null) {
+                            var tag=(net.minecraft.nbt.CompoundTag)net.minecraft.world.entity.raid.Raid.MAP_CODEC.codec()
+                                .encodeStart(net.minecraft.nbt.NbtOps.INSTANCE,raid).getOrThrow();
+                            state.addProperty("status",tag.getStringOr("status","missing"));
+                            state.addProperty("started",raid.isStarted());state.addProperty("active",raid.isActive());
+                            state.addProperty("groups_spawned",raid.getGroupsSpawned());
+                            state.add("center",gson.toJsonTree(new int[]{raid.getCenter().getX(),raid.getCenter().getY(),raid.getCenter().getZ()}));
+                            state.addProperty("village",raidLevel.isVillage(raid.getCenter()));
+                            if (op.get("members").getAsBoolean()) state.addProperty("member_present",raid.getAllRaiders().stream().anyMatch(e->e.isAlive() && e.getCurrentRaid()==raid));
+                        }
+                        JsonObject raw=new JsonObject();raw.addProperty("label",op.get("label").getAsString());raw.addProperty("id",id);
+                        var pp=op.getAsJsonArray("poi");var pos=new BlockPos(pp.get(0).getAsInt(),pp.get(1).getAsInt(),pp.get(2).getAsInt());
+                        raw.addProperty("loaded",raidLevel.hasChunkAt(pos));
+                        raw.addProperty("occupied",raidLevel.getPoiManager().getCountInRange(h->h.is(net.minecraft.tags.PoiTypeTags.VILLAGE),pos,0,net.minecraft.world.entity.ai.village.poi.PoiManager.Occupancy.IS_OCCUPIED));
+                        raw.addProperty("poi_type",raidLevel.getPoiManager().getType(pos).map(h->h.unwrapKey().orElseThrow().identifier().toString()).orElse("none"));
+                        raw.addProperty("raid_nbt",net.minecraft.world.entity.raid.Raids.CODEC.encodeStart(net.minecraft.nbt.NbtOps.INSTANCE,raidLevel.getRaids()).getOrThrow().toString());
+                        JsonArray members=new JsonArray();if (raid!=null) for (var entity:raid.getAllRaiders()) members.add(raidActor(entity,raidLevel));raw.add("actors",members);
+                        JsonArray villagers=new JsonArray();for (var uuid:op.getAsJsonArray("villagers")) {
+                            var entity=raidLevel.getEntity(UUID.fromString(uuid.getAsString()));
+                            if (!(entity instanceof net.minecraft.world.entity.npc.villager.Villager)) throw new IllegalStateException("raid fixture villager absent/wrong type");
+                            villagers.add(raidActor((net.minecraft.world.entity.LivingEntity)entity,raidLevel));
+                        }raw.add("villagers",villagers);
+                        System.err.println("raid input raw: "+gson.toJson(raw));
+                        JsonObject row=new JsonObject();row.addProperty("cmd","#raid_state "+op.get("label").getAsString()+" "+id);
+                        row.add("messages",new JsonArray());row.add("results",new JsonArray());row.add("state",state);out.append(gson.toJson(row)).append('\n');
                     }
                     case "mob_anger" -> {
                         try {
@@ -563,6 +806,9 @@ public final class VanillaCommandExecOracle {
                     }
                     case "tick" -> {
                         int n = op.has("n") ? op.get("n").getAsInt() : 1;
+                        // The ordinary harness budget defers chunk I/O. An unload
+                        // fixture can give the real unload queue time to drain.
+                        boolean allowChunkIo = op.has("allow_chunk_io") && op.get("allow_chunk_io").getAsBoolean();
                         messages.clear();
                         // Answers computed off-thread (profile lookups) reach the
                         // server's task queue before the next tick.
@@ -574,7 +820,7 @@ public final class VanillaCommandExecOracle {
                         }
                         long pacedStart = System.nanoTime();
                         for (int i = 0; i < n; i++) {
-                            tick();
+                            tick(allowChunkIo);
                             if (op.has("pace_ms")) {
                                 long left = op.get("pace_ms").getAsLong() * (i + 1) * 1_000_000L - (System.nanoTime() - pacedStart);
                                 if (left > 0) try {Thread.sleep(left / 1_000_000L, (int)(left % 1_000_000L));}
@@ -619,6 +865,33 @@ public final class VanillaCommandExecOracle {
                                 Thread.yield();
                             }
                         }
+                    }
+                    case "boat_interact" -> {
+                        var boat = level.getEntity(UUID.fromString(op.get("uuid").getAsString()));
+                        if (!(boat instanceof net.minecraft.world.entity.vehicle.boat.AbstractBoat))
+                            throw new IllegalStateException("boat click: missing live boat");
+                        player.connection.handleInteract(new net.minecraft.network.protocol.game.ServerboundInteractPacket(
+                            boat.getId(), net.minecraft.world.InteractionHand.MAIN_HAND,
+                            net.minecraft.world.phys.Vec3.ZERO, false));
+                    }
+                    case "mob_interact" -> {
+                        // The player's real Interact packet on a live mob, by UUID.
+                        var mob = level.getEntity(UUID.fromString(op.get("uuid").getAsString()));
+                        if (!(mob instanceof net.minecraft.world.entity.Mob) || !mob.isAlive())
+                            throw new IllegalStateException("mob click: missing live mob");
+                        player.connection.handleInteract(new net.minecraft.network.protocol.game.ServerboundInteractPacket(
+                            mob.getId(), net.minecraft.world.InteractionHand.MAIN_HAND,
+                            net.minecraft.world.phys.Vec3.ZERO, false));
+                    }
+                    case "player_command" -> {
+                        // The player's real ServerboundPlayerCommandPacket, through its handler.
+                        var action = switch (op.get("action").getAsString()) {
+                            case "start_riding_jump" -> net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.Action.START_RIDING_JUMP;
+                            case "stop_riding_jump" -> net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket.Action.STOP_RIDING_JUMP;
+                            default -> throw new IllegalStateException("player command: unknown action");
+                        };
+                        player.connection.handlePlayerCommand(new net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket(
+                            player, action, op.get("data").getAsInt()));
                     }
                     case "use_item" -> {
                         if (!op.has("sequence")) {
@@ -701,12 +974,75 @@ public final class VanillaCommandExecOracle {
                             throw new IllegalStateException(e);
                         }
                     }
+                    case "map_carried" -> {
+                        // The harness has no player network listener; invoke the
+                        // real map update normally reached from its player tick.
+                        for (int i = 0; i < player.getInventory().getContainerSize(); i++) {
+                            var stack = player.getInventory().getItem(i);
+                            var id = stack.get(net.minecraft.core.component.DataComponents.MAP_ID);
+                            if (id == null) continue;
+                            var map = net.minecraft.world.item.MapItem.getSavedData(id, player.level());
+                            if (map != null) map.tickCarriedBy(player, stack, null);
+                        }
+                    }
+                    case "craft_menu_click" -> {
+                        if (!(player.containerMenu instanceof net.minecraft.world.inventory.CraftingMenu))
+                            throw new IllegalStateException("craft fixture: crafting menu not open");
+                        int revision = player.containerMenu.getStateId();
+                        System.err.println("craft fixture click: window=" + player.containerMenu.containerId + ", revision=" + revision);
+                        player.connection.handleContainerClick(new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
+                            player.containerMenu.containerId, revision, (short) op.get("slot").getAsInt(),
+                            (byte) op.get("button").getAsInt(), net.minecraft.world.inventory.ContainerInput.values()[op.get("input").getAsInt()],
+                            new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>(), net.minecraft.network.HashedStack.EMPTY));
+                    }
+                    case "craft_menu_close" -> {
+                        player.connection.handleContainerClose(new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(player.containerMenu.containerId));
+                    }
+                    case "craft_menu_state" -> {
+                        if (!(player.containerMenu instanceof net.minecraft.world.inventory.CraftingMenu))
+                            throw new IllegalStateException("craft fixture: crafting menu not open");
+                        JsonObject state = new JsonObject();
+                        state.addProperty("window", player.containerMenu.containerId);
+                        state.addProperty("kind", net.minecraft.core.registries.BuiltInRegistries.MENU.getKey(player.containerMenu.getType()).toString());
+                        JsonArray slots = new JsonArray();
+                        for (var slot : player.containerMenu.slots) slots.add(craftStack(slot.getItem()));
+                        state.add("slots", slots); state.add("carried", player.containerMenu.getCarried().isEmpty() ? new JsonArray() : craftStack(player.containerMenu.getCarried()));
+                        JsonObject record = new JsonObject(); record.addProperty("cmd", "#craft_menu " + op.get("label").getAsString());
+                        record.add("state", state); record.add("messages", new JsonArray()); record.add("results", new JsonArray());
+                        out.append(gson.toJson(record)).append('\n');
+                    }
+                    case "map_files" -> {
+                        this.getDataStorage().saveAndJoin();
+                        Path directory = this.getWorldPath(net.minecraft.world.level.storage.LevelResource.ROOT).resolve("data/minecraft/maps");
+                        JsonArray maps = new JsonArray();
+                        for (var id : op.getAsJsonArray("ids")) {
+                            Path path = directory.resolve(id.getAsInt() + ".dat");
+                            if (!Files.exists(path)) { maps.add(com.google.gson.JsonNull.INSTANCE); continue; }
+                            var root = net.minecraft.nbt.NbtIo.readCompressed(path, net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+                            var data = root.getCompoundOrEmpty("data");
+                            JsonObject row = new JsonObject(); row.addProperty("scale", data.getIntOr("scale", 0));
+                            row.addProperty("locked", data.getBooleanOr("locked", false));
+                            JsonArray center = new JsonArray(); center.add(data.getIntOr("xCenter", 0)); center.add(data.getIntOr("zCenter", 0));
+                            row.add("center", center); row.addProperty("dimension", data.getStringOr("dimension", ""));
+                            row.addProperty("byte_array_length", data.getByteArray("colors").orElseThrow().length); maps.add(row);
+                        }
+                        var last = net.minecraft.nbt.NbtIo.readCompressed(directory.resolve("last_id.dat"), net.minecraft.nbt.NbtAccounter.unlimitedHeap());
+                        JsonObject state = new JsonObject(); state.add("maps", maps); state.addProperty("last_id", last.getCompoundOrEmpty("data").getIntOr("map", -1));
+                        JsonObject record = new JsonObject(); record.addProperty("cmd", "#map_files"); record.add("state", state);
+                        record.add("messages", new JsonArray()); record.add("results", new JsonArray()); out.append(gson.toJson(record)).append('\n');
+                    }
                     case "map_state" -> {
                         int id = op.get("id").getAsInt();
                         var map = net.minecraft.world.item.MapItem.getSavedData(
                             new net.minecraft.world.level.saveddata.maps.MapId(id), player.level());
                         String value = map == null ? "missing" : "scale=" + map.scale + ",locked=" + map.locked
                             + ",center=" + map.centerX + "," + map.centerZ;
+                        if (map != null && op.has("red_x")) {
+                            int targets = 0;
+                            for (var decoration : map.getDecorations())
+                                if (decoration.type().is(net.minecraft.world.level.saveddata.maps.MapDecorationTypes.RED_X)) targets++;
+                            value += ",red_x=" + targets;
+                        }
                         JsonObject record = new JsonObject();
                         record.addProperty("cmd", "#map_state " + id);
                         JsonArray messages = new JsonArray();
@@ -718,6 +1054,17 @@ public final class VanillaCommandExecOracle {
                     case "light" -> {
                         JsonArray p = op.getAsJsonArray("pos");
                         BlockPos pos = new BlockPos(p.get(0).getAsInt(), p.get(1).getAsInt(), p.get(2).getAsInt());
+                        // ThreadedLevelLightEngine runs the checkBlock tasks a /fill queues at most 1000 per update,
+                        // so after a large fill the light lags by many ticks on a loaded runner (command_reinforcements
+                        // read block light 10 in its sealed room, 2026-11-07). Read it once the tasks queued so far ran.
+                        var pending = player.level().getChunkSource().getLightEngine().waitForPendingTasks(
+                            pos.getX() >> 4, pos.getZ() >> 4);
+                        long lightDeadline = System.nanoTime() + 120_000_000_000L;
+                        while (!pending.isDone()) {
+                            if (System.nanoTime() > lightDeadline) throw new IllegalStateException("light updates did not finish");
+                            tick();
+                            try { Thread.sleep(5); } catch (InterruptedException e) { throw new RuntimeException(e); }
+                        }
                         JsonObject record = new JsonObject();
                         record.addProperty("cmd", "#light " + p);
                         record.add("messages", new JsonArray());
@@ -732,7 +1079,77 @@ public final class VanillaCommandExecOracle {
                         record.add("results", results);
                         out.append(gson.toJson(record)).append('\n');
                     }
-                    case "close_menu" -> player.closeContainer();
+                    case "close_menu" -> player.connection.handleContainerClose(
+                        new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(player.containerMenu.containerId));
+                    case "merchant_saved_stats" -> {
+                        player.getStats().save();
+                        String raw;
+                        try {
+                            var field=net.minecraft.stats.ServerStatsCounter.class.getDeclaredField("file");
+                            field.setAccessible(true);
+                            raw=Files.readString((Path)field.get(player.getStats()));
+                        } catch(ReflectiveOperationException error) { throw new IllegalStateException(error); }
+                        var saved=JsonParser.parseString(raw).getAsJsonObject().getAsJsonObject("stats");
+                        JsonObject state=new JsonObject();
+                        state.add("uuid",gson.toJsonTree(net.minecraft.core.UUIDUtil.uuidToIntArray(player.getUUID())));
+                        String[][] keys={{"books","minecraft:crafted","minecraft:bookshelf"},
+                            {"glass","minecraft:crafted","minecraft:glass"},
+                            {"trades","minecraft:custom","minecraft:traded_with_villager"}};
+                        for(var key:keys) {
+                            var group=saved.getAsJsonObject(key[1]);
+                            state.addProperty(key[0],group!=null&&group.has(key[2])?group.get(key[2]).getAsInt():0);
+                        }
+                        String label=op.get("label").getAsString();
+                        Files.writeString(output.resolveSibling("java-merchant-stats-"+label+".json"),raw);
+                        JsonObject row=new JsonObject();row.addProperty("cmd","#merchant_saved_stats "+label);
+                        row.add("messages",new JsonArray());row.add("results",new JsonArray());row.add("state",state);
+                        out.append(row.toString()).append('\n');
+                    }
+                    case "merchant_action" -> {
+                        channel.runPendingTasks();channel.flushOutbound();channel.checkException();
+                        if(!channel.isActive())throw new IllegalStateException("merchant channel inactive");
+                        System.err.println("merchant action receipt: action="+op.get("action")+" player="+player.getUUID()
+                            +" window="+player.containerMenu.containerId+" revision="+player.containerMenu.getStateId()
+                            +" clock="+player.level().getGameTime());
+                        switch(op.get("action").getAsString()) {
+                            case "open" -> {
+                                var entity=player.level().getEntity(UUID.fromString(op.get("uuid").getAsString()));
+                                if(!(entity instanceof net.minecraft.world.entity.npc.villager.Villager))throw new IllegalStateException("missing real villager");
+                                player.connection.handleInteract(new net.minecraft.network.protocol.game.ServerboundInteractPacket(
+                                    entity.getId(),net.minecraft.world.InteractionHand.MAIN_HAND,new net.minecraft.world.phys.Vec3(0,0,0),false));
+                            }
+                            case "select" -> player.connection.handleSelectTrade(new net.minecraft.network.protocol.game.ServerboundSelectTradePacket(op.get("index").getAsInt()));
+                            case "click" -> {
+                                if(!(player.containerMenu instanceof net.minecraft.world.inventory.MerchantMenu))throw new IllegalStateException("no merchant menu");
+                                player.connection.handleContainerClick(new net.minecraft.network.protocol.game.ServerboundContainerClickPacket(
+                                    player.containerMenu.containerId,player.containerMenu.getStateId(),(short)op.get("slot").getAsInt(),
+                                    (byte)(op.has("button")?op.get("button").getAsInt():0),
+                                    net.minecraft.world.inventory.ContainerInput.values()[op.has("input")?op.get("input").getAsInt():0],
+                                    new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>(),net.minecraft.network.HashedStack.EMPTY));
+                            }
+                            case "close" -> player.connection.handleContainerClose(new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(player.containerMenu.containerId));
+                            default -> throw new IllegalStateException("unknown merchant action");
+                        }
+                    }
+                    case "merchant_state" -> {
+                        if(!(player.containerMenu instanceof net.minecraft.world.inventory.MerchantMenu menu))throw new IllegalStateException("no merchant menu");
+                        var trader=merchantOwner(menu);
+                        JsonObject state=new JsonObject();state.addProperty("window",menu.containerId);
+                        JsonArray uuid=new JsonArray(); for(int n:net.minecraft.core.UUIDUtil.uuidToIntArray(trader.getUUID()))uuid.add(n);state.add("merchant",uuid);
+                        uuid=new JsonArray();for(int n:net.minecraft.core.UUIDUtil.uuidToIntArray(player.getUUID()))uuid.add(n);state.add("player",uuid);
+                        JsonArray slots=new JsonArray();for(int n=0;n<3;n++)slots.add(merchantStack(menu.getSlot(n).getItem()));state.add("slots",slots);
+                        state.add("carried",merchantStack(menu.getCarried()));state.addProperty("xp",menu.getTraderXp());
+                        boolean offerPackets = op.has("offer_packets") && op.get("offer_packets").getAsBoolean();
+                        if (offerPackets) state.add("sent_offers",sentMerchantOffers.get(menu.containerId));
+                        JsonArray offers=new JsonArray();for(var offer:menu.getOffers()) {
+                            JsonObject o=new JsonObject();o.addProperty("uses",offer.getUses());o.addProperty("special",offer.getSpecialPriceDiff());
+                            if (offerPackets) o.addProperty("demand",offer.getDemand());
+                            o.addProperty("cost",offer.getCostA().getCount());offers.add(o);
+                        }state.add("offers",offers);
+                        JsonObject record=new JsonObject();record.addProperty("cmd","#merchant_state "+op.get("label").getAsString());
+                        record.add("messages",new JsonArray());record.add("results",new JsonArray());record.add("state",state);
+                        out.append(record.toString()).append('\n');
+                    }
                     case "menu_state" -> {
                         int slots = player.containerMenu == player.inventoryMenu ? 0 : player.containerMenu.slots.size() - 36;
                         JsonObject state = new JsonObject();state.addProperty("own_slots", slots);
@@ -754,9 +1171,22 @@ public final class VanillaCommandExecOracle {
                         JsonArray p = op.getAsJsonArray("pos");
                         BlockPos pos = new BlockPos(p.get(0).getAsInt(), p.get(1).getAsInt(), p.get(2).getAsInt());
                         var state = player.level().getBlockState(pos);
-                        if (!state.is(net.minecraft.world.level.block.Blocks.CRAFTER))
-                            throw new IllegalStateException("crafter tick without a crafter");
+                        if (!state.is(net.minecraft.world.level.block.Blocks.CRAFTER) && !state.is(net.minecraft.world.level.block.Blocks.DISPENSER))
+                            throw new IllegalStateException("crafter tick without a crafter or dispenser");
                         state.tick(player.level(), pos, player.level().getRandom());
+                    }
+                    case "sync_randoms" -> {
+                        // docs/parity-workflow.md "Randoms that repeat": needs tools/seed_agent.py's -javaagent.
+                        try {
+                            Class.forName("dev.horizonlab.parity.SeedAgent").getMethod("setUniquifier", long.class)
+                                .invoke(null, op.get("uniquifier").getAsLong());
+                            var counter = ServerLevel.class.getDeclaredField("ENTITY_COUNTER");
+                            counter.setAccessible(true);
+                            ((java.util.concurrent.atomic.AtomicInteger) counter.get(null)).set(op.get("entity_id").getAsInt());
+                        } catch (ReflectiveOperationException e) {
+                            throw new IllegalStateException(e);
+                        }
+                        player.level().getRandom().setSeed(op.get("level_seed").getAsLong());
                     }
                     case "break" -> {
                         JsonArray pos = op.getAsJsonArray("pos");
@@ -822,8 +1252,34 @@ public final class VanillaCommandExecOracle {
             Files.writeString(output, out.toString(), StandardCharsets.UTF_8);
         }
 
+        static JsonObject merchantOffer(net.minecraft.world.item.trading.MerchantOffer offer) {
+            JsonObject value = new JsonObject();
+            value.addProperty("uses", offer.getUses());
+            value.addProperty("special", offer.getSpecialPriceDiff());
+            value.addProperty("demand", offer.getDemand());
+            value.addProperty("cost", offer.getCostA().getCount());
+            return value;
+        }
+
+        static net.minecraft.world.entity.npc.villager.Villager merchantOwner(net.minecraft.world.inventory.MerchantMenu menu) {
+            try {
+                var field=net.minecraft.world.inventory.MerchantMenu.class.getDeclaredField("trader");field.setAccessible(true);
+                return (net.minecraft.world.entity.npc.villager.Villager)field.get(menu);
+            } catch(ReflectiveOperationException error) {throw new IllegalStateException(error);}
+        }
+
+        static com.google.gson.JsonElement merchantStack(net.minecraft.world.item.ItemStack stack) {
+            if(stack.isEmpty())return com.google.gson.JsonNull.INSTANCE;
+            JsonArray value=new JsonArray();value.add(net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).toString());
+            value.add(stack.getCount());return value;
+        }
+
         /** One iteration of MinecraftServer.runServer: the delayed tick profiler start, then the tick. */
         void tick() {
+            tick(false);
+        }
+
+        void tick(boolean allowChunkIo) {
             try {
                 var delay = MinecraftServer.class.getDeclaredField("debugCommandProfilerDelayStart");
                 delay.setAccessible(true);
@@ -840,7 +1296,7 @@ public final class VanillaCommandExecOracle {
                 throw new RuntimeException(e);
             }
             drain();
-            super.tickServer(() -> false);
+            super.tickServer(() -> allowChunkIo);
             // The player's network listener ticks it each server tick
             // (ServerGamePacketListenerImpl.tickPlayer); this one has no
             // listening connection. Its movement is the client's, so of
@@ -937,6 +1393,16 @@ public final class VanillaCommandExecOracle {
                 try { Thread.sleep(5); } catch (InterruptedException e) { throw new RuntimeException(e); }
             }
             throw new IllegalStateException("entities around the player did not load");
+        }
+
+        static com.google.gson.JsonElement craftStack(net.minecraft.world.item.ItemStack stack) {
+            if (stack.isEmpty()) return com.google.gson.JsonNull.INSTANCE;
+            JsonArray value = new JsonArray();
+            value.add(net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem()).toString()); value.add(stack.getCount());
+            var map = stack.get(net.minecraft.core.component.DataComponents.MAP_ID);
+            value.add(map == null ? null : map.id());
+            var post = stack.get(net.minecraft.core.component.DataComponents.MAP_POST_PROCESSING);
+            value.add(post == null ? null : post.id()); return value;
         }
 
         static JsonArray spans(Component message) {

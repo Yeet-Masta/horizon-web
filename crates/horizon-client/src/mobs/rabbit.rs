@@ -49,6 +49,9 @@ pub fn register(m: &mut Mob) {
     g.add(6, Stroll::avoiding_water(0.6));
     g.add(11, LookAtPlayer::new(10.0));
     m.ai.mov.kind = super::control::MoveKind::Custom;
+    // Rabbit's constructor ends with setSpeedModifier(0.0), which leaves the move control in
+    // MOVE_TO towards the default wanted position (0, 0, 0).
+    m.ai.mov.set_wanted(0.0, 0.0, 0.0, 0.0);
     m.ai.nav.can_float = true;
     m.extra.ints[IDLE_TIMEOUT] = m.random.next_int_bound(40).unwrap_or(0) + 180;
 }
@@ -566,7 +569,7 @@ mod tests {
         // Animal.addAdditionalSaveData / readAdditionalSaveData: "InLove" (#1396).
         let mut m = rabbit();
         m.extra.in_love = 570;
-        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None, None);
+        let tag = crate::entity_nbt::mob_to_nbt(&m, [0, 0, 0, 1], None, None, |_| None);
         assert_eq!(tag.get("InLove"), Some(&horizon_world::nbt::Tag::Int(570)));
         let types = HashMap::from([(m.kind.id.clone(), m.kind.clone())]);
         let back = crate::entity_nbt::mob_from_nbt(&tag, &types, 2, None).unwrap();

@@ -3,7 +3,6 @@
 //! and the hand-over interaction (`Allay.mobInteract`).
 use super::Game;
 use horizon_client::{
-    containers::BlockEntity,
     first_person::Hand,
     items::ItemStack,
     mobs::{Species, allay},
@@ -12,6 +11,29 @@ use horizon_core::random::RandomSource;
 
 impl Game<'_> {
     /// The client's `Allay.mobInteract` runs before the server's response.
+    /// Whether `predict_allay_interaction` would act, on a copy of the allay.
+    pub(super) fn allay_would_take(
+        &self,
+        index: usize,
+        hand: Hand,
+        offered: Option<ItemStack>,
+    ) -> bool {
+        let duplicates = offered.as_ref().is_some_and(|s| {
+            self.items()
+                .item_tags
+                .get("minecraft:duplicates_allays")
+                .is_some_and(|tag| tag.contains(&*s.item))
+        });
+        allay::interaction::predict(
+            &mut self.mobs[index].clone(),
+            offered.as_ref(),
+            hand == Hand::Main,
+            duplicates,
+            self.acting_uuid(),
+        )
+        .is_some()
+    }
+
     pub(super) fn predict_allay_interaction(
         &mut self,
         index: usize,
@@ -51,34 +73,16 @@ impl Game<'_> {
 
     pub(super) fn tick_allays(&mut self) {
         let griefing = self.ui.rules.bool("mob_griefing");
-        // The playing jukeboxes, found at the first allay: no allay starts
-        // or stops one, and the block entities run into the thousands.
-        let mut jukeboxes: Option<Vec<(i32, i32, i32)>> = None;
         for i in 0..self.mobs.len() {
-            if self.mobs[i].species() != Species::Allay || !self.mobs[i].alive() {
+            if self.mobs[i].species() != Species::Allay
+                || !self.mobs[i].alive()
+                || !self.creatures.ticked.contains(&self.mobs[i].id)
+            {
                 continue;
             }
             let pos = self.mobs[i].position;
-            // Dancing: a playing jukebox within 10 blocks.
-            let jukeboxes = jukeboxes.get_or_insert_with(|| {
-                self.world
-                    .block_entities
-                    .iter()
-                    .filter(|(_, e)| matches!(e, BlockEntity::Jukebox(j) if j.playing))
-                    .map(|(k, _)| *k)
-                    .collect()
-            });
-            let nearest = jukeboxes
-                .iter()
-                .map(|k| {
-                    (f64::from(k.0) + 0.5 - pos.x).powi(2)
-                        + (f64::from(k.1) + 0.5 - pos.y).powi(2)
-                        + (f64::from(k.2) + 0.5 - pos.z).powi(2)
-                })
-                .fold(f64::INFINITY, f64::min);
-            // `Allay.setDancing` wants effective AI: a `NoAI` allay never dances.
-            let panicking = horizon_client::mobs::goals::should_panic(&self.mobs[i]);
-            self.mobs[i].extra.flag = allay::dances(self.mobs[i].no_ai, panicking, nearest);
+            // The dance follows the jukebox events the allay hears
+            // (`mob_listen`), `Allay.tick` and `aiStep`.
             let Some(held) = self.mobs[i].extra.main_hand_stack().cloned() else {
                 self.mobs[i].extra.point = None;
                 continue;
@@ -199,16 +203,27 @@ impl Game<'_> {
         let host = self
             .player_view()
             .filter(|p| !p.spectator && self.level.player_uuid.unwrap_or([0, 0, 0, 1]) == uuid)
-            .map(|p| p.position);
+            .map(|p| (p.position, p.eye));
         let found = host.or_else(|| {
             self.lan_present()
                 .into_iter()
                 .find(|p| p.uuid == uuid && !p.spectator)
                 .map(|p| {
-                    horizon_core::geometry::Vec3::new(p.position[0], p.position[1], p.position[2])
+                    (
+                        horizon_core::geometry::Vec3::new(
+                            p.position[0],
+                            p.position[1],
+                            p.position[2],
+                        ),
+                        p.eye,
+                    )
                 })
         });
-        found.filter(|p| p.distance_squared(m.position) < 64.0 * 64.0)
+        // The 64-block search uses the feet; the deposit point is the eyes
+        // (`new EntityTracker(player, true)`).
+        found
+            .filter(|(feet, _)| feet.distance_squared(m.position) < 64.0 * 64.0)
+            .map(|(_, eye)| horizon_core::geometry::Vec3::new(eye[0], eye[1], eye[2]))
     }
     /// `GoAndGiveItemsToTarget` / `AllayAi.throwItem`: within 3 blocks of
     /// the deposit, one item a tick, each restarting the three-second pause
@@ -246,13 +261,14 @@ impl Game<'_> {
         };
         let from = [
             m.position.x,
-            m.position.y + m.eye_height() - 0.3,
+            m.position.y + m.eye_height() - 0.2,
             m.position.z,
         ];
+        // BehaviorUtils.throwItem: the vector runs from the allay's feet.
         let d = [
-            target.x - from[0],
-            target.y + 1.0 - from[1],
-            target.z - from[2],
+            target.x - m.position.x,
+            target.y + 1.0 - m.position.y,
+            target.z - m.position.z,
         ];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
         let v = [d[0] / len * 0.2, d[1] / len * 0.3, d[2] / len * 0.2];
@@ -272,7 +288,7 @@ impl Game<'_> {
         });
         let m = &mut self.mobs[i];
         m.extra.allay.as_mut().unwrap().take(1);
-        m.extra.ints[3] = 60;
+        allay::set_pickup_cooldown(m, Some(60));
         // ItemEntity.setDefaultPickUpDelay.
         self.spawn_item(stack, from, v, 10);
         // BehaviorUtils.throwItem: ItemEntity.setThrower(the allay).
@@ -313,7 +329,7 @@ impl Game<'_> {
         if m.extra.flag && shard && m.extra.egg_time == 0 {
             let pos = at;
             self.mobs[index].extra.egg_time = 6000;
-            if let Some(id) = self.spawn_mob("minecraft:allay", pos, true)
+            if let Some(id) = self.spawn_mob_raw("minecraft:allay", pos, true)
                 && let Some(c) = self.mobs.iter_mut().find(|m| m.id == id)
             {
                 c.extra.egg_time = 6000;
@@ -339,9 +355,8 @@ impl Game<'_> {
             // `Allay.mobInteract` hands over one item, its components and all.
             given.count = 1;
             m.extra.set_main_hand_stack(Some(given));
-            m.extra.tame = true;
             // `Allay.mobInteract` remembers LIKED_PLAYER by UUID.
-            m.extra.owner = Some(acting);
+            allay::like_player(m, acting);
             self.play_mob_bound_sound(
                 index,
                 "minecraft:entity.allay.item_given",
@@ -364,8 +379,7 @@ impl Game<'_> {
                 .unwrap_or_else(|| ItemStack::new("minecraft:air", 1));
             m.extra.set_main_hand(None);
             let carried = m.extra.allay.as_mut().and_then(|st| st.inventory.take());
-            m.extra.tame = false;
-            m.extra.owner = None;
+            allay::forget_liked_player(m);
             self.play_mob_bound_sound(
                 index,
                 "minecraft:entity.allay.item_taken",
@@ -389,3 +403,7 @@ impl Game<'_> {
         false
     }
 }
+
+#[cfg(test)]
+#[path = "allay_jukebox_source_tests.rs"]
+mod allay_jukebox_source_tests;

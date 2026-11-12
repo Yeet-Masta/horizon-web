@@ -2,7 +2,7 @@
 //! cores, each polling its players' sockets (epoll, kqueue or Windows' AFD,
 //! through mio), where every player used to have a reader and a writer thread
 //! of its own. The game thread only queues packet bodies in a player's
-//! [`Outbox`] (bounded by [`MAX_PENDING`] bytes); framing, compression,
+//! [`Outbox`] (over the network, bounded by [`MAX_PENDING`] bytes); framing, compression,
 //! encryption, the socket writes, reading and the keep-alives happen here. A
 //! connection stays on one thread, so its bytes keep their order. The
 //! integrated server's own player, over an in-memory pipe, is served the same
@@ -20,7 +20,7 @@ use std::{
     io::{ErrorKind, Read, Write},
     sync::{
         Arc, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 #[cfg(target_family = "wasm")]
@@ -114,7 +114,7 @@ mod web_poll {
     }
 }
 
-/// Packets queued for one client beyond this many bytes disconnect it.
+/// Packets queued for one network client beyond this many bytes disconnect it.
 pub(super) const MAX_PENDING: usize = 96 << 20;
 /// How often a thread looks at its connections' clocks: keep-alives,
 /// timeouts and the closes that wait for a disconnect's last bytes.
@@ -127,6 +127,44 @@ const AHEAD: usize = 256 << 10;
 /// How long a disconnect's last bytes are given before the socket closes.
 const LINGER: Duration = Duration::from_millis(50);
 const WAKER: Token = Token(usize::MAX);
+/// The packets a connection keeps for the game while counting, each way: the game takes them
+/// every tick ([`Outbox::take_packets`]), so only a tick stalled for long reaches it.
+const TALLY_MAX: usize = 1 << 16;
+
+/// Whether the network threads keep each play packet's id and size for the game
+/// (`native_server_packets`): off unless a mod asks, and off a packet costs one relaxed load.
+static COUNTING: AtomicBool = AtomicBool::new(false);
+
+/// Start or stop keeping the play packets' ids and sizes.
+pub(super) fn count_packets(on: bool) {
+    COUNTING.store(on, Ordering::Relaxed);
+}
+/// Whether the play packets' ids and sizes are kept.
+#[inline]
+pub(super) fn counting_packets() -> bool {
+    COUNTING.load(Ordering::Relaxed)
+}
+/// The VarInt packet id a body starts with.
+fn body_id(body: &[u8]) -> Option<i32> {
+    let mut value = 0u32;
+    for (i, &b) in body.iter().take(5).enumerate() {
+        value |= u32::from(b & 0x7f) << (7 * i);
+        if b & 0x80 == 0 {
+            return Some(value as i32);
+        }
+    }
+    None
+}
+/// The bytes of `id` as a VarInt.
+fn id_len(id: i32) -> usize {
+    let mut v = id as u32;
+    let mut len = 1;
+    while v >= 0x80 {
+        v >>= 7;
+        len += 1;
+    }
+    len
+}
 
 /// The play state's side of a connection (conn.rs's `PlayConn`).
 pub(super) trait Session: Send {
@@ -182,11 +220,18 @@ pub(super) struct Outbox {
     queue: Mutex<Queue>,
     /// The bytes queued and not framed yet (`PlayerSender::pending`).
     pending: Arc<AtomicUsize>,
+    /// Whether [`MAX_PENDING`] applies. A client in this process (a memory connection) reads
+    /// what it is sent as it comes, and a join's first view can pass the limit in one burst.
+    /// The reader is this process: if it stopped reading, that would be a bug of its own.
+    capped: bool,
     worker: Arc<Worker>,
+    /// While counting: each play packet framed (sent) and read (received) since the game last
+    /// took them, as (id, body bytes).
+    tally: Mutex<[Vec<(i32, usize)>; 2]>,
 }
 impl Outbox {
     /// An outbox on the least busy network thread, started the first time.
-    pub(super) fn new(pending: Arc<AtomicUsize>) -> Result<Arc<Self>, String> {
+    pub(super) fn new(pending: Arc<AtomicUsize>, capped: bool) -> Result<Arc<Self>, String> {
         let workers = &pool()?.workers;
         let worker = workers
             .iter()
@@ -195,15 +240,34 @@ impl Outbox {
         Ok(Arc::new(Self {
             queue: Mutex::default(),
             pending,
+            capped,
             worker: worker.clone(),
+            tally: Mutex::default(),
         }))
+    }
+    /// Keep `packets` going `way` (0 sent, 1 received), up to [`TALLY_MAX`].
+    fn tally(&self, way: usize, packets: impl IntoIterator<Item = (i32, usize)>) {
+        let mut tally = self.tally.lock().unwrap_or_else(PoisonError::into_inner);
+        let list = &mut tally[way];
+        let room = TALLY_MAX.saturating_sub(list.len());
+        list.extend(packets.into_iter().take(room));
+    }
+    /// The play packets kept since the last call, sent then received, as (id, body bytes):
+    /// the id before an older client's renumbering, the bytes before compression and
+    /// encryption.
+    pub(super) fn take_packets(&self) -> [Vec<(i32, usize)>; 2] {
+        std::mem::take(&mut *self.tally.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+    /// The packets queued and not taken by the thread yet.
+    pub(super) fn queued(&self) -> usize {
+        self.queue().bodies.len()
     }
     fn queue(&self) -> MutexGuard<'_, Queue> {
         self.queue.lock().unwrap_or_else(PoisonError::into_inner)
     }
     /// Queue `bodies` (already counted in `pending`), then `end`. Nothing
     /// follows an end, but a close overrides a disconnect still writing.
-    /// Past [`MAX_PENDING`] the connection closes. The thread to wake, if
+    /// Past [`MAX_PENDING`] a capped connection closes. The thread to wake, if
     /// this is the first news it has since it last looked.
     pub(super) fn push(&self, bodies: Vec<Vec<u8>>, end: Option<End>) -> Option<&Arc<Worker>> {
         let mut q = self.queue();
@@ -215,7 +279,7 @@ impl Outbox {
                 } else {
                     q.bodies.extend(bodies);
                 }
-                q.end = if self.pending.load(Ordering::Relaxed) > MAX_PENDING {
+                q.end = if self.capped && self.pending.load(Ordering::Relaxed) > MAX_PENDING {
                     Some(End::Close)
                 } else {
                     end
@@ -585,6 +649,9 @@ impl Conn {
             match self.reader.buffered() {
                 Ok(Some((id, payload))) => {
                     if !self.left {
+                        if counting_packets() {
+                            self.outbox.tally(1, [(id, id_len(id) + payload.len())]);
+                        }
                         match self.session.packet(id, payload) {
                             Verdict::Go => {}
                             Verdict::Close(reason) => return self.end(now, reason),
@@ -612,6 +679,10 @@ impl Conn {
     /// Frame `bodies` into `out`, `queued` ones counted off `pending`: false
     /// if one could not be.
     fn frame(&mut self, now: Instant, bodies: Vec<Vec<u8>>, queued: bool) -> bool {
+        if counting_packets() {
+            let ids = bodies.iter().filter_map(|b| Some((body_id(b)?, b.len())));
+            self.outbox.tally(0, ids);
+        }
         for body in bodies {
             if queued {
                 self.outbox.pending.fetch_sub(body.len(), Ordering::Relaxed);
@@ -818,8 +889,16 @@ mod tests {
         probe: impl FnOnce(Sender<Seen>) -> Probe,
         timeout: Duration,
     ) -> Served {
+        serve_with(server, probe, timeout, true)
+    }
+    fn serve_with(
+        server: Connection,
+        probe: impl FnOnce(Sender<Seen>) -> Probe,
+        timeout: Duration,
+        capped: bool,
+    ) -> Served {
         let pending = Arc::new(AtomicUsize::new(0));
-        let outbox = Outbox::new(pending.clone()).unwrap();
+        let outbox = Outbox::new(pending.clone(), capped).unwrap();
         let (tx, seen) = channel();
         let (socket, reader, writer) = server.detach();
         adopt(
@@ -841,6 +920,44 @@ mod tests {
             kick_on: None,
             unprompted: None,
         }
+    }
+
+    /// A body's VarInt id reads back, a truncated one doesn't, and the sizes match.
+    #[test]
+    fn packet_ids_read_from_bodies() {
+        for id in [0, 1, 0x7f, 0x80, 300, 0x3fff, 0x4000] {
+            let mut body = Vec::new();
+            let mut v = id as u32;
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    body.push(b);
+                    break;
+                }
+                body.push(b | 0x80);
+            }
+            assert_eq!(id_len(id), body.len(), "{id}");
+            body.push(9);
+            assert_eq!(body_id(&body), Some(id));
+        }
+        assert_eq!(body_id(&[0x80]), None);
+        assert_eq!(body_id(&[]), None);
+    }
+
+    /// The tally keeps each way apart, stops at its cap and empties when taken.
+    #[test]
+    fn the_tally_keeps_both_ways_up_to_its_cap() {
+        let outbox = Outbox::new(Arc::new(AtomicUsize::new(0)), true).unwrap();
+        outbox.tally(0, [(0x27, 10), (0x08, 3)]);
+        outbox.tally(1, [(0x1a, 5)]);
+        assert_eq!(
+            outbox.take_packets(),
+            [vec![(0x27, 10), (0x08, 3)], vec![(0x1a, 5)]]
+        );
+        assert_eq!(outbox.take_packets(), [vec![], vec![]]);
+        outbox.tally(0, (0..TALLY_MAX + 5).map(|_| (1, 1)));
+        assert_eq!(outbox.take_packets()[0].len(), TALLY_MAX);
     }
 
     #[test]
@@ -894,10 +1011,19 @@ mod tests {
             unprompted: Some(body(0x21, 2)),
         };
         let served = serve(Connection::local(b), probe, Duration::from_secs(30));
+        // The queued packet and the one the session sends of its own accord
+        // are framed by different paths (`Outbox::take` and `Session::tick`
+        // in `sweep`), so which of the two goes out first is the sweep's
+        // timing, not an order the pool promises: take both, then tell them
+        // apart. The kick still has to come after the queued one.
         served.send(vec![body(3, 10)], None);
-        assert_eq!(client.recv().unwrap(), packet(&body(3, 10)));
-        // What the session sends of its own accord.
-        assert_eq!(client.recv().unwrap(), packet(&body(0x21, 2)));
+        let mut first = client.recv().unwrap();
+        let mut second = client.recv().unwrap();
+        if first == packet(&body(0x21, 2)) {
+            std::mem::swap(&mut first, &mut second);
+        }
+        assert_eq!(first, packet(&body(3, 10)));
+        assert_eq!(second, packet(&body(0x21, 2)));
         client.send(&body(9, 1)).unwrap();
         client.send(&body(10, 1)).unwrap();
         assert_eq!(client.recv().unwrap(), packet(&body(0x7f, 3)));
@@ -927,7 +1053,30 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let client = Connection::connect("127.0.0.1", port, Duration::from_secs(5)).unwrap();
-        let server = Connection::from_stream(listener.accept().unwrap().0).unwrap();
+        let mut socket = listener.accept().unwrap().0;
+        socket.set_nonblocking(true).unwrap();
+        // Windows may buffer an entire large first write. Establish actual backpressure with
+        // small framed writes before adoption, rather than assuming the batch below fills it.
+        let fill = horizon_protocol::frame::encode(&body(0, 65535), None).unwrap();
+        let mut filled = 0;
+        let mut offset = 0;
+        let fill_until = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < fill_until, "socket prefill timed out");
+            match socket.write(&fill[offset..]) {
+                Ok(n) => {
+                    assert!(n > 0, "socket closed during prefill");
+                    filled += n;
+                    assert!(filled < MAX_PENDING, "socket did not apply backpressure");
+                    offset = (offset + n) % fill.len();
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => panic!("socket prefill: {e}"),
+            }
+        }
+        socket.set_nonblocking(false).unwrap();
+        let server = Connection::from_stream(socket).unwrap();
         let served = serve(server, quiet, Duration::from_secs(30));
         // Fill the socket until the outbox waits. A fixed amount may all go
         // through: Windows takes a write of any size whole while its buffer
@@ -968,5 +1117,18 @@ mod tests {
             assert_eq!(served.next(), Seen::Left("Disconnected".into()));
             assert_eq!(served.next(), Seen::Closed);
         }
+    }
+
+    /// A client in this process takes a join's whole first view at once: queued past the
+    /// limit, it is served and stays connected.
+    #[test]
+    fn an_uncapped_connection_outlasts_too_much_queued() {
+        let (a, b) = Pipe::pair();
+        let mut client = Connection::local(a);
+        let served = serve_with(Connection::local(b), quiet, Duration::from_secs(30), false);
+        served.pending.store(MAX_PENDING, Ordering::Relaxed);
+        served.send(vec![body(3, 10)], None);
+        assert_eq!(client.recv().unwrap().0, 3);
+        assert!(served.seen.try_recv().is_err());
     }
 }

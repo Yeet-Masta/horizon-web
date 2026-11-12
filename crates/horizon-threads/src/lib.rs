@@ -1,12 +1,26 @@
 //! Scheduling hints for the game's threads and its allocator: the few OS calls
 //! that the other crates, which forbid unsafe code, can't make themselves.
 
+pub mod alloc_count;
+pub mod allocator_stats;
 /// The game window's boot screen, before wgpu's first frame paints over it.
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
 pub mod heap_census;
+#[cfg(target_os = "linux")]
+pub mod heap_sample;
 pub mod jobs;
 pub mod process_memory;
+#[cfg(target_os = "linux")]
+pub mod profile;
+#[cfg(target_os = "linux")]
+pub mod sampler;
+pub mod stack_dump;
+/// Alt+Space and a bare Alt never open the window's system menu, as in GLFW.
+#[cfg(target_os = "windows")]
+pub mod system_menu;
+pub mod unwind;
+pub mod work;
 
 use std::sync::{
     OnceLock,
@@ -28,6 +42,190 @@ pub fn worker_count() -> usize {
         parse_worker_count(horizon_std::env::var("HORIZON_WORKER_THREADS").ok())
             .unwrap_or_else(|| horizon_std::thread::available_parallelism().map_or(1, |n| n.get()))
     })
+}
+
+/// `HORIZON_SERIAL_TICK=all`: every [`par_chunks_mut`] keeps its chunks on the
+/// calling thread, in order — the serial reference a parallel phase of the
+/// tick is checked against, tick by tick (#8158).
+fn serial_tick_all() -> bool {
+    static ALL: OnceLock<bool> = OnceLock::new();
+    *ALL.get_or_init(|| {
+        std::env::var("HORIZON_SERIAL_TICK").is_ok_and(|v| v.eq_ignore_ascii_case("all"))
+    })
+}
+
+/// Runs `f` over `items` in chunks of `chunk`, in place. Helper threads take
+/// the next chunk as they finish one under a scope, the calling thread working
+/// too; a helper the system refuses to start leaves its chunks to the others,
+/// and the calling thread does all of it at worst (the region writer's
+/// `share_out` shape). A chunk runs on whatever thread takes it, so `f` must
+/// not depend on the order; nothing is shared out while one chunk is the
+/// whole slice, or while [`serial_tick_all`] holds the tick serial. The
+/// thread-locals the tick relies on do not follow a helper: set them in `f`,
+/// as `block_contact::in_level` wraps a level's own.
+pub fn par_chunks_mut<T: Send>(items: &mut [T], chunk: usize, f: impl Fn(&mut [T]) + Send + Sync) {
+    par_chunks_mut_with(items, chunk, f, !serial_tick_all());
+}
+
+/// [`par_chunks_mut`] with whether the work is shared out (its test).
+pub fn par_chunks_mut_with<T: Send>(
+    items: &mut [T],
+    chunk: usize,
+    f: impl Fn(&mut [T]) + Send + Sync,
+    parallel: bool,
+) {
+    let chunk = chunk.max(1);
+    let count = items.len().div_ceil(chunk);
+    if !parallel || count < 2 {
+        for slice in items.chunks_mut(chunk) {
+            f(slice);
+        }
+        return;
+    }
+    // A helper takes a chunk whole, so no thread sees another's half of one;
+    // the lock is only held while a chunk is taken, never while it runs.
+    let pending: std::sync::Mutex<Vec<&mut [T]>> =
+        std::sync::Mutex::new(items.chunks_mut(chunk).collect());
+    let work = || {
+        while let Some(slice) = pending.lock().unwrap_or_else(|e| e.into_inner()).pop() {
+            f(slice);
+        }
+    };
+    std::thread::scope(|scope| {
+        let helpers = worker_count().saturating_sub(1).clamp(1, count - 1);
+        let threads: Vec<_> = (0..helpers)
+            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .collect();
+        work();
+        for t in threads {
+            t.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        }
+    });
+}
+
+#[cfg(test)]
+mod par_chunks_tests {
+    use super::par_chunks_mut_with;
+
+    /// Every item is visited exactly once, in parallel and on the caller
+    /// alone: each adds one to itself, whatever thread its chunk ran on.
+    #[test]
+    fn every_item_runs_once_shared_out_or_not() {
+        for parallel in [true, false] {
+            let mut items: Vec<usize> = (0..10_000).collect();
+            par_chunks_mut_with(
+                &mut items,
+                16,
+                |chunk| {
+                    for i in chunk {
+                        *i += 1;
+                    }
+                },
+                parallel,
+            );
+            assert_eq!(items, (1..=10_000).collect::<Vec<_>>(), "{parallel}");
+        }
+    }
+
+    /// A slice one chunk long never starts a helper, whichever way it is
+    /// asked for.
+    #[test]
+    fn one_chunk_stays_whole() {
+        let mut items = vec![0usize; 3];
+        par_chunks_mut_with(
+            &mut items,
+            16,
+            |chunk| {
+                assert_eq!(chunk.len(), 3);
+                for i in chunk {
+                    *i = 7;
+                }
+            },
+            true,
+        );
+        assert_eq!(items, vec![7, 7, 7]);
+    }
+}
+
+/// The chunk worker pool's automatic size (`jobs::default_threads`, Graphics > Worker
+/// threads on Auto): every core but one, as vanilla's `Util.maxAllowedExecutorThreads`,
+/// counting on Apple silicon only its performance cores. Its efficiency cores are slower,
+/// and workers there kept the render and server threads waiting for a performance core: on
+/// a base M4 (4 performance and 6 efficiency cores) a fast flight's p99 frame went from
+/// 20 ms with 9 workers to 7 ms with 3 (#11294).
+pub fn default_workers() -> usize {
+    workers_for(worker_count(), performance_cores)
+}
+
+/// [`default_workers`] for `cores` cores, of which `performance` (asked only here, the
+/// sysctl) are performance cores where the machine tells them apart (`None` elsewhere):
+/// one less than the smaller count, at least 1.
+fn workers_for(cores: usize, performance: impl FnOnce() -> Option<usize>) -> usize {
+    let fast = performance().filter(|&n| n > 0).unwrap_or(cores);
+    cores.min(fast).saturating_sub(1).max(1)
+}
+
+/// The machine's performance cores:
+/// - on Apple silicon via `hw.perflevel0.physicalcpu`
+/// - on Linux by comparing max frequencies in `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq`
+///   (Intel Alder Lake, Raptor Lake, Meteor Lake, big.LITTLE ARM)
+#[cfg(target_vendor = "apple")]
+fn performance_cores() -> Option<usize> {
+    let mut count: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: a NUL-terminated name; `count` and `size` are live locals of the size passed.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"hw.perflevel0.physicalcpu".as_ptr(),
+            (&raw mut count).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (read == 0 && count > 0).then_some(count as usize)
+}
+
+#[cfg(target_os = "linux")]
+fn performance_cores() -> Option<usize> {
+    // Read max frequencies across CPUs from sysfs
+    let mut max_freq = 0u64;
+    let mut freqs = Vec::new();
+    let mut cpu_idx = 0;
+    loop {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu_idx}/cpufreq/cpuinfo_max_freq");
+        match std::fs::read_to_string(path) {
+            Ok(content) => {
+                if let Ok(freq) = content.trim().parse::<u64>() {
+                    max_freq = max_freq.max(freq);
+                    freqs.push(freq);
+                }
+                cpu_idx += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    if freqs.is_empty() {
+        return None;
+    }
+
+    // Check if there is frequency disparity indicating asymmetric cores (hybrid architecture)
+    let min_freq = *freqs.iter().min()?;
+    if min_freq < max_freq {
+        // Count performance cores (within 5% of max frequency)
+        let threshold = max_freq.saturating_sub(max_freq / 20);
+        let p_threads = freqs.iter().filter(|&&f| f >= threshold).count();
+        if p_threads > 0 && p_threads < freqs.len() {
+            return Some(p_threads);
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_vendor = "apple", target_os = "linux")))]
+fn performance_cores() -> Option<usize> {
+    None
 }
 
 /// `Some(n)` when `value` names a positive count (`" 4 "` counts; `"0"`,
@@ -109,6 +307,31 @@ pub fn thread_cpu() -> Option<std::time::Duration> {
 #[cfg(not(all(windows, target_arch = "x86_64")))]
 pub fn thread_cpu() -> Option<std::time::Duration> {
     None
+}
+
+/// Clones the file or the whole folder `from` as `to`, which must not exist, in one call
+/// that shares the data (APFS `clonefile`, folders included). `Unsupported` where there is
+/// no such call: the caller copies the files itself.
+pub fn clone_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = |p: &std::path::Path| {
+            std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+        };
+        let (from, to) = (path(from)?, path(to)?);
+        // SAFETY: both paths are NUL-terminated strings that outlive the call.
+        if unsafe { libc::clonefile(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let _ = (from, to);
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// Set once as the game starts, before its helper threads do: they then go
@@ -299,13 +522,31 @@ pub fn catch_stop_signals() {}
 /// The game's global allocator (`#[global_allocator]` in its `main.rs`).
 /// World generation, meshing and the tick allocate and free small blocks on
 /// every worker at once; the system heaps serialise them (Windows' heap was
-/// 16% of a chunk's generation time), mimalloc keeps a heap per thread. Not on
+/// 16% of a chunk's generation time), mimalloc keeps a heap per thread.
+/// On Linux it samples allocations while a capture runs (`heap_sample`). Not on
 /// the web build, which keeps its own (horizon-std's web/alloc.rs).
-#[cfg(not(target_family = "wasm"))]
+#[cfg(target_os = "linux")]
+pub type Allocator = heap_sample::SamplingAllocator;
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 pub type Allocator = mimalloc::MiMalloc;
 /// The game's mimalloc allocator.
 #[cfg(not(target_family = "wasm"))]
-pub const ALLOCATOR: Allocator = mimalloc::MiMalloc;
+pub const ALLOCATOR: Allocator = Allocator {};
+
+/// The game's global allocator: the census, else counting mimalloc, else [`Allocator`].
+#[cfg(all(feature = "alloc-census", not(target_family = "wasm")))]
+pub type GameAllocator = heap_census::CensusAllocator;
+#[cfg(all(
+    feature = "alloc-count",
+    not(feature = "alloc-census"),
+    not(target_family = "wasm")
+))]
+pub type GameAllocator = alloc_count::CountingAllocator;
+#[cfg(not(any(feature = "alloc-count", target_family = "wasm")))]
+pub type GameAllocator = Allocator;
+/// The value of [`GameAllocator`].
+#[cfg(not(target_family = "wasm"))]
+pub const GAME_ALLOCATOR: GameAllocator = GameAllocator {};
 
 /// The global allocator of a build with the `alloc-census` feature: live
 /// heap bytes by startup step and thread, for `horizon-ctl memory`.
@@ -515,6 +756,36 @@ mod tests {
         }
         let machine = std::thread::available_parallelism().map_or(1, |n| n.get());
         assert_eq!(super::worker_count(), machine);
+    }
+
+    /// The pool leaves a core, counting only the performance cores where the machine has them.
+    #[test]
+    fn default_workers_count_performance_cores() {
+        use super::workers_for;
+        // Apple silicon: base M4 (4 + 6), M1 (4 + 4), M4 Pro (10 + 4).
+        assert_eq!(workers_for(10, || Some(4)), 3);
+        assert_eq!(workers_for(8, || Some(4)), 3);
+        assert_eq!(workers_for(14, || Some(10)), 9);
+        // HORIZON_WORKER_THREADS below the performance cores still caps the pool.
+        assert_eq!(workers_for(4, || Some(10)), 3);
+        // Everywhere else (and a sysctl that answers nothing): every core but one, as before.
+        assert_eq!(workers_for(12, || None), 11);
+        assert_eq!(workers_for(14, || Some(0)), 13);
+        // Never fewer than one worker.
+        assert_eq!(workers_for(1, || None), 1);
+        assert_eq!(workers_for(2, || Some(1)), 1);
+    }
+
+    /// Platforms without asymmetric core detection (Windows, etc.) are unchanged: the count is the one the pool always had.
+    #[test]
+    fn default_workers_are_unchanged_on_uniform_systems() {
+        let before = super::worker_count().saturating_sub(1).max(1);
+        if cfg!(any(target_vendor = "apple", target_os = "linux")) {
+            assert!((1..=before).contains(&super::default_workers()));
+        } else {
+            assert_eq!(super::performance_cores(), None);
+            assert_eq!(super::default_workers(), before);
+        }
     }
 
     /// Only a positive number overrides the machine's count.

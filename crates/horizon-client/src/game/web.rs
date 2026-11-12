@@ -21,6 +21,14 @@ async fn boot() -> Result<()> {
         horizon_std::env::set_var("HORIZON_HOME", horizon_std::env::HOME);
     }
     horizon_client::telemetry::mark_start();
+    // Play with Friends' STUN servers, for the browsers' peer connections.
+    #[cfg(feature = "friends")]
+    horizon_client::net::set_web_stun_servers(
+        horizon_friends::stun::DEFAULT_SERVERS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    );
     let home = horizon_client::logging::game_home();
     horizon_client::logging::init(&home, "Render thread");
     horizon_client::crash::install(home, "client");

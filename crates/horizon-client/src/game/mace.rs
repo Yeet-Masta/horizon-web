@@ -237,6 +237,7 @@ impl Game<'_> {
             damage_type: Some(match source.kind {
                 horizon_client::mobs::DamageKind::MaceSmash => "minecraft:mace_smash",
                 horizon_client::mobs::DamageKind::Spear => "minecraft:spear",
+                horizon_client::mobs::DamageKind::Thorns => "minecraft:thorns",
                 _ => "minecraft:player_attack",
             }),
             items: Some(world_items!(self)),
@@ -280,19 +281,33 @@ impl Game<'_> {
         }
         hurt
     }
+    /// Takes the absorbed tenths a projectile's hit left on the mobs; the shooter gets them
+    /// as `damage_dealt_absorbed` when it is the player (`LivingEntity.actuallyHurt`).
+    pub(super) fn settle_dealt_absorbed(&mut self, by_player: bool) {
+        let absorbed: i32 = self
+            .mobs
+            .iter_mut()
+            .map(|m| std::mem::take(&mut m.dealt_absorbed))
+            .fold(0, i32::saturating_add);
+        if by_player && absorbed > 0 {
+            self.award_custom_stat("damage_dealt_absorbed", absorbed);
+        }
+    }
     /// `Player.itemAttackInteraction` after the player's hit landed on the mob
     /// at `index`: the item's `hurtEnemy` (the "used" statistic of a weapon),
     /// the post-attack enchantments, then `postHurtEnemy` with the weapon's
     /// wear.
     pub(super) fn weapon_hit(&mut self, index: usize) {
         let Some(stack) = self.held().cloned() else {
+            // An empty hand still meets the victim's own post-attack
+            // enchantments (Thorns).
+            self.post_attack(index);
             return;
         };
-        let weapon = self
-            .res
-            .items()
-            .get(&stack.item)
-            .and_then(|i| i.weapon_damage.map(|d| (d, i.max_damage)));
+        let items = self.res.items();
+        let weapon = items
+            .weapon_damage(&stack)
+            .map(|damage| (damage, items.get(&stack.item).map_or(0, |i| i.max_damage)));
         self.native_hurt_enemy_event(&stack, index);
         let smash = self.smash_attack();
         if smash {
@@ -311,11 +326,10 @@ impl Game<'_> {
     /// `ItemStack.postHurtEnemy`: `hurtAndBreak(weapon.itemDamagePerAttack)` of
     /// the weapon in the acting hand.
     pub(super) fn weapon_wear(&mut self, stack: &ItemStack) {
-        let weapon = self
-            .res
-            .items()
-            .get(&stack.item)
-            .and_then(|i| i.weapon_damage.map(|d| (d, i.max_damage)));
+        let items = self.res.items();
+        let weapon = items
+            .weapon_damage(stack)
+            .map(|damage| (damage, items.get(&stack.item).map_or(0, |i| i.max_damage)));
         if let Some((per_attack, max)) = weapon
             && max > 0
             && !self.creative
@@ -364,6 +378,28 @@ impl Game<'_> {
         self.audio.play(sound, Some(feet), 1.0, 1.0);
         Some(fall)
     }
+    /// What a server's guest does after their hit landed on another player:
+    /// the weapon's side, the exhaustion and the sprint a knockback stops.
+    /// Returns the attacker's motion when a smash set it, which
+    /// `MaceItem.hurtEnemy` sends at once (`ClientboundSetEntityMotionPacket`),
+    /// not at the end of the tick after gravity (#8246). The mark from before
+    /// the hit stays.
+    pub(super) fn pvp_hit_after(
+        &mut self,
+        victim_on_ground: bool,
+        stops_sprint: bool,
+    ) -> Option<Vec3> {
+        let p = self.player.as_mut()?;
+        let marked = std::mem::take(&mut p.health.sync_velocity);
+        self.weapon_hit_player(victim_on_ground);
+        let p = self.player.as_mut()?;
+        let sent = std::mem::replace(&mut p.health.sync_velocity, marked).then_some(p.velocity);
+        self.pvp_exhaustion();
+        if stops_sprint {
+            self.stop_sprint_after_extra_knockback();
+        }
+        sent
+    }
     /// `Player.itemAttackInteraction` after the player's hit hurt another
     /// player: the weapon's side of it, as `weapon_hit` does for a mob. A
     /// smash stops the fall and its Wind Burst (a `post_attack` explosion on
@@ -376,12 +412,7 @@ impl Game<'_> {
         if smash {
             self.mace_smash_self(victim_on_ground);
         }
-        if self
-            .res
-            .items()
-            .get(&stack.item)
-            .is_some_and(|i| i.weapon_damage.is_some())
-        {
+        if self.res.items().weapon_damage(&stack).is_some() {
             self.award_stat("used", &stack.item, 1);
         }
         self.post_attack_bursts(&stack, "minecraft:player");
@@ -405,12 +436,7 @@ impl Game<'_> {
         {
             self.smash_knockback(center, Spared::Stand(id), fall);
         }
-        if self
-            .res
-            .items()
-            .get(&stack.item)
-            .is_some_and(|i| i.weapon_damage.is_some())
-        {
+        if self.res.items().weapon_damage(&stack).is_some() {
             self.award_stat("used", &stack.item, 1);
         }
         self.post_attack_bursts(&stack, "minecraft:armor_stand");
@@ -585,13 +611,13 @@ impl Game<'_> {
                 let Some(i) = self.armor_stands.iter().position(|s| s.id == id) else {
                     continue;
                 };
-                // knockback(0.4, ..) follows a hurtServer that landed, on a
+                // knockback(0.4F, ..) follows a hurtServer that landed, on a
                 // stand that is still there (LivingEntity.knockback).
                 if !self.punch_armor_stand(i) {
                     continue;
                 }
                 let mut knock = horizon_client::health::Knock {
-                    strength: 0.4,
+                    strength: f64::from(0.4_f32),
                     x: xd,
                     z: zd,
                 };
@@ -641,7 +667,7 @@ impl Game<'_> {
                 if old_health > 0.0 && !self.mobs[i].alive() {
                     self.native_kill_event(i);
                 }
-                self.mobs[i].knockback(0.4, xd, zd, &source);
+                self.mobs[i].knockback(f64::from(0.4_f32), xd, zd, &source);
                 self.last_hurt_by_player
                     .insert(self.mobs[i].id, self.lan_acting);
                 self.post_attack(i);

@@ -766,12 +766,25 @@ const SMALLEST_0_2: &str = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\
 
 #[test]
 fn both_lines_are_read() {
-    use horizon_shader_api::{Api, Blend};
+    use horizon_shader_api::{Api, Blend, Primaries};
     let m = Manifest::parse(SMALLEST_0_2).unwrap();
     assert_eq!(
         (m.api, m.blend, m.tonemap.is_none()),
         (Api::V0_2, Blend::Gamma, true)
     );
+    assert_eq!(m.primaries, Primaries::Bt709);
+    let named = format!("{SMALLEST_0_2}[frame]\nprimaries = \"bt709\"\n");
+    assert_eq!(Manifest::parse(&named).unwrap(), m);
+    let wide = format!("{SMALLEST_0_2}[frame]\nblend = \"linear\"\nprimaries = \"bt2020\"\n");
+    let wide = Manifest::parse(&wide).unwrap();
+    assert_eq!(
+        (wide.blend, wide.primaries),
+        (Blend::Linear, Primaries::Bt2020)
+    );
+    // Each space's weights give white a luminance of 1.
+    for p in [Primaries::Bt709, Primaries::Bt2020] {
+        assert!((p.luminance().iter().sum::<f32>() - 1.0).abs() < 1e-6);
+    }
     assert_eq!(Manifest::parse(&sample_text()).unwrap().api, Api::V0_1);
     let tonemap = format!("{SMALLEST_0_2}[tonemap]\nfile = \"t.wgsl\"\nname = \"Curve\"\n");
     let m = Manifest::parse(&tonemap).unwrap();
@@ -784,6 +797,14 @@ fn both_lines_are_read() {
         "[tonemap]\nfile = \"t.wgsl\"\n",
     );
     assert!(Manifest::parse(&only).unwrap().post.is_empty());
+    // The entity stage alone is a pack too, with the keys every stage has.
+    let entity = only.replace(
+        "[tonemap]\nfile = \"t.wgsl\"\n",
+        "[entity]\nfile = \"e.wgsl\"\nfiles = [\"light.wgsl\"]\nname = \"Mobs\"\n",
+    );
+    let m = Manifest::parse(&entity).unwrap();
+    assert_eq!(m.entity.as_ref().unwrap().name.as_deref(), Some("Mobs"));
+    assert_eq!(m.files(), ["light.wgsl", "e.wgsl"]);
 }
 
 #[test]
@@ -801,6 +822,42 @@ fn the_0_2_keys_are_refused_under_0_1_and_checked_under_0_2() {
         (
             format!("{SMALLEST_0_2}[frame]\nblend = \"srgb\"\n"),
             "frame.blend \"srgb\": gamma or linear",
+        ),
+        (
+            format!("{SMALLEST_0_2}[frame]\nblend = \"linear\"\nprimaries = \"p3\"\n"),
+            "frame.primaries \"p3\": bt709 or bt2020",
+        ),
+        (
+            format!("{SMALLEST_0_2}[frame]\nprimaries = \"bt2020\"\n"),
+            "needs blend = \"linear\": a change of primaries is only right in linear light",
+        ),
+        (
+            format!("{SMALLEST_0_2}[frame]\nblend = \"gamma\"\nprimaries = \"bt2020\"\n"),
+            "frame.primaries \"bt2020\" needs blend = \"linear\"",
+        ),
+        (
+            format!("{smallest_0_1}[frame]\nprimaries = \"bt709\"\n"),
+            "[frame] is shader API 0.2",
+        ),
+        (
+            format!("{smallest_0_1}[entity]\nfile = \"e.wgsl\"\n"),
+            "[entity] is shader API 0.2",
+        ),
+        (
+            format!("{SMALLEST_0_2}[entity]\nfile = \"e.wgsl\"\nfog = false\n"),
+            "`fog` is a key of [material] only",
+        ),
+        (
+            format!("{SMALLEST_0_2}[entity]\nfile = \"e.wgsl\"\nscale = 0.5\n"),
+            "`scale` and `output` are keys of [[post]] only",
+        ),
+        (
+            format!("{SMALLEST_0_2}[entity]\nfile = \"e.wgsl\"\nclouds = false\n"),
+            "`clouds`, `sun` and `stars` are keys of [sky] only",
+        ),
+        (
+            format!("{SMALLEST_0_2}[entity]\nfile = \"e.glsl\"\n"),
+            "is not a plain path to a .wgsl file",
         ),
         (
             format!("{SMALLEST_0_2}[frame]\nwhite = 1\n"),
@@ -827,4 +884,100 @@ fn the_0_2_keys_are_refused_under_0_1_and_checked_under_0_2() {
         let e = refused(&text);
         assert!(e.contains(needle), "{needle:?} not in {e:?}");
     }
+}
+
+fn float_option_manifest(fields: &str) -> String {
+    format!(
+        "schema = 1\nid = \"finite_options\"\nname = \"Finite options\"\nversion = \"1.0\"\napi = \"0.1\"\n[sky]\nfile = \"sky.wgsl\"\n[[options]]\nid = \"gain\"\nname = \"Gain\"\ntype = \"float\"\n{fields}"
+    )
+}
+
+#[test]
+fn finite_toml_numbers_cannot_overflow_float_option_storage() {
+    for fields in [
+        "min = 0.0\nmax = 1e300\ndefault = 1e300\nstep = 1e300\n",
+        "min = -1e300\nmax = 1.0\ndefault = 0.0\nstep = 1.0\n",
+        "min = -3e38\nmax = 3e38\ndefault = 0.0\nstep = 1e300\n",
+    ] {
+        assert!(
+            Manifest::parse(&float_option_manifest(fields)).is_err(),
+            "{fields}"
+        );
+    }
+}
+
+#[test]
+fn wide_finite_float_option_ranges_keep_a_finite_default_step() {
+    for bound in ["3e38", "3.4028234663852886e38"] {
+        let text =
+            float_option_manifest(&format!("min = -{bound}\nmax = {bound}\ndefault = 0.0\n"));
+        let manifest = Manifest::parse(&text).unwrap();
+        let OptionKind::Float {
+            min,
+            max,
+            default,
+            step,
+        } = manifest.options[0].kind
+        else {
+            panic!("expected float option");
+        };
+        assert!(min.is_finite() && max.is_finite() && default.is_finite());
+        assert!(step.is_finite() && step > 0.0);
+        assert!(f64::from(step) <= f64::from(max) - f64::from(min));
+        assert!(manifest.options[0].kind.default_constant().is_finite());
+    }
+}
+
+#[test]
+fn ordinary_float_options_and_invalid_non_finite_values_keep_their_contract() {
+    let fields = "min = 0.0\nmax = 1.0\ndefault = 0.5\nstep = 0.01\n";
+    let manifest = Manifest::parse(&float_option_manifest(fields)).unwrap();
+    assert_eq!(manifest.options[0].kind.default_constant(), 0.5);
+    for (key, old) in [
+        ("min", "0.0"),
+        ("max", "1.0"),
+        ("default", "0.5"),
+        ("step", "0.01"),
+    ] {
+        for invalid in ["nan", "inf", "-inf"] {
+            let invalid_fields =
+                fields.replace(&format!("{key} = {old}"), &format!("{key} = {invalid}"));
+            assert!(Manifest::parse(&float_option_manifest(&invalid_fields)).is_err());
+        }
+    }
+}
+
+/// The entity stage has the shadow maps and the coloured lights, so a pack with no other stage
+/// may ask for them; without a stage that reads them they are still refused.
+#[test]
+fn an_entity_only_pack_may_ask_for_its_shadow_and_lights() {
+    let head = "schema = 1
+id = \"p\"
+name = \"P\"
+version = \"1\"
+api = \"0.2\"
+";
+    let asks = "[shadow]
+[[lights]]
+blocks = [\"minecraft:torch\"]
+color = [1.0, 0.5, 0.2]
+                [[particle_lights]]
+particles = [\"firefly\"]
+color = [1.0, 1.0, 0.5]
+reach = 4.0
+";
+    let entity = format!(
+        "{head}[entity]
+file = \"e.wgsl\"
+{asks}"
+    );
+    let m = Manifest::parse(&entity).unwrap();
+    assert!(m.shadow.is_some() && m.lights.len() == 1 && m.particle_lights.len() == 1);
+    let sky = format!(
+        "{head}[sky]
+file = \"s.wgsl\"
+{asks}"
+    );
+    let why = Manifest::parse(&sky).unwrap_err().to_string();
+    assert!(why.contains("a [material] or an [entity]"), "{why}");
 }

@@ -9,6 +9,7 @@ use crate::{
     environment::Sky,
     world::World,
 };
+use horizon_core::random::{LegacyRandom, RandomSource};
 use std::path::Path;
 
 /// `FogType` of the camera position.
@@ -64,7 +65,7 @@ impl FogTables {
 }
 
 /// Fog state that evolves over time.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FogState {
     /// `LocalPlayer.waterVisionTime` (0..600).
     pub water_vision_time: i32,
@@ -72,42 +73,52 @@ pub struct FogState {
     pub rain_fog_multiplier: f32,
     /// `LightmapRenderStateExtractor.blockLightFlicker`.
     pub block_light_flicker: f32,
-    flicker_seed: u64,
+    /// `LightmapRenderStateExtractor.random`: `RandomSource.create()`.
+    flicker_random: LegacyRandom,
+}
+impl Default for FogState {
+    fn default() -> Self {
+        Self {
+            water_vision_time: 0,
+            rain_fog_multiplier: 0.0,
+            block_light_flicker: 0.0,
+            flicker_random: crate::random_source::create(),
+        }
+    }
 }
 impl FogState {
-    fn next_float(&mut self) -> f32 {
-        // splitmix64: the vanilla source is unseeded `RandomSource.create()`.
-        self.flicker_seed = self.flicker_seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.flicker_seed;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        ((z ^ (z >> 31)) >> 40) as f32 / (1u32 << 24) as f32
-    }
     /// `LightmapRenderStateExtractor.tick`: the torch light flickers.
     pub fn tick_flicker(&mut self) {
+        let r = &mut self.flicker_random;
         let (a, b, c, d) = (
-            self.next_float(),
-            self.next_float(),
-            self.next_float(),
-            self.next_float(),
+            r.next_float(),
+            r.next_float(),
+            r.next_float(),
+            r.next_float(),
         );
         self.block_light_flicker += (a - b) * c * d * 0.1;
         self.block_light_flicker *= 0.9;
     }
-    /// `LocalPlayer.aiStep`: water vision ramps up while the eye is in water.
-    pub fn tick(&mut self, eye_in_water: bool) {
+    /// `LocalPlayer.aiStep`: water vision ramps up while the eye is in water, ten times faster
+    /// for a spectator.
+    pub fn tick(&mut self, eye_in_water: bool, spectator: bool) {
         self.water_vision_time = if eye_in_water {
-            (self.water_vision_time + 1).min(600)
+            (self.water_vision_time + if spectator { 10 } else { 1 }).min(600)
         } else {
             (self.water_vision_time - 10).max(0)
         };
     }
     /// `LocalPlayer.getWaterVision`.
     pub fn water_vision(&self, eye_in_water: bool) -> f32 {
+        self.water_vision_over(eye_in_water, 600.0)
+    }
+    /// The water vision a pack's `water_fog_brightening_time` gives: vanilla's ramp over that
+    /// many ticks, of the 600 the game counts (more never reaches full).
+    pub fn water_vision_over(&self, eye_in_water: bool, ticks: f32) -> f32 {
         if !eye_in_water {
             return 0.0;
         }
-        let t = self.water_vision_time as f32;
+        let t = self.water_vision_time as f32 * 600.0 / ticks;
         if t >= 600.0 {
             return 1.0;
         }
@@ -220,6 +231,10 @@ pub struct FogInputs<'a> {
     /// `GameRenderer.nightVisionScale` while Night Vision is on without
     /// Darkness, else 0 (`FogRenderer.computeFogColor`'s brightenFactor).
     pub night_vision: f32,
+    /// The packs' `environment` fog settings (Polytone's).
+    pub environment: crate::pack_palette::Environment,
+    /// The packs' fluid modifiers' fog.
+    pub fluid_fog: crate::pack_palette::FluidFogs,
 }
 
 /// `FogRenderer.setupFog` + `computeFogColor`.
@@ -235,7 +250,7 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
     // Base colour of the applicable environment.
     let mut color = match input.fog_type {
         FogType::Lava => rgb(0x99_1A00),
-        FogType::PowderSnow => rgb(0x9F_BACC),
+        FogType::PowderSnow => rgb(input.environment.powder_snow_fog.unwrap_or(0x9F_BACC)),
         FogType::Water => input.water_fog_color,
         FogType::Atmospheric => {
             let mut fog = sky.fog_color;
@@ -293,8 +308,11 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
         color[1] += (color[1] * 0.6 - color[1]) * t;
         color[2] += (color[2] * 0.6 - color[2]) * t;
     }
-    let brighten = if eye_in_water {
+    let env = &input.environment;
+    let brighten = if eye_in_water && input.full_water_vision {
         water_vision
+    } else if eye_in_water {
+        state.water_vision_over(true, env.water_fog_brightening_time) * env.water_fog_brightening
     } else {
         input.night_vision
     };
@@ -336,10 +354,11 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
         }
         _ if input.blindness.is_some() => {
             let (duration, infinite) = input.blindness.unwrap_or((0, true));
+            let end = env.blindness_fog_distance;
             let distance = if infinite {
-                5.0
+                end
             } else {
-                rd + (5.0 - rd) * (duration as f32 / 20.0).min(1.0)
+                rd + (end - rd) * (duration as f32 / 20.0).min(1.0)
             };
             fog.environmental_start = distance * 0.25;
             fog.environmental_end = distance;
@@ -349,7 +368,7 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
         _ if input.darkness.is_some() => {
             // DarknessFogEnvironment.setupFog: closing in to 15 blocks.
             let blend = input.darkness.unwrap_or(0.0);
-            let distance = rd + (15.0 - rd) * blend;
+            let distance = rd + (env.darkness_fog_distance - rd) * blend;
             fog.environmental_start = distance * 0.75;
             fog.environmental_end = distance;
             fog.sky_end = distance;
@@ -374,11 +393,29 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
             fog.cloud_end = ((input.cloud_range_chunks * 16) as f32).min(sky.cloud_fog_end);
             if input.boss_world_fog {
                 fog.environmental_start = fog.environmental_start.min(10.0);
-                fog.environmental_end = fog.environmental_end.min(96.0);
+                fog.environmental_end = fog.environmental_end.min(env.boss_fog_distance);
                 fog.sky_end = fog.environmental_end;
                 fog.cloud_end = fog.environmental_end;
             }
         }
+    }
+    // A pack's fluid modifier over its fluid's fog, after everything else (wiki "Custom Colors").
+    let fluid = match input.fog_type {
+        FogType::Lava => input.fluid_fog.lava,
+        FogType::Water if input.blindness.is_none() && input.darkness.is_none() => {
+            input.fluid_fog.water
+        }
+        _ => None,
+    };
+    if let Some(f) = fluid {
+        if let Some(rgb) = f.color {
+            let [r, g, b] = self::rgb(rgb);
+            fog.color = [r, g, b, 1.0];
+        }
+        let end = fog.environmental_end * f.radius;
+        let start = end - (end - fog.environmental_start * f.radius) * f.fade;
+        (fog.environmental_start, fog.environmental_end) = (start, end);
+        (fog.sky_end, fog.cloud_end) = (end, end);
     }
     let span = (rd / 10.0).clamp(4.0, 64.0);
     fog.render_distance_start = rd - span;
@@ -413,6 +450,19 @@ pub fn clear_distance_fog(fog: &mut FogData, input: &FogInputs) {
         (fog.environmental_start, fog.environmental_end) = (1e9, 2e9);
     }
 }
+/// What `AtmosphericFogEnvironment.updateRainFogState` eases the rain fog toward: the rain, where
+/// the sky reaches the eye, halved in a biome without precipitation.
+pub fn rain_fog_target(rain: f32, sky_light: u8, biome_rains: bool) -> f32 {
+    let sky = ((f32::from(sky_light) - 8.0) / 7.0).clamp(0.0, 1.0);
+    rain * sky * if biome_rains { 1.0 } else { 0.5 }
+}
+/// Whether the frame draws no sky, only the clear to the fog colour: `LevelRenderer.addSkyPass`
+/// leaves the sky out in lava and powder snow and while blindness or darkness is on (`Camera`'s
+/// `doesMobEffectBlockSky`), and `GameRenderer.renderLevel` gives `LevelRenderer.render`
+/// `shouldRenderSky` false while a boss bar makes world fog (the Ender Dragon's).
+pub fn sky_pass_skipped(fog_type: FogType, effect_blocks_sky: bool, boss_world_fog: bool) -> bool {
+    matches!(fog_type, FogType::Lava | FogType::PowderSnow) || effect_blocks_sky || boss_world_fog
+}
 /// `AtmosphericFogEnvironment.updateRainFogState`.
 pub fn update_rain_fog(
     state: &mut FogState,
@@ -421,9 +471,13 @@ pub fn update_rain_fog(
     biome_rains: bool,
     delta_ticks: f32,
 ) {
-    let sky = ((f32::from(sky_light) - 8.0) / 7.0).clamp(0.0, 1.0);
-    let target = rain * sky * if biome_rains { 1.0 } else { 0.5 };
+    let target = rain_fog_target(rain, sky_light, biome_rains);
     state.rain_fog_multiplier += (target - state.rain_fog_multiplier) * delta_ticks * 0.2;
+}
+/// The rain fog at its target at once: a frozen world under `HORIZON_STILL`, where the rain sits
+/// at its level and easing would wait for ticks that do not come.
+pub fn settle_rain_fog(state: &mut FogState, rain: f32, sky_light: u8, biome_rains: bool) {
+    state.rain_fog_multiplier = rain_fog_target(rain, sky_light, biome_rains);
 }
 fn rgb(c: u32) -> [f32; 3] {
     [
@@ -460,6 +514,8 @@ mod tests {
             fire_resistance: false,
             full_water_vision: false,
             night_vision: 0.0,
+            environment: Default::default(),
+            fluid_fog: Default::default(),
         }
     }
     #[test]
@@ -478,6 +534,20 @@ mod tests {
         assert_eq!(fog(surface + 0.05, 0.0), FogType::Atmospheric);
         // The eye itself is not tested: looking up, the whole plane is above it.
         assert_eq!(fog(surface - 0.01, -90.0), FogType::Atmospheric);
+    }
+    #[test]
+    fn the_dragon_fights_world_fog_leaves_out_the_sky() {
+        use FogType::*;
+        // GameRenderer.renderLevel: no sky pass under a createWorldFog boss bar, in clear air
+        // as in water.
+        assert!(sky_pass_skipped(Atmospheric, false, true));
+        assert!(sky_pass_skipped(Water, false, true));
+        // LevelRenderer.addSkyPass's own conditions.
+        assert!(sky_pass_skipped(Lava, false, false));
+        assert!(sky_pass_skipped(PowderSnow, false, false));
+        assert!(sky_pass_skipped(Atmospheric, true, false));
+        assert!(!sky_pass_skipped(Atmospheric, false, false));
+        assert!(!sky_pass_skipped(Water, false, false));
     }
     #[test]
     fn boss_world_fog_closes_in() {
@@ -521,6 +591,87 @@ mod tests {
         assert_eq!(fog.environmental_end, 96.0);
         clear_distance_fog(&mut fog, &input);
         assert!(fog.environmental_start >= 1e9 && fog.render_distance_start >= 1e9);
+    }
+    #[test]
+    fn a_packs_environment_moves_effect_fog_and_its_colours() {
+        let sky = Sky {
+            fog_start: 10.0,
+            fog_end: 96.0,
+            ..Sky::default()
+        };
+        let tables = FogTables {
+            water_fog_end: vec![1.0],
+        };
+        let environment = crate::pack_palette::Environment {
+            powder_snow_fog: Some(0xFF0000),
+            blindness_fog_distance: 40.0,
+            water_fog_brightening: 0.0,
+            ..Default::default()
+        };
+        let mut input = inputs(&sky);
+        input.blindness = Some((-1, true));
+        input.environment = environment;
+        assert_eq!(
+            setup_fog(&tables, &FogState::default(), &input).environmental_end,
+            40.0
+        );
+        input.blindness = None;
+        input.fog_type = FogType::PowderSnow;
+        let fog = setup_fog(&tables, &FogState::default(), &input);
+        assert_eq!(fog.color, [1.0, 0.0, 0.0, 1.0]);
+        // Under water for the full 600 ticks: vanilla washes the fog out to a full channel; a
+        // brightening of 0 keeps the colour given.
+        let mut state = FogState::default();
+        for _ in 0..600 {
+            state.tick(true, false);
+        }
+        input.fog_type = FogType::Water;
+        input.water_fog_color = [0.1, 0.2, 0.4];
+        let washed = setup_fog(&tables, &state, &inputs_with(&input, Default::default())).color;
+        assert_eq!(washed[2], 1.0);
+        let kept = setup_fog(&tables, &state, &input).color;
+        assert_eq!(&kept[..3], &[0.1, 0.2, 0.4]);
+    }
+    #[test]
+    fn a_fluid_modifier_scales_and_colours_its_fog_last() {
+        let sky = Sky {
+            fog_start: 10.0,
+            fog_end: 96.0,
+            ..Sky::default()
+        };
+        let tables = FogTables {
+            water_fog_end: vec![1.0],
+        };
+        let mut input = inputs(&sky);
+        input.fog_type = FogType::Lava;
+        input.fire_resistance = true;
+        let vanilla = setup_fog(&tables, &FogState::default(), &input);
+        assert_eq!(
+            (vanilla.environmental_start, vanilla.environmental_end),
+            (0.0, 5.0)
+        );
+        input.fluid_fog.lava = Some(crate::pack_palette::FluidFog {
+            color: Some(0x00FF00),
+            radius: 2.0,
+            fade: 0.5,
+        });
+        let fog = setup_fog(&tables, &FogState::default(), &input);
+        assert_eq!(fog.color, [0.0, 1.0, 0.0, 1.0]);
+        // The end doubles; half the fade from 0 to 10 starts it at 5.
+        assert_eq!(
+            (fog.environmental_start, fog.environmental_end),
+            (5.0, 10.0)
+        );
+        assert_eq!((fog.sky_end, fog.cloud_end), (10.0, 10.0));
+    }
+    fn inputs_with<'a>(
+        input: &FogInputs<'a>,
+        environment: crate::pack_palette::Environment,
+    ) -> FogInputs<'a> {
+        FogInputs {
+            environment,
+            ..*input
+        }
     }
     #[test]
     fn fog_off_keeps_fluid_and_effect_fog() {
@@ -671,11 +822,11 @@ mod tests {
     fn water_vision_ramps() {
         let mut s = FogState::default();
         for _ in 0..100 {
-            s.tick(true);
+            s.tick(true, false);
         }
         assert!((s.water_vision(true) - 0.6).abs() < 1e-6);
         for _ in 0..500 {
-            s.tick(true);
+            s.tick(true, false);
         }
         assert_eq!(s.water_vision(true), 1.0);
         assert_eq!(s.water_vision(false), 0.0);
@@ -690,20 +841,44 @@ mod tests {
         input.fog_type = FogType::Water;
         // Just in: vanilla's water vision is 0, so the fog ends at a quarter of 96 blocks.
         let mut state = FogState::default();
-        state.tick(true);
+        state.tick(true, false);
         let first = setup_fog(&tables, &state, &input);
         assert_eq!(first.environmental_end, 24.0);
         for _ in 0..600 {
-            state.tick(true);
+            state.tick(true, false);
         }
         let settled = setup_fog(&tables, &state, &input);
         assert_eq!(settled.environmental_end, 96.0);
         input.full_water_vision = true;
         let mut fresh = FogState::default();
-        fresh.tick(true);
+        fresh.tick(true, false);
         let clear = setup_fog(&tables, &fresh, &input);
         assert_eq!(clear.environmental_end, settled.environmental_end);
         assert_eq!(clear.color, settled.color);
+    }
+    /// Settling puts the rain fog at its target exactly, where a tick of easing moves it a fifth
+    /// of the way, as before.
+    #[test]
+    fn settled_rain_fog_is_its_target_and_easing_is_unchanged() {
+        assert_eq!(
+            rain_fog_target(1.0, 15, false),
+            0.5,
+            "a dry biome halves it"
+        );
+        assert_eq!(rain_fog_target(1.0, 8, true), 0.0, "no sky, no rain fog");
+        let start = FogState {
+            rain_fog_multiplier: 0.1,
+            ..FogState::default()
+        };
+        let mut settled = start.clone();
+        settle_rain_fog(&mut settled, 0.5, 15, true);
+        assert_eq!(settled.rain_fog_multiplier, 0.5);
+        let mut eased = start;
+        update_rain_fog(&mut eased, 0.5, 15, true, 1.0);
+        assert_eq!(
+            eased.rain_fog_multiplier.to_bits(),
+            (0.1f32 + (0.5f32 - 0.1) * 1.0 * 0.2).to_bits()
+        );
     }
     #[test]
     fn rain_fog_pulls_fog_in() {
@@ -721,5 +896,21 @@ mod tests {
         let fog = setup_fog(&tables, &state, &inputs(&sky));
         assert_eq!(fog.environmental_start, -160.0);
         assert_eq!(fog.environmental_end, 768.0);
+    }
+
+    #[test]
+    fn a_spectator_sees_clearly_under_water_ten_times_sooner() {
+        let mut swimmer = FogState::default();
+        let mut spectator = FogState::default();
+        for _ in 0..60 {
+            swimmer.tick(true, false);
+            spectator.tick(true, true);
+        }
+        // LocalPlayer.getWaterVision after 60 ticks: 60 and 600 ticks of vision.
+        assert!((swimmer.water_vision(true) - 0.36).abs() < 1e-6);
+        assert_eq!(spectator.water_vision(true), 1.0);
+        // Out of the water both lose it 10 a tick.
+        spectator.tick(false, true);
+        assert_eq!(spectator.water_vision_time, 590);
     }
 }

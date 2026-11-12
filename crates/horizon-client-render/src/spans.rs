@@ -1,10 +1,4 @@
-//! Named timings within a frame, for finding what makes a frame slow:
-//! `HORIZON_SPIKES=MS` prints the spans of every frame whose CPU time
-//! exceeds MS milliseconds, and of every server tick (dedicated or
-//! integrated) longer than MS. Each span keeps its wall time and the
-//! thread's CPU time inside it, so a span that waited (for a lock, the GPU
-//! or a core on a busy machine) shows apart from one that worked. Costs two
-//! clock reads per span when enabled and a relaxed load otherwise.
+//! Named timings (wall and thread CPU) of a frame or tick, on with `HORIZON_SPIKES` or while a capture records; the slow ones go to the slow ring, not as span lists to the log.
 use horizon_std::time::{Duration, Instant};
 use std::{
     cell::{Cell, RefCell},
@@ -21,6 +15,11 @@ thread_local! {
     /// What this thread's slowest steps were busy with since it last took them ([`note`]).
     static NOTES: RefCell<Vec<(f32, String)>> = const { RefCell::new(Vec::new()) };
 }
+
+/// The most spans a thread holds before they are taken ([`take_raw`]): a worker thread
+/// that records spans (`lod_reduce`, `lt_*`) while they are on for every thread is never
+/// taken from, so it drops what it held instead of growing for as long as they stay on.
+const UNTAKEN_MAX: usize = 1 << 14;
 
 /// The shortest step a [`note`] keeps, in milliseconds.
 pub const NOTE_MS: f32 = 10.0;
@@ -53,10 +52,10 @@ pub fn record_here(on: bool) {
 /// Whether this thread records spans: all of them on, or [`record_here`].
 #[inline]
 pub fn recording_here() -> bool {
-    ENABLED.load(Ordering::Relaxed) || HERE.with(Cell::get)
+    ENABLED.load(Ordering::Relaxed) || HERE.with(Cell::get) || timeline::on()
 }
-/// The thread's CPU time when spans are on for every thread (`HORIZON_SPIKES`): only they
-/// print it.
+/// The thread's CPU time when spans are on for every thread (`HORIZON_SPIKES`): spans recorded
+/// by `record_here` alone keep wall time only.
 #[inline]
 fn cpu_if_enabled() -> Option<Duration> {
     if ENABLED.load(Ordering::Relaxed) {
@@ -77,39 +76,74 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
 pub struct Guard {
     open: Option<(&'static str, Instant, Option<Duration>, u8)>,
     _heap: Option<horizon_threads::heap_census::Tag>,
+    /// The sampler's span before this one.
+    outer: u16,
 }
 /// Start a span named `name` that ends when the returned [`Guard`] is dropped.
 #[inline]
 pub fn guard(name: &'static str) -> Guard {
     let _heap = horizon_threads::heap_tag(name);
+    let outer = horizon_threads::work::enter_span(name);
     if !recording_here() {
-        return Guard { open: None, _heap };
+        return Guard {
+            open: None,
+            _heap,
+            outer,
+        };
     }
     let depth = DEPTH.with(|d| d.replace(d.get().saturating_add(1)));
     Guard {
         open: Some((name, Instant::now(), cpu_if_enabled(), depth)),
         _heap,
+        outer,
     }
 }
 impl Drop for Guard {
     fn drop(&mut self) {
+        horizon_threads::work::leave_span(self.outer);
         let Some((name, started, cpu, depth)) = self.open.take() else {
             return;
         };
-        let ms = started.elapsed().as_secs_f32() * 1000.0;
+        let elapsed = started.elapsed();
+        let ms = elapsed.as_secs_f32() * 1000.0;
         let cpu_ms = cpu
             .and_then(|start| Some((thread_cpu()?, start)))
             .map_or(ms, |(end, start)| (end - start).as_secs_f32() * 1000.0);
         DEPTH.with(|d| d.set(depth));
-        SPANS.with(|s| {
-            s.borrow_mut().push(Span {
-                name,
-                ms,
-                cpu_ms,
-                depth,
-            })
+        timeline::span(name, started, elapsed, depth);
+        push(Span {
+            name,
+            ms,
+            cpu_ms,
+            depth,
         });
     }
+}
+/// How many spans this thread holds.
+fn recorded() -> usize {
+    SPANS.with(|s| s.borrow().len())
+}
+/// Moves the spans recorded since `mark` one level in: they ran inside the lap now ending.
+fn nest_since(mark: usize, depth: u8) {
+    SPANS.with(|s| {
+        let mut s = s.borrow_mut();
+        let start = mark.min(s.len());
+        for span in &mut s[start..] {
+            if span.depth >= depth {
+                span.depth = span.depth.saturating_add(1);
+            }
+        }
+    });
+}
+/// Keeps a finished span for the thread's next [`take_raw`].
+fn push(span: Span) {
+    SPANS.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.len() >= UNTAKEN_MAX {
+            s.clear();
+        }
+        s.push(span);
+    });
 }
 /// Notes that one step inside a span took `ms` milliseconds doing `what` (one player's
 /// packets, say), when this thread records spans and the step took at least [`NOTE_MS`]: a
@@ -143,35 +177,36 @@ pub fn take_notes() -> Vec<(f32, String)> {
 }
 /// Consecutive steps of one function timed as spans: each [`Laps::lap`] records the time since
 /// the previous one (or since [`laps`]) under its name. Nothing is read while spans are off.
-pub struct Laps(Option<(Instant, Option<Duration>)>);
+pub struct Laps(Option<(Instant, Option<Duration>, usize)>);
 /// Start timing the steps of a function (see [`Laps`]).
 #[inline]
 pub fn laps() -> Laps {
-    Laps(recording_here().then(|| (Instant::now(), cpu_if_enabled())))
+    Laps(recording_here().then(|| (Instant::now(), cpu_if_enabled(), recorded())))
 }
 impl Laps {
     /// Record the step that just ended under `name`, and start the next.
     #[inline]
     pub fn lap(&mut self, name: &'static str) {
-        let Some((started, cpu)) = &mut self.0 else {
+        let Some((started, cpu, mark)) = &mut self.0 else {
             return;
         };
         let now = Instant::now();
         let now_cpu = cpu.and_then(|_| thread_cpu());
-        let ms = (now - *started).as_secs_f32() * 1000.0;
+        let elapsed = now - *started;
+        let ms = elapsed.as_secs_f32() * 1000.0;
         let cpu_ms = now_cpu
             .zip(*cpu)
             .map_or(ms, |(end, start)| (end - start).as_secs_f32() * 1000.0);
         let depth = DEPTH.with(Cell::get);
-        SPANS.with(|s| {
-            s.borrow_mut().push(Span {
-                name,
-                ms,
-                cpu_ms,
-                depth,
-            })
+        timeline::span(name, *started, elapsed, depth);
+        nest_since(*mark, depth);
+        push(Span {
+            name,
+            ms,
+            cpu_ms,
+            depth,
         });
-        (*started, *cpu) = (now, now_cpu);
+        (*started, *cpu, *mark) = (now, now_cpu, recorded());
     }
 }
 /// The CPU time this thread has used, where the platform tells it: a tick
@@ -254,21 +289,178 @@ pub fn merge(spans: &[Span]) -> Vec<Span> {
     sums.sort_by(|a, b| b.ms.total_cmp(&a.ms));
     sums
 }
-/// `name wall` for spans of at least 0.5 ms, with `/cpu` when the thread
-/// worked for less than nine tenths of it: the slow-frame and slow-tick lines.
-pub fn describe(spans: &[Span]) -> String {
-    let list: Vec<String> = spans
-        .iter()
-        .filter(|s| s.ms >= 0.5)
-        .map(|s| {
-            if s.cpu_ms < s.ms * 0.9 {
-                format!("{} {:.1}/{:.1}", s.name, s.ms, s.cpu_ms)
-            } else {
-                format!("{} {:.1}", s.name, s.ms)
+/// The run's timeline: every span on every thread, kept in per-thread buffers until a capture drains them as `timeline` chunks.
+pub mod timeline {
+    use horizon_std::sync::Mutex;
+    use horizon_std::time::{Duration, Instant};
+    use std::{
+        cell::RefCell,
+        sync::{
+            Arc, PoisonError,
+            atomic::{AtomicBool, AtomicU32, Ordering},
+        },
+    };
+
+    /// The most spans a thread holds between two drains; a thread that records more drops them.
+    const THREAD_EVENTS_MAX: usize = 1 << 18;
+
+    static ON: AtomicBool = AtomicBool::new(false);
+    static GENERATION: AtomicU32 = AtomicU32::new(0);
+    static RUN: Mutex<Option<Run>> = Mutex::new(None);
+
+    struct Run {
+        origin: Instant,
+        threads: Vec<Arc<Mutex<Thread>>>,
+    }
+
+    struct Thread {
+        name: String,
+        label: String,
+        events: Vec<Event>,
+    }
+
+    /// This thread's buffer in the timeline it last joined.
+    struct Mine {
+        generation: u32,
+        origin: Instant,
+        thread: Arc<Mutex<Thread>>,
+    }
+
+    thread_local! {
+        static MINE: RefCell<Option<Mine>> = const { RefCell::new(None) };
+    }
+
+    /// One finished span.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Event {
+        pub name: &'static str,
+        /// Microseconds from the timeline's start.
+        pub start_us: u64,
+        pub dur_us: u32,
+        /// How many spans it ran inside on its thread.
+        pub depth: u8,
+    }
+
+    /// The spans one thread finished since the last drain, in the order they finished.
+    #[derive(Debug, PartialEq, Eq)]
+    pub struct ThreadEvents {
+        /// The thread's name; threads alive together under one name get `#2`, `#3`... after it.
+        pub thread: String,
+        pub events: Vec<Event>,
+    }
+
+    /// Whether a timeline is being recorded.
+    #[inline]
+    pub fn on() -> bool {
+        ON.load(Ordering::Relaxed)
+    }
+
+    /// Starts recording, timed from `origin`; false when a timeline already runs (the process has one).
+    pub fn start(origin: Instant) -> bool {
+        let mut run = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+        if run.is_some() {
+            return false;
+        }
+        *run = Some(Run {
+            origin,
+            threads: Vec::new(),
+        });
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+        ON.store(true, Ordering::Relaxed);
+        true
+    }
+
+    /// Takes what the threads finished since the last call.
+    pub fn drain() -> Vec<ThreadEvents> {
+        let run = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+        run.as_ref().map_or_else(Vec::new, take_all)
+    }
+
+    /// Stops recording and returns what the threads finished since the last drain.
+    pub fn finish() -> Vec<ThreadEvents> {
+        ON.store(false, Ordering::Relaxed);
+        let run = RUN.lock().unwrap_or_else(PoisonError::into_inner).take();
+        run.as_ref().map_or_else(Vec::new, take_all)
+    }
+
+    fn take_all(run: &Run) -> Vec<ThreadEvents> {
+        run.threads
+            .iter()
+            .filter_map(|thread| {
+                let mut thread = thread.lock().unwrap_or_else(PoisonError::into_inner);
+                (!thread.events.is_empty()).then(|| ThreadEvents {
+                    thread: thread.label.clone(),
+                    events: std::mem::take(&mut thread.events),
+                })
+            })
+            .collect()
+    }
+
+    /// Takes a buffer for this thread: the one of an exited thread of the same name, else a new one.
+    fn join() -> Option<Mine> {
+        let mut slot = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+        let run = slot.as_mut()?;
+        let name = horizon_std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_owned();
+        let of_name =
+            |t: &Arc<Mutex<Thread>>| t.lock().unwrap_or_else(PoisonError::into_inner).name == name;
+        let thread = match run
+            .threads
+            .iter()
+            .find(|t| Arc::strong_count(t) == 1 && of_name(t))
+        {
+            Some(exited) => Arc::clone(exited),
+            None => {
+                let same = run.threads.iter().filter(|t| of_name(t)).count();
+                let label = if same == 0 {
+                    name.clone()
+                } else {
+                    format!("{name} #{}", same + 1)
+                };
+                let thread = Arc::new(Mutex::new(Thread {
+                    name,
+                    label,
+                    events: Vec::new(),
+                }));
+                run.threads.push(Arc::clone(&thread));
+                thread
             }
+        };
+        Some(Mine {
+            generation: GENERATION.load(Ordering::Relaxed),
+            origin: run.origin,
+            thread,
         })
-        .collect();
-    list.join(", ")
+    }
+
+    /// A span of this thread from `started`, `elapsed` long, inside `depth` others.
+    pub(super) fn span(name: &'static str, started: Instant, elapsed: Duration, depth: u8) {
+        if !on() {
+            return;
+        }
+        let generation = GENERATION.load(Ordering::Relaxed);
+        let _ = MINE.try_with(|mine| {
+            let mut mine = mine.borrow_mut();
+            if mine.as_ref().is_none_or(|m| m.generation != generation) {
+                *mine = join();
+            }
+            let Some(mine) = mine.as_ref() else {
+                return;
+            };
+            let event = Event {
+                name,
+                start_us: started.saturating_duration_since(mine.origin).as_micros() as u64,
+                dur_us: elapsed.as_micros().min(u128::from(u32::MAX)) as u32,
+                depth,
+            };
+            let mut thread = mine.thread.lock().unwrap_or_else(PoisonError::into_inner);
+            if thread.events.len() < THREAD_EVENTS_MAX {
+                thread.events.push(event);
+            }
+        });
+    }
 }
 
 /// The start's timeline: `HORIZON_STARTUP_TRACE=FILE` writes every named step of
@@ -474,6 +666,46 @@ mod tests {
         SWITCH.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Samples taken inside a named span carry its id, with spans off, and the span is left after it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn samples_inside_a_span_carry_its_id() {
+        use horizon_std::time::{Duration, Instant};
+        use horizon_threads::{sampler, work};
+        let worker = horizon_std::thread::spawn(|| {
+            assert!(sampler::sampled_thread("spans-id-test"));
+            let config = sampler::Config {
+                hz: 1000,
+                ..Default::default()
+            };
+            let session = sampler::start(config, |n| n == "spans-id-test").unwrap();
+            let busy = |ms| {
+                let until = Instant::now() + Duration::from_millis(ms);
+                while Instant::now() < until {
+                    std::hint::black_box(0);
+                }
+            };
+            super::time("spans_id_test_named", || busy(60));
+            assert_eq!(sampler::span(), 0);
+            busy(60);
+            let mut spans = Vec::new();
+            session.stop(|_, r| spans.push(r.ctx.span));
+            spans
+        });
+        let spans = worker.join().unwrap();
+        let inside = |s: &u16| work::name(work::Space::Span, *s) == Some("spans_id_test_named");
+        let (named, plain) = (
+            spans.iter().filter(|s| inside(s)).count(),
+            spans.iter().filter(|s| **s == 0).count(),
+        );
+        assert!(
+            named > 30 && plain > 30,
+            "{named} named, {plain} outside of {} samples",
+            spans.len()
+        );
+        assert_eq!(named + plain, spans.len(), "no other span id");
+    }
+
     /// A slow tick's notes are its slowest steps, slowest first; short steps and steps on a
     /// thread that records no spans leave none.
     #[test]
@@ -500,8 +732,7 @@ mod tests {
         assert!(super::take_notes().is_empty(), "taking them clears them");
     }
 
-    /// Spans of one name add up; a span the thread spent mostly waiting
-    /// shows its CPU time after the wall time, short ones are left out.
+    /// Spans of one name add up, the slowest first; a span that waited keeps its small CPU time.
     #[test]
     fn spans_sum_by_name_and_show_waits() {
         super::SPANS.with(|s| {
@@ -543,7 +774,6 @@ mod tests {
             }
         );
         assert_eq!((spans[1].name, spans[1].ms), ("tick", 5.0));
-        assert_eq!(super::describe(&spans), "submit 30.0/0.2, tick 5.0");
         assert!(super::take().is_empty());
     }
 
@@ -663,6 +893,22 @@ mod tests {
         assert!(spans[0].ms >= 2.0);
     }
 
+    /// A span that ran during a lap belongs inside that lap, and not inside the next one.
+    #[test]
+    fn a_span_during_a_lap_nests_under_that_lap() {
+        let _switch = spans_switch();
+        let _ = super::take_raw();
+        super::enable(true);
+        let mut laps = super::laps();
+        super::time("inner", || {});
+        laps.lap("first");
+        laps.lap("second");
+        super::enable(false);
+        let spans = super::take_raw();
+        let depths: Vec<_> = spans.iter().map(|s| (s.name, s.depth)).collect();
+        assert_eq!(depths, [("inner", 1), ("first", 0), ("second", 0)]);
+    }
+
     /// The thread's CPU clock moves with work done on it, not with time
     /// spent asleep.
     #[cfg(any(unix, all(windows, target_arch = "x86_64")))]
@@ -684,5 +930,77 @@ mod tests {
         };
         assert!(slept.as_millis() < 25, "{slept:?} while asleep");
         assert!(worked.as_millis() >= 10, "{worked:?} while busy");
+    }
+
+    /// Each thread's finished spans reach the timeline with their depth and nesting in time; threads alive together under one name get labels of their own, ones after another share a lane.
+    #[test]
+    fn the_timeline_keeps_each_threads_spans_with_their_depth_and_place_in_time() {
+        use super::timeline;
+        use horizon_std::time::{Duration, Instant};
+        use std::sync::{Arc, Barrier};
+        let _switch = spans_switch();
+        assert!(timeline::start(Instant::now()));
+        assert!(
+            !timeline::start(Instant::now()),
+            "the process has one timeline"
+        );
+        let spawn = |name: &str, alive_with: Option<Arc<Barrier>>| {
+            horizon_std::thread::Builder::new()
+                .name(name.into())
+                .spawn(move || {
+                    super::time("outer", || {
+                        horizon_std::thread::sleep(Duration::from_millis(4));
+                        super::time("inner", || {
+                            horizon_std::thread::sleep(Duration::from_millis(3))
+                        });
+                    });
+                    if let Some(barrier) = alive_with {
+                        barrier.wait();
+                    }
+                })
+                .unwrap()
+        };
+        spawn("tl-solo", None).join().unwrap();
+        let together = Arc::new(Barrier::new(2));
+        let twins = [
+            spawn("tl-twin", Some(together.clone())),
+            spawn("tl-twin", Some(together)),
+        ];
+        for twin in twins {
+            twin.join().unwrap();
+        }
+        spawn("tl-seq", None).join().unwrap();
+        spawn("tl-seq", None).join().unwrap();
+        let mut threads = timeline::finish();
+        threads.retain(|t| t.thread.starts_with("tl-"));
+        threads.sort_by(|a, b| a.thread.cmp(&b.thread));
+        let labels: Vec<_> = threads.iter().map(|t| t.thread.as_str()).collect();
+        assert_eq!(labels, ["tl-seq", "tl-solo", "tl-twin", "tl-twin #2"]);
+        for thread in &threads {
+            let runs = if thread.thread == "tl-seq" { 2 } else { 1 };
+            assert_eq!(thread.events.len(), 2 * runs, "{thread:?}");
+            for pair in thread.events.chunks(2) {
+                let [inner, outer] = pair else { unreachable!() };
+                assert_eq!((inner.name, inner.depth), ("inner", 1));
+                assert_eq!((outer.name, outer.depth), ("outer", 0));
+                assert!(
+                    inner.dur_us >= 3_000 && outer.dur_us >= 7_000,
+                    "{inner:?} {outer:?}"
+                );
+                assert!(inner.start_us >= outer.start_us + 4_000);
+                assert!(
+                    inner.start_us + u64::from(inner.dur_us)
+                        <= outer.start_us + u64::from(outer.dur_us)
+                );
+            }
+        }
+        let seq = threads.iter().find(|t| t.thread == "tl-seq").unwrap();
+        assert!(seq.events[2].start_us >= seq.events[1].start_us + u64::from(seq.events[1].dur_us));
+
+        spawn("tl-after", None).join().unwrap();
+        assert!(
+            timeline::drain().is_empty(),
+            "a stopped timeline records nothing"
+        );
     }
 }

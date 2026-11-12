@@ -67,15 +67,21 @@ impl Game<'_> {
         let (at, count, xz, height, floating) = match self.res.behaviours().bone_meal_spreads(state)
         {
             Some(spreads) => {
-                // BonemealableBlock.getParticlePos: below for rooted dirt
-                // (its hanging roots) and mangrove leaves (their propagule).
-                let at = match &*facts.get(state).name {
-                    "minecraft:rooted_dirt" | "minecraft:mangrove_leaves" => [p[0], p[1] - 1, p[2]],
-                    _ => p,
-                };
                 if spreads {
-                    (at, count * 3, 3.0, 1.0, false)
+                    // BonemealableBlock.getParticlePos: a NEIGHBOR_SPREADER
+                    // (grass, nylium, netherrack, moss) sparks over the block
+                    // above it, where its spread lands (#11310).
+                    ([p[0], p[1] + 1, p[2]], count * 3, 3.0, 1.0, false)
                 } else {
+                    // getParticlePos of a GROWER is the block itself, below
+                    // for rooted dirt (its hanging roots) and mangrove leaves
+                    // (their propagule).
+                    let at = match &*facts.get(state).name {
+                        "minecraft:rooted_dirt" | "minecraft:mangrove_leaves" => {
+                            [p[0], p[1] - 1, p[2]]
+                        }
+                        _ => p,
+                    };
                     // ParticleUtils.spawnParticleInBlock: up to the
                     // block's shape (a full block when air).
                     (at, count, 0.5, self.block_shape_top(at), true)
@@ -139,8 +145,9 @@ impl Game<'_> {
             }
         }
     }
-    /// `LevelEventHandler` 2012 (a turtle egg laid on sand):
-    /// `ParticleUtils.spawnParticleInBlock` with happy villager sparks.
+    /// `LevelEventHandler` 2011 (a bee grew a crop) and 2012 (a turtle egg
+    /// laid on sand): `ParticleUtils.spawnParticleInBlock` with happy villager
+    /// sparks.
     pub(super) fn turtle_egg_particles(&mut self, pos: BlockPos, count: i32) {
         let at = [pos.x, pos.y, pos.z];
         let height = self.block_shape_top(at);
@@ -273,8 +280,8 @@ impl Game<'_> {
         };
         let above = self.world.block(pos.x, root_y + 1, pos.z);
         let above_facts = self.res.facts().get(above);
-        let nether = self.dim == super::Dim::Nether;
-        let fluid = if &*above_facts.name == "minecraft:mud" && !nether {
+        let evaporates = self.dimension_type().water_evaporates;
+        let fluid = if &*above_facts.name == "minecraft:mud" && !evaporates {
             horizon_client::blocks::Fluid::Water
         } else {
             above_facts.fluid
@@ -282,7 +289,9 @@ impl Game<'_> {
         let ty = match fluid {
             horizon_client::blocks::Fluid::Water => ParticleType::DrippingDripstoneWater,
             horizon_client::blocks::Fluid::Lava => ParticleType::DrippingDripstoneLava,
-            horizon_client::blocks::Fluid::None if nether => ParticleType::DrippingDripstoneLava,
+            horizon_client::blocks::Fluid::None if evaporates => {
+                ParticleType::DrippingDripstoneLava
+            }
             horizon_client::blocks::Fluid::None => ParticleType::DrippingDripstoneWater,
         };
         let offset = self

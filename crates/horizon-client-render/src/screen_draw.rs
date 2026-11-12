@@ -580,6 +580,15 @@ pub fn button(
         "widget/button"
     };
     sprite(out, sprite_id, x, y, w, h);
+    // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage`: an inactive
+    // widget's message is -6250336 (0xFFA0A0A0), not the active white.
+    let inactive;
+    let label = if active {
+        label
+    } else {
+        inactive = label.clone().with_color(0xFFA0_A0A0);
+        &inactive
+    };
     scrolling_string_over_contents(out, m, label, x, y, w, h, 2, now_ms);
 }
 /// `Tooltip.splitTooltip` of a widget's tooltip, shown under the mouse.
@@ -681,26 +690,36 @@ impl TextField {
     }
     /// `setValue`.
     pub fn set_value(&mut self, m: &Measure, value: &str) {
-        self.value = value.chars().take(self.max_length).collect();
+        self.value = crate::ui::utf16_prefix(value, self.max_length);
         self.move_cursor_to(m, chars(&self.value), false);
         self.set_highlight(m, self.cursor);
     }
     /// `insertText`: replaces the selection within the maximum length. True
-    /// when the value changed (its responder runs).
+    /// when the value changed (its responder runs). The limit is in UTF-16
+    /// code units, as Java's `String.length()` counts them.
     pub fn insert_text(&mut self, m: &Measure, input: &str) -> bool {
         let (start, end) = (
             self.cursor.min(self.highlight),
             self.cursor.max(self.highlight),
         );
-        let room = self.max_length as isize - chars(&self.value) as isize + (end - start) as isize;
-        if room <= 0 {
+        let selected_units: usize = self
+            .value
+            .chars()
+            .skip(start)
+            .take(end - start)
+            .map(char::len_utf16)
+            .sum();
+        let room = self
+            .max_length
+            .saturating_sub(crate::ui::utf16_len(&self.value) - selected_units);
+        if room == 0 {
             return false;
         }
         let filtered: String = input
             .chars()
             .filter(|c| *c >= ' ' && *c != '\u{7f}' && *c != '§')
             .collect();
-        let insert: String = filtered.chars().take(room as usize).collect();
+        let insert = crate::ui::utf16_prefix(&filtered, room);
         let n = chars(&insert);
         self.value = format!(
             "{}{}{}",
@@ -912,7 +931,8 @@ impl TextField {
             text_as_typed(out, t, draw_x, ty, color, self.text_shadow);
             draw_x += w + 1;
         }
-        let insert = self.cursor < len || len >= self.max_length;
+        // `value.length() >= maxLength` is Java's length: UTF-16 units.
+        let insert = self.cursor < len || crate::ui::utf16_len(&self.value) >= self.max_length;
         let mut cursor_x = draw_x;
         if !on_screen {
             cursor_x = if rel_cursor > 0 { tx + self.width } else { tx };
@@ -975,11 +995,32 @@ impl TextField {
     }
 }
 
+/// `ScreenRectangle.intersection`: the part of both rectangles, or
+/// `ScreenRectangle.empty()` (`0, 0, 0, 0`, which clips everything) when they
+/// do not overlap.
+fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
+    let rect = [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ];
+    if rect[0] < rect[2] && rect[1] < rect[3] {
+        rect
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
 /// Draws the calls with the HUD batch: sprites nine-sliced, textures from
 /// the atlas (`textures/gui/x.png` is `gui/x`; tiled textures from their
 /// corner), scissor clipping, and the tooltip at the mouse.
 pub fn paint(batch: &mut HudBatch, atlas: &HudAtlas, draws: &[Draw]) {
-    let mut clip: Option<(usize, [i32; 4])> = None;
+    // `GuiGraphicsExtractor.ScissorStack`: a scissor clips what is drawn since
+    // it opened, cut to the screen while none is open and to the one around it
+    // otherwise; closing it puts the enclosing one back.
+    let screen = [0, 0, batch.width as i32, batch.height as i32];
+    let mut clips: Vec<(usize, [i32; 4])> = Vec::new();
     let mut tooltip = None;
     for d in draws {
         match d {
@@ -1083,10 +1124,11 @@ pub fn paint(batch: &mut HudBatch, atlas: &HudAtlas, draws: &[Draw]) {
                 );
             }
             Draw::Scissor { x0, y0, x1, y1 } => {
-                clip = Some((batch.vertices.len(), [*x0, *y0, *x1, *y1]))
+                let outer = clips.last().map_or(screen, |&(_, rect)| rect);
+                clips.push((batch.vertices.len(), intersect(outer, [*x0, *y0, *x1, *y1])));
             }
             Draw::NoScissor => {
-                if let Some((start, [x0, y0, x1, y1])) = clip.take() {
+                if let Some((start, [x0, y0, x1, y1])) = clips.pop() {
                     batch.clip_since(start, x0 as f32, y0 as f32, x1 as f32, y1 as f32);
                 }
             }
@@ -1116,6 +1158,33 @@ mod button_label_tests {
         let mut out = Vec::new();
         button(&mut out, m, text, 10, 20, w, 20, true, false, now_ms);
         out
+    }
+    /// `WithInactiveMessage`: a disabled button's message is grey, not white.
+    #[test]
+    fn an_inactive_buttons_label_is_grey() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let mut out = Vec::new();
+        button(
+            &mut out,
+            &m,
+            &Text::literal("Go"),
+            10,
+            20,
+            100,
+            20,
+            false,
+            false,
+            0,
+        );
+        let color = out
+            .iter()
+            .find_map(|d| match d {
+                Draw::Text { text, .. } => text.spans.iter().find_map(|s| s.style.color),
+                _ => None,
+            })
+            .expect("the label is drawn with its inactive style");
+        assert_eq!(color & 0xFF_FFFF, 0xA0_A0A0);
     }
     fn scissor_of(draws: &[Draw]) -> Option<[i32; 4]> {
         draws.iter().find_map(|d| match d {
@@ -1280,5 +1349,157 @@ mod button_label_tests {
         sprite(&mut out, "widget/button", 10, 20, w, 20);
         paint(&mut batch, atlas, &out);
         batch.vertices.len()
+    }
+}
+
+#[cfg(test)]
+mod scissor_tests {
+    use super::*;
+
+    fn atlas() -> HudAtlas {
+        HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
+    }
+
+    /// The bounds of every quad's six vertices, in draw order.
+    fn quads(batch: &HudBatch) -> Vec<[f32; 4]> {
+        batch
+            .vertices
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .map(|q| {
+                let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+                let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+                for v in q {
+                    x0 = x0.min(v.pos[0]);
+                    y0 = y0.min(v.pos[1]);
+                    x1 = x1.max(v.pos[0]);
+                    y1 = y1.max(v.pos[1]);
+                }
+                [x0, y0, x1, y1]
+            })
+            .collect()
+    }
+
+    fn fill(x0: i32, y0: i32, x1: i32, y1: i32) -> Draw {
+        Draw::Fill {
+            x0,
+            y0,
+            x1,
+            y1,
+            color: -1,
+        }
+    }
+
+    fn scissor(x0: i32, y0: i32, x1: i32, y1: i32) -> Draw {
+        Draw::Scissor { x0, y0, x1, y1 }
+    }
+
+    /// `GuiGraphicsExtractor.ScissorStack.push`: a scissor inside another is
+    /// intersected with it (`ScreenRectangle.intersection`), and the outer one
+    /// still clips what is drawn after the inner one closes.
+    #[test]
+    fn a_nested_scissor_is_intersected_with_the_one_around_it() {
+        let atlas = atlas();
+        let mut batch = HudBatch::new([320, 240]);
+        paint(
+            &mut batch,
+            &atlas,
+            &[
+                scissor(10, 10, 100, 100),
+                fill(0, 0, 200, 200),
+                scissor(50, 50, 300, 300),
+                fill(0, 0, 400, 400),
+                Draw::NoScissor,
+                fill(0, 0, 200, 200),
+                Draw::NoScissor,
+            ],
+        );
+        assert_eq!(
+            quads(&batch),
+            [
+                [10.0, 10.0, 100.0, 100.0],
+                [50.0, 50.0, 100.0, 100.0],
+                [10.0, 10.0, 100.0, 100.0],
+            ]
+        );
+    }
+
+    /// A scissor with no scissor around it is cut to the screen, as
+    /// `ScissorStack.push` intersects with the screen while the stack is empty.
+    #[test]
+    fn a_scissor_wider_than_the_screen_is_cut_to_it() {
+        let atlas = atlas();
+        let mut batch = HudBatch::new([320, 240]);
+        paint(
+            &mut batch,
+            &atlas,
+            &[
+                scissor(-50, -50, 500, 500),
+                fill(-100, -100, 600, 600),
+                Draw::NoScissor,
+            ],
+        );
+        assert_eq!(quads(&batch), [[0.0, 0.0, 320.0, 240.0]]);
+    }
+
+    /// A scissor that misses the one around it intersects to
+    /// `ScreenRectangle.empty()`: nothing inside it is drawn, and the outer
+    /// scissor takes over again when it closes.
+    #[test]
+    fn a_scissor_outside_the_one_around_it_draws_nothing() {
+        let atlas = atlas();
+        let mut batch = HudBatch::new([320, 240]);
+        paint(
+            &mut batch,
+            &atlas,
+            &[
+                scissor(10, 10, 50, 50),
+                fill(0, 0, 200, 200),
+                scissor(60, 60, 90, 90),
+                fill(0, 0, 200, 200),
+                Draw::NoScissor,
+                fill(0, 0, 200, 200),
+                Draw::NoScissor,
+                fill(0, 0, 200, 200),
+            ],
+        );
+        assert_eq!(
+            quads(&batch),
+            [
+                [10.0, 10.0, 50.0, 50.0],
+                [10.0, 10.0, 50.0, 50.0],
+                [0.0, 0.0, 200.0, 200.0],
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod max_length_tests {
+    use super::*;
+
+    fn atlas() -> HudAtlas {
+        HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
+    }
+
+    /// `EditBox.maxLength` counts Java `String.length()` (UTF-16 code units),
+    /// and the chat box is this field: ChatScreen's 256 takes 128 emoji, not
+    /// 256, and a half-fitted emoji is dropped rather than split.
+    #[test]
+    fn the_chat_box_maximum_counts_utf16_units() {
+        let atlas = atlas();
+        let m = Measure(&atlas.font);
+        let mut field = TextField::new(0, 0, 200, 20);
+        field.max_length = 3;
+        field.insert_text(&m, "ab😀");
+        assert_eq!(
+            field.value, "ab",
+            "three units: a, b and one of the emoji's"
+        );
+        field.set_value(&m, "");
+        field.max_length = 4;
+        field.insert_text(&m, "ab😀");
+        assert_eq!(field.value, "ab😀", "four units, both of the emoji's");
     }
 }

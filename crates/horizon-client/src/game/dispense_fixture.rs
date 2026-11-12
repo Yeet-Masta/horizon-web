@@ -23,10 +23,7 @@ use horizon_client::{
     projectiles::ProjectileKind,
     world::World,
 };
-use horizon_core::{
-    position::BlockPos,
-    random::{LegacyRandom, RandomSource},
-};
+use horizon_core::{position::BlockPos, random::RandomSource};
 use horizon_world::{level::Ticks, registry::BlockStateId};
 use serde_json::Value;
 use std::{cell::RefCell, collections::HashMap, fmt::Write as _, io::Write as _, sync::Arc};
@@ -104,6 +101,10 @@ fn floor_pos(p: [f64; 3]) -> String {
 enum Target {
     Mob(u32),
     Stand(u32),
+    /// A chest boat or raft (`ContainerEntity`).
+    Boat(u32),
+    /// A chest or hopper minecart (`ContainerEntity`).
+    Cart(u32),
 }
 
 impl Game<'_> {
@@ -186,6 +187,9 @@ impl Game<'_> {
     fn dispense_case(&mut self, case: &Value) -> Result<Vec<String>> {
         let seed = case["seed"].as_i64().unwrap_or(0);
         self.fixture_reset(seed);
+        if let Some(op) = case.get("blocking_wear") {
+            return self.fixture_blocking_wear(op);
+        }
         // The oracle level answers one sky and one block light everywhere.
         let light = case["light"].as_array();
         let level = |i: usize, default: i64| {
@@ -297,12 +301,15 @@ impl Game<'_> {
             }
         }
         // Creating the targets must not move the stream the dispenser draws from.
-        self.world.random = LegacyRandom::new(seed);
+        self.world.random.set_seed(seed);
         self.world.block_log = Some(Vec::new());
         self.audio.capture = Some(Vec::new());
         LOG.with(|log| *log.borrow_mut() = Some(Vec::new()));
         let old_mobs: Vec<u32> = self.mobs.iter().map(|m| m.id).collect();
         let old_stands: Vec<u32> = self.armor_stands.iter().map(|s| s.id).collect();
+        let old_vehicles: Vec<u32> = (self.boats.iter().map(|b| b.id))
+            .chain(self.carts.iter().map(|c| c.id))
+            .collect();
 
         let pos = &case["pos"];
         let origin = BlockPos::new(
@@ -312,7 +319,25 @@ impl Game<'_> {
         );
         let state = self.world.block(origin.x, origin.y, origin.z);
         let mut used = Vec::new();
-        if let Some(op) = case.get("remove") {
+        if let Some(op) = case.get("shield_hit") {
+            used = self.fixture_shield_hit(op)?;
+        } else if let Some(op) = case.get("special_attack") {
+            used = self.fixture_special_attack(op)?;
+        } else if let Some(op) = case.get("wind_burst") {
+            let center = [
+                op["center"][0].as_f64().ok_or("wind center x")?,
+                op["center"][1].as_f64().ok_or("wind center y")?,
+                op["center"][2].as_f64().ok_or("wind center z")?,
+            ];
+            let breeze = op["breeze"].as_bool().unwrap_or(false);
+            self.wind_burst(
+                center,
+                op["radius"].as_f64().unwrap_or(3.0) as f32,
+                1.0,
+                breeze,
+                !breeze,
+            )?;
+        } else if let Some(op) = case.get("remove") {
             used = self.fixture_remove(origin, op)?;
         } else if let Some(op) = case.get("use") {
             used = self.fixture_use(origin, op)?;
@@ -329,7 +354,7 @@ impl Game<'_> {
             let found =
                 self.find_respawn_and_use(config, op["consume"].as_bool().unwrap_or(true))?;
             used.push(match found {
-                Some((p, yaw)) => format!(
+                Some((p, yaw, _pitch)) => format!(
                     "respawn {} {} {} {}",
                     num(p.x),
                     num(p.y),
@@ -448,9 +473,19 @@ impl Game<'_> {
                 s.spawn_delay as i16
             ));
         }
-        self.fixture_entities(&old_mobs, &old_stands, &mut out);
+        self.fixture_entities(&old_mobs, &old_stands, &old_vehicles, &mut out);
+        if case["pickup_delay"].as_bool().unwrap_or(false) {
+            for item in &self.dropped {
+                out.push(format!(
+                    "pickup {} {}",
+                    canon_stack(Some(&item.stack)),
+                    item.pickup_delay
+                ));
+            }
+        }
         for (i, t) in targets.iter().enumerate() {
             out.push(self.fixture_describe(i, t));
+            self.fixture_vehicle_items(i, t, &mut out);
         }
         let log = LOG.with(|log| log.borrow_mut().take()).unwrap_or_default();
         let event_sounds: Vec<String> = log.iter().filter_map(|l| event_sound(l)).collect();
@@ -461,6 +496,68 @@ impl Game<'_> {
         }
         out.extend(used);
         out.push(format!("rng {}", self.world.random.next_long()));
+        Ok(out)
+    }
+
+    /// Actual player combat and blocking-item side effects, without a window or connection.
+    fn fixture_shield_hit(&mut self, op: &Value) -> Result<Vec<String>> {
+        let stack = parse_stack(op["item"].as_str().ok_or("shield_hit item")?)?
+            .ok_or("shield_hit requires an item")?;
+        let item = stack.item.clone();
+        self.creative = op["creative"].as_bool().unwrap_or(false);
+        self.mode = if self.creative {
+            GameMode::Creative
+        } else {
+            GameMode::Survival
+        };
+        self.player = Some(PlayerMotion::new(
+            self.motion,
+            horizon_core::geometry::Vec3::new(0.0, 0.0, 0.0),
+        )?);
+        self.yaw = 0.0;
+        self.armor = Default::default();
+        self.offhand = Some(stack);
+        self.using = Some((super::shield::OFFHAND_SLOT, 100));
+        self.combat = Default::default();
+        let before = self.stats.get("used", &item);
+        let from = horizon_core::geometry::Vec3::new(
+            0.0,
+            0.0,
+            if op["behind"].as_bool().unwrap_or(false) {
+                -1.0
+            } else {
+                1.0
+            },
+        );
+        let mut arrow = horizon_client::projectiles::Projectile::new(
+            ProjectileKind::Arrow {
+                base_damage: op["damage"].as_f64().unwrap_or(8.0),
+                critical: false,
+                effect: None,
+            },
+            from,
+            None,
+        );
+        arrow.velocity = horizon_core::geometry::Vec3::new(0.0, 0.0, 1.0);
+        arrow.arrow.as_mut().unwrap().pierce = u8::from(op["pierce"].as_bool().unwrap_or(false));
+        self.projectile_hit(
+            &arrow,
+            horizon_client::projectiles::Hit::Entity {
+                who: horizon_client::mobs::Who::Player,
+                at: horizon_core::geometry::Vec3::ZERO,
+            },
+        )?;
+        let out = vec![format!(
+            "shield health={} used={} stack={}",
+            num(f64::from(self.player.as_ref().unwrap().health.health())),
+            self.stats.get("used", &item) - before,
+            self.offhand
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |s| format!("{}:{}", s.count, s.damage))
+        )];
+        self.player = None;
+        self.offhand = None;
+        self.using = None;
         Ok(out)
     }
 
@@ -545,6 +642,7 @@ impl Game<'_> {
                 dim: self.dim,
                 pos: [p(0), p(1), p(2)],
                 yaw: 0.0,
+                pitch: 0.0,
                 forced: false,
             });
         }
@@ -635,6 +733,46 @@ impl Game<'_> {
         Ok(out)
     }
 
+    /// Compare a raised item's durability across two frontal hits.
+    fn fixture_blocking_wear(&mut self, op: &Value) -> Result<Vec<String>> {
+        let stack = parse_stack(op["item"].as_str().ok_or("missing blocking stack")?)?
+            .ok_or("empty blocking stack")?;
+        // Reload the stack just as a player inventory does between sessions.
+        let saved = horizon_items::item_nbt::item_to_nbt(&stack);
+        self.inventory[self.selected] = horizon_items::item_nbt::item_from_nbt(&saved);
+        let (creative, mode) = (self.creative, self.mode);
+        self.creative = op["creative"].as_bool().unwrap_or(false);
+        self.mode = if self.creative {
+            GameMode::Creative
+        } else {
+            GameMode::Survival
+        };
+        self.combat = Default::default();
+        self.using = None;
+        self.shield_cooldown = 0;
+        self.yaw = 0.0;
+        self.player = Some(PlayerMotion::new(
+            self.motion,
+            horizon_core::geometry::Vec3::new(0.0, 64.0, 0.0),
+        )?);
+        if !self.raise_shield(self.selected) || self.using.is_none() {
+            return Err("could not raise blocking stack".into());
+        }
+        let mut lines = Vec::new();
+        for _ in 0..2 {
+            self.hurt_player_from(4.0, Some([0.0, 64.0, 2.0]), "minecraft:arrow", Some(None));
+            let stack = self.inventory[self.selected].as_ref();
+            let (count, damage) = stack.map_or((0, 0), |stack| (stack.count, stack.damage));
+            lines.push(format!("blocking wear {count} {damage}"));
+        }
+        self.player = None;
+        self.using = None;
+        self.inventory[self.selected] = None;
+        self.creative = creative;
+        self.mode = mode;
+        Ok(lines)
+    }
+
     /// The player's hit on the first target with the case's item, from the
     /// attack strength's scaled `base` damage on: the item's damage bonus and
     /// source, the hurt with the weapon's armor effects, then `weapon_hit`
@@ -655,6 +793,8 @@ impl Game<'_> {
                 v[2].as_f64().unwrap_or(0.0),
             )
         };
+        // A new player: no combat of an earlier case's.
+        self.combat = Default::default();
         let mut player = PlayerMotion::new(self.motion, v3(&op["player"]))?;
         player.velocity = v3(&op["motion"]);
         player.fall_distance = op["fall"].as_f64().unwrap_or(0.0);
@@ -670,6 +810,7 @@ impl Game<'_> {
         let used_before = stack
             .as_ref()
             .map_or(0, |s| self.stats.get("used", &s.item));
+        let taken_before = self.stats.get("custom", "minecraft:damage_taken");
         let base = op["base"].as_f64().unwrap_or(0.0) as f32;
         let source = self.attack_source(feet);
         let (bonus, hurt) = match targets.first() {
@@ -703,15 +844,42 @@ impl Game<'_> {
                 let bonus = self.smash_damage_bonus("minecraft:armor_stand");
                 (bonus, self.hit_armor_stand(index, |_, _, _| {}))
             }
-            None => return Err("an attack case has a target".into()),
+            _ => return Err("an attack case has a mob or armor stand target".into()),
         };
         self.process_level_events()?;
         let mut out = Vec::new();
+        // What the player's tick makes of its own hurt (the victim's Thorns):
+        // the combat record with its statistic, the hurt sound where it
+        // stands and the damage game event of the health it lost.
+        let events = self
+            .player
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.events))
+            .unwrap_or_default();
+        self.record_combat(&events);
+        for event in &events {
+            if let horizon_client::motion::MotionEvent::HurtSound(sound) = event {
+                out.push(format!("S {} {sound}", floor_pos(feet)));
+            }
+        }
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|p| p.health.health() < 20.0)
+        {
+            self.post_entity_event("minecraft:entity_damage", horizon_client::mobs::Who::Player);
+        }
         if let Some(s) = &stack {
             let used = self.stats.get("used", &s.item) - used_before;
             if used != 0 {
                 out.push(format!("stat {} minecraft:used {used}", s.item));
             }
+        }
+        let taken = self.stats.get("custom", "minecraft:damage_taken") - taken_before;
+        if taken != 0 {
+            out.push(format!(
+                "stat minecraft:damage_taken minecraft:custom {taken}"
+            ));
         }
         let source = match source.kind {
             horizon_client::mobs::DamageKind::MaceSmash => "minecraft:mace_smash",
@@ -735,6 +903,7 @@ impl Game<'_> {
                         continue;
                     }
                 },
+                Target::Boat(_) | Target::Cart(_) => continue,
             };
             out.push(format!(
                 "V {i} {health} {} {} {}",
@@ -742,6 +911,25 @@ impl Game<'_> {
                 num(v.y),
                 num(v.z)
             ));
+        }
+        // What the first target wears, worn by its Thorns.
+        if let Some(&Target::Mob(id)) = targets.first()
+            && let Some(m) = self.mobs.iter().find(|m| m.id == id)
+        {
+            use horizon_client::mobs::finalize as f;
+            for (slot, name) in [
+                (f::FEET, "feet"),
+                (f::LEGS, "legs"),
+                (f::CHEST, "chest"),
+                (f::HEAD, "head"),
+            ] {
+                if let Some(s) = f::item_stack(m, slot) {
+                    out.push(format!("W {name} {}", canon_stack(Some(&s))));
+                }
+            }
+        }
+        if let Some(p) = self.player.as_ref() {
+            out.push(format!("H {}", num(f64::from(p.health.health()))));
         }
         if let Some(p) = self.player.take() {
             let impact = p.impulse.impact_position.map_or("-".to_owned(), |i| {
@@ -787,9 +975,14 @@ impl Game<'_> {
                 self.world.block_entities.insert(
                     p,
                     BlockEntity::Jukebox(horizon_client::containers::Jukebox {
+                        song_clock_present: stack
+                            .as_ref()
+                            .and_then(|s| self.res.items().get(&s.item))
+                            .is_some_and(|i| i.jukebox_song.is_some()),
                         items: [stack],
                         ticks: 0,
                         playing: false,
+                        loaded_clock: false,
                     }),
                 );
             }
@@ -878,14 +1071,19 @@ impl Game<'_> {
         Ok(Vec::new())
     }
 
-    /// A survival player three blocks south of `pos` mines it holding the
-    /// case's item (`break_block`, which every player's mining goes through):
-    /// the statistics and the held stack, as `VanillaDispenserOracle.mine`
-    /// prints them.
+    /// A player three blocks south of `pos` mines it holding the case's item
+    /// (`break_block`, which every player's mining goes through), in survival
+    /// or in creative, where the block and its contents never drop: the
+    /// statistics and the held stack, as `VanillaDispenserOracle.mine` prints
+    /// them.
     fn fixture_mine(&mut self, pos: BlockPos, op: &Value) -> Result<Vec<String>> {
         let stack = parse_stack(op["item"].as_str().unwrap_or("-"))?;
-        self.mode = GameMode::Survival;
-        self.creative = false;
+        self.mode = if op["creative"].as_bool().unwrap_or(false) {
+            GameMode::Creative
+        } else {
+            GameMode::Survival
+        };
+        self.creative = self.mode == GameMode::Creative;
         self.player = Some(PlayerMotion::new(
             self.motion,
             horizon_core::geometry::Vec3::new(
@@ -971,10 +1169,26 @@ impl Game<'_> {
         let yaw = e["yaw"].as_f64().unwrap_or(0.0) as f32;
         self.next_entity += 1;
         let id = self.next_entity;
+        if let Some(cart) = super::minecarts::CartKind::from_id(kind) {
+            let mut c = super::minecarts::Minecart::new(id, cart, at);
+            c.yaw = yaw;
+            self.carts.push(c);
+            return Ok(Target::Cart(id));
+        }
+        if let Some((wood, chest)) = super::boats::any_boat_wood(kind) {
+            let mut boat = super::boats::Boat::new(id, wood.into(), at, yaw);
+            if chest {
+                boat = boat.with_chest();
+            }
+            self.boats.push(boat);
+            return Ok(Target::Boat(id));
+        }
         if kind == "minecraft:armor_stand" {
             let mut stand = horizon_client::entities::ArmorStand::new(id, at, yaw);
             stand.marker = e["marker"].as_bool().unwrap_or(false);
             stand.on_ground = e["ground"].as_bool().unwrap_or(false);
+            stand.show_arms = e["arms"].as_bool().unwrap_or(false);
+            stand.disabled_slots = e["disabled"].as_i64().unwrap_or(0) as i32;
             if let Some(last_hit) = e["last_hit"].as_i64() {
                 stand.last_hit = last_hit;
             }
@@ -1039,22 +1253,53 @@ impl Game<'_> {
         if flag("brown") && s == Species::Mooshroom {
             mob.extra.variant = 1;
         }
-        for (slot, snbt) in e["equip"].as_object().into_iter().flatten() {
+        for (name, snbt) in e["equip"].as_object().into_iter().flatten() {
             if let (Some(slot), Some(stack)) = (
-                Slot::from_name(slot),
+                Slot::from_name(name),
                 parse_stack(snbt.as_str().unwrap_or("-"))?,
             ) {
-                mob_set_slot(&mut mob, slot, stack);
+                // `setItemSlot` keeps the whole stack: a piece's enchantments and damage.
+                let kept = ["mainhand", "offhand", "feet", "legs", "chest", "head"]
+                    .iter()
+                    .position(|s| s == name)
+                    .filter(|_| stack.extra.is_some() || stack.damage > 0);
+                match kept {
+                    Some(at) => horizon_client::mobs::finalize::set_item_stack(&mut mob, at, stack),
+                    None => mob_set_slot(&mut mob, slot, stack),
+                }
             }
         }
         self.mobs.push(mob);
         Ok(Target::Mob(id))
     }
 
+    /// `Tinv` lines: a container entity target's items by slot, as
+    /// `VanillaDispenserOracle` prints a `ContainerEntity`'s.
+    fn fixture_vehicle_items(&self, index: usize, target: &Target, out: &mut Vec<String>) {
+        let items = match *target {
+            Target::Boat(id) => self.boats.iter().find(|b| b.id == id).map(|b| &b.items),
+            Target::Cart(id) => self.carts.iter().find(|c| c.id == id).map(|c| &c.items),
+            Target::Mob(_) | Target::Stand(_) => None,
+        };
+        for (slot, stack) in items.into_iter().flatten().enumerate() {
+            if let Some(stack) = stack {
+                out.push(format!("Tinv {index} {slot} {}", canon_stack(Some(stack))));
+            }
+        }
+    }
+
     /// `T` lines: removal, equipment by `EquipmentSlot`, shearing readiness, chests.
     fn fixture_describe(&self, index: usize, target: &Target) -> String {
         let mut line = format!("T {index} ");
         match *target {
+            Target::Boat(id) => match self.boats.iter().find(|b| b.id == id) {
+                Some(b) => line.push_str(&b.entity_type()),
+                None => line.push_str("removed"),
+            },
+            Target::Cart(id) => match self.carts.iter().find(|c| c.id == id) {
+                Some(c) => line.push_str(c.kind.id()),
+                None => line.push_str("removed"),
+            },
             Target::Stand(id) => {
                 line.push_str("minecraft:armor_stand");
                 let Some(stand) = self.armor_stands.iter().find(|s| s.id == id) else {
@@ -1129,7 +1374,13 @@ impl Game<'_> {
     }
 
     /// `N` lines for every entity the dispenser added.
-    fn fixture_entities(&self, old_mobs: &[u32], old_stands: &[u32], out: &mut Vec<String>) {
+    fn fixture_entities(
+        &self,
+        old_mobs: &[u32],
+        old_stands: &[u32],
+        old_vehicles: &[u32],
+        out: &mut Vec<String>,
+    ) {
         let line = |kind: &str, p: [f64; 3], v: [f64; 3], extra: &str| {
             let mut l = format!(
                 "N {kind} {} {} {} {} {} {}",
@@ -1192,6 +1443,9 @@ impl Game<'_> {
                 ProjectileKind::Egg => "minecraft:egg",
                 ProjectileKind::SmallFireball => "minecraft:small_fireball",
                 ProjectileKind::WindCharge => "minecraft:wind_charge",
+                ProjectileKind::Potion(_, true) => "minecraft:lingering_potion",
+                ProjectileKind::Potion(..) => "minecraft:splash_potion",
+                ProjectileKind::ExperienceBottle => "minecraft:experience_bottle",
                 _ => "minecraft:unknown_projectile",
             };
             let (p, v) = (shot.position, shot.velocity);
@@ -1217,7 +1471,7 @@ impl Game<'_> {
                 &format!("fuse={}", t.fuse),
             ));
         }
-        for b in &self.boats {
+        for b in self.boats.iter().filter(|b| !old_vehicles.contains(&b.id)) {
             let kind = b.entity_type();
             let (p, v) = (b.position, b.velocity);
             out.push(line(&kind, [p.x, p.y, p.z], [v.x, v.y, v.z], ""));
@@ -1231,11 +1485,11 @@ impl Game<'_> {
                     "minecraft:experience_orb",
                     [p.x, p.y, p.z],
                     [v.x, v.y, v.z],
-                    "",
+                    &format!("value={}", o.value),
                 ));
             }
         }
-        for c in &self.carts {
+        for c in self.carts.iter().filter(|c| !old_vehicles.contains(&c.id)) {
             let (p, v) = (c.position, c.velocity);
             out.push(line(c.kind.id(), [p.x, p.y, p.z], [v.x, v.y, v.z], ""));
         }

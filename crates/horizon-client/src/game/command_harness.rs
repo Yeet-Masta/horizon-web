@@ -131,6 +131,9 @@ impl Game<'_> {
             {
                 return Ok((guest.conn, menu.slot_count() - 36, *window));
             }
+            if let Some(station) = host.play.get(&guest.conn).and_then(|p| p.station.as_ref()) {
+                return Ok((guest.conn, station.menu.slot_count() - 36, station.window));
+            }
             Ok((guest.conn, 0, 0))
         })
     }
@@ -164,7 +167,7 @@ impl Game<'_> {
         // its hub record, which leave_guest would otherwise overwrite.
         self.in_owner_level(|g| {
             let mut host = g.lan.take().ok_or("command harness: no hub")?;
-            g.start_server_trip(&mut host, conn, plan.dim, Some(plan));
+            g.start_server_trip(&mut host, conn, plan.dim, Some(plan), false);
             g.lan = Some(host);
             Ok(())
         })
@@ -206,6 +209,7 @@ impl Game<'_> {
                     // in those chunks (areEntitiesActuallyLoadedAndTicking):
                     // after a dimension change they come back from the save.
                     self.spawn_loaded_entities();
+                    self.world.entities_pending.clear();
                     return Ok(());
                 }
             }
@@ -268,13 +272,42 @@ impl Game<'_> {
                     let command = op["cmd"].as_str().unwrap_or("");
                     self.chat_capture = Some(Vec::new());
                     self.cmds.results = Some(Vec::new());
+                    let earlier = self.adv.announced.len();
+                    self.cmds.broadcast_announced = earlier;
                     self.harness_owner(|g| {
+                        let previous = g.command_source;
+                        if op["source"].as_str() == Some("console") {
+                            // Actual server source; permission-only `as_console`
+                            // otherwise keeps the connected owner's entity.
+                            g.command_source = Some(super::commands::execute::Source {
+                                silent: false,
+                                ..g.server_source()
+                            });
+                        }
                         g.as_console(|g| {
                             g.run_command(command.strip_prefix('/').unwrap_or(command))
                         });
+                        g.command_source = previous;
                         Ok(())
                     })?;
-                    let messages = self.chat_capture.take().unwrap_or_default();
+                    // What the command's own `broadcastChanges` earned is announced
+                    // before its feedback, as a guest's command sends it
+                    // (`announce_guest_advancements`); the rest is left for the tick.
+                    let earned: Vec<_> = {
+                        let len = self.adv.announced.len();
+                        let end = self.cmds.broadcast_announced.clamp(earlier.min(len), len);
+                        self.adv.announced.drain(earlier.min(len)..end).collect()
+                    };
+                    if let Some(host) = self.lan.as_mut() {
+                        for text in &earned {
+                            host.hub
+                                .system_message(horizon_client::lan::data::component_nbt(
+                                    &text.component(),
+                                ));
+                        }
+                    }
+                    let mut messages = earned;
+                    messages.extend(self.chat_capture.take().unwrap_or_default());
                     let results = self.cmds.results.take().unwrap_or_default();
                     if op["record"].as_bool() != Some(false) || op["trace"].as_bool() == Some(true)
                     {
@@ -291,6 +324,43 @@ impl Game<'_> {
                             out.push('\n');
                         }
                     }
+                }
+                "projectile_saved_type" => {
+                    let uuid = u128::from_str_radix(
+                        &op["uuid"]
+                            .as_str()
+                            .ok_or("projectile type: missing UUID")?
+                            .replace('-', ""),
+                        16,
+                    )?;
+                    let state = self.harness_owner(|g| {
+                        let Some(super::commands::Target::Projectile(id)) = g.target_by_uuid(uuid) else {
+                            return Err("projectile type: missing loaded projectile".into());
+                        };
+                        let actual = *g.persist.uuids.get(&id).ok_or("projectile type: missing actual UUID")?;
+                        if horizon_client::lan::playerdata::ints_uuid(actual) != uuid {
+                            return Err("projectile type: UUID mismatch".into());
+                        }
+                        let p = g.creatures.projectiles.iter().find(|p| p.id == id)
+                            .ok_or("projectile type: missing model")?;
+                        // Read the live save adapter's type, not the generic selector alias.
+                        // No Duration value is supplied by this admission observation.
+                        let saved = horizon_client::entity_nbt::arrow_to_nbt(p, actual, None, None, None)
+                            .ok_or("projectile type: not an actual arrow")?;
+                        Ok(json!({"uuid":actual,"kind":horizon_client::entity_nbt::kind(&saved)
+                            .ok_or("projectile type: missing saved type")?,
+                            "pos":[p.position.x,p.position.y,p.position.z],"no_gravity":p.no_gravity}))
+                    })?;
+                    out.push_str(&json!({"cmd":format!("#projectile_saved_type {}",op["label"].as_str().unwrap_or("")),
+                        "messages":[],"results":[],"state":state}).to_string());
+                    out.push('\n');
+                }
+                "raid_state" => {
+                    let state = self.harness_owner(|g| g.raid_fixture_state(&op))?;
+                    let row = json!({"cmd":format!("#raid_state {} {}",op["label"].as_str().unwrap_or(""),op["id"]),
+                        "messages":[],"results":[],"state":state});
+                    out.push_str(&row.to_string());
+                    out.push('\n');
                 }
                 "mob_anger" => {
                     // Metadata-state equality through the production writer, not packet delivery.
@@ -327,7 +397,7 @@ impl Game<'_> {
                         let (mut meta, mut defaults) = (Vec::new(), Vec::new());
                         super::lan::mob_meta(
                             m,
-                            hub,
+                            hub.sync_data(),
                             None,
                             g.world.game_time,
                             &mut meta,
@@ -414,6 +484,8 @@ impl Game<'_> {
                                         .iter()
                                         .any(|(key, _)| *key == (x, z))
                             }) {
+                                // The oracle waits for `areEntitiesLoaded` too.
+                                g.world.entities_pending.clear();
                                 break;
                             }
                             if Instant::now() > deadline {
@@ -590,6 +662,128 @@ impl Game<'_> {
                 }
                 // Java produced the fixture file before this world was opened; map_state loads it.
                 "crafter_max_map_fixture" => {}
+                "boat_interact" => {
+                    let uuid = u128::from_str_radix(
+                        &op["uuid"]
+                            .as_str()
+                            .ok_or("boat click: missing UUID")?
+                            .replace('-', ""),
+                        16,
+                    )?;
+                    self.in_owner_level(|g| -> Result<()> {
+                        let id = g
+                            .boat_by_uuid(horizon_client::lan::playerdata::uuid_ints(uuid))
+                            .ok_or("boat click: missing live boat")?;
+                        let owner = g.serving.as_ref().ok_or("boat click: no server")?.owner;
+                        let conn = g
+                            .lan
+                            .as_ref()
+                            .and_then(|h| {
+                                h.hub
+                                    .guests
+                                    .iter()
+                                    .find(|p| p.uuid == owner && p.placed)
+                                    .map(|p| p.conn)
+                            })
+                            .ok_or("boat click: owner not connected")?;
+                        let mut host = g.lan.take().ok_or("boat click: no hub")?;
+                        g.lan_guest_packet(
+                            &mut host,
+                            conn,
+                            horizon_protocol::packets::play::Serverbound::Interact(
+                                horizon_protocol::packets::play::Interact {
+                                    id: id as i32,
+                                    hand: 0,
+                                    location: [0.0; 3],
+                                    secondary: false,
+                                },
+                            ),
+                        );
+                        g.lan = Some(host);
+                        Ok(())
+                    })?;
+                }
+                "mob_interact" => {
+                    // The owner's real Interact packet on a live mob, by UUID.
+                    let uuid = u128::from_str_radix(
+                        &op["uuid"]
+                            .as_str()
+                            .ok_or("mob click: missing UUID")?
+                            .replace('-', ""),
+                        16,
+                    )?;
+                    self.in_owner_level(|g| -> Result<()> {
+                        let id = g
+                            .mob_by_uuid(horizon_client::lan::playerdata::uuid_ints(uuid))
+                            .filter(|id| g.mobs.iter().any(|m| m.id == *id && !m.removed))
+                            .ok_or("mob click: missing live mob")?;
+                        let owner = g.serving.as_ref().ok_or("mob click: no server")?.owner;
+                        let conn = g
+                            .lan
+                            .as_ref()
+                            .and_then(|h| {
+                                h.hub
+                                    .guests
+                                    .iter()
+                                    .find(|p| p.uuid == owner && p.placed)
+                                    .map(|p| p.conn)
+                            })
+                            .ok_or("mob click: owner not connected")?;
+                        let mut host = g.lan.take().ok_or("mob click: no hub")?;
+                        g.lan_guest_packet(
+                            &mut host,
+                            conn,
+                            horizon_protocol::packets::play::Serverbound::Interact(
+                                horizon_protocol::packets::play::Interact {
+                                    id: id as i32,
+                                    hand: 0,
+                                    location: [0.0; 3],
+                                    secondary: false,
+                                },
+                            ),
+                        );
+                        g.lan = Some(host);
+                        Ok(())
+                    })?;
+                }
+                "player_command" => {
+                    // The owner's real ServerboundPlayerCommandPacket, through the
+                    // server's own handler (START_RIDING_JUMP is action 3).
+                    let action = match op["action"].as_str() {
+                        Some("start_riding_jump") => 3,
+                        Some("stop_riding_jump") => 4,
+                        _ => return Err("player command: unknown action".into()),
+                    };
+                    let data = op["data"].as_i64().ok_or("player command: missing data")? as i32;
+                    let owner = self
+                        .serving
+                        .as_ref()
+                        .ok_or("command harness: no server")?
+                        .owner;
+                    self.in_owner_level(|g| -> Result<()> {
+                        let (conn, id) = g
+                            .lan
+                            .as_ref()
+                            .and_then(|h| {
+                                h.hub
+                                    .guests
+                                    .iter()
+                                    .find(|p| p.uuid == owner && p.placed)
+                                    .map(|p| (p.conn, p.entity_id))
+                            })
+                            .ok_or("player command: owner not connected")?;
+                        let mut host = g.lan.take().ok_or("player command: no hub")?;
+                        g.lan_guest_packet(
+                            &mut host,
+                            conn,
+                            horizon_protocol::packets::play::Serverbound::PlayerCommand(
+                                horizon_protocol::packets::play::PlayerCommand { id, action, data },
+                            ),
+                        );
+                        g.lan = Some(host);
+                        Ok(())
+                    })?;
+                }
                 "use_item" => {
                     let owner = self
                         .serving
@@ -676,14 +870,125 @@ impl Game<'_> {
                     );
                     out.push('\n');
                 }
+                "map_carried" => {
+                    self.harness_owner(|g| {
+                        g.tick_maps();
+                        Ok(())
+                    })?;
+                }
+                "craft_menu_click" | "craft_menu_state" | "craft_menu_close" => {
+                    let owner = self.serving.as_ref().ok_or("no server")?.owner;
+                    let state = self.in_owner_level(|g| -> Result<Value> {
+                        let conn = g.lan.as_ref().and_then(|h| h.hub.guests.iter()
+                            .find(|p| p.uuid == owner && p.placed).map(|p| p.conn))
+                            .ok_or("craft fixture: no connected owner")?;
+                        let mut host = g.lan.take().ok_or("no hub")?;
+                        let result = (|| -> Result<Value> {
+                            let (window, revision, _, _) = host.play.get(&conn)
+                                .and_then(|p| p.crafting.table.as_ref())
+                                .ok_or("craft fixture: crafting menu not open")?;
+                            let (window, revision) = (*window, *revision);
+                            if op["op"] == "craft_menu_click" {
+                                // Revision last sent by the real table-content sync, never a fixed 0.
+                                eprintln!("craft fixture click: window={window}, revision={revision}");
+                                g.lan_guest_packet(&mut host, conn,
+                                    horizon_protocol::packets::play::Serverbound::ContainerClick(
+                                        horizon_protocol::packets::play::ContainerClick {
+                                            container: window, state: revision,
+                                            slot: op["slot"].as_i64().ok_or("click slot")? as i16,
+                                            button: op["button"].as_i64().unwrap_or(0) as i8,
+                                            input: op["input"].as_i64().unwrap_or(0) as i32,
+                                            changed: Vec::new(), carried: None,
+                                        }));
+                                return Ok(Value::Null);
+                            }
+                            if op["op"] == "craft_menu_close" {
+                                g.lan_guest_packet(&mut host, conn,
+                                    horizon_protocol::packets::play::Serverbound::ContainerClose(
+                                        horizon_protocol::packets::play::ContainerClose { container: window }));
+                                return Ok(Value::Null);
+                            }
+                            let (_, _, menu, _) = host.play.get(&conn)
+                                .and_then(|p| p.crafting.table.as_ref()).unwrap();
+                            if menu.kind() != horizon_client::menu::Kind::Crafting {
+                                return Err("craft fixture: wrong menu kind".into());
+                            }
+                            let guest = host.hub.guest(conn).ok_or("no guest")?;
+                            let stack = |s: Option<&horizon_client::items::ItemStack>| {
+                                s.map(|s| json!([&*s.item, s.count,
+                                    s.data().and_then(|d| d.map_id),
+                                    s.data().and_then(|d| d.map_post_processing)]))
+                            };
+                            // Table's ten slots plus the owner's live inventory in menu order.
+                            let slots: Vec<_> = (0..10).map(|i| stack(menu.slot(i)))
+                                .chain((9..36).chain(0..9).map(|i| stack(guest.inventory[i].as_ref())))
+                                .collect();
+                            Ok(json!({"window": window, "kind": "minecraft:crafting",
+                                "slots": slots, "carried": stack(guest.carried.as_ref()).unwrap_or_else(|| json!([]))}))
+                        })();
+                        g.lan = Some(host);
+                        result
+                    })?;
+                    if op["op"] == "craft_menu_state" {
+                        let record = json!({"cmd": format!("#craft_menu {}", op["label"].as_str().unwrap_or("")),
+                            "state": state, "messages": [], "results": []});
+                        out.push_str(&record.to_string());
+                        out.push('\n');
+                    }
+                }
+                "map_files" => {
+                    let state = self.harness_owner(|g| {
+                        use horizon_world::nbt::Tag;
+                        g.save_maps();
+                        let directory = g.world_root.join("data/minecraft/maps");
+                        let maps: Vec<_> = op["ids"].as_array().ok_or("map IDs")?.iter().map(|id| {
+                            let path = directory.join(format!("{}.dat", id.as_i64().unwrap()));
+                            horizon_client::save::read_dat(&path).map(|root| {
+                                let data = root.get("data").unwrap_or(&root);
+                                let number = |key| match data.get(key) {
+                                    Some(Tag::Int(v)) => *v, Some(Tag::Byte(v)) => i32::from(*v), _ => 0,
+                                };
+                                let colors = match data.get("colors") {
+                                    Some(Tag::ByteArray(bytes)) => Some(bytes.len()), _ => None,
+                                };
+                                json!({"scale": number("scale"), "locked": number("locked") != 0,
+                                    "center": [number("xCenter"), number("zCenter")],
+                                    "dimension": horizon_client::save::text(data.get("dimension")),
+                                    "byte_array_length": colors})
+                            })
+                        }).collect();
+                        let last = horizon_client::save::read_dat(&directory.join("last_id.dat"))
+                            .and_then(|tag| match tag.get("data").and_then(|d| d.get("map")) {
+                                Some(Tag::Int(v)) => Some(*v), _ => None,
+                            });
+                        Ok(json!({"maps": maps, "last_id": last}))
+                    })?;
+                    out.push_str(
+                        &json!({"cmd": "#map_files", "state": state,
+                        "messages": [], "results": []})
+                        .to_string(),
+                    );
+                    out.push('\n');
+                }
                 "map_state" => {
                     let id = op["id"].as_i64().ok_or("command harness: map id")? as i32;
                     let value = self.harness_owner(|g| {
                         Ok(match g.map(id) {
-                            Some(m) => format!(
-                                "scale={},locked={},center={},{}",
-                                m.scale, m.locked, m.center[0], m.center[1]
-                            ),
+                            Some(m) => {
+                                let mut value = format!(
+                                    "scale={},locked={},center={},{}",
+                                    m.scale, m.locked, m.center[0], m.center[1]
+                                );
+                                if op["red_x"].as_bool().unwrap_or(false) {
+                                    let count = m
+                                        .decorations
+                                        .iter()
+                                        .filter(|d| d.sprite == "map/decorations/red_x")
+                                        .count();
+                                    value.push_str(&format!(",red_x={count}"));
+                                }
+                                value
+                            }
                             None => "missing".to_owned(),
                         })
                     })?;
@@ -708,6 +1013,125 @@ impl Game<'_> {
                         "messages": [], "results": levels.map(|v| (true, v))});
                     out.push_str(&record.to_string());
                     out.push('\n');
+                }
+                "merchant_saved_stats" => {
+                    let (state, raw) = self.harness_owner(|g| {
+                        g.load_stats();
+                        if !g.stats.loaded { return Err("merchant stats not loaded".into()); }
+                        g.save_stats();
+                        let uuid = g.level.player_uuid.ok_or("merchant stats UUID")?;
+                        let path = super::stats::player_json(&g.world_root, "stats", uuid);
+                        let raw = horizon_std::fs::read_to_string(path)?;
+                        let saved: Value = serde_json::from_str(&raw)?;
+                        let value = |ty: &str, key: &str| saved["stats"][ty][key].as_i64().unwrap_or(0);
+                        Ok((json!({"uuid":uuid,"books":value("minecraft:crafted","minecraft:bookshelf"),
+                            "glass":value("minecraft:crafted","minecraft:glass"),
+                            "trades":value("minecraft:custom","minecraft:traded_with_villager")}), raw))
+                    })?;
+                    let label = op["label"].as_str().unwrap_or("");
+                    horizon_std::fs::write(
+                        output.with_file_name(format!("native-merchant-stats-{label}.json")),
+                        raw,
+                    )?;
+                    out.push_str(
+                        &json!({"cmd":format!("#merchant_saved_stats {label}"),
+                        "messages":[],"results":[],"state":state})
+                        .to_string(),
+                    );
+                    out.push('\n');
+                }
+                "merchant_action" | "merchant_state" => {
+                    let observe = op["op"] == "merchant_state";
+                    let state = self.in_owner_level(|g| -> Result<Value> {
+                        let mut host = g.lan.take().ok_or("merchant oracle: no hub")?;
+                        let result = (|| -> Result<Value> {
+                            let owner = g
+                                .serving
+                                .as_ref()
+                                .ok_or("merchant oracle: no server")?
+                                .owner;
+                            let conn = host
+                                .hub
+                                .guests
+                                .iter()
+                                .find(|p| p.uuid == owner && p.placed)
+                                .ok_or("merchant oracle: owner not connected")?
+                                .conn;
+                            if observe {
+                                return Ok(g
+                                    .harness_merchant(&host, conn)
+                                    .ok_or("merchant oracle: no live menu")?
+                                    .2);
+                            }
+                            use horizon_protocol::packets::play::{self, Serverbound as S};
+                            let packet = match op["action"].as_str().unwrap_or("") {
+                                "open" => {
+                                    let uuid = u128::from_str_radix(
+                                        op["uuid"]
+                                            .as_str()
+                                            .ok_or("merchant oracle: UUID")?
+                                            .replace('-', "")
+                                            .as_str(),
+                                        16,
+                                    )?;
+                                    let Some(super::commands::Target::Mob(id)) =
+                                        g.target_by_uuid(uuid)
+                                    else {
+                                        return Err("merchant oracle: missing live mob".into());
+                                    };
+                                    S::Interact(play::Interact {
+                                        id: id as i32,
+                                        hand: 0,
+                                        location: [0.0; 3],
+                                        secondary: false,
+                                    })
+                                }
+                                "select" => S::SelectTrade(play::SelectTrade {
+                                    item: op["index"].as_i64().unwrap_or(0) as i32,
+                                }),
+                                "click" => {
+                                    let (container, state, _) = g
+                                        .harness_merchant(&host, conn)
+                                        .ok_or("merchant oracle: no menu")?;
+                                    S::ContainerClick(play::ContainerClick {
+                                        container,
+                                        state,
+                                        slot: op["slot"].as_i64().ok_or("merchant oracle: slot")?
+                                            as i16,
+                                        button: op["button"].as_i64().unwrap_or(0) as i8,
+                                        input: op["input"].as_i64().unwrap_or(0) as i32,
+                                        changed: Vec::new(),
+                                        carried: None,
+                                    })
+                                }
+                                "close" => S::ContainerClose(play::ContainerClose {
+                                    container: g
+                                        .harness_merchant(&host, conn)
+                                        .ok_or("merchant oracle: no menu")?
+                                        .0,
+                                }),
+                                _ => return Err("merchant oracle: unknown action".into()),
+                            };
+                            eprintln!("merchant action receipt: action={} owner={owner:032x} conn={conn} menu={:?} clock={}",
+                                op["action"], g.harness_merchant(&host, conn).map(|(w, r, _)| (w, r)), g.world.game_time);
+                            g.lan_guest_packet(&mut host, conn, packet);
+                            Ok(Value::Null)
+                        })();
+                        g.lan = Some(host);
+                        result
+                    })?;
+                    if observe {
+                        let mut state = state;
+                        if !op["offer_packets"].as_bool().unwrap_or(false) {
+                            state.as_object_mut().unwrap().remove("sent_offers");
+                            for offer in state["offers"].as_array_mut().unwrap() {
+                                offer.as_object_mut().unwrap().remove("demand");
+                            }
+                        }
+                        out.push_str(&json!({"cmd":format!("#merchant_state {}",op["label"].as_str().unwrap_or("")),
+                            "messages":[],"results":[],"state":state}).to_string());
+                        out.push('\n');
+                    }
                 }
                 "menu_state" => {
                     let (_, own_slots, _) = self.harness_owner_menu()?;
@@ -787,10 +1211,37 @@ impl Game<'_> {
                         std::array::from_fn(|i| op["pos"][i].as_i64().unwrap_or(0) as i32);
                     self.harness_owner(|g| {
                         let state = g.world.block(x, y, z);
-                        if &*g.res.facts().get(state).name != "minecraft:crafter" {
-                            return Err("command harness: crafter tick without a crafter".into());
+                        let name = &*g.res.facts().get(state).name;
+                        if name != "minecraft:crafter" && name != "minecraft:dispenser" {
+                            return Err(
+                                "command harness: crafter tick without a crafter or dispenser"
+                                    .into(),
+                            );
                         }
                         g.dispense_from(horizon_core::position::BlockPos::new(x, y, z), state)
+                    })?;
+                }
+                "sync_randoms" => {
+                    // docs/parity-workflow.md "Randoms that repeat". The script
+                    // runs on the server thread, whose uniquifier this sets.
+                    let field = |key: &str| {
+                        op[key]
+                            .as_i64()
+                            .ok_or_else(|| format!("sync_randoms: no {key}"))
+                    };
+                    let (uniquifier, entity_id, level_seed) = (
+                        field("uniquifier")?,
+                        field("entity_id")?,
+                        field("level_seed")?,
+                    );
+                    horizon_client::random_source::set_thread_uniquifier(uniquifier)?;
+                    self.harness_owner(|g| {
+                        g.next_entity = u32::try_from(entity_id)?;
+                        horizon_core::random::RandomSource::set_seed(
+                            &mut g.world.random,
+                            level_seed,
+                        );
+                        Ok(())
                     })?;
                 }
                 "break" => {

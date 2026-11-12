@@ -480,16 +480,14 @@ impl FullscreenState {
         let mode_change = !in_video_screen && self.take_mode_change();
         match request {
             Some(false) => window.set_fullscreen(None),
-            Some(true) => window.set_fullscreen(Some(fullscreen_request(
+            Some(true) => enter_fullscreen(
                 window,
-                exclusive,
-                preferred.as_ref(),
-            ))),
-            None if reapply || mode_change => window.set_fullscreen(Some(fullscreen_request(
+                fullscreen_request(window, exclusive, preferred.as_ref()),
+            ),
+            None if reapply || mode_change => enter_fullscreen(
                 window,
-                exclusive,
-                preferred.as_ref(),
-            ))),
+                fullscreen_request(window, exclusive, preferred.as_ref()),
+            ),
             None => {}
         }
     }
@@ -668,6 +666,34 @@ fn monitor_current_mode(
         .max_by_key(|m| (m.refresh_rate_millihertz(), m.bit_depth()))
 }
 
+/// `window.set_fullscreen(Some(fullscreen))`. On Windows a maximized window leaves its maximized
+/// state first: winit keeps a maximized window's client area inside the work area, so a
+/// borderless fullscreen kept the taskbar over its bottom and pushed its top off screen (#9984).
+pub fn enter_fullscreen(window: &winit::window::Window, fullscreen: winit::window::Fullscreen) {
+    #[cfg(target_os = "windows")]
+    if window.is_maximized() {
+        window.set_maximized(false);
+    }
+    window.set_fullscreen(Some(fullscreen));
+}
+
+/// Borderless fullscreen on the window's own monitor (the primary one when it has none).
+pub fn borderless_fullscreen(window: &winit::window::Window) -> winit::window::Fullscreen {
+    winit::window::Fullscreen::Borderless(
+        window
+            .current_monitor()
+            .or_else(|| window.primary_monitor()),
+    )
+}
+
+/// A window created fullscreen that the system also marked maximized enters it again
+/// unmaximized ([`enter_fullscreen`]); only Windows does that.
+pub fn settle_created_fullscreen(window: &winit::window::Window, fullscreen: bool) {
+    if cfg!(target_os = "windows") && fullscreen && window.is_maximized() {
+        enter_fullscreen(window, borderless_fullscreen(window));
+    }
+}
+
 /// `Window.applyFullscreen`: the fullscreen the window asks for. Exclusive fullscreen takes
 /// `Monitor.getPreferredVideoMode` (the preferred mode if the monitor has it, else the desktop
 /// mode); a monitor with no usable mode falls back to borderless, as vanilla does.
@@ -677,13 +703,13 @@ pub fn fullscreen_request(
     preferred: Option<&VideoMode>,
 ) -> winit::window::Fullscreen {
     use winit::window::Fullscreen;
-    if !exclusive {
-        return Fullscreen::Borderless(None);
-    }
-    let Some(monitor) = window
+    let monitor = window
         .current_monitor()
-        .or_else(|| window.primary_monitor())
-    else {
+        .or_else(|| window.primary_monitor());
+    if !exclusive {
+        return Fullscreen::Borderless(monitor);
+    }
+    let Some(monitor) = monitor else {
         return Fullscreen::Borderless(None);
     };
     let wanted = preferred.and_then(|p| {
@@ -693,14 +719,34 @@ pub fn fullscreen_request(
     });
     match wanted.or_else(|| monitor_current_mode(&monitor)) {
         Some(mode) => Fullscreen::Exclusive(mode),
-        None => Fullscreen::Borderless(None),
+        None => Fullscreen::Borderless(Some(monitor)),
     }
 }
 
-/// Horizon's icon for the window's title bar and the task bar (X11 and Windows; Wayland takes
-/// it from the `horizon.desktop` entry, macOS from the app bundle). `None` if it can't be read.
+/// The PNG the windows show as their icon, given once at startup by the layer that brands the
+/// game (the engine has none of its own).
+static ICON_PNG: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+
+/// Give the windows their icon, a PNG: call it before the first window opens. A second call
+/// keeps the first icon.
+pub fn set_icon_png(png: &'static [u8]) {
+    let _ = ICON_PNG.set(png);
+}
+
+/// The icon given to [`set_icon_png`], if any.
+pub fn icon_png() -> Option<&'static [u8]> {
+    ICON_PNG.get().copied()
+}
+
+/// The icon for the window's title bar and the task bar (X11 and Windows; Wayland takes it from
+/// the `.desktop` entry, macOS from the app bundle). `None` with no icon given, or one that
+/// can't be read.
 pub fn icon() -> Option<winit::window::Icon> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(horizon_theme::ICON_PNG));
+    decode_icon(icon_png()?)
+}
+
+fn decode_icon(png: &[u8]) -> Option<winit::window::Icon> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
     decoder.ignore_checksums(true);
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().ok()?;
@@ -711,6 +757,56 @@ pub fn icon() -> Option<winit::window::Icon> {
     }
     bytes.truncate(info.buffer_size());
     winit::window::Icon::from_rgba(bytes, info.width, info.height).ok()
+}
+
+/// Apply the icon given to [`set_icon_png`] to a window. Windows has a separate taskbar icon slot
+/// from the small window icon; requiring a given icon to decode there prevents a generic taskbar
+/// icon from appearing.
+pub fn with_icon(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    #[cfg(not(target_os = "windows"))]
+    let icon = icon();
+    #[cfg(target_os = "windows")]
+    let icon =
+        icon_png().map(|png| decode_icon(png).expect("the window icon must decode on Windows"));
+
+    let attributes = attributes.with_window_icon(icon.clone());
+    #[cfg(target_os = "windows")]
+    let attributes =
+        winit::platform::windows::WindowAttributesExtWindows::with_taskbar_icon(attributes, icon);
+    attributes
+}
+
+/// The screen a window is on: its size in physical pixels, its refresh rate where the OS gives
+/// it, and its scale. For `horizon-ctl status` and the performance statistics' `system.display`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Display {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: Option<u32>,
+    pub scale: f64,
+}
+
+/// The screen `window` is on, else the primary one, else the only one: right after the window
+/// is made, Wayland doesn't say yet which screen it is on.
+pub fn monitor(window: &winit::window::Window) -> Option<winit::monitor::MonitorHandle> {
+    let only = || {
+        let mut all = window.available_monitors();
+        all.next().filter(|_| all.next().is_none())
+    };
+    window
+        .current_monitor()
+        .or_else(|| window.primary_monitor())
+        .or_else(only)
+}
+
+/// [`monitor`]'s size, refresh rate and scale.
+pub fn display(window: &winit::window::Window) -> Option<Display> {
+    monitor(window).map(|m| Display {
+        width: m.size().width,
+        height: m.size().height,
+        refresh_hz: m.refresh_rate_millihertz().map(|r| r.div_ceil(1000)),
+        scale: m.scale_factor(),
+    })
 }
 
 #[cfg(test)]
@@ -749,7 +845,8 @@ mod tests {
     }
     #[test]
     fn the_window_icon_decodes() {
-        assert!(icon().is_some());
+        assert!(decode_icon(horizon_theme::ICON_PNG).is_some());
+        assert!(decode_icon(b"not a png").is_none());
     }
 
     #[test]

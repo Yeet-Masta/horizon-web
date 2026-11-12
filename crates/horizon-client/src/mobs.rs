@@ -5,6 +5,10 @@
 //! fly and amphibious node evaluators (`path`, `nav`), move/look/jump/body
 //! controls (`control`), `LivingEntity` physics (`living`) and per-species
 //! behaviour, models, animations and sounds.
+mod mob_slot;
+mod pending_pushes;
+pub use mob_slot::MobSlot;
+pub use pending_pushes::{PendingPushes, apply_mob_pushes};
 pub mod ai;
 pub mod allay;
 pub mod ambient;
@@ -48,6 +52,7 @@ pub mod golem;
 pub mod guardian;
 pub mod happy_ghast;
 pub mod hostile;
+mod hurt_by;
 pub mod illager;
 pub mod illusioner;
 pub mod item_break;
@@ -56,8 +61,13 @@ pub mod landing;
 pub mod leash;
 pub mod living;
 pub mod llama;
+pub mod model_layers;
 pub mod monster_brain;
 pub mod nautilus;
+pub mod neutral_anger;
+pub use neutral_anger::{
+    adopt_anger_end, anger_left, persistent_anger, resume_anger, settle_anger_end,
+};
 pub mod nav;
 pub mod nether;
 pub mod panda;
@@ -72,6 +82,7 @@ pub mod random_textures;
 pub mod ravager;
 pub mod render;
 pub mod riders;
+mod seen;
 pub mod seen_grid;
 pub mod sheep_dye;
 pub mod shulker;
@@ -102,8 +113,11 @@ pub mod warden;
 pub mod warden_brain;
 pub mod witch;
 pub mod wither;
+
+#[cfg(test)]
+mod invisible_follow_tests;
 mod world;
-pub use world::{TargetInfo, visual_clip};
+pub use world::{TargetInfo, single_player_pos, visual_clip};
 pub mod dragon_contacts;
 pub mod zombie_villager;
 
@@ -111,215 +125,17 @@ use crate::{blocks::BlockFacts, mesher::Vertex, world::World};
 pub use data::MobData;
 use horizon_core::{
     geometry::{Aabb, Vec3},
-    random::{LegacyRandom, RandomSource},
+    random::{EntityRandom, LegacyRandom, RandomSource},
 };
 use horizon_std::fs;
 use horizon_world::block_collision::BlockCollisionRegistry;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-#[derive(Clone, Debug)]
-pub struct Polygon {
-    pub normal: [f32; 3],
-    pub vertices: [[f32; 5]; 4],
-    /// The model's render type culls back faces (`entityCutoutCull`: the bat,
-    /// the baby turtle).
-    pub cull_back: bool,
-}
-impl Polygon {
-    fn vertex_normal(&self, pose: ModelNormals) -> [i8; 4] {
-        let n = pose.matrix * glam::Vec3::from_array(self.normal);
-        let n = if pose.trusted {
-            n
-        } else {
-            n.normalize_or_zero()
-        };
-        let packed = n.to_array().map(|v| (v.clamp(-1.0, 1.0) * 127.0) as i8);
-        let w = if self.cull_back {
-            crate::mesher::SHADED_CULL_W
-        } else {
-            -127
-        };
-        [packed[0], packed[1], packed[2], w]
-    }
-}
+mod model;
+use model::ModelNormals;
+pub use model::{Part, Polygon};
 
-/// ModelPart uses a separate normal stack: uniform scaling keeps normal lengths,
-/// while nonuniform scaling requires normalization after the complete part transform.
-#[derive(Clone, Copy)]
-struct ModelNormals {
-    matrix: glam::Mat3,
-    trusted: bool,
-}
-impl ModelNormals {
-    // shortcut: infer the root normal pose from its geometry matrix; pass an explicit
-    // root normal stack when root-transform rounding is ported as well.
-    fn new(base: glam::Mat4) -> Self {
-        let m = glam::Mat3::from_mat4(base);
-        let lengths = glam::Vec3::new(m.x_axis.length(), m.y_axis.length(), m.z_axis.length());
-        let uniform =
-            lengths.min_element() > 0.0 && lengths.max_element() - lengths.min_element() < 1.0e-6;
-        Self {
-            matrix: if uniform {
-                m / lengths.x
-            } else {
-                m.inverse().transpose()
-            },
-            trusted: uniform,
-        }
-    }
-    fn rotation(x: f32, y: f32, z: f32) -> glam::Mat3 {
-        // JOML derives cosine from the rounded sine, then retains quaternion length.
-        // Assuming an exactly unit quaternion changes a packed normal by one byte.
-        let sin_cos = |angle: f32| {
-            let angle = angle * 0.5;
-            let sin = f64::from(angle).sin() as f32;
-            let cos = (1.0 - sin * sin).sqrt();
-            let a = angle + std::f32::consts::FRAC_PI_2;
-            let tau = std::f32::consts::TAU;
-            let mut quadrant = a - (a / tau) as i32 as f32 * tau;
-            if quadrant < 0.0 {
-                quadrant += tau;
-            }
-            (
-                sin,
-                if quadrant >= std::f32::consts::PI {
-                    -cos
-                } else {
-                    cos
-                },
-            )
-        };
-        let (sx, cx) = sin_cos(x);
-        let (sy, cy) = sin_cos(y);
-        let (sz, cz) = sin_cos(z);
-        let (cycz, sysz, sycz, cysz) = (cy * cz, sy * sz, sy * cz, cy * sz);
-        let (w, x, y, z) = (
-            cx * cycz + sx * sysz,
-            sx * cycz - cx * sysz,
-            cx * sycz + sx * cysz,
-            cx * cysz - sx * sycz,
-        );
-        let (ww, xx, yy, zz) = (w * w, x * x, y * y, z * z);
-        let (xy, xz, xw, yz, yw, zw) = (x * y, x * z, x * w, y * z, y * w, z * w);
-        glam::Mat3::from_cols_array(&[
-            ww + xx - zz - yy,
-            (xy + xy) + (zw + zw),
-            (xz + xz) - (yw + yw),
-            (xy + xy) - (zw + zw),
-            yy - zz + ww - xx,
-            (yz + yz) + (xw + xw),
-            (yw + yw) + (xz + xz),
-            (yz + yz) - (xw + xw),
-            zz - yy - xx + ww,
-        ])
-    }
-    fn part(mut self, pose: [f32; 9]) -> Self {
-        self.matrix *= Self::rotation(pose[3], pose[4], pose[5]);
-        let scale = glam::Vec3::new(pose[6], pose[7], pose[8]);
-        if scale.x.abs() == scale.y.abs() && scale.x.abs() == scale.z.abs() {
-            if scale.min_element() < 0.0 {
-                self.matrix *= glam::Mat3::from_diagonal(scale.signum());
-            }
-        } else {
-            self.matrix *= glam::Mat3::from_diagonal(scale.recip());
-            self.trusted = false;
-        }
-        self
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Part {
-    pub name: String,
-    /// x, y, z, xRot, yRot, zRot, xScale, yScale, zScale
-    pub pose: [f32; 9],
-    pub polygons: Vec<Polygon>,
-    pub children: Vec<Part>,
-}
-impl Part {
-    /// Marks every polygon as drawn by a back-face-culling render type.
-    fn set_cull_back(&mut self) {
-        for poly in &mut self.polygons {
-            poly.cull_back = true;
-        }
-        for child in &mut self.children {
-            child.set_cull_back();
-        }
-    }
-    fn parse(name: &str, v: &Value) -> Self {
-        let pose: Vec<f32> = v["pose"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-            .collect();
-        let mut p = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
-        for (i, x) in pose.iter().enumerate().take(9) {
-            p[i] = *x;
-        }
-        let polygons: Vec<Polygon> = v["polygons"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .filter_map(|(index, poly)| {
-                let verts: Vec<[f32; 5]> = poly
-                    .as_array()?
-                    .iter()
-                    .map(|vx| {
-                        let a: Vec<f32> = vx
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                            .collect();
-                        [a[0], a[1], a[2], a[3], a[4]]
-                    })
-                    .collect();
-                (verts.len() == 4).then(|| Polygon {
-                    normal: v["normals"][index].as_array().map_or_else(
-                        || {
-                            // shortcut: collapsed legacy faces have no recoverable normal; re-prepare resources.
-                            let p = verts
-                                .iter()
-                                .map(|v| glam::Vec3::new(v[0], v[1], v[2]))
-                                .collect::<Vec<_>>();
-                            (p[1] - p[0])
-                                .cross(p[2] - p[0])
-                                .normalize_or_zero()
-                                .to_array()
-                        },
-                        |n| std::array::from_fn(|i| n[i].as_f64().unwrap_or(0.0) as f32),
-                    ),
-                    vertices: [verts[0], verts[1], verts[2], verts[3]],
-                    cull_back: false,
-                })
-            })
-            .collect();
-        let mut children: Vec<Part> = v["children"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(k, c)| Part::parse(k, c))
-            .collect();
-        children.sort_by(|a, b| a.name.cmp(&b.name));
-        // A model whose root holds a part also named "root" (allay, vex,
-        // frog...): that inner part is what `root.getChild("root")` and the
-        // keyframe bones mean, so the outer one gives up the name.
-        let name = if name == "root" && children.iter().any(|c| c.name == "root") {
-            ""
-        } else {
-            name
-        };
-        Self {
-            name: name.to_owned(),
-            pose: p,
-            polygons,
-            children,
-        }
-    }
-}
 /// Kept for callers of the earlier simple AI; species now select behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Brain {
@@ -476,25 +292,57 @@ pub struct MobTypes {
 }
 impl MobTypes {
     pub fn load(root: &Path) -> crate::Result<Self> {
-        Self::load_with_models(root, true)
+        Self::load_with_models(root, true, None, None)
+    }
+
+    /// Load client mob data using defaults already decoded by the resource
+    /// bootstrap. This avoids decoding `items.json` a second time for Allay
+    /// inventory limits.
+    pub fn load_with_defaults(
+        root: &Path,
+        defaults: &horizon_world::item_defaults::Defaults,
+    ) -> crate::Result<Self> {
+        Self::load_with_models(root, true, None, Some(defaults))
     }
 
     /// The dedicated server needs entity facts and AI, but never their render
     /// geometry. Keep one empty part for the fields shared with the client
     /// rather than parsing and retaining every entity-model layer.
     pub fn load_for_server(root: &Path) -> crate::Result<Self> {
-        Self::load_with_models(root, false)
+        Self::load_with_models(root, false, None, None)
     }
 
-    fn load_with_models(root: &Path, models_needed: bool) -> crate::Result<Self> {
+    /// The client startup already parsed `entity-models.json` for the handoff
+    /// and the other model loaders; read the model layers from that copy.
+    pub fn load_with_document(root: &Path, document: &EntityModelDocument) -> crate::Result<Self> {
+        Self::load_with_models(root, true, Some(document), None)
+    }
+
+    /// The client startup already has both the entity model document and the
+    /// item defaults. Reuse both instead of decoding either file again.
+    pub fn load_with_document_and_defaults(
+        root: &Path,
+        document: &EntityModelDocument,
+        defaults: &horizon_world::item_defaults::Defaults,
+    ) -> crate::Result<Self> {
+        Self::load_with_models(root, true, Some(document), Some(defaults))
+    }
+
+    fn load_with_models(
+        root: &Path,
+        models_needed: bool,
+        document: Option<&EntityModelDocument>,
+        item_defaults: Option<&horizon_world::item_defaults::Defaults>,
+    ) -> crate::Result<Self> {
         let bytes = fs::read(root.join("entity-types.json"))?;
         let types: Value = serde_json::from_slice(&bytes)?;
         let exact = exact_attributes(&bytes);
         let models = models_needed
-            .then(|| -> crate::Result<Value> {
-                Ok(serde_json::from_slice(&fs::read(
-                    root.join("entity-models.json"),
-                )?)?)
+            .then(|| -> crate::Result<EntityModelDocument> {
+                match document {
+                    Some(document) => Ok(document.clone()),
+                    None => EntityModelDocument::load(root),
+                }
             })
             .transpose()?;
         let empty_model = Arc::new(Part::parse("root", &Value::Null));
@@ -514,24 +362,43 @@ impl MobTypes {
         };
         // The Allay's InventoryCarrier loading needs item limits before a
         // Game exists. Other mob-only resource sets need no item data.
-        let items: HashMap<String, Value> = if types.get("minecraft:allay").is_some() {
-            serde_json::from_slice(&fs::read(root.join("items.json"))?)?
-        } else {
-            HashMap::new()
-        };
-        let item_stack_limits: Arc<HashMap<String, u32>> = Arc::new(
-            items
-                .into_iter()
-                .map(|(id, components)| {
-                    (
-                        id,
-                        components["minecraft:max_stack_size"]
-                            .as_u64()
-                            .unwrap_or(64) as u32,
+        let item_stack_limits: Arc<HashMap<String, u32>> = if types.get("minecraft:allay").is_some()
+        {
+            match item_defaults {
+                Some(items) => Arc::new(
+                    items
+                        .iter()
+                        .map(|(id, components)| {
+                            (
+                                id.clone(),
+                                components["minecraft:max_stack_size"]
+                                    .as_u64()
+                                    .unwrap_or(64) as u32,
+                            )
+                        })
+                        .collect(),
+                ),
+                None => {
+                    let items: HashMap<String, Value> =
+                        serde_json::from_slice(&fs::read(root.join("items.json"))?)?;
+                    Arc::new(
+                        items
+                            .into_iter()
+                            .map(|(id, components)| {
+                                (
+                                    id,
+                                    components["minecraft:max_stack_size"]
+                                        .as_u64()
+                                        .unwrap_or(64) as u32,
+                                )
+                            })
+                            .collect(),
                     )
-                })
-                .collect(),
-        );
+                }
+            }
+        } else {
+            Arc::new(HashMap::new())
+        };
         let mut out = HashMap::new();
         // A content mod's living type (its row names a vanilla `template`) is
         // its template's mob under its own id: the template's model, sounds
@@ -554,14 +421,19 @@ impl MobTypes {
                 continue;
             }
             let model_key = format!("minecraft:{}", def.model);
-            let model = models.as_ref().and_then(|models| models.get(&model_key));
+            let model = models
+                .as_ref()
+                .and_then(|models| models.value().get(&model_key));
             if models_needed && model.is_none() {
                 continue;
             }
             let defaults = exact.get(&id).cloned().unwrap_or_default();
             let attr = |k: &str| defaults.get(&format!("minecraft:{k}")).copied();
             let mut layers = crate::fast_hash::FxHashMap::default();
-            if let Some(all) = models.as_ref().and_then(Value::as_object) {
+            if let Some(all) = models
+                .as_ref()
+                .and_then(|models| models.value().as_object())
+            {
                 for prefix in def.layer_prefixes() {
                     let start = format!("minecraft:{prefix}#");
                     for (k, v) in all.iter().filter(|(k, _)| k.starts_with(&start)) {
@@ -668,6 +540,7 @@ impl NamedDamage {
     pub const IS_PROJECTILE: u32 = 1 << 7;
     pub const IS_EXPLOSION: u32 = 1 << 8;
     pub const IS_FALL: u32 = 1 << 9;
+    pub const BYPASSES_ENCHANTMENTS: u32 = 1 << 10;
 
     pub const fn new(name: &'static str, tags: u32) -> Self {
         Self { name, tags }
@@ -691,6 +564,8 @@ pub enum DamageKind {
     Fireball,
     Explosion,
     Fall,
+    /// `fly_into_wall`: gliding into a horizontal collision.
+    FlyIntoWall,
     FallingBlock,
     FallingStalactite,
     OnFire,
@@ -767,6 +642,13 @@ impl DamageKind {
             return named.has(NamedDamage::BYPASSES_RESISTANCE);
         }
         matches!(self, DamageKind::OutOfWorld | DamageKind::GenericKill)
+    }
+    /// DamageTypeTags.BYPASSES_ENCHANTMENTS: `sonic_boom` alone in vanilla.
+    pub fn bypasses_enchantments(self) -> bool {
+        if let Self::Named(named) = self {
+            return named.has(NamedDamage::BYPASSES_ENCHANTMENTS);
+        }
+        matches!(self, DamageKind::SonicBoom)
     }
 }
 /// `source.getEntity()` of a blow, as `SulfurCube.knockback` reads it: `getEyePosition()`,
@@ -895,6 +777,7 @@ impl Damage {
         matches!(
             self.kind,
             DamageKind::Fall
+                | DamageKind::FlyIntoWall
                 | DamageKind::OnFire
                 | DamageKind::Drown
                 | DamageKind::Magic
@@ -936,6 +819,7 @@ impl Damage {
             self.kind,
             DamageKind::Explosion
                 | DamageKind::Fall
+                | DamageKind::FlyIntoWall
                 | DamageKind::OnFire
                 | DamageKind::InFire
                 | DamageKind::Campfire
@@ -990,18 +874,10 @@ pub struct Attrs {
 }
 /// `minecraft:wolf_armor`'s maximum damage.
 pub const WOLF_ARMOR_DURABILITY: i32 = 64;
-/// `NeutralMob.readPersistentAngerSaveData`: the anger runs until its end
-/// time, so a mob that is loaded again is angry for what is left of it.
-pub fn anger_left(anger_end: i64, game_time: i64) -> i32 {
-    if anger_end <= 0 {
-        return 0;
-    }
-    (anger_end - game_time).clamp(0, i64::from(i32::MAX)) as i32
-}
-
 /// Species-specific persistent state (variants, colours, taming, ageing...).
 #[derive(Clone, Debug, Default)]
 pub struct Extra {
+    pub client_side: bool, // `Level.isClientSide`: a client copy, which `Entity.hurt` leaves alone.
     /// Saved fish/axolotl bucket flag; tadpoles save a constant true value.
     pub from_bucket: bool,
     /// Command-created armor instances, shared by commands and runtime damage.
@@ -1038,9 +914,7 @@ pub struct Extra {
     pub age: i32,
     /// `AgeLocked` (tadpoles fed a slime ball... and ageable mobs).
     pub age_locked: bool,
-    /// `AgeableMob.ageLockParticleTimer` (a tadpole's too): the ticks of
-    /// growth particles left after a golden dandelion, and the cooldown
-    /// before the next one can be used. Not saved.
+    /// `AgeableMob.ageLockParticleTimer`: growth particles left, and the cooldown. Not saved.
     pub age_lock_particle_timer: i32,
     /// AgeableMob.forcedAge: the age fed food added, restored as the age
     /// when it reaches 0 (`ForcedAge`).
@@ -1054,8 +928,7 @@ pub struct Extra {
     /// Secondary variant (horse markings, tropical fish pattern colours, panda hidden gene).
     pub variant2: u8,
     pub variant3: u8,
-    /// `MushroomCow.stewEffects`: what a brown one took from a flower, given
-    /// back in its next bowl of stew. `None` is vanilla's null.
+    /// `MushroomCow.stewEffects`: what a brown one took from a flower, for its next stew.
     pub stew_effects: Option<Vec<(Arc<str>, i32)>>,
     /// Dye colour id (sheep wool, collars).
     pub color: u8,
@@ -1083,14 +956,23 @@ pub struct Extra {
     pub chested: bool,
     /// The chest contents of a donkey or mule (15 slots).
     pub items: Vec<Option<crate::items::ItemStack>>,
-    /// `Piglin.inventory` (`SimpleContainer(8)`): what it picked up and kept.
+    /// Occupied InventoryCarrier stacks: Piglin/trader (8 slots), Pillager (5).
     pub inventory: Vec<crate::items::ItemStack>,
+    /// `AbstractHorse.temper` of every equine (horses, llamas, camels).
+    /// Loaded signed values are independent of the gameplay modification cap.
+    pub equine_temper: i32,
     pub tame: bool,
+    /// `TamableAnimal.isOrderedToSit` (the saved order), and in `sitting_pose`
+    /// `isInSittingPose` (bit 1 of `DATA_FLAGS_ID`, which only a sit goal writes).
     pub sitting: bool,
+    pub sitting_pose: bool,
     /// `Parrot.partyParrot` and `jukebox`: the playing jukebox it dances to.
     pub party_jukebox: Option<[i32; 3]>,
-    /// The owner's UUID (tamed animals).
+    /// The owner's UUID: a tamed animal's, or the reference a vex was loaded with.
     pub owner: Option<[i32; 4]>,
+    /// `Vindicator.isJohnny`: a custom name that was ever `Johnny`, which
+    /// `setCustomName` latches and nothing clears.
+    pub johnny: bool,
     /// Slime/magma cube size (0 = not sized).
     pub size: i32,
     /// Sheep eat-grass / iron golem attack / ravager animation ticks.
@@ -1101,6 +983,8 @@ pub struct Extra {
     /// anger ends at, -1 when the mob is calm. The save keeps it, so the
     /// anger goes on while the chunk is unloaded.
     pub anger_end: i64,
+    /// Countdown and age when `anger_end` was last settled (`neutral_anger`).
+    pub anger_stamp: Option<(i32, u32)>,
     /// `NeutralMob.getPersistentAngerTarget`: the entity the mob is angry
     /// at, which the save keeps with it.
     pub angry_at: Option<Who>,
@@ -1108,6 +992,10 @@ pub struct Extra {
     pub player_created: bool,
     pub carried: Option<horizon_world::registry::BlockStateId>,
     pub charged: bool,
+    /// `Creeper.explosionRadius` (`ExplosionRadius`, a byte): the blast's
+    /// radius, 3 unless the save or a command says otherwise; a powered
+    /// creeper blows with twice it (`explodeCreeper`).
+    pub explosion_radius: i8,
     /// Held item ids (main hand, off hand) and head item.
     pub main_hand: Option<Arc<str>>,
     /// Components of the current held stack; setters clear these on replacement.
@@ -1118,6 +1006,9 @@ pub struct Extra {
     /// The body item (`getItemBySlot(BODY)`): a horse's armour, a llama's
     /// carpet, a wolf's armour, a harness, a sulfur cube's swallowed block.
     pub body: Option<Arc<str>>,
+    /// The body a sulfur cube's archetype attribute modifiers came from
+    /// (`LivingEntity.lastEquipmentItems` for `BODY`).
+    pub adopted_body: Option<Arc<str>>,
     /// Worn armour below the head (humanoid mobs).
     pub chest: Option<Arc<str>>,
     pub legs: Option<Arc<str>>,
@@ -1181,6 +1072,9 @@ pub struct Extra {
     /// Species scratch values (the wither's head targets and clocks).
     pub ints: [i32; 6],
     pub counter: i32,
+    /// Nautilus ATTACK_TARGET_COOLDOWN saved slot: None is absent,
+    /// Some(MAX) is permanent, otherwise the remaining lifetime. The value is `counter`.
+    pub nautilus_attack_cooldown_ttl: Option<i64>,
     pub counter2: i32,
     pub home: Option<[i32; 3]>,
     /// A copper golem's `openedChestPos`.
@@ -1192,6 +1086,9 @@ pub struct Extra {
     pub vector: [f64; 3],
     /// Active status effects: (effect id, ticks left, amplifier).
     pub effects: Vec<(&'static str, i32, i32)>,
+    /// Only the weaker subtrees of active effects, keyed by the same namespaced id.
+    /// The public tuples above remain the active state, never a cached wrapper.
+    pub effect_fallbacks: Vec<crate::effects::EffectInstance>,
     /// The effects above given with `hideParticles`: no swirls for them.
     pub hidden_effects: Vec<&'static str>,
     /// The effects above that are ambient (`MobEffectInstance.isAmbient`: a beacon's), whose swirls
@@ -1234,6 +1131,14 @@ pub struct Extra {
     /// `getFirstPassenger`).
     pub mount: Option<u32>,
     pub rider: Option<u32>,
+    /// Where `positionRider` last seated this rider: its own vehicle
+    /// attachment (`getPassengerRidingPosition(this).y` is its feet plus this)
+    /// and the vehicle's box (`Mob.getAttackBoundingBox`, `getHitbox`).
+    pub seat: Option<(u32, f64, Aabb)>,
+    /// The living vehicle `positionRider` last seated this rider on, with
+    /// its `yBodyRotO` and `yBodyRot`: a rider of a living vehicle is drawn
+    /// from that body (`LivingEntityRenderer.solveBodyRot`), not its own.
+    pub vehicle_body: Option<(u32, f32, f32)>,
     /// `Entity.boardingCooldown`: ticks after leaving a boat before a boat
     /// can pick this mob up again.
     pub boarding_cooldown: i32,
@@ -1263,8 +1168,9 @@ pub struct Extra {
     pub attributes: Option<Box<finalize::Attributes>>,
     /// Brain memories `finalizeSpawn` sets: (memory, value, ticks to expiry).
     pub memories: Vec<(&'static str, i64, i64)>,
-    /// A camel's `LAST_POSE_CHANGE_TICK`.
+    /// A camel's `LAST_POSE_CHANGE_TICK`, and its game time minus age at the last tick.
     pub pose_change_tick: i64,
+    pub pose_epoch: Option<i64>,
     /// Whether a camel sits (`egg_time` is then the age it sat down at).
     pub camel_sitting: bool,
     /// `Entity.DATA_POSE` as a mob of a server has it (`sync::pose_id`).
@@ -1296,6 +1202,17 @@ pub struct Extra {
     /// (`LivingEntity.lastEquipmentItems`, empty at first), by
     /// `EquipmentSlot` ordinal: see `Mob::equipment_stacks`.
     pub equipment_heard: Option<Box<[Option<crate::items::ItemStack>; 8]>>,
+    /// What the game last read from the hands' `minecraft:death_protection`
+    /// components (`game/totem.rs`); `None` until it has, when the totem's id
+    /// stands in for the component.
+    pub hand_protection: Option<HandProtection>,
+}
+/// The `death_effects` of the `death_protection` component each hand's stack
+/// carries; `None` for a hand without the component.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HandProtection {
+    pub main: Option<Vec<crate::items::ConsumeEffect>>,
+    pub off: Option<Vec<crate::items::ConsumeEffect>>,
 }
 impl Extra {
     pub fn set_main_hand(&mut self, item: Option<Arc<str>>) {
@@ -1314,6 +1231,47 @@ impl Extra {
     pub fn take_main_hand(&mut self) -> Option<Arc<str>> {
         self.main_hand_stack = None;
         self.main_hand.take()
+    }
+}
+/// How far the boxes of a set of mobs reach from their positions: the widest reach sideways, below
+/// and above among them, worked out from each mob's real box ([`Mob::bounds`]: a shulker's grows
+/// toward its open lid, sideways or below its position). A box query over many mobs (a vehicle's,
+/// against every mob of the level) tests each mob's position against this first, and works out the
+/// box only for the mobs whose position comes close.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BoxReach {
+    half_width: f64,
+    below: f64,
+    height: f64,
+}
+impl BoxReach {
+    pub fn of(mobs: &[Mob]) -> Self {
+        mobs.iter().fold(Self::default(), |r, m| {
+            let (b, p) = (m.bounds(), m.position);
+            let (lo, hi) = (b.min_position(), b.max_position());
+            Self {
+                half_width: r
+                    .half_width
+                    .max(p.x - lo.x)
+                    .max(hi.x - p.x)
+                    .max(p.z - lo.z)
+                    .max(hi.z - p.z),
+                below: r.below.max(p.y - lo.y),
+                height: r.height.max(hi.y - p.y),
+            }
+        })
+    }
+    /// Whether the box of `m`, one of the mobs this was worked out for, can meet `area`: a
+    /// superset, the caller still tests the box.
+    #[inline]
+    pub fn may_meet(self, m: &Mob, area: Aabb) -> bool {
+        let (lo, hi, p) = (area.min_position(), area.max_position(), m.position);
+        p.x - self.half_width <= hi.x
+            && p.x + self.half_width >= lo.x
+            && p.z - self.half_width <= hi.z
+            && p.z + self.half_width >= lo.z
+            && p.y - self.below <= hi.y
+            && p.y + self.height >= lo.y
     }
 }
 
@@ -1342,14 +1300,25 @@ pub struct Mob {
     /// `Entity.needsSync`: knocked back, pushed or jumped since its server
     /// last sent it, so the next update goes out at once.
     pub needs_sync: bool,
+    /// `Entity.syncPosition`: it bounced this tick (`restituteMovementAfterCollisions`),
+    /// so its tracker keeps this position as a step of the next move it sends.
+    pub sync_position: bool,
     /// `getAttributeValue(KNOCKBACK_RESISTANCE)` with the modifiers of the
     /// items it wears or holds, which the game works out each tick for a mob
     /// that has any (the mob itself knows no item): `None` for the rest.
     pub gear_knockback_resistance: Option<f64>,
     pub health: f32,
     pub hurt_time: i32,
+    /// `LivingEntity.damageCooldownTime`: the hurt cooldown, 20 after a hit;
+    /// transient, never saved.
     pub invulnerable: i32,
+    /// `Entity.invulnerableTime`, saved as `invulnerable_time`: while above 0
+    /// the mob is invulnerable as with `Invulnerable` (`isTemporarilyInvulnerable`).
+    pub invulnerable_time: i32,
     pub death_time: i32,
+    /// `LivingEntity.currentImpulseContextResetGraceTime`: ticks left to keep
+    /// the impulse context after a wind charge or mace impulse.
+    pub impulse_grace_time: i32,
     pub age: u32,
     pub limb_position: f32,
     pub limb_speed: f32,
@@ -1373,7 +1342,7 @@ pub struct Mob {
     pub name_visible: bool,
     /// `Entity.DATA_SHARED_FLAGS_ID` bit 0x20: the model is hidden.
     pub invisible: bool,
-    pub random: LegacyRandom,
+    pub random: EntityRandom,
     pub ai: Box<ai::Ai>,
     pub extra: Extra,
     pub fluids: living::Fluids,
@@ -1404,8 +1373,14 @@ pub struct Mob {
     /// way it was travelling. None for any other direct entity.
     pub projectile_motion: Option<[f64; 2]>,
     pub climbing: bool,
+    /// `LivingEntity.onClimbable` as of the last mob tick, for `isPushable`
+    /// checks made outside the mob world (minecarts, boats).
+    pub on_climbable: bool,
     pub fire_ticks: i32,
     pub ticks_frozen: i32,
+    /// `Entity.isInPowderSnow` as of the last mob tick, for the skeleton's
+    /// freezing tracker read at save time.
+    pub in_powder_snow: bool,
     pub glowing: bool,
     pub air: i32,
     pub last_hurt: f32,
@@ -1443,9 +1418,9 @@ pub struct Mob {
     /// `PlayerSkin.cape`: a player's cape texture, once every download of
     /// its skin is ready.
     pub cape: Option<String>,
-    /// A Horizon emote this player plays (docs/cosmetics.md), timed on `age`: it poses the bones
-    /// after the vanilla animation (`anim::setup`). Visual only.
-    pub emote: Option<horizon_cosmetics::Playing>,
+    /// A pose laid over this player's body after the vanilla animation (`anim::setup`), timed on
+    /// `age`: a Horizon emote (docs/cosmetics.md), given by the game. Visual only.
+    pub emote: Option<Arc<dyn anim::BodyPose>>,
     /// A mannequin's `DATA_PROFILE` (ResolvableProfile): the profile's
     /// `textures` property resolves to `skin` like a player's.
     pub profile: Option<horizon_protocol::entity_data::Profile>,
@@ -1604,6 +1579,8 @@ pub enum MobEvent {
     ChestOpen {
         chest: [i32; 3],
         open: bool,
+        /// The golem, the source of the container's game event.
+        mob: u32,
     },
     /// `BeeEnterHiveGoal.start`: the bee goes into its hive (the host stores
     /// its tag with `BeehiveBlockEntity.addOccupant` and discards it).
@@ -1626,9 +1603,12 @@ pub enum MobEvent {
         slot: usize,
         stack: Option<crate::items::ItemStack>,
     },
-    /// `InfestedMobEffect.onMobHurt`: the mob was hurt while infested.
+    /// `InfestedMobEffect.onMobHurt`: the mob was hurt while infested and its
+    /// draws (`infested_silverfish`) spawn silverfish at `at`, half its height
+    /// up where it was hurt, each thrown with its velocity.
     Infested {
-        mob: u32,
+        at: [f64; 3],
+        velocities: Vec<Vec3>,
     },
     /// `LivingEntity.hurtArmor` (`doHurtEquipment`): a hit that landed on a mob
     /// wearing body armour (a horse's) leaves the piece owing
@@ -1639,6 +1619,14 @@ pub enum MobEvent {
         mob: u32,
         amount: f32,
         kind: DamageKind,
+    },
+    /// `LivingEntity.updateFallFlying`: every 20 glide ticks the glider in
+    /// `slot` (the one `Util.getRandom` picked) takes one point of wear,
+    /// `ItemStack.hurtAndBreak(1, this, slot)`. The host applies it with the
+    /// item's maximum and Unbreaking.
+    GliderWear {
+        mob: u32,
+        slot: horizon_world::player_inventory::EquipmentSlot,
     },
     /// `OfferFlowerGoal.stop`: the item goes to the target's antenna (saddle)
     /// slot if it is empty, as a guaranteed drop.
@@ -1690,6 +1678,17 @@ pub enum MobEvent {
         event: &'static str,
         at: [f64; 3],
         source: u32,
+        state: horizon_world::registry::BlockStateId,
+    },
+    /// `Level.gameEvent` from the block a mob landed on (`FarmlandBlock.turnToBaseBlock`'s
+    /// BLOCK_CHANGE from the mob that trampled it, `TurtleEggBlock.decreaseEggs`' and
+    /// `Level.destroyBlock`'s BLOCK_DESTROY with no source): the game posts it, a
+    /// sculk sensor, a calibrated sensor and a warden hear it.
+    LandingGameEvent {
+        event: &'static str,
+        at: [i32; 3],
+        /// The entity that caused the change, `None` for a destroyed egg.
+        source: Option<u32>,
         state: horizon_world::registry::BlockStateId,
     },
     AttackPlayer(f32, [f64; 3]),
@@ -1752,6 +1751,14 @@ pub enum MobEvent {
         target: Who,
         delta: [f64; 3],
     },
+    /// `Shulker.onPeekAmountChange` for the entities kept outside the mob
+    /// list: the opening lid of `shulker` moves every armor stand with
+    /// physics whose box meets `area` (the box the lid swept) by `delta`.
+    LidPush {
+        shulker: u32,
+        area: Aabb,
+        delta: [f64; 3],
+    },
     /// `EvokerWololoSpellGoal`: a blue sheep turns red.
     Wololo {
         mob: u32,
@@ -1775,10 +1782,13 @@ pub enum MobEvent {
         name: crate::text::Text,
         /// `Entity.isInWater` of the source: `BlockAttached.ignoreExplosion`.
         in_water: bool,
+        /// Its entity type: a player the blast kills is still credited to it
+        /// (`getKillCredit` finds the source during its own explosion).
+        kind: String,
     },
     /// The centre, the radius and the kind of the mob blowing up (it may be
-    /// gone from the list by the time the blast is handled).
-    Explode([f64; 3], f32, Species),
+    /// gone from the list by the time the blast is handled), and its `Silent`.
+    Explode([f64; 3], f32, Species, bool),
     /// `Creeper.spawnLingeringCloud`, right after its `Explode`: an `AreaEffectCloud` at the
     /// creeper with its active effects `(id, remaining ticks, amplifier)`, in their mixed colour.
     LingeringCloud {
@@ -1790,7 +1800,14 @@ pub enum MobEvent {
         ambient: Vec<&'static str>,
         color: u32,
     },
-    /// Melee or ranged damage to another mob.
+    /// Damage that bypasses `EnchantmentHelper.doPostAttackEffects` (roars,
+    /// beams, retaliation and hot-cube contact).
+    DamageMob {
+        target: u32,
+        amount: f32,
+        source: Damage,
+    },
+    /// An attack that runs post-attack effects when the hit lands.
     AttackMob {
         target: u32,
         amount: f32,
@@ -1840,18 +1857,24 @@ pub enum MobEvent {
     StabDismount {
         target: Who,
     },
-    /// `LivingEntity.knockback(power, x, z, source)`: pushed away from the
-    /// direction.
+    /// `LivingEntity.knockback(power, x, z, source)`; a ram's blocked again first (`RamTarget.tick`).
     Knockback {
         target: Who,
         power: f64,
         x: f64,
         z: f64,
         source: Damage,
+        apply_blocking: Option<f32>,
     },
     /// Set another mob's attack target (HurtByTargetGoal alerts).
     SetTarget {
         mob: u32,
+        target: Who,
+    },
+    /// `HoglinAi.broadcastAttackTarget` from hoglin `from` to `mob` (`Game::hoglin_attack_target`).
+    HoglinAttackTarget {
+        mob: u32,
+        from: u32,
         target: Who,
     },
     /// `StartHuntingHoglin` for a nearby adult piglin: it takes the hoglin as
@@ -1917,6 +1940,12 @@ pub enum MobEvent {
         mob: u32,
         item: Arc<str>,
         count: u32,
+        at: [f64; 3],
+    },
+    /// `Entity.spawnAtLocation` with the complete stack and its components.
+    DropStack {
+        mob: u32,
+        stack: crate::items::ItemStack,
         at: [f64; 3],
     },
     /// `new ItemEntity(.., stack)` thrown by `mob` (`setThrower`): `Dolphin.ItemGoal.drop`.
@@ -2070,11 +2099,10 @@ pub enum MobEvent {
         ticks: i32,
         amplifier: i32,
     },
-    /// Set an entity on fire.
-    Ignite {
-        target: Who,
-        seconds: i32,
-    },
+    /// Set an entity on fire for so many seconds.
+    Ignite(Who, i32),
+    /// `Zombie.doHurtTarget`'s burn: lit only if the attack event before it hurt.
+    ZombieIgnite(Who, i32),
     /// Two animals bred: the game spawns the baby and resets the partner.
     Breed {
         parent: u32,
@@ -2104,14 +2132,23 @@ pub enum MobEvent {
     Buck {
         mob: u32,
     },
+    /// `Entity.unRide`'s `ejectPassengers` before a move (a shulker's
+    /// teleport): whoever rides `mob` gets off where it stood, `from`.
+    EjectPassengers {
+        mob: u32,
+        from: Vec3,
+    },
     /// A piglin's admiring is over: barter or keep the item.
     FinishAdmiring {
         mob: u32,
     },
-    /// Throw an entity upward (iron golem swings).
-    Launch {
+    /// `IronGolem.doHurtTarget`: the hit, then, only when `hurtServer` let it
+    /// land, the target thrown up by `0.4f` scaled by
+    /// `max(0, 1 - KNOCKBACK_RESISTANCE)`.
+    IronGolemHit {
         target: Who,
-        up: f64,
+        amount: f32,
+        source: Damage,
     },
     /// Damage the mob itself (snow golems melting).
     HurtSelf {
@@ -2123,6 +2160,12 @@ pub enum MobEvent {
     VillagerMeet {
         mob: u32,
         other: u32,
+    },
+    /// `Villager.customServerAiStep`: deliver the pending TRADE reputation
+    /// event for the actual player recorded by rewardTradeXp.
+    VillagerTrade {
+        mob: u32,
+        player: [i32; 4],
     },
     /// `AbstractVillager.getOffers` for a villager whose offers are not made
     /// yet: the level rolls them (the brain has no trade data), so the
@@ -2278,6 +2321,8 @@ pub struct SpawnSetup {
     pub owner_mob: Option<u32>,
     pub home: Option<[i32; 3]>,
     pub life: Option<i32>,
+    /// Whether to skip `finalizeSpawn`'s rolls (e.g. conversions or EntityType.create).
+    pub skip_finalize: bool,
 }
 /// A snapshot of another entity mobs can see this tick.
 #[derive(Clone, Debug)]
@@ -2298,6 +2343,7 @@ pub struct Seen {
     pub bred: bool,
     /// A tamed animal's owner (`getOwner`).
     pub owner: Option<[i32; 4]>,
+    /// `instanceof Enemy` (what the golems' target predicates test).
     pub hostile: bool,
     pub target: Option<Who>,
     pub health: f32,
@@ -2325,6 +2371,11 @@ pub struct Seen {
     pub delay: i32,
     /// `getLastHurtByMob` and its timestamp.
     pub hurt_by: Option<(Who, i32)>,
+    /// `Entity.isInvisible`: the flag, or the invisibility effect.
+    pub invisible: bool,
+    /// `PathfinderMob.isPanicking`: a running panic goal or the brain's
+    /// `IS_PANICKING` memory.
+    pub panicking: bool,
     /// A raider in an active raid.
     pub active_raid: bool,
     /// A copper golem's `openedChestPos` (`ContainerUser.hasContainerOpen`).
@@ -2333,10 +2384,12 @@ pub struct Seen {
     pub passenger: bool,
     /// The vehicle it rides (`getVehicle`): a mob's or a boat's id.
     pub vehicle: Option<u32>,
-    /// A villager's reputation of the player (`getPlayerReputation`).
-    pub player_rep: i32,
+    /// `LivingEntity.getHitbox`: the box, cut below the seat when riding.
+    pub hitbox: Aabb,
     /// `isPushable` and pushed by others (`Entity.push(Entity)` moves it).
     pub pushable: bool,
+    /// A sleeping villager, wandering trader or fox vetoes its own `push(Entity)`.
+    pub sleeping: bool,
     /// A cold strider (`Strider.isSuffocating`).
     pub cold_strider: bool,
     /// `MobCategory` (`monster`, `creature`, ...).
@@ -2372,8 +2425,33 @@ pub struct Seen {
     pub hurt_recently: bool,
     /// `Hoglin.canBeHunted`: an adult hoglin without `CannotBeHunted`.
     pub huntable: bool,
+    /// A happy ghast's `isOnStillTimeout` (a player on its back holds it).
+    pub still: bool,
+    /// `Entity.isVehicle`: something rides it.
+    pub carrying: bool,
 }
 impl Seen {
+    /// Whether `canBeCollidedWith` can ever hold for this kind: the slots
+    /// [`MobWorld::others_solid`] lists.
+    pub fn may_block_mobs(&self) -> bool {
+        matches!(self.species, Species::Shulker | Species::HappyGhast)
+    }
+    /// `canBeCollidedWith(mover)` for a mob of species `mover` moving into
+    /// it (`EntityGetter.getEntityCollisions`): a living shulker
+    /// (`Shulker`), or an adult happy ghast held still, or carrying someone
+    /// when the mover is a happy ghast too (`HappyGhast`). Every other mob
+    /// keeps `Entity`'s false.
+    pub fn blocks_mob(&self, mover: Species) -> bool {
+        match self.species {
+            Species::Shulker => self.alive,
+            Species::HappyGhast => {
+                self.alive
+                    && !self.baby
+                    && (self.still || (self.carrying && mover == Species::HappyGhast))
+            }
+            _ => false,
+        }
+    }
     /// `LivingEntity.hasEffect`, by id without namespace.
     pub fn has_effect(&self, effect: &str) -> bool {
         self.effects.contains(&effect)
@@ -2490,86 +2568,6 @@ impl Mob {
         self.ticks_frozen >= crate::motion::PlayerMotion::TICKS_REQUIRED_TO_FREEZE
     }
 
-    /// What other mobs see of this one this tick (`player`: the player's
-    /// UUID, which villagers' reputation is keyed by).
-    pub fn seen(&self, player: Option<[i32; 4]>) -> Seen {
-        let m = self;
-        let villager = m.species() == Species::Villager;
-        Seen {
-            in_water: self.fluids.in_water,
-            playing_dead: axolotl::is_playing_dead(self),
-            last_damage: self.last_damage.map(|(d, _)| d),
-            id: m.id,
-            species: m.species(),
-            position: m.position,
-            bounds: m.bounds(),
-            eye_y: m.eye_y(),
-            alive: m.alive(),
-            baby: m.is_baby(),
-            // A villager is "in love" when it is willing to breed (`canBreed`).
-            in_love: if villager {
-                villager::can_breed(m)
-            } else {
-                m.extra.in_love > 0
-            },
-            tame: m.extra.tame,
-            bred: m.extra.bred,
-            owner: m.extra.owner,
-            hostile: m.hostile(),
-            target: m.ai.target,
-            health: m.health,
-            variant: m.extra.variant,
-            size: m.extra.size,
-            color: m.extra.color,
-            job: villager.then_some(m.extra.home).flatten(),
-            bed: villager.then_some(m.extra.bed).flatten(),
-            yaw: m.yaw,
-            velocity: m.velocity,
-            known_speed: m.position.subtract(m.previous),
-            leash: m.extra.leash,
-            caravan: caravan::head_of(m),
-            school: (m.extra.leader, m.extra.followers),
-            section: (m.extra.section, m.extra.section_seq),
-            delay: m.extra.ints[5],
-            hurt_by: m.ai.last_hurt_by.map(|w| (w, m.ai.last_hurt_by_time)),
-            active_raid: raider::has_active_raid(m),
-            opened_chest: m.extra.opened_chest,
-            passenger: m.extra.mount.is_some(),
-            vehicle: m.extra.mount,
-            player_rep: match (villager, player) {
-                (true, Some(uuid)) => villager::ext(m).map_or(0, |e| e.gossips.reputation(uuid)),
-                _ => 0,
-            },
-            pushable: m.pushable(),
-            cold_strider: strider::suffocating(m),
-            category: m.category(),
-            potential_job: villager_brain::potential_job_site(m),
-            meeting: villager.then_some(m.extra.meeting).flatten(),
-            profession: m.extra.variant2,
-            xp: villager::xp(m),
-            villager: villager.then(|| Arc::new(villager::seen(m))),
-            stats: [
-                f64::from(m.attrs.max_health),
-                m.extra.vector[0],
-                m.attrs.speed,
-            ],
-            sitting: m.extra.sitting,
-            silent: m.silent,
-            lying: m.species() == Species::Cat && (m.extra.flag || m.extra.relax_one),
-            ridden: m.rider.is_some() || m.extra.rider.is_some() || m.extra.mount.is_some(),
-            is_vehicle: equine::is_vehicle(m),
-            knockback_resistance: m.attrs.knockback_resistance,
-            effects: m
-                .extra
-                .effects
-                .iter()
-                .map(|e| e.0.trim_start_matches("minecraft:"))
-                .collect(),
-            hunted_recently: m.species() == Species::Piglin && m.extra.ints[0] > 0,
-            hurt_recently: m.species() == Species::Piglin && m.extra.piglin.hurt,
-            huntable: m.species() == Species::Hoglin && !m.is_baby() && !m.extra.cannot_be_hunted,
-        }
-    }
     /// `EntityType.getCategory`'s name.
     pub fn category(&self) -> &'static str {
         match self.kind.category.as_str() {
@@ -2614,28 +2612,6 @@ pub fn take_mob_pushes(events: &mut Vec<MobEvent>, from: usize, pending: &mut Pe
     }
     events.truncate(kept);
 }
-/// Pushes waiting for their mob's tick, in push order. A list while short;
-/// past [`PendingPushes::LIST_MAX`] (a crowd pushing each other) one list
-/// per mob, as scanning the whole list for each mob grows with its square.
-#[derive(Default)]
-pub struct PendingPushes {
-    list: Vec<(u32, Vec3)>,
-    by_mob: crate::fast_hash::FxHashMap<u32, Vec<Vec3>>,
-}
-impl PendingPushes {
-    const LIST_MAX: usize = 64;
-    pub fn push(&mut self, id: u32, v: Vec3) {
-        if self.by_mob.is_empty() && self.list.len() < Self::LIST_MAX {
-            self.list.push((id, v));
-            return;
-        }
-        // Older pushes first, so each mob's stay in order.
-        for (id, v) in self.list.drain(..) {
-            self.by_mob.entry(id).or_default().push(v);
-        }
-        self.by_mob.entry(id).or_default().push(v);
-    }
-}
 /// `ServerLevel.sendBlockUpdated`: for each write that changed a block's collision
 /// shape, a mob whose path runs near it re-paths (`PathNavigation.shouldRecomputePath`).
 /// The writes whose shape changed are found once per tick ([`collision_changes`]).
@@ -2663,50 +2639,28 @@ pub fn collision_changes(w: &MobWorld, writes: &[((i32, i32, i32), u32, u32)]) -
         })
         .collect()
 }
-/// Adds the pending pushes aimed at `m` to its velocity, in push order.
-pub fn apply_mob_pushes(m: &mut Mob, pending: &mut PendingPushes) {
-    // Entity.push(x, y, z) sets needsSync.
-    let mut add = |v: Vec3| {
-        m.velocity = Vec3::new(m.velocity.x + v.x, m.velocity.y + v.y, m.velocity.z + v.z);
-        m.needs_sync = true;
-    };
-    if !pending.list.is_empty() {
-        pending.list.retain(|(id, v)| {
-            if *id != m.id {
-                return true;
-            }
-            add(*v);
-            false
-        });
-    }
-    if !pending.by_mob.is_empty()
-        && let Some(pushes) = pending.by_mob.remove(&m.id)
-    {
-        pushes.into_iter().for_each(add);
-    }
-}
 /// Applies the brain memories a mob's tick set on other mobs (from event
 /// index `from` on), at once: vanilla sets them on the other entity during
 /// the tick, before the mobs after it tick.
-pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: usize) {
+pub fn apply_brain_events<M: MobSlot>(mobs: &mut [M], events: &mut Vec<MobEvent>, from: usize) {
     let mut i = from;
     while i < events.len() {
         match events[i] {
             MobEvent::BreedTarget { mob, partner } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.iter_mut().map(MobSlot::mob_mut).find(|m| m.id == mob) {
                     animal_brain::set_breed_partner(m, partner);
                 }
                 events.remove(i);
             }
             MobEvent::LockGaze { mob, partner } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.iter_mut().map(MobSlot::mob_mut).find(|m| m.id == mob) {
                     animal_brain::lock_gaze(m, partner);
                     villager_brain::lock_gaze_half(m, Who::Mob(partner));
                 }
                 events.remove(i);
             }
             MobEvent::Retreat { mob, from, at } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == mob) {
+                if let Some(m) = mobs.iter_mut().map(MobSlot::mob_mut).find(|m| m.id == mob) {
                     piglin::receive_retreat(m, from, at);
                 }
                 events.remove(i);
@@ -2720,7 +2674,11 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
                 events.remove(i);
             }
             MobEvent::SchoolSize { leader, by } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == leader) {
+                if let Some(m) = mobs
+                    .iter_mut()
+                    .map(MobSlot::mob_mut)
+                    .find(|m| m.id == leader)
+                {
                     m.extra.followers += by;
                 }
                 events.remove(i);
@@ -2730,7 +2688,11 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
             MobEvent::Breed {
                 parent, partner, ..
             } => {
-                if let Some(m) = mobs.iter_mut().find(|m| m.id == partner) {
+                if let Some(m) = mobs
+                    .iter_mut()
+                    .map(MobSlot::mob_mut)
+                    .find(|m| m.id == partner)
+                {
                     m.extra.age = 6000;
                     m.extra.in_love = 0;
                     animal_brain::forget_breed_target(m, parent);
@@ -2752,6 +2714,7 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
                 let mut raised = Vec::new();
                 let (aim, fish_pos, fish_silent) = mobs
                     .iter()
+                    .map(MobSlot::mob)
                     .find(|m| m.id == mob)
                     .map(|m| {
                         (
@@ -2766,7 +2729,10 @@ pub fn apply_brain_events(mobs: &mut [Mob], events: &mut Vec<MobEvent>, from: us
                     })
                     .map(|(aim, pos, silent)| (Some(aim), Some(pos), silent))
                     .unwrap_or((None, None, true));
-                if let Some(t) = mobs.iter_mut().find(|m| m.id == target)
+                if let Some(t) = mobs
+                    .iter_mut()
+                    .map(MobSlot::mob_mut)
+                    .find(|m| m.id == target)
                     && t.damage_aimed(amount, source, aim)
                 {
                     t.add_effect("minecraft:poison", poison_ticks, 0);
@@ -2935,6 +2901,9 @@ pub struct MobWorld<'a> {
     /// keeps them (the mob ticks: a slot keeps its mob, and its species, all
     /// tick). Each zombie looking for a village read every slot.
     pub others_villagers: Option<&'a [u32]>,
+    /// The slots of `others` that may stop a moving mob
+    /// ([`Seen::may_block_mobs`]), when the caller keeps them; None: any.
+    pub others_solid: Option<&'a [u32]>,
     pub daylight: bool,
     /// The `gameplay/monsters_burn` attribute: the overworld day timeline's
     /// step track, false in every other dimension.
@@ -2943,7 +2912,7 @@ pub struct MobWorld<'a> {
     pub day_time: i64,
     pub raining: bool,
     pub thundering: bool,
-    pub nether: bool,
+    pub level: horizon_core::LevelKey,
     pub block_tags: &'a HashMap<String, std::collections::HashSet<String>>,
     /// Each block's `fallOn` rule (the player's landing registry).
     pub landing: &'a horizon_world::block_landing::BlockLandingRegistry,
@@ -2959,8 +2928,8 @@ pub struct MobWorld<'a> {
     /// `getCurrentDifficultyAt` at the mob being ticked (near the player
     /// outside the mob tick).
     pub difficulty: spawning::LocalDifficulty,
-    /// The End (its dimension type's monster spawn light rules).
-    pub end: bool,
+    /// The level's dimension type.
+    pub dimension_type: &'a horizon_world::dimension_type::DimensionFacts,
     /// The world seed (slime chunks).
     pub world_seed: i64,
     /// `Level.getSeaLevel` (63 in the overworld, -63 in a flat world).
@@ -2974,6 +2943,13 @@ pub struct MobWorld<'a> {
     pub lid_openers: &'a HashMap<(i32, i32, i32), i32>,
     /// What a content mod's effects do, on a server (None on a client).
     pub mod_effects: Option<&'a dyn ModEffectTicks>,
+    /// `Level.getEntity(uuid)`, for the UUIDs a mob kept of entities that were
+    /// not in the level (a warden's anger, `AngerManagement.angerByUuid`).
+    /// None: this world keeps no entity UUIDs, so nothing is resolved.
+    pub who_lookup: Option<&'a dyn WhoLookup>,
+    /// Another thread's mobs, for a lookup by id that misses `others`: a group of the server's
+    /// parallel mob loop (`game/mob_islands.rs`) answers as the serial loop would.
+    pub foreign: Option<&'a dyn ForeignSeen>,
     /// The level's world border, whose walls stop a mob's moves
     /// (`Entity.collectColliders`); None: nothing stops them there.
     pub border: Option<&'a horizon_core::geometry::border::BorderGeometry>,
@@ -2983,6 +2959,17 @@ pub struct MobWorld<'a> {
 /// native mods answer. False removes the effect.
 pub trait ModEffectTicks {
     fn tick_mod_effect(&self, effect: &str, mob: u32, tick_count: i32, amplifier: i32) -> bool;
+}
+/// `Level.getEntity(UUID)` for a reference a mob stored: the entity that UUID
+/// names while it is in the level, never some other entity as a stand-in. Only
+/// the game layer keeps entity UUIDs, so it answers this (`Game::who_by_uuid`)
+/// and the mob layer reaches it through `MobWorld`.
+/// A mob outside this thread's part of the mob loop, as the serial loop would see it now.
+pub trait ForeignSeen {
+    fn seen(&self, id: u32) -> Option<&Seen>;
+}
+pub trait WhoLookup {
+    fn who_by_uuid(&self, uuid: [i32; 4]) -> Option<Who>;
 }
 /// `Entity.getTeam` of the player and of the mobs on a team.
 #[derive(Clone, Debug, Default)]
@@ -2998,20 +2985,67 @@ impl<'a> Teams<'a> {
         }
     }
 }
+/// `InfestedMobEffect.onMobHurt`'s draws from the bearer's random
+/// (`mob.getRandom()`): a 10% chance of one or two silverfish, each thrown
+/// along `look` (`spawnSilverfish`). Their velocities; none when the chance
+/// fails.
+pub fn infested_silverfish(random: &mut LegacyRandom, look: [f64; 3]) -> Vec<Vec3> {
+    if random.next_float() > 0.1 {
+        return Vec::new();
+    }
+    let count = 1 + random.next_int_bound(2).unwrap_or(0);
+    (0..count)
+        .map(|_| {
+            // Mth.randomBetween(-PI / 2, PI / 2), then in floats (JOML
+            // Vector3f): the look direction `.mul(0.3f).mul(1, 1.5f, 1)`,
+            // `.rotateY(angle)`.
+            let half = std::f32::consts::FRAC_PI_2;
+            let angle = random.next_float() * (2.0 * half) - half;
+            let sin = horizon_assets::math::joml_sin(angle);
+            let cos = horizon_assets::math::cos_from_sin(sin, angle);
+            let x = look[0] as f32 * 0.3;
+            let y = look[1] as f32 * 0.3 * 1.5;
+            let z = look[2] as f32 * 0.3;
+            Vec3::new(
+                f64::from(x * cos + z * sin),
+                f64::from(y),
+                f64::from(-x * sin + z * cos),
+            )
+        })
+        .collect()
+}
 /// `Entity.random` of a client's copy of entity `id` first seen at `position`: vanilla's is its
 /// own (`RandomSource.create()`), drawn on by nothing else; this one is seeded from the two.
-pub fn entity_random(id: u32, position: Vec3) -> LegacyRandom {
+pub fn entity_random(id: u32, position: Vec3) -> EntityRandom {
     let mut random = LegacyRandom::new(
         i64::from(id).wrapping_mul(0x5DEE_CE66D)
             ^ (position.x.to_bits() as i64)
             ^ (position.z.to_bits() as i64).rotate_left(17),
     );
     let _ = random.next_int();
-    random
+    EntityRandom::own(random)
+}
+/// The own random (`Entity.random`) of a living entity the server makes, after
+/// the UUID's two draws (`Mth.createInsecureUUID`), which are returned here.
+/// `Mob::with_random` makes the `defineSynchedData` draws and the yaw next.
+pub fn living_random() -> (EntityRandom, [i32; 4]) {
+    let mut random = crate::random_source::entity();
+    let uuid = crate::save::insecure_uuid(&mut random);
+    (EntityRandom::own(random), uuid)
 }
 impl Mob {
     pub fn new(id: u32, kind: Arc<MobType>, position: Vec3, yaw: f32) -> Self {
-        let random = entity_random(id, position);
+        Self::with_random(id, kind, position, yaw, entity_random(id, position))
+    }
+    /// `new` with the mob's own random given: the kind's constructor draws
+    /// (a chicken's egg timer) come from it.
+    pub fn with_random(
+        id: u32,
+        kind: Arc<MobType>,
+        position: Vec3,
+        yaw: f32,
+        random: EntityRandom,
+    ) -> Self {
         let mut mob = Self {
             join: Default::default(),
             id,
@@ -3031,10 +3065,13 @@ impl Mob {
             horizontal_collision: false,
             vertical_collision_below: false,
             needs_sync: false,
+            sync_position: false,
             gear_knockback_resistance: None,
             hurt_time: 0,
             invulnerable: 0,
+            invulnerable_time: 0,
             death_time: 0,
+            impulse_grace_time: 0,
             age: 0,
             limb_position: 0.0,
             limb_speed: 0.0,
@@ -3063,8 +3100,10 @@ impl Mob {
             attacker_aim: None,
             projectile_motion: None,
             climbing: false,
+            on_climbable: false,
             fire_ticks: 0,
             ticks_frozen: 0,
+            in_powder_snow: false,
             glowing: false,
             air: 300,
             last_hurt: 0.0,
@@ -3121,6 +3160,11 @@ impl Mob {
         if mob.species() == Species::Salmon {
             mob.extra.variant = 1;
         }
+        // `Entity.<init>`'s order: `defineSynchedData`, then the yaw.
+        zombie_villager::constructor_draws(&mut mob);
+        neutral_anger::init(&mut mob);
+        // `Creeper.explosionRadius = 3` until a save or a command sets it.
+        mob.extra.explosion_radius = 3;
         // The PathNavigation constructor: the base follow range.
         mob.ai.nav.max_visited_nodes = (mob.kind.follow_range * 16.0).floor() as i32;
         ai::register(&mut mob);
@@ -3130,17 +3174,51 @@ impl Mob {
     /// something off its pickup cooldown, a sulfur cube with no block.
     pub fn can_pick_up_loot(&self) -> bool {
         match self.species() {
-            Species::Allay => self.extra.main_hand.is_some() && self.extra.ints[3] <= 0,
+            Species::Allay => allay::can_pick_up_loot(self),
             Species::SulfurCube => !sulfur_cube::has_body(self),
             _ => self.extra.pick_up_loot,
         }
     }
     #[inline]
+    /// `LivingEntity.getHitbox`: a rider's box starts no lower than its seat
+    /// (`vehicle.getPassengerRidingPosition(this).y`).
+    pub fn hitbox(&self) -> Aabb {
+        let b = self.bounds();
+        match self.extra.seat.filter(|s| self.extra.mount == Some(s.0)) {
+            Some((_, offset, _)) => {
+                let (lo, hi) = (b.min_position(), b.max_position());
+                let y = (self.position.y + offset).max(lo.y);
+                Aabb::new(Vec3::new(lo.x, y, lo.z), hi)
+            }
+            None => b,
+        }
+    }
+    /// `Mob.getAttackBoundingBox(range)`: its box, widened to its vehicle's
+    /// (`vehicle`, when it rides) on x and z, grown by `range` on x and z.
+    pub fn attack_box(&self, range: f64, vehicle: Option<Aabb>) -> Aabb {
+        let b = self.bounds();
+        let (mut lo, mut hi) = (b.min_position(), b.max_position());
+        if let Some(vehicle) = vehicle.filter(|_| self.extra.mount.is_some()) {
+            let (vlo, vhi) = (vehicle.min_position(), vehicle.max_position());
+            lo = Vec3::new(lo.x.min(vlo.x), lo.y, lo.z.min(vlo.z));
+            hi = Vec3::new(hi.x.max(vhi.x), hi.y, hi.z.max(vhi.z));
+        }
+        Aabb::new(lo, hi).inflate(Vec3::new(range, 0.0, range))
+    }
+    /// `positionRider` seated it on vehicle `id`: its own vehicle attachment
+    /// and the vehicle's box, good while it rides that vehicle.
+    pub fn seated(&mut self, id: u32, offset: f64, vehicle: Aabb) {
+        self.extra.seat = Some((id, offset, vehicle));
+    }
     pub fn bounds(&self) -> Aabb {
         self.bounds_at(self.position)
     }
     /// `Entity.makeBoundingBox(position)`.
     pub fn bounds_at(&self, position: Vec3) -> Aabb {
+        // Shulker.makeBoundingBox: the lid's lift, not the dimensions.
+        if self.kind.species == Species::Shulker {
+            return shulker::bounds_at(self, position);
+        }
         // `width()` and `height()` in one `dims()`: every box asked for (each
         // collision, push and cart test) read the whole size twice.
         let (width, height, _) = self.dims();
@@ -3171,6 +3249,16 @@ impl Mob {
     }
     pub fn hostile(&self) -> bool {
         self.kind.category == "monster"
+    }
+    /// `instanceof Enemy`. The zombie horse, camel husk and zombie nautilus are in
+    /// the monster category but extend `Animal`/`AbstractNautilus`, which do
+    /// not implement `Enemy`.
+    pub fn is_enemy(&self) -> bool {
+        self.hostile()
+            && !matches!(
+                self.species(),
+                Species::ZombieHorse | Species::CamelHusk | Species::ZombieNautilus
+            )
     }
     #[inline]
     pub fn species(&self) -> Species {
@@ -3253,9 +3341,14 @@ impl Mob {
     /// `LivingEntity.isInvulnerableTo` and dead or removed: only #bypasses_invulnerability gets
     /// past the flag. The guard every damage hook runs after (`LivingIncomingDamageEvent`).
     pub fn refuses_damage(&self, source: &Damage) -> bool {
-        !self.alive()
+        self.extra.client_side
+            || !self.alive()
             || self.removed
-            || (self.invulnerable_flag && !source.kind.bypasses_invulnerability())
+            || (self.is_invulnerable() && !source.kind.bypasses_invulnerability())
+    }
+    /// `Entity.isInvulnerable`: `Invulnerable`, or `invulnerable_time` left.
+    pub fn is_invulnerable(&self) -> bool {
+        self.invulnerable_flag || self.invulnerable_time > 0
     }
     /// `LivingEntity.hurtServer`'s partial mob adapter, with health reductions inline.
     /// `damage` by a source with a weapon: `armor_effectiveness` runs the
@@ -3282,6 +3375,25 @@ impl Mob {
     /// `LivingEntity.hurtServer`'s shared partial mob adapter. The optional
     /// identity only selects the species filter; the health pipeline is shared.
     fn damage_with_player_context(
+        &mut self,
+        amount: f32,
+        source: Damage,
+        armor_effectiveness: Option<&mut dyn FnMut(f32) -> f32>,
+        player_uuid: Option<[i32; 4]>,
+    ) -> bool {
+        // Enderman.hurtServer: past `isInvulnerableTo`, the teleport draw
+        // follows `super.hurtServer` whatever it answered (a hurt cooldown, a
+        // dead enderman), its hurt sound's pitch included.
+        let enderman = self.species() == Species::Enderman
+            && !self.removed
+            && !(self.is_invulnerable() && !source.kind.bypasses_invulnerability());
+        let hurt = self.hurt_server(amount, source, armor_effectiveness, player_uuid);
+        if enderman {
+            enderman::after_hurt(self, &source);
+        }
+        hurt
+    }
+    fn hurt_server(
         &mut self,
         amount: f32,
         source: Damage,
@@ -3363,6 +3475,17 @@ impl Mob {
         if !amount.is_finite() {
             amount = f32::MAX;
         }
+        // LivingEntity.hurtServer: inside the hurt cooldown a hit is compared
+        // with `lastHurt` by this incoming amount, before armor and Resistance,
+        // and `actuallyHurt` gets only what it adds.
+        let incoming = amount;
+        let cooldown = self.invulnerable as f32 > 10.0;
+        if cooldown {
+            if incoming <= self.last_hurt {
+                return false;
+            }
+            amount = incoming - self.last_hurt;
+        }
         // LivingEntity.getDamageAfterArmorAbsorb asks `hurtArmor` *before*
         // `CombatRules.getDamageAfterAbsorb`, so a worn piece wears by the
         // damage the armour, toughness and enchantment reductions have not
@@ -3381,13 +3504,8 @@ impl Mob {
                 amount *= 1.0 - fraction;
             }
         }
-        // CombatRules.getDamageAfterMagicAbsorb: enchantment protection.
-        let epf = gear::protection(self, source.kind);
-        if epf > 0.0 {
-            amount *= 1.0 - epf / 25.0;
-        }
         // LivingEntity.getDamageAfterMagicAbsorb: Resistance takes 20% per level off
-        // (`#bypasses_resistance` and `#bypasses_effects` skip it).
+        // (`#bypasses_resistance` and `#bypasses_effects` skip it) ...
         if !source.kind.bypasses_effects()
             && !source.kind.bypasses_resistance()
             && let Some(&(_, _, amp)) = self
@@ -3399,6 +3517,15 @@ impl Mob {
             let remainder = 25i32.wrapping_sub(amp.wrapping_add(1).wrapping_mul(5));
             amount = (amount * remainder as f32 / 25.0).max(0.0);
             // actuallyHurt is void: zero health damage still lets hurtServer set hurt state.
+        }
+        // ... then, with damage left and outside `#bypasses_enchantments` (a
+        // warden's sonic boom), CombatRules.getDamageAfterMagicAbsorb's
+        // enchantment protection (#11308).
+        if amount > 0.0 && !source.kind.bypasses_enchantments() {
+            let epf = gear::protection(self, source.kind);
+            if epf > 0.0 {
+                amount *= 1.0 - epf / 25.0;
+            }
         }
         // Witch.getDamageAfterMagicAbsorb: none from its own doing, else
         // 85% less from `#witch_resistant_to`.
@@ -3418,28 +3545,26 @@ impl Mob {
         // Wolf.actuallyHurt: wolf armor takes the damage instead of the wolf.
         let absorbed = self.wolf_armor_absorbs(&source);
         let mut knock = true;
-        let dealt = if self.invulnerable as f32 > 10.0 {
-            if amount <= self.last_hurt {
-                return false;
-            }
-            let dealt = amount - self.last_hurt;
+        // What came off the health, for `LivingDamageEvent.Post`.
+        let mut taken = 0.0;
+        let dealt = if cooldown {
             if absorbed {
-                self.hurt_wolf_armor(dealt);
+                self.hurt_wolf_armor(amount);
             } else {
-                let dealt = self.soak_hit(dealt, &source);
-                self.health -= dealt;
+                let through = self.soak_hit(amount, &source);
+                taken = self.hurt_health(through, &source);
             }
-            self.last_hurt = amount;
+            self.last_hurt = incoming;
             knock = false;
-            dealt
+            amount
         } else {
-            self.last_hurt = amount;
+            self.last_hurt = incoming;
             self.invulnerable = 20;
             if absorbed {
                 self.hurt_wolf_armor(amount);
             } else {
                 let through = self.soak_hit(amount, &source);
-                self.health -= through;
+                taken = self.hurt_health(through, &source);
             }
             self.hurt_time = 10;
             amount
@@ -3449,6 +3574,11 @@ impl Mob {
         // Wolf.actuallyHurt keeps a hit its armor takes out of it.
         if !absorbed && dealt != 0.0 {
             self.record_damage(source, dealt);
+        }
+        // The end of `actuallyHurt`: a native mod's `LivingDamageEvent.Post`.
+        // `Wolf.actuallyHurt` never gets there when the armour takes the hit.
+        if !absorbed {
+            crate::health::damage_post(crate::health::Hurting::Mob(self, &source), taken);
         }
         // LivingEntity.hurtArmor: `Horse` is the only mob that overrides it, and
         // it hands `doHurtEquipment` the body slot alone. A wolf's armour has
@@ -3472,8 +3602,7 @@ impl Mob {
         self.last_damage = Some((source, i64::from(self.age)));
         self.last_direct = None;
         if let Some(who) = source.attacker {
-            self.ai.last_hurt_by = Some(who);
-            self.ai.last_hurt_by_time = self.age as i32;
+            self.ai.hurt_by(who, self.age as i32);
             if who == Who::Player {
                 self.ai.last_hurt_by_player = 100;
             }
@@ -3519,6 +3648,13 @@ impl Mob {
                         .push(MobEvent::Sound(sound, at, ai::sound_volume(self), pitch));
                 }
             }
+            // playSecondaryHurtSound: a thorns hit sounds where the mob
+            // stands, silent or not.
+            if source.kind == DamageKind::Thorns {
+                let at = [self.position.x, self.position.y, self.position.z];
+                self.outbox
+                    .push(MobEvent::Sound("enchant.thorns.hit", at, 1.0, 1.0));
+            }
         }
         // IronGolem.hurtServer: a new crack level plays the damage sound.
         if let Some(before) = crackiness
@@ -3529,8 +3665,25 @@ impl Mob {
             self.outbox
                 .push(MobEvent::Sound("entity.iron_golem.damage", at, 1.0, 1.0));
         }
+        // LivingEntity.hurtServer ends with MobEffectInstance.onMobHurt, so
+        // Infested draws from the mob's random here, before a subclass's own
+        // draws after `super.hurtServer` (an enderman's or a shulker's
+        // teleport), and its silverfish come out where the mob was hurt.
         if self.has_effect("minecraft:infested") {
-            self.outbox.push(MobEvent::Infested { mob: self.id });
+            let look = self.view_vector();
+            let velocities = infested_silverfish(&mut self.random, look);
+            if !velocities.is_empty() {
+                let at = [
+                    self.position.x,
+                    self.position.y + f64::from(self.height()) / 2.0,
+                    self.position.z,
+                ];
+                self.outbox.push(MobEvent::Infested { at, velocities });
+            }
+        }
+        // Shulker.hurtServer: the low-health teleport roll after `super.hurtServer`.
+        if self.species() == Species::Shulker {
+            shulker::after_hurt(self);
         }
         // Squid.hurtServer: a squid hurt after a living entity hit it squirts ink.
         if matches!(self.species(), Species::Squid | Species::GlowSquid)
@@ -3548,12 +3701,24 @@ impl Mob {
         if self.species() == Species::GlowSquid && self.ai.last_hurt_by.is_some() {
             aquatic::hurt_server(self);
         }
-        true
+        // Squid.hurtServer (also GlowSquid's result): parent health damage has
+        // happened, but without a last living attacker the subclass returns false.
+        !matches!(self.species(), Species::Squid | Species::GlowSquid)
+            || self.ai.last_hurt_by.is_some()
     }
     /// `damage` by a source whose direct entity is `direct` (an entity type id), which `source`
     /// cannot carry: `DamageSources.indirectMagic(potion or cloud, owner)`.
     pub fn damage_by(&mut self, amount: f32, source: Damage, direct: &'static str) -> bool {
+        // Enderman.hurtServer: only a thrown potion skips the teleport draw;
+        // a lingering cloud's `indirect_magic` goes through it.
+        let cloud = self.species() == Species::Enderman
+            && direct == "minecraft:area_effect_cloud"
+            && !self.removed
+            && !(self.is_invulnerable() && !source.kind.bypasses_invulnerability());
         let hurt = self.damage(amount, source);
+        if cloud {
+            enderman::teleport_chance(self, &source);
+        }
         if hurt {
             self.last_direct = Some(direct);
         }
@@ -3690,9 +3855,8 @@ impl Mob {
     ) -> bool {
         self.track_section();
         // LivingEntity.tick: CombatTracker.recheckStatus.
-        let alive = self.alive();
-        self.combat.recheck(alive, self.age);
-        ai::tick(self, w, level_random, events)
+        self.combat.recheck(self.alive(), self.age);
+        neutral_anger::around_tick(self, w.game_time, |m| ai::tick(m, w, level_random, events))
     }
     /// The section the mob is in, noted when it changes (`EntitySection` lists).
     fn track_section(&mut self) {
@@ -3774,7 +3938,7 @@ impl Mob {
             .iter()
             .find(|e| e.0 == effect)
             .map(|e| (e.1, e.2));
-        self.add_effect(effect, ticks, amplifier);
+        let updated = self.add_effect_inner(effect, ticks, amplifier, Some((ambient, visible)));
         let after = self
             .extra
             .effects
@@ -3798,9 +3962,20 @@ impl Mob {
             self.extra.hidden_effects.push(effect);
         }
         after.is_some()
-            && (before != after
-                || present_ambient != self.extra.ambient_effects.contains(&effect)
-                || was_visible != visible)
+            && updated.unwrap_or(
+                before != after
+                    || present_ambient != self.extra.ambient_effects.contains(&effect)
+                    || was_visible != visible,
+            )
+    }
+    /// `LivingEntity.actuallyHurt`'s last step: what got past absorption goes to
+    /// a native mod's `LivingDamageEvent.Pre`, which may change it, then comes
+    /// off the health. What came off.
+    fn hurt_health(&mut self, through: f32, source: &Damage) -> f32 {
+        let mut through = through;
+        crate::health::damage_pre(crate::health::Hurting::Mob(self, source), &mut through);
+        self.health -= through;
+        through
     }
     /// [`Mob::soak_absorption`] for a hit from `source`: `LivingEntity.actuallyHurt`
     /// credits a `ServerPlayer` attacker with the absorbed damage in tenths.
@@ -3818,41 +3993,68 @@ impl Mob {
         through
     }
     /// `LivingEntity.actuallyHurt`: the absorption amount takes the damage first;
-    /// what is left reaches the health.
+    /// what is left reaches the health. `setAbsorptionAmount` stores the rest
+    /// with `Mth.clamp(amount, 0, getMaxAbsorption())`, so absorption above
+    /// `max_absorption` (from the mob's data, with no Absorption effect) is gone
+    /// after the hit.
     pub fn soak_absorption(&mut self, damage: f32) -> f32 {
         let through = (damage - self.absorption).max(0.0);
-        self.absorption = (self.absorption - (damage - through)).max(0.0);
+        let left = self.absorption - (damage - through);
+        // `Mth.clamp(float, float, float)`: `value < min ? min : Math.min(value, max)`.
+        self.absorption = if left < 0.0 {
+            0.0
+        } else {
+            left.min(armor::max_absorption(self))
+        };
         through
     }
     /// `LivingEntity.checkTotemDeathProtection`: the first hand with a
-    /// `death_protection` item uses it up, the mob survives at 1 health with
-    /// the totem's effects, and entity event 35 tells the clients.
+    /// `death_protection` stack uses one item up, the mob survives at 1 health
+    /// with that component's `death_effects`, and entity event 35 tells the
+    /// clients.
     fn use_death_protection(&mut self, source: &Damage) -> bool {
         // `DamageTypeTags.BYPASSES_INVULNERABILITY`: the void and /kill take it.
         if source.kind.bypasses_invulnerability() {
             return false;
         }
-        // `getItemInHand`: the main hand first. The totem is the only item in
-        // the shipped data with `minecraft:death_protection`.
+        // `getItemInHand`: the main hand first. The game reads the components
+        // (`hand_protection`); before it has, the totem is the only item in the
+        // shipped data with `minecraft:death_protection`.
         const TOTEM: &str = "minecraft:totem_of_undying";
-        let main = self.extra.main_hand.as_deref() == Some(TOTEM);
-        let off = !main && self.extra.off_hand.as_deref() == Some(TOTEM);
-        if !main && !off {
-            return false;
-        }
-        if main {
-            self.extra.set_main_hand(None);
-        } else {
+        let (main, off) = match self.extra.hand_protection.clone() {
+            Some(h) => (h.main, h.off),
+            None => {
+                let totem = || Some(living::totem_death_effects());
+                (
+                    (self.extra.main_hand.as_deref() == Some(TOTEM))
+                        .then(totem)
+                        .flatten(),
+                    (self.extra.off_hand.as_deref() == Some(TOTEM))
+                        .then(totem)
+                        .flatten(),
+                )
+            }
+        };
+        // `itemStack.shrink(1)`: a held stack of several keeps the rest.
+        let effects = if let Some(effects) = main {
+            match self.extra.main_hand_stack.as_mut() {
+                Some(s) if s.count > 1 && self.extra.main_hand.as_ref() == Some(&s.item) => {
+                    s.count -= 1;
+                }
+                _ => self.extra.set_main_hand(None),
+            }
+            effects
+        } else if let Some(effects) = off {
             self.extra.off_hand = None;
-        }
-        // `setHealth(1.0F)`, then `DeathProtection.TOTEM_EFFECTS`.
+            effects
+        } else {
+            return false;
+        };
+        self.extra.hand_protection = None;
+        // `setHealth(1.0F)`, then `DeathProtection.applyEffects`.
         self.health = 1.0;
-        for (effect, ticks, amplifier) in [
-            ("regeneration", 900, 1),
-            ("absorption", 100, 1),
-            ("fire_resistance", 800, 0),
-        ] {
-            self.add_effect(effect, ticks, amplifier);
+        for effect in &effects {
+            self.apply_consume_effect(effect);
         }
         let at = [self.position.x, self.position.y, self.position.z];
         self.outbox.push(MobEvent::EntityEvent {
@@ -3861,6 +4063,75 @@ impl Mob {
             at,
         });
         true
+    }
+    /// One `ConsumeEffect` of a totem or a fox's food on the mob. Teleporting,
+    /// sounds and a mod's own kinds are not applied here.
+    pub(crate) fn apply_consume_effect(&mut self, effect: &crate::items::ConsumeEffect) {
+        use crate::items::ConsumeEffect;
+        match effect {
+            // `LivingEntity.removeAllEffects` -> `onEffectsRemoved` ->
+            // `refreshDirtyAttributes` -> `onAttributeUpdated(MAX_ABSORPTION)`:
+            // the absorption amount is clamped to the remaining maximum.
+            ConsumeEffect::ClearAllEffects => {
+                let had_absorption = self.has_effect("minecraft:absorption");
+                let had_boost = self.has_effect("minecraft:health_boost");
+                self.extra.effect_fallbacks.clear();
+                self.extra.effects.clear();
+                if had_absorption {
+                    self.absorption = self.absorption.min(armor::max_absorption(self));
+                }
+                if had_boost {
+                    finalize::health_boost_changed(self);
+                }
+            }
+            ConsumeEffect::RemoveEffects(ids) => {
+                let had_absorption = self.has_effect("minecraft:absorption");
+                let had_boost = self.has_effect("minecraft:health_boost");
+                self.extra.effects.retain(|e| {
+                    let held = e.0.trim_start_matches("minecraft:");
+                    !ids.iter()
+                        .any(|id| id.trim_start_matches("minecraft:") == held)
+                });
+                self.extra
+                    .effect_fallbacks
+                    .retain(|h| self.extra.effects.iter().any(|e| e.0 == h.id));
+                if had_absorption && !self.has_effect("minecraft:absorption") {
+                    self.absorption = self.absorption.min(armor::max_absorption(self));
+                }
+                if had_boost && !self.has_effect("minecraft:health_boost") {
+                    finalize::health_boost_changed(self);
+                }
+            }
+            // `ApplyStatusEffectsConsumeEffect.apply`: one random draw, even at
+            // probability 1.
+            ConsumeEffect::ApplyEffects {
+                effects,
+                probability,
+            } => {
+                if self.random.next_float() >= *probability {
+                    return;
+                }
+                for spec in effects {
+                    let Some(def) = horizon_client_core::potions::effect(&spec.id) else {
+                        continue;
+                    };
+                    if def.instant {
+                        match def.id {
+                            "instant_damage" | "instant_health" => self.apply_heal_or_harm(
+                                def.id == "instant_damage",
+                                self.kind.flags.undead,
+                                spec.amplifier,
+                                1.0,
+                            ),
+                            _ => {}
+                        }
+                    } else {
+                        self.add_effect(def.id, spec.duration, spec.amplifier);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     /// `LivingEntity.heal`, with the native heal hook.
     pub fn heal(&mut self, mut amount: f32) {
@@ -3874,14 +4145,16 @@ impl Mob {
     /// living mob (6 << amplifier, magic) and heals an undead one, a healing effect
     /// the reverse (4 << amplifier), both scaled by `scale`.
     pub fn apply_heal_or_harm(&mut self, harm: bool, inverted: bool, amplifier: i32, scale: f64) {
-        let amp = amplifier.clamp(0, 30);
+        // HealOrHarmMobEffect.applyEffectTick: Java's `<<` takes the distance
+        // modulo 32 and wraps; a heal is at least 0.
+        let shift = amplifier as u32;
         if harm != inverted {
             self.damage(
-                (scale * f64::from(6i32 << amp)) as i32 as f32,
+                (scale * f64::from(6i32.wrapping_shl(shift))) as i32 as f32,
                 Damage::of(DamageKind::Magic),
             );
         } else {
-            let heal = (scale * f64::from(4i32 << amp)) as i32 as f32;
+            let heal = (scale * f64::from(4i32.wrapping_shl(shift).max(0))) as i32 as f32;
             self.heal(heal);
         }
     }
@@ -3911,37 +4184,116 @@ impl Mob {
         !(self.kind.flags.undead && matches!(effect, "minecraft:poison" | "minecraft:regeneration"))
     }
     pub fn add_effect(&mut self, effect: &'static str, ticks: i32, amplifier: i32) {
+        let _ = self.add_effect_inner(effect, ticks, amplifier, None);
+    }
+    /// Join the authoritative active tuple with only its weaker subtree.
+    pub(crate) fn effect_instance(&self, index: usize) -> crate::effects::EffectInstance {
+        let (id, duration, amplifier) = self.extra.effects[index];
+        let visible = !self.extra.hidden_effects.contains(&id);
+        crate::effects::EffectInstance {
+            id,
+            duration,
+            amplifier,
+            ambient: self.extra.ambient_effects.contains(&id),
+            visible,
+            // Independent active icon retention remains outside this Mob model.
+            show_icon: visible,
+            hidden: self
+                .extra
+                .effect_fallbacks
+                .iter()
+                .find(|h| h.id == id)
+                .cloned()
+                .map(Box::new),
+        }
+    }
+    pub(crate) fn set_effect_fallback(
+        &mut self,
+        id: &'static str,
+        hidden: Option<Box<crate::effects::EffectInstance>>,
+    ) {
+        let at = self.extra.effect_fallbacks.iter().position(|h| h.id == id);
+        match (at, hidden) {
+            (Some(i), Some(h)) => self.extra.effect_fallbacks[i] = *h,
+            (Some(i), None) => {
+                self.extra.effect_fallbacks.remove(i);
+            }
+            (None, Some(h)) => self.extra.effect_fallbacks.push(*h),
+            (None, None) => {}
+        }
+    }
+    /// Project duration/promotion back into the same active slot and flag sets.
+    pub(crate) fn project_effect_instance(
+        &mut self,
+        index: usize,
+        e: crate::effects::EffectInstance,
+    ) {
+        self.extra.effects[index] = (e.id, e.duration, e.amplifier);
+        for (ids, enabled) in [
+            (&mut self.extra.hidden_effects, !e.visible),
+            (&mut self.extra.ambient_effects, e.ambient),
+        ] {
+            if ids.contains(&e.id) != enabled {
+                ids.retain(|id| *id != e.id);
+                if enabled {
+                    ids.push(e.id);
+                }
+            }
+        }
+        self.set_effect_fallback(e.id, e.hidden);
+    }
+    fn add_effect_inner(
+        &mut self,
+        effect: &'static str,
+        ticks: i32,
+        amplifier: i32,
+        flags: Option<(bool, bool)>,
+    ) -> Option<bool> {
         let effect = horizon_client_core::potions::namespaced(effect);
         // LivingEntity.addEffect: an effect the mob refuses is never added, so it
         // never joins the list the client draws or an effect tick reads.
         // WitherBoss.addEffect returns false for every effect.
         if self.species() == Species::Wither || !self.can_be_affected(effect) {
-            return;
+            return None;
         }
-        // AbsorptionMobEffect.addAttributeModifiers: at least 4 hearts-halves per level.
-        if effect == "minecraft:absorption"
-            && self
-                .extra
-                .effects
-                .iter()
-                .find(|e| e.0 == effect)
-                .is_none_or(|e| amplifier > e.2)
-        {
-            self.absorption = self.absorption.max(4.0 * (amplifier + 1) as f32);
-        }
-        if let Some(e) = self.extra.effects.iter_mut().find(|e| e.0 == effect) {
-            // MobEffectInstance.update: a stronger effect replaces with its
-            // own duration, an equal one only extends it; a weaker one is
-            // ignored (vanilla keeps it hidden behind the active one).
-            if amplifier > e.2 {
-                e.1 = ticks;
-                e.2 = amplifier;
-            } else if amplifier == e.2 && e.1 != -1 && (ticks == -1 || e.1 < ticks) {
-                e.1 = ticks;
-            }
+        let added = if let Some(i) = self.extra.effects.iter().position(|e| e.0 == effect) {
+            let mut active = self.effect_instance(i);
+            let (ambient, visible) = flags.unwrap_or((false, true));
+            // A struct literal preserves this caller's numeric behavior.
+            let incoming = crate::effects::EffectInstance {
+                id: effect,
+                duration: ticks,
+                amplifier,
+                ambient,
+                visible,
+                show_icon: visible,
+                hidden: None,
+            };
+            let changed = active.update(&incoming);
+            self.extra.effects[i] = (effect, active.duration, active.amplifier);
+            self.set_effect_fallback(effect, active.hidden);
+            Some(changed)
         } else {
+            self.set_effect_fallback(effect, None);
             self.extra.effects.push((effect, ticks, amplifier));
+            Some(true)
+        };
+        // AbsorptionMobEffect.onEffectStarted, which addEffect runs for every
+        // effect it accepts, new, stronger or not, after onEffectAdded or
+        // onEffectUpdated put its modifier on: at least 4 hearts-halves per
+        // level of the effect given (#11386), within getMaxAbsorption
+        // (setAbsorptionAmount).
+        if effect == "minecraft:absorption" {
+            self.absorption = self
+                .absorption
+                .max(4.0 * (amplifier + 1) as f32)
+                .clamp(0.0, armor::max_absorption(self));
         }
+        // MobEffect.addAttributeModifiers, then refreshDirtyAttributes.
+        if effect == "minecraft:health_boost" {
+            finalize::health_boost_changed(self);
+        }
+        added
     }
     pub fn speed_bonus(&self) -> f64 {
         ai::speed_bonus(self)
@@ -3953,9 +4305,10 @@ impl Mob {
             self.position.z,
         ]
     }
+    /// `Entity.playSound(event, 1.0, 1.0)`: at the feet, and nothing while silent.
     pub fn sound(&self, event: &'static str, events: &mut Vec<MobEvent>) {
-        let at = [self.position.x, self.eye_y(), self.position.z];
-        events.push(MobEvent::Sound(event, at, 1.0, 1.0));
+        let at = [self.position.x, self.position.y, self.position.z];
+        events.extend((!self.silent).then_some(MobEvent::Sound(event, at, 1.0, 1.0)));
     }
     /// `Mob.getAmbientSoundInterval`; `HappyGhast` waits six times as long
     /// while it carries a passenger.
@@ -3973,11 +4326,10 @@ impl Mob {
         if self.species() == Species::HappyGhast {
             return 1.0;
         }
-        // Parrot.getVoicePitch: `getPitch(random)`, the plain range, so a baby
-        // parrot does not take the 1.5 that AgeableMob raises a baby by.
-        if self.species() == Species::Parrot {
-            return (self.random.next_float() - self.random.next_float()) * 0.2 + 1.0;
-        }
+        // Parrot.getVoicePitch is `getPitch(random)`, the plain 1.0 ± 0.2 an
+        // adult gets below: a parrot is never a baby (`Parrot.canBeABaby`), so
+        // the 1.5 `AgeableMob` gives a baby cannot reach it and the override
+        // needs no arm of its own.
         // ZombieVillager.getVoicePitch: babies are 2.0, not 1.5.
         let baby = if self.species() == Species::ZombieVillager {
             2.0
@@ -3995,9 +4347,8 @@ impl Mob {
     }
     /// Mob.playSound with LivingEntity.getVoicePitch.
     pub fn voice(&mut self, event: &'static str, events: &mut Vec<MobEvent>) {
-        // Java evaluates the arguments of `playSound(event, getSoundVolume(),
-        // getVoicePitch())` before the call, so the pitch is drawn even for a
-        // silent entity, whose `Entity.playSound` then plays nothing.
+        // Java draws the pitch before `Entity.playSound` looks at isSilent, so a
+        // silent entity draws it and then plays nothing.
         let pitch = self.voice_pitch();
         if self.silent {
             return;
@@ -4021,13 +4372,14 @@ pub fn render(
 }
 /// A parsed `entity-models.json` document, shared while loading model batches.
 /// Each lookup still constructs an independent part tree for the caller.
-pub struct EntityModelDocument(Value);
+#[derive(Clone)]
+pub struct EntityModelDocument(Arc<Value>);
 
 impl EntityModelDocument {
     pub fn load(root: &Path) -> crate::Result<Self> {
-        Ok(Self(serde_json::from_slice(&fs::read(
+        Ok(Self(Arc::new(serde_json::from_slice(&fs::read(
             root.join("entity-models.json"),
-        )?)?))
+        )?)?)))
     }
 
     pub fn model(&self, key: &str) -> Option<Part> {
@@ -4039,6 +4391,11 @@ impl EntityModelDocument {
             .as_object()
             .into_iter()
             .flat_map(|all| all.keys().map(String::as_str))
+    }
+
+    /// The parsed document, for loaders that read several keys from it.
+    pub fn value(&self) -> &Value {
+        &self.0
     }
 }
 
@@ -5033,6 +5390,50 @@ mod magic_absorb_tests {
         assert_eq!(m.extra.effects, vec![(speed, 900, 0)]);
     }
 
+    /// `LivingEntity.playSecondaryHurtSound`: a `thorns` hit that lands whole
+    /// sounds `enchant.thorns.hit` where the mob stands, after its own hurt
+    /// sound and for a silent mob too (`level.playSound`, not the mob's). The
+    /// rest of a stronger hit inside the hurt cooldown makes no sound, and
+    /// another kind of hit makes none.
+    #[test]
+    fn a_thorns_hit_sounds_where_the_mob_stands() {
+        let thorns = Damage {
+            kind: DamageKind::Thorns,
+            attacker: Some(Who::Player),
+            from: Some([4.0, 2.0, 3.0]),
+            attacker_species: None,
+        };
+        let sounds = |m: &Mob| -> Vec<(&'static str, [f64; 3], f32, f32)> {
+            m.outbox
+                .iter()
+                .filter_map(|e| match e {
+                    MobEvent::Sound(s, at, volume, pitch) => Some((*s, *at, *volume, *pitch)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut m = witch();
+        m.position = Vec3::new(1.0, 2.0, 3.0);
+        m.silent = true;
+        assert!(m.damage(4.0, thorns));
+        assert_eq!(
+            sounds(&m),
+            vec![("enchant.thorns.hit", [1.0, 2.0, 3.0], 1.0, 1.0)]
+        );
+        m.outbox.clear();
+        m.damage(8.0, thorns);
+        assert!(sounds(&m).is_empty(), "inside the hurt cooldown");
+
+        let mut loud = witch();
+        assert!(loud.damage(4.0, thorns));
+        let heard = sounds(&loud);
+        assert_eq!(heard.last().map(|s| s.0), Some("enchant.thorns.hit"));
+        let mut hit = witch();
+        assert!(hit.damage(4.0, Damage::player([4.0, 2.0, 3.0])));
+        assert_eq!(heard.len(), sounds(&hit).len() + 1, "{heard:?}");
+        assert!(sounds(&hit).iter().all(|s| s.0 != "enchant.thorns.hit"));
+    }
+
     /// `Witch.getDamageAfterMagicAbsorb`: `#witch_resistant_to` (`magic`,
     /// `indirect_magic`, `sonic_boom`, `thorns`) takes 15% of the hit, which
     /// leaves a 10 health witch on 7 of a 20 hit it would not survive whole.
@@ -5125,6 +5526,26 @@ mod armor_hurt_tests {
         k.id = id.into();
         k.species = species;
         Mob::new(1, kind, Vec3::ZERO, 0.0)
+    }
+
+    /// `Entity.hurt` on a client level does nothing: the horse a rider's
+    /// client drives takes no fall of its own, and the server's health stays
+    /// (#15294: the client's copy died and lay on the ground, still ridable).
+    #[test]
+    fn a_client_copy_takes_no_fall_damage() {
+        let mut m = horse();
+        m.extra.client_side = true;
+        let health = m.health;
+        let mut events = Vec::new();
+        assert!(!m.damage(20.0, Damage::of(DamageKind::Fall)));
+        m.cause_fall_damage_at(30.0, 1.0, &mut events, None, DamageKind::Fall);
+        assert_eq!(m.health, health);
+        assert_eq!(m.hurt_time, 0);
+        assert!(m.alive());
+        // The server's copy of the same fall is hurt.
+        let mut server = horse();
+        server.cause_fall_damage_at(30.0, 1.0, &mut events, None, DamageKind::Fall);
+        assert!(server.health < health);
     }
 
     /// `LivingEntity.hurtArmor` (`doHurtEquipment`): a hit that lands on a mob
@@ -5503,6 +5924,71 @@ mod effect_refusal_tests {
         );
     }
 
+    fn check_squid_damage_result(id: &str) {
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let types = MobTypes::load_for_server(&root).unwrap();
+        let mut attacker = mob(&types, "minecraft:cow");
+        attacker.id = 2;
+        attacker.position = Vec3::new(4.0, 64.0, 4.0);
+        assert!(attacker.alive());
+        let by_cow = Damage {
+            kind: DamageKind::Generic,
+            ..Damage::mob(attacker.id, [4.0, 64.0, 4.0]).with_species(Species::Cow)
+        };
+        // An unrelated parent's generic acceptance remains true.
+        let mut cow = mob(&types, "minecraft:cow");
+        assert!(cow.damage(1.0, Damage::of(DamageKind::Generic)));
+        assert_eq!(cow.health, 9.0);
+        // A parent's existing rejection never reaches the subclass aftermath.
+        let mut protected = mob(&types, id);
+        protected.invulnerable_flag = true;
+        assert!(!protected.damage(1.0, by_cow));
+        assert_eq!(protected.health, 10.0);
+        if protected.species() == Species::GlowSquid {
+            assert_eq!(aquatic::dark_ticks(&protected), 0);
+        }
+        for no_ai in [false, true] {
+            for attributed in [true, false] {
+                let mut victim = mob(&types, id);
+                victim.no_ai = no_ai;
+                assert_eq!(victim.health, 10.0);
+                assert!(victim.ai.last_hurt_by.is_none());
+                let source = if attributed {
+                    by_cow
+                } else {
+                    Damage::of(DamageKind::Generic)
+                };
+                let accepted = victim.damage(1.0, source);
+                // Check the parent's state first: false must not roll back damage.
+                assert_eq!(victim.health, 9.0);
+                assert_eq!(
+                    victim.ai.last_hurt_by,
+                    attributed.then_some(Who::Mob(attacker.id))
+                );
+                if victim.species() == Species::GlowSquid {
+                    assert_eq!(
+                        aquatic::dark_ticks(&victim),
+                        if attributed { 100 } else { 0 }
+                    );
+                }
+                assert_eq!(accepted, attributed, "{id} NoAI={no_ai}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs prepared entity types in HORIZON_TEST_RESOURCES"]
+    fn glow_squid_damage_result_keeps_parent_health_side_effect() {
+        check_squid_damage_result("minecraft:glow_squid");
+    }
+
+    #[test]
+    #[ignore = "needs prepared entity types in HORIZON_TEST_RESOURCES"]
+    fn squid_damage_result_keeps_parent_health_side_effect() {
+        check_squid_damage_result("minecraft:squid");
+    }
+
     /// Squid.hurtServer reports a hit only when a living entity dealt it, so
     /// environmental damage leaves a glow squid glowing; a mob's blow dims it.
     #[test]
@@ -5516,12 +6002,74 @@ mod effect_refusal_tests {
         let types = MobTypes::load_for_server(&root).unwrap();
         let mut burned = mob(&types, "minecraft:glow_squid");
         burned.health = 10.0;
-        assert!(burned.damage(1.0, Damage::of(DamageKind::Campfire)));
+        assert!(!burned.damage(1.0, Damage::of(DamageKind::Campfire)));
+        assert_eq!(burned.health, 9.0);
         assert_eq!(aquatic::dark_ticks(&burned), 0);
         let mut struck = mob(&types, "minecraft:glow_squid");
         struck.health = 10.0;
         assert!(struck.damage(1.0, Damage::mob(2, [0.0, 64.0, 0.0])));
+        assert_eq!(struck.health, 9.0);
         assert_eq!(aquatic::dark_ticks(&struck), 100);
+    }
+}
+#[cfg(test)]
+mod model_document_sharing_tests {
+    use super::*;
+
+    fn part_dump(part: &Part) -> String {
+        format!("{part:?}")
+    }
+
+    /// The startup reads `entity-models.json` once and hands the same document
+    /// to every model loader; reading it again per loader must build the same
+    /// types, model for model and layer for layer.
+    #[test]
+    fn a_shared_document_builds_the_same_types() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("entity-models.json").exists() {
+            return;
+        }
+        let document = EntityModelDocument::load(&root).unwrap();
+        let shared = MobTypes::load_with_document(&root, &document).unwrap();
+        let independent = MobTypes::load(&root).unwrap();
+        assert_eq!(shared.types.len(), independent.types.len());
+        for (id, independent) in &independent.types {
+            let shared = shared.types.get(id).unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(independent.id, shared.id);
+            assert_eq!(independent.species, shared.species);
+            assert_eq!(
+                (
+                    independent.width,
+                    independent.height,
+                    independent.eye_height,
+                ),
+                (shared.width, shared.height, shared.eye_height)
+            );
+            assert_eq!(independent.attributes, shared.attributes);
+            assert_eq!(independent.item_stack_limits, shared.item_stack_limits);
+            assert_eq!(
+                part_dump(&independent.model),
+                part_dump(&shared.model),
+                "{id} model"
+            );
+            let mut independent_layers: Vec<_> = independent.layers.iter().collect();
+            let mut shared_layers: Vec<_> = shared.layers.iter().collect();
+            independent_layers.sort_by_key(|(key, _)| key.as_str());
+            shared_layers.sort_by_key(|(key, _)| key.as_str());
+            assert_eq!(independent_layers.len(), shared_layers.len(), "{id} layers");
+            for ((independent_key, independent_part), (shared_key, shared_part)) in
+                independent_layers.into_iter().zip(shared_layers)
+            {
+                assert_eq!(independent_key, shared_key, "{id} layer key");
+                assert_eq!(
+                    part_dump(independent_part),
+                    part_dump(shared_part),
+                    "{id} layer {independent_key}"
+                );
+            }
+        }
     }
 }
 crate::impl_joined!(Mob);
@@ -5589,6 +6137,25 @@ mod named_damage_tests {
         );
         assert!(no_effects.damage(2.0, fire(NamedDamage::BYPASSES_EFFECTS)));
         assert_eq!(no_effects.health, 8.0);
+        // #bypasses_enchantments (#11308): a warden's sonic boom, or a named
+        // type with the tag, is not reduced by Protection, as
+        // getDamageAfterMagicAbsorb returns it before the enchantments.
+        for kind in [
+            DamageKind::SonicBoom,
+            DamageKind::Named(NamedDamage::new(
+                "example:boom",
+                NamedDamage::BYPASSES_ARMOR | NamedDamage::BYPASSES_ENCHANTMENTS,
+            )),
+        ] {
+            let mut plated = pig();
+            gear::set(
+                &mut plated,
+                gear::CHEST,
+                vec![("minecraft:protection".into(), 4)],
+            );
+            assert!(plated.damage(4.0, Damage::of(kind)));
+            assert_eq!(plated.health, 6.0, "{kind:?}");
+        }
         let mut armor = gear::Gear::default();
         armor.slots[gear::FEET] = vec![("minecraft:feather_falling".into(), 4)];
         armor.slots[gear::CHEST] = vec![("minecraft:blast_protection".into(), 4)];
@@ -5752,6 +6319,223 @@ mod visibility_percent_tests {
         assert_eq!(
             sneaking.visibility_percent(Some("minecraft:skeleton"), Some(&items)),
             0.4
+        );
+    }
+}
+
+/// Added controls (H248): `LivingEntity.hurtServer` compares a hit inside
+/// the hurt cooldown, and keeps `lastHurt`, by its incoming amount; the
+/// reductions (`actuallyHurt`) get only the accepted difference.
+#[cfg(test)]
+#[path = "hurt_cooldown_incoming_tests.rs"]
+mod hurt_cooldown_incoming_tests;
+
+#[cfg(test)]
+mod hidden_speed_mob_tick_tests {
+    use super::*;
+    fn full_tick_promotes(no_ai: bool) {
+        use horizon_core::random::LegacyRandom;
+        let admitted = crate::mobs::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                let stone = registry.default_state("minecraft:stone").unwrap();
+                world
+                    .chunks
+                    .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                world.set(2, 199, 4, stone).unwrap();
+            },
+            |w, types| {
+                let mut m = Mob::new(
+                    202,
+                    Arc::new(types.types["minecraft:pig"].clone()),
+                    Vec3::new(2.5, 200.0, 4.5),
+                    0.0,
+                );
+                m.no_ai = no_ai;
+                m.no_gravity = true;
+                assert!(m.add_effect_with("minecraft:speed", 200, 0, false, true));
+                assert!(m.add_effect_with("minecraft:speed", 40, 1, false, true));
+                assert_eq!(m.extra.effects, [("minecraft:speed", 40, 1)]);
+                let mut random = LegacyRandom::new(202);
+                let mut events = Vec::new();
+                for _ in 0..39 {
+                    assert!(m.tick(w, &mut random, &mut events));
+                }
+                assert_eq!(m.extra.effects, [("minecraft:speed", 1, 1)]);
+                assert!(m.tick(w, &mut random, &mut events));
+                assert_eq!(
+                    m.extra.effects,
+                    [("minecraft:speed", 160, 0)],
+                    "actual Mob tick must promote its counted-down fallback"
+                );
+                assert_eq!(m.age, 40);
+                assert!(m.tick(w, &mut random, &mut events));
+                assert_eq!(m.extra.effects, [("minecraft:speed", 159, 0)]);
+            },
+        );
+        // Without the vanilla data under .local/horizon-client there is no Mob
+        // world to tick: the test has nothing to check.
+        let _ = admitted;
+    }
+    #[test]
+    fn noai_full_mob_tick_promotes_speed() {
+        full_tick_promotes(true)
+    }
+    #[test]
+    fn ai_full_mob_tick_promotes_speed() {
+        full_tick_promotes(false)
+    }
+    // Added causal controls; the three original old/fixed tests remain above.
+    #[test]
+    fn hidden_only_updates_copy_and_clear_readd_keep_active_authority() {
+        let mut kind = (*sensor_scan_tests::kind()).clone();
+        kind.id = "minecraft:pig".into();
+        kind.species = Species::Pig;
+        let mut m = Mob::new(202, Arc::new(kind), Vec3::ZERO, 0.0);
+        m.add_effect("night_vision", 400, 0);
+        assert!(m.add_effect_with("speed", 200, 0, true, false));
+        assert!(m.add_effect_with("speed", 40, 1, false, true));
+        assert_eq!(
+            (
+                m.extra.effect_fallbacks[0].ambient,
+                m.extra.effect_fallbacks[0].visible
+            ),
+            (true, false)
+        );
+        assert!(!m.add_effect_with("speed", 300, 0, false, true));
+        assert_eq!(
+            m.extra.effects,
+            [
+                ("minecraft:night_vision", 400, 0),
+                ("minecraft:speed", 40, 1)
+            ]
+        );
+        assert_eq!(m.extra.effect_fallbacks[0].duration, 300);
+        assert!(!m.add_effect_with("speed", 40, 1, false, true));
+        let mut to = Mob::new(203, m.kind.clone(), Vec3::ZERO, 0.0);
+        conversion::single(&m, &mut to, conversion::Params::KEEP_ALL);
+        assert_eq!(to.extra.effects, m.extra.effects);
+        assert_eq!(to.extra.effect_fallbacks, m.extra.effect_fallbacks);
+        to.extra.effect_fallbacks[0].duration = 222;
+        assert_eq!(m.extra.effect_fallbacks[0].duration, 300);
+        m.apply_consume_effect(&crate::items::ConsumeEffect::RemoveEffects(vec![
+            "minecraft:speed".into(),
+        ]));
+        assert_eq!(m.extra.effects, [("minecraft:night_vision", 400, 0)]);
+        assert!(m.extra.effect_fallbacks.is_empty());
+        m.add_effect("speed", 20, 0);
+        assert!(m.extra.effect_fallbacks.is_empty());
+        m.add_effect("speed", 5, 1);
+        assert_eq!(m.extra.effect_fallbacks[0].duration, 20);
+        m.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
+        assert!(m.extra.effects.is_empty() && m.extra.effect_fallbacks.is_empty());
+        // The basic add has default incoming flags, while preserving its
+        // existing active flag policy; a newly retained weaker node gets them.
+        assert!(m.add_effect_with("speed", 200, 0, true, false));
+        assert!(m.add_effect_with("speed", 40, 1, true, false));
+        m.add_effect("speed", 300, 0);
+        assert!(m.extra.ambient_effects.contains(&"minecraft:speed"));
+        assert!(m.extra.hidden_effects.contains(&"minecraft:speed"));
+        assert!(!m.extra.effect_fallbacks[0].ambient);
+        assert!(m.extra.effect_fallbacks[0].visible);
+    }
+
+    #[test]
+    fn health_boost_death_effect_clear_clamps_health() {
+        let mut kind = (*sensor_scan_tests::kind()).clone();
+        kind.id = "minecraft:pig".into();
+        kind.species = Species::Pig;
+        let mut m = Mob::new(202, Arc::new(kind), Vec3::ZERO, 0.0);
+        finalize::set_base(&mut m, finalize::Attr::MaxHealth, 10.0);
+        m.add_effect("health_boost", 200, 1);
+        assert_eq!(m.attrs.max_health, 18.0);
+        m.health = 18.0;
+        m.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
+        assert_eq!(m.attrs.max_health, 10.0);
+        assert_eq!(m.health, 10.0);
+    }
+
+    #[test]
+    fn consume_effect_removal_clamps_absorption_to_remaining_maximum() {
+        use horizon_world::attributes::entity::Catalog;
+        let bits = |v: f64| format!("{:016x}", v.to_bits());
+        let catalog = Arc::new(
+            Catalog::from_json(&serde_json::json!({
+                "data_version": horizon_world::DATA_VERSION,
+                "attributes": [
+                    {"id":"minecraft:max_absorption", "default":bits(0.0), "min":bits(0.0), "max":bits(2048.0), "syncable":true}
+                ],
+                "entities": {"minecraft:pig":{"minecraft:max_absorption":bits(0.0)}}
+            }))
+            .unwrap(),
+        );
+        let key = catalog.id("minecraft:max_absorption").unwrap();
+
+        let mut kind = (*sensor_scan_tests::kind()).clone();
+        kind.id = "minecraft:pig".into();
+        kind.species = Species::Pig;
+        let kind = Arc::new(kind);
+
+        // Case 1: Base 0 mob with Absorption I (granting 4.0 absorption hearts, max_absorption 4.0).
+        // On ClearAllEffects, max_absorption becomes 0.0, amount drops to 0.0.
+        let mut m0 = Mob::new(1, kind.clone(), Vec3::ZERO, 0.0);
+        m0.add_effect("absorption", 600, 0);
+        assert_eq!(armor::max_absorption(&m0), 4.0);
+        assert_eq!(m0.absorption, 4.0);
+        m0.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
+        assert_eq!(
+            m0.absorption, 0.0,
+            "base 0 mob loses absorption on ClearAllEffects"
+        );
+
+        // Case 2: Base 20 mob with Absorption I (granting 4.0 absorption hearts, max_absorption 24.0).
+        // On ClearAllEffects, max_absorption becomes 20.0; amount 4.0 is <= 20.0, so it keeps 4.0.
+        let mut m20 = Mob::new(2, kind.clone(), Vec3::ZERO, 0.0);
+        let mut attrs = catalog.create("minecraft:pig").unwrap();
+        attrs.edit(key, |value, observer| {
+            value.set_base_value(20.0, observer).unwrap();
+        });
+        m20.extra.armor_attributes = Some(Box::new(attrs));
+        m20.add_effect("absorption", 600, 0);
+        assert_eq!(armor::max_absorption(&m20), 24.0);
+        assert_eq!(m20.absorption, 4.0);
+        m20.apply_consume_effect(&crate::items::ConsumeEffect::ClearAllEffects);
+        assert_eq!(
+            m20.absorption, 4.0,
+            "base 20 mob keeps absorption on ClearAllEffects"
+        );
+
+        // Case 3: Base 20 mob with Absorption I and absorption raised to 24.0.
+        // On RemoveEffects(["minecraft:absorption"]), remaining max_absorption is 20.0,
+        // so amount 24.0 is clamped to 20.0.
+        let mut m20_clamp = Mob::new(3, kind.clone(), Vec3::ZERO, 0.0);
+        let mut attrs3 = catalog.create("minecraft:pig").unwrap();
+        attrs3.edit(key, |value, observer| {
+            value.set_base_value(20.0, observer).unwrap();
+        });
+        m20_clamp.extra.armor_attributes = Some(Box::new(attrs3));
+        m20_clamp.add_effect("absorption", 600, 0);
+        m20_clamp.absorption = 24.0;
+        m20_clamp.apply_consume_effect(&crate::items::ConsumeEffect::RemoveEffects(vec![
+            "minecraft:absorption".into(),
+        ]));
+        assert_eq!(
+            m20_clamp.absorption, 20.0,
+            "base 20 mob clamps absorption to 20.0 on RemoveEffects"
+        );
+
+        // Case 4: Base 0 mob with Absorption I (granting 4.0 absorption hearts, max_absorption 4.0).
+        // On RemoveEffects(["minecraft:absorption"]), remaining max_absorption is 0.0,
+        // so amount drops to 0.0.
+        let mut m0_remove = Mob::new(4, kind, Vec3::ZERO, 0.0);
+        m0_remove.add_effect("absorption", 600, 0);
+        assert_eq!(m0_remove.absorption, 4.0);
+        m0_remove.apply_consume_effect(&crate::items::ConsumeEffect::RemoveEffects(vec![
+            "minecraft:absorption".into(),
+        ]));
+        assert_eq!(
+            m0_remove.absorption, 0.0,
+            "base 0 mob loses absorption on RemoveEffects"
         );
     }
 }
