@@ -344,8 +344,14 @@ The web build is the native game with the operating system swapped out
 - **Threads**: chunk generation, lighting and meshing run on Web Workers that
   share the page's memory (`web/worker.js`), as the native game's workers do.
   A browser can't run them behind the page as the native game does, so there
-  are half as many as cores, at most 3 (Horizon's graphics settings, Worker
-  Threads, or `?env=HORIZON_WEB_WORKERS=2`, set it). A frame spends at most
+  are half as many as the cores the browser reports, about one a physical
+  core, at most 12 (Horizon's graphics settings, Worker Threads, or
+  `?env=HORIZON_WEB_WORKERS=2`, set it). Filling a new world at render distance
+  32 in Chromium (`tools/web_profile.py --still --settle 1 --seconds 6`), 4
+  workers on 8 logical cores meshed 18% more than 3, and 12 on 32 cores 2.9
+  times more, with no slower frames while flying; one more than that made
+  slower frames and little more terrain. The cap of 3 before dated from one
+  allocator lock every thread shared. A frame spends at most
   4 ms on finished jobs, and uploads at most 4 MiB of section meshes (the
   Upload Budget setting). Each thread keeps the blocks up to 64 KiB it
   frees for its next allocations, and the rest comes from dlmalloc heaps

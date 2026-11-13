@@ -164,9 +164,8 @@ pub fn scoped_threads(native: usize) -> usize {
 /// How many [`spawn_worker`] threads make sense: natively the cores less the
 /// one the game runs on (its workers run behind it, `horizon_threads`). A
 /// browser can't put a worker behind the page, so the threaded web build
-/// takes half the cores, at most 3 (more ran slower in Firefox and Chromium
-/// alike), leaving the rest to the page and the browser's own threads;
-/// `HORIZON_WEB_WORKERS` sets it.
+/// takes [`web_workers`] of the cores the browser reports, leaving the rest to
+/// the page and the browser's own threads; `HORIZON_WEB_WORKERS` sets it.
 pub fn worker_count() -> usize {
     #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
     {
@@ -174,11 +173,34 @@ pub fn worker_count() -> usize {
             .ok()
             .and_then(|n| n.trim().parse::<usize>().ok());
         return set
-            .unwrap_or((crate::web::hardware_concurrency() / 2).min(3))
+            .unwrap_or_else(|| web_workers(crate::web::hardware_concurrency()))
             .clamp(1, 16);
     }
     #[allow(unreachable_code)]
     available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1))
+}
+
+/// The threaded web build's workers on a browser that reports `cores` (logical cores, as
+/// `navigator.hardwareConcurrency` counts them): half of them, about one a physical core, at most
+/// 12. Measured in Chromium filling a new world at render distance 32 (web/README.md): on 8
+/// logical cores 4 workers meshed 18% more than 3 and 5 no more than 4; on 4, 3 workers made
+/// slower frames than 2 and no more terrain; on 32, 12 workers meshed 2.9 times what 3 did with
+/// no slower frames while flying, and 16 began to slow frames.
+pub fn web_workers(cores: usize) -> usize {
+    (cores / 2).clamp(1, 12)
+}
+
+#[cfg(test)]
+mod web_worker_tests {
+    use super::web_workers;
+
+    #[test]
+    fn about_one_worker_per_physical_core_up_to_twelve() {
+        assert_eq!(
+            [1, 2, 4, 8, 12, 16, 24, 32, 64].map(web_workers),
+            [1, 1, 2, 4, 6, 8, 12, 12, 12]
+        );
+    }
 }
 
 /// Waits `duration` in a task: the thread sleeps natively and on the web
