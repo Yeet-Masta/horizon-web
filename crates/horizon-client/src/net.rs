@@ -2019,7 +2019,7 @@ mod tests {
         let (done, result) = channel();
         horizon_std::thread::spawn(move || {
             let (send, _events) = channel();
-            let _ = done.send(receive_play(
+            let _ = done.send(horizon_std::block_on(receive_play(
                 &mut reader,
                 &Mutex::new(Some(writer)),
                 &AtomicBool::new(false),
@@ -2029,7 +2029,7 @@ mod tests {
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
                 &Arc::new(Mutex::new(None)),
-            ));
+            )));
         });
         let ended = result
             .recv_timeout(Duration::from_secs(10))
@@ -2567,7 +2567,7 @@ mod tests {
             session.recorder.clone(),
         );
         let thread = horizon_std::thread::spawn(move || {
-            receive_play(
+            horizon_std::block_on(receive_play(
                 &mut reader,
                 &thread_writer,
                 &thread_configuring,
@@ -2577,7 +2577,7 @@ mod tests {
                 &crate::lod_net::Inbox::default(),
                 Path::new("."),
                 &thread_recorder,
-            )
+            ))
         });
 
         let mut server = Connection::local(server);

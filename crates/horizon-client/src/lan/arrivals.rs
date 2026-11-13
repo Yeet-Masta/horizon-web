@@ -861,6 +861,7 @@ mod hub_tests {
         hub::{Hub, HubConfig, TickCtx},
     };
     use horizon_protocol::ids::play::clientbound as id;
+    use horizon_std::time::{Duration, Instant};
     use std::sync::mpsc::{Receiver, channel};
 
     fn hub() -> Hub {
