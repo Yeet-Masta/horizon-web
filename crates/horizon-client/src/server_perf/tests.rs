@@ -1220,3 +1220,31 @@ fn memory_snapshots_keep_their_labels_paths_values_and_capture_time() {
     assert_eq!(snapshot.value_mb, [12.5, 2.0]);
     assert!(!perf.memory_snapshot(11.5, "after", &rows));
 }
+
+/// The web build's console line for a slow frame, which tools/web_profile.py's `SLOW` and `SPAN`
+/// patterns read: steps under half a millisecond left out, CPU time shown where a step waited.
+#[test]
+fn a_slow_frame_logs_its_steps_as_the_profiler_reads_them() {
+    let span = |name: &str, wall_ms, cpu_ms| SlowSpan {
+        name: name.into(),
+        wall_ms,
+        cpu_ms,
+        depth: 0,
+    };
+    let record = SlowRecord {
+        t: 3.0,
+        unit: Unit::Frame,
+        counter: 812,
+        wall_ms: 41.25,
+        cpu_ms: 30.0,
+        top: vec![
+            span("upload", 12.0, 11.9),
+            span("streaming_results", 6.0, 2.0),
+            span("tick", 0.2, 0.2),
+        ],
+    };
+    assert_eq!(
+        slow_line(&record),
+        "Horizon: slow frame 41.2 ms, cpu 30.0 ms (#812): upload 12.0, streaming_results 6.0/2.0"
+    );
+}

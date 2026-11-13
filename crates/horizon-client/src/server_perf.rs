@@ -311,6 +311,11 @@ impl ServerPerf {
                     })
                     .collect(),
             };
+            // A page has no capture file to read later: the web build logs each one to the
+            // browser's console, where web/README.md's "Finding stutters" and
+            // tools/web_profile.py read it.
+            #[cfg(target_family = "wasm")]
+            log::info!("{}", slow_line(&record));
             if self.slow.offer(record)
                 && let Some(session) = &mut self.session
                 && let Some(kept) = self.slow.records().last()
@@ -834,4 +839,35 @@ fn unix_ms() -> i64 {
 pub(crate) fn profiler_thread() {
     #[cfg(target_os = "linux")]
     horizon_threads::heap_sample::ignore_this_thread();
+}
+
+/// A slow ring record as the web build logs it (`ServerPerf::tick`): `Horizon: slow frame 34.2 ms,
+/// cpu 20.1 ms (#1234): step 12.3, other 4.0/1.2`, its steps of half a millisecond or more, with
+/// their CPU time where they waited for a tenth of it or more, as the log line the slow ring replaced.
+#[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+fn slow_line(record: &SlowRecord) -> String {
+    let unit = if record.unit == Unit::Tick { "tick" } else { "frame" };
+    let cpu = if record.cpu_ms > 0.0 {
+        format!(", cpu {:.1} ms", record.cpu_ms)
+    } else {
+        String::new()
+    };
+    let steps: Vec<String> = record
+        .top
+        .iter()
+        .filter(|s| s.wall_ms >= 0.5)
+        .map(|s| {
+            if s.cpu_ms < s.wall_ms * 0.9 {
+                format!("{} {:.1}/{:.1}", s.name, s.wall_ms, s.cpu_ms)
+            } else {
+                format!("{} {:.1}", s.name, s.wall_ms)
+            }
+        })
+        .collect();
+    format!(
+        "Horizon: slow {unit} {:.1} ms{cpu} (#{}): {}",
+        record.wall_ms,
+        record.counter,
+        steps.join(", ")
+    )
 }
