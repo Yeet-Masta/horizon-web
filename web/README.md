@@ -178,8 +178,13 @@ python3 tools/web_profile.py --resources R.zip --channel chrome --out report.jso
 ```
 
 - `--channel chrome` (or `msedge`) runs the browser installed on the machine,
-  with its GPU. Without it Playwright's Chromium draws on SwiftShader: the CPU
-  profile holds, frame rates and GPU times don't.
+  with its GPU (`--browser PATH` another Chromium's). Without it Playwright's Chromium
+  draws on SwiftShader: the CPU profile holds, frame rates and GPU times don't.
+- `--stock` launches that browser as players run it, without `--enable-unsafe-webgpu`,
+  which also offers features browsers don't ship yet (Chromium's experimental multi-draw).
+- The report's `terrain` line counts the sections meshed while it recorded, a second:
+  where a fast machine draws at the display's rate, that is what a faster build shows.
+  `--still --settle 1 --seconds 6 --render-distance 32` measures a new world filling in.
 - Build with `web/build.sh --profiling` (`web\build.bat --profiling`) first:
   wasm-opt otherwise strips the module's function names and the profile lists
   addresses. The names add about half a megabyte to the download.

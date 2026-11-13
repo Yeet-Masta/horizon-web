@@ -123,12 +123,23 @@ pub fn horizon_frame_stats() -> Option<String> {
     FRAME_STATS.lock().unwrap().clone()
 }
 
-/// Each frame: answers the page's ask, if there is one.
-pub fn answer_frame_stats(stats: &mut horizon_client::control::FrameStats) {
+/// Each frame: answers the page's ask, if there is one, with the chunks loaded and the sections
+/// meshed so far beside the frame times: how fast terrain comes in, which a fast machine shows
+/// where its frame times sit at the display's rate.
+pub fn answer_frame_stats(
+    stats: &mut horizon_client::control::FrameStats,
+    chunks: usize,
+    meshed_sections: u64,
+) {
     let Some(reset) = FRAME_STATS_ASK.lock().unwrap().take() else {
         return;
     };
-    *FRAME_STATS.lock().unwrap() = Some(stats.summary().to_string());
+    let mut summary = stats.summary();
+    if let Some(fields) = summary.as_object_mut() {
+        fields.insert("chunks".into(), chunks.into());
+        fields.insert("meshed_sections".into(), meshed_sections.into());
+    }
+    *FRAME_STATS.lock().unwrap() = Some(summary.to_string());
     if reset {
         stats.reset();
     }

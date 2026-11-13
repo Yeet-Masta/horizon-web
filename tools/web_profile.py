@@ -295,6 +295,15 @@ def main():
     ap.add_argument("--browser", type=pathlib.Path,
                     help="a Chromium-based browser's executable to run (Chromium, Brave...), with "
                     "its GPU, as --channel does for an installed Chrome or Edge")
+    ap.add_argument("--stock", action="store_true",
+                    help="with --channel or --browser: launch it as players do, without "
+                    "--enable-unsafe-webgpu, so the browser offers only the features it ships "
+                    "(no experimental multi-draw)")
+    ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                    help="a HORIZON_* variable for the game (?env=), to compare: "
+                    "--env HORIZON_FLAT_DRAWS=1; repeatable")
+    ap.add_argument("--screenshot", type=pathlib.Path,
+                    help="save the page as the recording ends (with --still, to compare builds)")
     ap.add_argument("--seed", default="777")
     ap.add_argument("--size", default="1280x720", help="the page's size (smaller: less GPU work)")
     ap.add_argument("--render-distance", type=int, help="chunks (the game's --render-distance)")
@@ -334,7 +343,8 @@ def main():
                 time.sleep(0.2)
         with sync_playwright() as pw:
             real_gpu = bool(args.channel or args.browser)
-            launch = {"headless": False, "args": (GPU if real_gpu else SWIFTSHADER) + COMMON}
+            gpu = ["--ignore-gpu-blocklist"] if args.stock else GPU
+            launch = {"headless": False, "args": (gpu if real_gpu else SWIFTSHADER) + COMMON}
             if args.channel:
                 launch["channel"] = args.channel
             if args.browser:
@@ -353,7 +363,8 @@ def main():
             page.on("console", lambda m: log.append(m.text))
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.add_init_script(RAF)
-            page.goto(f"http://127.0.0.1:{port}/?env=HORIZON_SPIKES={args.spikes:g}")
+            env = ",".join([f"HORIZON_SPIKES={args.spikes:g}", *args.env])
+            page.goto(f"http://127.0.0.1:{port}/?env={env}")
             page.wait_for_selector("#play:not([disabled])", timeout=180_000)
             machine = page.evaluate(ADAPTER)
             page.evaluate(
@@ -387,6 +398,15 @@ def main():
             cdp.send("Profiler.enable")
             cdp.send("Profiler.setSamplingInterval", {"interval": 250})
             page.evaluate("globalThis.horizonGlue.horizon_frame_stats_ask(true)")
+            # Its answer has the terrain so far (chunks, sections meshed): the recording's
+            # terrain is what the last answer adds.
+            start = None
+            for _ in range(50):
+                start = page.evaluate("globalThis.horizonGlue.horizon_frame_stats()")
+                if start:
+                    break
+                page.wait_for_timeout(20)
+            start = json.loads(start) if start else {}
             page.evaluate("globalThis.__rec(true)")
             mark = len(log)
             if args.trace:
@@ -420,6 +440,8 @@ def main():
                 trace = trace_report(parsed["traceEvents"] if isinstance(parsed, dict) else parsed)
             if args.cpuprofile:
                 args.cpuprofile.write_text(json.dumps(profile))
+            if args.screenshot:
+                page.screenshot(path=str(args.screenshot))
             stamps = page.evaluate("globalThis.__rec(false), globalThis.__rafs")
             page.evaluate("globalThis.horizonGlue.horizon_frame_stats_ask(false)")
             stats = None
@@ -456,6 +478,7 @@ def main():
                 },
                 "frames": frame_report(stamps),
                 "game": json.loads(stats) if stats else None,
+                "terrain": terrain_report(start, json.loads(stats) if stats else {}, args.seconds),
                 "slow_frames": spike_report(log[mark:]),
                 "slow_ticks": spike_report(log[mark:], SLOW_TICK, "slow tick"),
                 "page_thread": cpu_report(profile, args.top),
@@ -481,6 +504,19 @@ def print_frames(f):
           + (f"; the last over 100 ms at {f['last_over_100ms_at_s']} s"
              if f.get("last_over_100ms_at_s") is not None else ""))
     print("slowest:", ", ".join(f"{w['ms']} ms at {w['at_s']} s" for w in f["worst"][:6]))
+
+
+def terrain_report(start, end, seconds):
+    """The terrain the recording brought in: sections meshed (a second) and chunks loaded, from
+    the game's counters at its start and end (builds before they were reported have none)."""
+    if "meshed_sections" not in start or "meshed_sections" not in end:
+        return None
+    meshed = end["meshed_sections"] - start["meshed_sections"]
+    return {
+        "meshed_sections": meshed,
+        "meshed_per_s": round(meshed / seconds, 1),
+        "chunks": [start.get("chunks"), end.get("chunks")],
+    }
 
 
 def print_report(r):
@@ -509,6 +545,10 @@ def print_report(r):
     if g and g.get("frames"):
         cpu, gpu = g.get("cpu") or {}, g.get("gpu") or {}
         print(f"\n## The game's figures")
+        if r.get("terrain"):
+            t = r["terrain"]
+            print(f"terrain: {t['meshed_sections']} sections meshed ({t['meshed_per_s']} a second), "
+                  f"chunks {t['chunks'][0]} -> {t['chunks'][1]}")
         print(f"CPU per frame: median {cpu.get('p50_ms', 0):.1f} ms, p99 {cpu.get('p99_ms', 0):.1f}, "
               f"max {cpu.get('max_ms', 0):.1f}")
         if gpu:
