@@ -183,12 +183,16 @@ pub fn wanted(adapter: &wgpu::Adapter, device: &wgpu::Device) -> bool {
 }
 
 /// Whether frames without a shader pack's terrain draw flat: where the backend
-/// emulates multi-draw (Metal, past `MIN_SECTIONS`), on Intel Gen11/Gen12's Vulkan
-/// driver, on Qualcomm's Adreno under DirectX 12, or with `HORIZON_FLAT_DRAWS=1`.
-/// Elsewhere per-section draws stay.
+/// emulates multi-draw (Metal, past `MIN_SECTIONS`; a browser's WebGPU, which has none),
+/// on Intel Gen11/Gen12's Vulkan driver, on Qualcomm's Adreno under DirectX 12, or with
+/// `HORIZON_FLAT_DRAWS=1`. Elsewhere per-section draws stay. In Chromium, filling a new
+/// world at render distance 32, flat draws took the GPU process 23% less time decoding the
+/// page's commands and 26% less submitting them than per-section draws replayed from render
+/// bundles, for the same CPU time on the page (web/README.md, "Render bundles").
 pub fn for_vanilla(info: &wgpu::AdapterInfo) -> bool {
     horizon_std::env::var("HORIZON_FLAT_DRAWS").as_deref() == Ok("1")
         || info.backend == wgpu::Backend::Metal
+        || info.backend == wgpu::Backend::BrowserWebGpu
         || is_broken_intel_vulkan(info)
         || is_adreno_dx12(info)
 }

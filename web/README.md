@@ -246,11 +246,20 @@ https page, a cookie), the relay's TCP tunnel with TLS spoken in the module, so 
 carries ciphertext. Those requests run on the page's thread, whose event loop has `fetch` and
 the sockets; a Web Worker hands its request there and waits for the answer.
 
-## Render bundles
+## Flat draws and render bundles
 
 Every WebGPU call is a call out of the module into the browser and a command its GPU process
-decodes, and browsers have no multi-draw yet (Chromium's is behind a developer flag), so the
-terrain's multi-draws became one `drawIndexedIndirect` per section. The vendored wgpu
+decodes, and browsers have no multi-draw yet (Chromium's is behind a developer flag). So the
+web build draws terrain flat, as on Metal (`gfx/flat.rs`): a compute pass copies the frame's
+section draws into one index list, drawn with a call per arena page. Filling a new world at
+render distance 32 in Chromium (`tools/web_profile.py --trace`), that took the GPU process 23%
+less time decoding the page's commands and 26% less submitting them than per-section draws
+from render bundles, for the same CPU time on the page; while terrain streams in, the GPU
+process's main thread is what the page's slowest frames wait on. `?env=HORIZON_FLAT_DRAWS=0`
+draws per section again.
+
+Per-section draws (`HORIZON_FLAT_DRAWS=0`, and the other multi-draws) are one
+`drawIndexedIndirect` per section. The vendored wgpu
 (`third_party/wgpu/src/backend/webgpu/bundles.rs`) records each 16-entry stretch of a
 multi-draw's indirect buffer, drawn with the same pipeline and bindings in an earlier
 submission, into a render bundle once and replays it: a bundle reads the draws' parameters when
@@ -375,8 +384,8 @@ The web build is the native game with the operating system swapped out
   what is left of a frame waits for the next. Region files are written as
   they are saved, and single player runs in the frame.
 - **Graphics**: WebGPU only. The device opens before the game starts. WebGPU
-  has no multi-draw yet (gpuweb#5175), so each section's draw is a call of its
-  own; where Chrome offers its experimental one
+  has no multi-draw yet (gpuweb#5175), so terrain draws flat, a call per arena
+  page (see Flat draws and render bundles); where Chrome offers its experimental one
   (`chromium-experimental-multi-draw-indirect`, behind
   chrome://flags/#enable-webgpu-developer-features), the vendored wgpu draws a
   run of sections with one call. Block
