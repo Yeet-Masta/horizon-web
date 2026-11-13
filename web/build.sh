@@ -5,13 +5,15 @@
 #   web/build.sh --wasm64        wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
 #                                (wasm32 measured 7-14% faster: memory64 bounds-checks every access)
 #   web/build.sh --no-threads    one thread: no shared memory, so no COOP/COEP headers needed
-#   web/build.sh --fast          the quicker-to-build `fast` profile (no LTO) instead of release
+#   web/build.sh --fast          the quicker-to-build `fast` profile (no LTO) instead of `web`
+#   web/build.sh --profile=NAME  another Cargo profile (`release`: thin LTO, to compare)
 #   web/build.sh --config=FILE   adds a cargo config (rustflags, say), as web/simd.toml does
 #   web/build.sh --abort         panics abort the thread they happen on instead of unwinding
 #                                (web/unwind.toml; the one-thread wasm32 build always aborts)
 #   web/build.sh --profiling     keeps the module's function names, which wasm-opt drops, for a
 #                                profiler (web/README.md, "Profiling"): 8 MB more, 2 MB downloaded
 #
+# A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
 # WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs the
 # wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
@@ -23,7 +25,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(dirname "$here")"
 target=wasm32-unknown-unknown
-profile=release
+profile=web
 threads=1
 unwind=1
 names=0
@@ -34,12 +36,13 @@ for arg in "$@"; do
     --wasm64) target=wasm64-unknown-unknown ;;
     --no-threads) threads=0 ;;
     --threads) threads=1 ;;
-    --release) profile=release ;;
+    --release) profile=web ;;
     --fast) profile=fast ;;
+    --profile=*) profile="${arg#--profile=}" ;;
     --config=*) extra+=(--config "${arg#--config=}") ;;
     --abort) unwind=0 ;;
     --profiling) names=1 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -118,7 +121,7 @@ printf '{"target":"%s","profile":"%s","threads":%s,"simd":true,"tailCall":true,"
 # 9 (seconds, not minutes) for --fast; BROTLI_QUALITY sets it. Without the `brotli` tool the
 # files are served as they are.
 if command -v brotli > /dev/null; then
-  quality="${BROTLI_QUALITY:-$([ "$profile" = release ] && echo 11 || echo 9)}"
+  quality="${BROTLI_QUALITY:-$([ "$profile" = fast ] && echo 9 || echo 11)}"
   find "$dist" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.html' -o -name '*.json' -o -name '*.svg' \) \
     -print0 | xargs -0 -n 1 -P "$(nproc 2>/dev/null || echo 2)" brotli -f -k -q "$quality" --lgwin=24
   echo "web/dist: Brotli at quality $quality: $(du -sh "$dist/pkg/horizon-client_bg.wasm.br" | cut -f1) to download"

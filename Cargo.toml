@@ -143,6 +143,12 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# The web build's release (web/build.sh): whole-program LTO, which inlines across every crate
+# of the one module the browser runs.
+[profile.web]
+inherits = "release"
+lto = "fat"
+
 # Optimized but quick-to-link builds for iteration: cargo build --profile fast
 [profile.fast]
 inherits = "release"

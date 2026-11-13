@@ -14,7 +14,7 @@ cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindge
 web/build.sh               # wasm32 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
 web/build.sh --wasm64      # wasm64: up to 8 GiB of memory instead of 4, 7-14% slower (memory64's bounds checks)
 web/build.sh --no-threads  # one thread: for browsers or hosts where web/coi.js can't isolate the page
-web/build.sh --fast        # the quicker-to-build `fast` profile instead of release (thin LTO)
+web/build.sh --fast        # the quicker-to-build `fast` profile (no LTO) instead of `web`
 ```
 
 On Windows, `web\build.bat` takes the same options.
@@ -24,8 +24,12 @@ root `Cargo.toml`): threads on memory64 aren't in a release yet. The CLI must
 be built from the same commit as the crates; `web/build.sh` says so when it
 isn't.
 
-The page and module land in `web/dist/`. When `wasm-opt` (binaryen) is on the
-`PATH` the module is optimized further. Every build uses WebAssembly SIMD
+The page and module land in `web/dist/`. A release build uses the root `Cargo.toml`'s `web`
+profile: release with whole-program (fat) LTO instead of thin, which filled a new world's
+terrain about 2% faster (6,288 against 6,166 sections a second, 5 runs each), took a minute
+longer to build and downloaded 0.1 MB less. When `wasm-opt` (binaryen) is on the
+`PATH` the module is optimized further, at `-O2`: `-O3` (binaryen 133) was no faster and
+took twice as long. Every build uses WebAssembly SIMD
 (`web/simd.toml`), which every browser with WebGPU has.
 
 ## Play

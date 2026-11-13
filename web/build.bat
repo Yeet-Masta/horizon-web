@@ -5,13 +5,15 @@ rem
 rem   web\build.bat                wasm32 with threads, the default
 rem   web\build.bat --wasm64       wasm64 (memory64): up to 8 GiB of memory instead of 4, and slower
 rem   web\build.bat --no-threads   one thread: no shared memory, so no COOP/COEP headers needed
-rem   web\build.bat --fast         the quicker-to-build `fast` profile (no LTO) instead of release
+rem   web\build.bat --fast         the quicker-to-build `fast` profile (no LTO) instead of `web`
+rem   web\build.bat --profile NAME another Cargo profile (`release`: thin LTO, to compare)
 rem   web\build.bat --config FILE  adds a cargo config (rustflags, say), as web\simd.toml does
 rem   web\build.bat --abort        panics abort the thread they happen on instead of unwinding
 rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
 rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
 rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
 rem
+rem A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
 rem WebGPU has. Threads and wasm64 build std here, with nightly Rust (rustup adds rust-src). Needs
 rem the wasm-bindgen CLI from the commit Cargo.lock pins (the error says the command); wasm-opt
@@ -23,7 +25,7 @@ set "here=%~dp0"
 set "here=%here:~0,-1%"
 for %%r in ("%here%\..") do set "root=%%~fr"
 set "target=wasm32-unknown-unknown"
-set "profile=release"
+set "profile=web"
 set "threads=1"
 set "unwind=1"
 set "names=0"
@@ -33,13 +35,18 @@ set "extra="
 if "%~1"=="" goto args_done
 if /i "%~1"=="--wasm32" (set "target=wasm32-unknown-unknown" & shift & goto args)
 if /i "%~1"=="--wasm64" (set "target=wasm64-unknown-unknown" & shift & goto args)
-if /i "%~1"=="--release" (set "profile=release" & shift & goto args)
+if /i "%~1"=="--release" (set "profile=web" & shift & goto args)
 if /i "%~1"=="--fast" (set "profile=fast" & shift & goto args)
 if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
 if /i "%~1"=="--abort" (set "unwind=0" & shift & goto args)
 if /i "%~1"=="--profiling" (set "names=1" & shift & goto args)
 rem cmd splits --config=FILE at the `=`: both spellings arrive as --config then FILE.
+if /i "%~1"=="--profile" (
+  if "%~2"=="" (echo --profile needs a name 1>&2 & exit /b 2)
+  set "profile=%~2"
+  shift & shift & goto args
+)
 if /i "%~1"=="--config" (
   if "%~2"=="" (echo --config needs a file 1>&2 & exit /b 2)
   set "extra=!extra! --config %~2"
@@ -50,8 +57,8 @@ if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm64] [--no-threads] [--fast] [--config FILE] [--abort] [--profiling]
-echo   default: wasm32 with threads on nightly Rust, release profile, panics that unwind;
+echo web\build.bat [--wasm64] [--no-threads] [--fast] [--profile NAME] [--config FILE] [--abort] [--profiling]
+echo   default: wasm32 with threads on nightly Rust, the web profile (fat LTO), panics that unwind;
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
 echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
 echo   --profiling keeps function names for a profiler
@@ -159,8 +166,8 @@ where brotli >nul 2>nul
 if errorlevel 1 (
   echo brotli not found: the module is served uncompressed ^(install brotli to compress it^) 1>&2
 ) else (
-  set "quality=9"
-  if "%profile%"=="release" set "quality=11"
+  set "quality=11"
+  if "%profile%"=="fast" set "quality=9"
   if defined BROTLI_QUALITY set "quality=%BROTLI_QUALITY%"
   for /r "%dist%" %%f in (*.wasm *.js *.html *.json *.svg) do (
     brotli -f -k -q !quality! --lgwin=24 "%%f" || exit /b 1
