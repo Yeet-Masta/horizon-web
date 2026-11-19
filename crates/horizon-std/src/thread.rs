@@ -91,6 +91,27 @@ pub fn page_wait(pause: std::time::Duration) {
     std::hint::spin_loop();
 }
 
+/// A point in long work where a page thread (see [`page_wait`]) hands the core to the page and
+/// the other threads, once it has had it 10 ms: they share one, and only a wait hands it over.
+/// Elsewhere nothing.
+pub fn page_yield() {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    if PAGE_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        use crate::time::Instant;
+        thread_local! {
+            static SINCE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+        }
+        let now = Instant::now();
+        let ran = SINCE.with(|since| since.get().map(|t| now - t));
+        if ran.is_none_or(|ran| ran >= std::time::Duration::from_millis(10)) {
+            if ran.is_some() {
+                page_wait(std::time::Duration::ZERO);
+            }
+            SINCE.with(|since| since.set(Some(Instant::now())));
+        }
+    }
+}
+
 /// Whether this thread may block: everywhere but the web build's page
 /// thread (every thread of the one-thread build is the page's).
 pub fn may_block() -> bool {

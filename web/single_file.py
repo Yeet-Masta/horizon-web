@@ -68,9 +68,9 @@ def main():
         subprocess.run(["cargo", "run", "--quiet", "--release", "--manifest-path", str(HERE / "jspi" / "Cargo.toml"),
                         "--", str(dist / "pkg" / "horizon-client_bg.wasm"), str(module)], check=True)
         # Each instance's waits and notifies go to web/horizon.js, which reads the shared memory,
-        # and the page's instance runs its event handlers and page tasks in promising calls.
+        # and runs its event handlers, page tasks and thread work in promising calls.
         entries = json.loads(pathlib.Path(f"{module}.entries.json").read_text(encoding="utf-8"))
-        build["jspiEntries"] = [e for e in entries if "convert__closures" in e or e == "horizon_page_task"]
+        build["jspiEntries"] = [e for e in entries if "convert__closures" in e or e in ("horizon_page_task", "horizon_thread_entry")]
         hooks = {
             "const imports = __wbg_get_imports(memory);":
                 "const imports = __wbg_get_imports(memory);"
@@ -85,7 +85,7 @@ def main():
             "    const real = (...args) => {\n":
                 "    const real = (...args) => {\n        let out;\n",
             "    wasm = instance.exports;\n":
-                "    wasm = globalThis.horizonJspiReady(instance.exports, horizonJspiImports, import.meta.url);\n",
+                "    wasm = globalThis.horizonJspiReady(instance.exports, horizonJspiImports);\n",
         }
         for hook, patched in hooks.items():
             if glue_text.count(hook) != (2 if "imports =" in hook else 1):

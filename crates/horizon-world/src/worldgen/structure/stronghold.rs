@@ -67,6 +67,8 @@ impl RingSearch {
         preferred: &BTreeSet<BiomeId>,
         biomes: &mut dyn FnMut(&[[i32; 3]]) -> Vec<BiomeId>,
     ) -> ChunkPos {
+        // Each search samples thousands of biomes: one core shared with the page breathes.
+        horizon_std::thread::page_yield();
         let mut search = self.random.clone();
         let (cx, cz) = (self.x * 16 + 8, self.z * 16 + 8);
         let allowed = biomes(&[[cx >> 2, 0, cz >> 2]])
@@ -85,6 +87,8 @@ impl RingSearch {
         preferred: &BTreeSet<BiomeId>,
         biomes: &mut dyn FnMut(&[[i32; 3]]) -> Vec<BiomeId>,
     ) -> ChunkPos {
+        // Each search samples thousands of biomes: one core shared with the page breathes.
+        horizon_std::thread::page_yield();
         let mut search = self.random.clone();
         let (cx, cz) = ((self.x * 16 + 8) >> 2, (self.z * 16 + 8) >> 2);
         let r = SEARCH_QUARTS;

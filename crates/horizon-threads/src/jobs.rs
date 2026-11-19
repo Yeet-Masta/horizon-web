@@ -508,6 +508,8 @@ fn run_job(inner: &Inner, worker: usize, entry: &Entry, far: bool) {
         drop(lock(&inner.sleep));
         inner.finished.notify_all();
     }
+    // Workers running on the page's one core (web/single_file.py) let it draw between jobs.
+    horizon_std::thread::page_yield();
 }
 
 /// `Condvar::wait_timeout_while`, whose std version reads std's clock, which

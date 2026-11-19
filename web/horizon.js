@@ -313,18 +313,16 @@ const notify = (addr, count) => {
   if (!list.length) waiters.delete(addr);
   return woken.length + Atomics.notify(new Int32Array(shared()), addr >> 2, count - woken.length);
 };
-// One instance's horizon_jspi imports (the glue asks as it instantiates). While the page's own
-// instance is suspended, its horizon_coroutine is off: a call into it meanwhile may not wait.
+// One instance's horizon_jspi imports (the glue asks as it instantiates). While its promising
+// call is suspended, its horizon_coroutine is off: a call into it meanwhile may not wait.
 globalThis.horizonJspiImports = () => {
-  // `running`: the page's promising call is on the stack (not suspended).
+  // `running`: the instance's promising call is on the stack (not suspended).
   const slot = { running: false };
   const away = () => {
-    if (!slot.page) return;
     slot.exports.horizon_coroutine.value = 0;
     slot.running = false;
   };
   const back = (result) => {
-    if (!slot.page) return result;
     slot.exports.horizon_coroutine.value = 1;
     slot.running = true;
     return result;
@@ -342,32 +340,15 @@ globalThis.horizonJspiImports = () => {
     notify,
   };
 };
-// An instance is up (the glue's finalize): a thread's goes on as it is (spawnPageThread). The
-// page's runs its event handlers and page tasks (build.jspiEntries) in promising calls, so they
-// may wait for the threads, as a worker would: one at a time, those that come meanwhile queued.
-const threadGlues = new Set();
-globalThis.horizonJspiReady = (exports, imports, glueUrl) => {
-  imports.slot.exports = exports;
-  const entries = new Set(build.jspiEntries ?? []);
-  // A thread's own work runs in its promising call (spawnPageThread); what calls into its
-  // instance meanwhile (its futures, the glue's callbacks) runs outside any, so may not wait.
-  if (threadGlues.has(glueUrl)) {
-    const thread = {};
-    for (const [name, value] of Object.entries(exports)) {
-      thread[name] = typeof value !== "function" || !entries.has(name) ? value : (...args) => {
-        const was = exports.horizon_coroutine.value;
-        exports.horizon_coroutine.value = 0;
-        try {
-          return value(...args);
-        } finally {
-          exports.horizon_coroutine.value = was;
-        }
-      };
-    }
-    return thread;
-  }
+// An instance is up (the glue's finalize). It runs its entries (build.jspiEntries: event
+// handlers, page tasks, a thread's work) in promising calls, so they may wait for the other
+// threads, as a worker would: one at a time, those that come meanwhile queued. A thread's
+// work is its first, so what comes for it (its futures, the glue's callbacks) runs once that
+// work ends, as in a worker.
+globalThis.horizonJspiReady = (exports, imports) => {
   const slot = imports.slot;
-  slot.page = true;
+  slot.exports = exports;
+  const entries = new Set(build.jspiEntries ?? []);
   const queue = [];
   let busy = false;
   // Each run's promise settles when it ends; the glue keeps its closure alive until then.
@@ -396,7 +377,7 @@ globalThis.horizonJspiReady = (exports, imports, glueUrl) => {
   const page = {};
   for (const [name, value] of Object.entries(exports)) {
     // Promise callbacks (a closure returning Result<(), JsError>) and closure frees run Rust
-    // too: while the page's call is suspended they wait their turn, as it isn't reentrant.
+    // too: while the instance's call is suspended they wait their turn, as it isn't reentrant.
     // Their result is Ok then.
     const later = name === "__wbindgen_destroy_closure" ||
       /convert__closures.*Result_____wasm_bindgen_[0-9a-f]+___JsError___true_$/.test(name);
@@ -434,19 +415,16 @@ globalThis.horizonJspiReady = (exports, imports, glueUrl) => {
   return page;
 };
 // A thread on this page: another instance of the module (its own copy of the glue, so its own
-// stack and thread-locals), whose work runs in a promising call so its waits can suspend.
+// stack and thread-locals), whose work runs in a promising call (horizonJspiReady).
 let glueText;
 async function spawnPageThread(name, module, memory, work) {
   try {
     glueText ??= await fetch(import.meta.resolve("./pkg/horizon-client.js")).then((r) => r.text());
     const url = URL.createObjectURL(new Blob([glueText], { type: "text/javascript" }));
-    threadGlues.add(url);
     const glue = await import(url);
     URL.revokeObjectURL(url);
     const exports = await glue.default({ module_or_path: module, memory });
-    threadGlues.delete(url);
-    exports.horizon_coroutine.value = 1;
-    await WebAssembly.promising(exports.horizon_thread_entry)(work);
+    await exports.horizon_thread_entry(work);
   } catch (e) {
     console.error(`Horizon: ${name} stopped:`, e?.message ?? e);
   }
