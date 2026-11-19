@@ -15,9 +15,17 @@ web/build.sh               # wasm32 with threads: nightly Rust and -Zbuild-std (
 web/build.sh --wasm64      # wasm64: up to 8 GiB of memory instead of 4, 7-14% slower (memory64's bounds checks)
 web/build.sh --no-threads  # one thread: for browsers or hosts where web/coi.js can't isolate the page
 web/build.sh --fast        # the quicker-to-build `fast` profile (no LTO) instead of `web`
+web/build.sh --single-file # also web/dist/horizon.html: the one-thread build in one file, opened without a server
 ```
 
 On Windows, `web\build.bat` takes the same options.
+
+`--single-file` builds without threads (a page opened from a file can't be
+cross-origin isolated) and folds the page, its script, the module (gzipped),
+the fonts and the icon into `web/dist/horizon.html` (`web/single_file.py`).
+Worlds opened there aren't kept: a `file://` page has no storage. The
+one-thread build can't host single player yet: the integrated server's loop
+would run on the page's thread and never return.
 
 wasm-bindgen comes from its main branch for now (`[patch.crates-io]` in the
 root `Cargo.toml`): threads on memory64 aren't in a release yet. The CLI must

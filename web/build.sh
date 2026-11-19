@@ -12,6 +12,9 @@
 #                                (web/unwind.toml; the one-thread wasm32 build always aborts)
 #   web/build.sh --profiling     keeps the module's function names, which wasm-opt drops, for a
 #                                profiler (web/README.md, "Profiling"): 8 MB more, 2 MB downloaded
+#   web/build.sh --single-file   also folds the build into one file, web/dist/horizon.html, that
+#                                opens without a server (web/single_file.py; needs Python 3). One
+#                                thread, as threads need a server's headers: no single player yet
 #
 # A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
@@ -29,6 +32,7 @@ profile=web
 threads=1
 unwind=1
 names=0
+single=0
 extra=()
 for arg in "$@"; do
   case "$arg" in
@@ -42,10 +46,13 @@ for arg in "$@"; do
     --config=*) extra+=(--config "${arg#--config=}") ;;
     --abort) unwind=0 ;;
     --profiling) names=1 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --single-file) single=1 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+# One file has no server to send the headers threads need.
+[ "$single" = 1 ] && threads=0
 
 cd "$root"
 # wasm-bindgen comes from its main branch for now (Cargo.toml's [patch.crates-io]): the CLI
@@ -129,3 +136,6 @@ else
   echo "brotli not found: the module is served uncompressed (install brotli to compress it)" >&2
 fi
 echo "web/dist: $(du -sh "$dist/pkg/horizon-client_bg.wasm" | cut -f1) module ($target, $profile, $([ "$threads" = 1 ] && echo threads || echo one thread))"
+if [ "$single" = 1 ]; then
+  python3 "$here/single_file.py" "$dist"
+fi

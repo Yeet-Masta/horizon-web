@@ -12,6 +12,9 @@ rem   web\build.bat --abort        panics abort the thread they happen on instea
 rem                                (web\unwind.toml; the one-thread wasm32 build always aborts)
 rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
 rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
+rem   web\build.bat --single-file  also folds the build into one file, web\dist\horizon.html, that
+rem                                opens without a server (web\single_file.py; needs Python 3). One
+rem                                thread, as threads need a server's headers: no single player yet
 rem
 rem A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
@@ -29,6 +32,7 @@ set "profile=web"
 set "threads=1"
 set "unwind=1"
 set "names=0"
+set "single=0"
 set "extra="
 
 :args
@@ -41,6 +45,7 @@ if /i "%~1"=="--no-threads" (set "threads=0" & shift & goto args)
 if /i "%~1"=="--threads" (set "threads=1" & shift & goto args)
 if /i "%~1"=="--abort" (set "unwind=0" & shift & goto args)
 if /i "%~1"=="--profiling" (set "names=1" & shift & goto args)
+if /i "%~1"=="--single-file" (set "single=1" & shift & goto args)
 rem cmd splits --config=FILE at the `=`: both spellings arrive as --config then FILE.
 if /i "%~1"=="--profile" (
   if "%~2"=="" (echo --profile needs a name 1>&2 & exit /b 2)
@@ -57,13 +62,16 @@ if /i "%~1"=="--help" goto usage
 echo unknown option: %~1 1>&2
 exit /b 2
 :usage
-echo web\build.bat [--wasm64] [--no-threads] [--fast] [--profile NAME] [--config FILE] [--abort] [--profiling]
+echo web\build.bat [--wasm64] [--no-threads] [--fast] [--profile NAME] [--config FILE] [--abort] [--profiling] [--single-file]
 echo   default: wasm32 with threads on nightly Rust, the web profile (fat LTO), panics that unwind;
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
 echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
-echo   --profiling keeps function names for a profiler
+echo   --profiling keeps function names for a profiler; --single-file also makes
+echo   web\dist\horizon.html, one file that opens without a server ^(one thread^)
 exit /b 0
 :args_done
+rem One file has no server to send the headers threads need.
+if "%single%"=="1" set "threads=0"
 
 cd /d "%root%" || exit /b 1
 
@@ -178,6 +186,9 @@ if errorlevel 1 (
 for %%s in ("%dist%\pkg\horizon-client_bg.wasm") do set /a "mb=%%~zs / 1048576"
 echo web\dist: %mb% MB module (%target%, %profile%, threads %threads_json%, unwind %unwind_json%)
 echo Serve it with: python web\serve.py   (then open http://localhost:8080/)
+if "%single%"=="1" (
+  python "%here%\single_file.py" "%dist%" || exit /b 1
+)
 exit /b 0
 
 :optimize

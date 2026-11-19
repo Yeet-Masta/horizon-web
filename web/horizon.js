@@ -160,14 +160,23 @@ const LAZY = 64 << 10;
 
 // The kept game folder as the game takes it: [path, kind, bytes, mtime], or with `lazy`, for a
 // larger file, [path, "blob", id, mtime, size].
+// A page the browser keeps nothing for (opened from a file: web/single_file.py) plays with
+// a game folder that lasts as long as the page.
+let unkept = false;
 async function gameFiles(lazy = false) {
   let kept;
-  if (opfs) {
-    await moveToOpfs();
-    kept = (await opfsWalk(await navigator.storage.getDirectory(), "", []))
-      .map(([path, kind, file]) => [path, kind, file, file?.lastModified ?? 0]);
-  } else {
-    kept = await idbFiles();
+  try {
+    if (opfs) {
+      await moveToOpfs();
+      kept = (await opfsWalk(await navigator.storage.getDirectory(), "", []))
+        .map(([path, kind, file]) => [path, kind, file, file?.lastModified ?? 0]);
+    } else {
+      kept = await idbFiles();
+    }
+  } catch (e) {
+    console.warn("Horizon: no browser storage here, so the game folder is not kept:", e);
+    unkept = true;
+    return [];
   }
   return Promise.all(kept.map(async ([path, kind, data, mtime]) => {
     if (kind !== "file" || !(data instanceof Blob)) return [path, kind, data, mtime];
@@ -179,6 +188,7 @@ async function gameFiles(lazy = false) {
 // What the game wrote since the last call, in order; writes queue so none overtakes another.
 let persisting = Promise.resolve();
 globalThis.horizonPersist = (records) => {
+  if (unkept) return;
   persisting = persisting.then(async () => {
     if (opfs) {
       await moveToOpfs();

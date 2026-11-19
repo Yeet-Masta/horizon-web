@@ -280,10 +280,11 @@ impl Pool {
             started > 0 || threads == 0,
             "GuestWorkerUnavailable: no job worker could start: {last_error:?}"
         );
-        inner.threads.store(started, Ordering::Relaxed);
+        // The one-thread web build's page runs the jobs: one worker's worth.
+        inner.threads.store(started.max(1), Ordering::Relaxed);
         Self {
             inner,
-            threads: started,
+            threads: started.max(1),
         }
     }
 
