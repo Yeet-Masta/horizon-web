@@ -301,14 +301,10 @@ impl Game<'_> {
             ..Style::default()
         };
         let mut context = Text::empty();
-        if cursor > 10 {
+        if horizon_client::command::java_index(input, cursor) > 10 {
             context.push("...");
         }
-        let start = (0..=cursor.saturating_sub(10))
-            .rev()
-            .find(|&i| input.is_char_boundary(i))
-            .unwrap_or(0);
-        context.push(&input[start..cursor]);
+        context.push(&input[horizon_client::command::context_start(input, cursor)..cursor]);
         if cursor < input.len() {
             context.push(
                 Text::literal(&input[cursor..])
@@ -1214,11 +1210,12 @@ impl Game<'_> {
         {
             // `CompassItem.getName`: a lodestone tracker names it, over `item_name`.
             Text::translate("item.minecraft.lodestone_compass", &[])
-        } else if let Some(name) = s.data().and_then(|d| d.other("minecraft:item_name")) {
+        } else if let Some(name) = s.item_name_text() {
             // `ItemStack.getItemName`: the `item_name` component wins over the
             // item's own name (`Item.getName`), so a datapack's or a server's
-            // renaming shows here as it does on the tooltip's first line.
-            horizon_client::component::name_text(name)
+            // renaming shows here as it does on the tooltip's first line, and
+            // a content mod's default name for its item as well.
+            name
         } else if let Some(title) = s
             .data()
             .and_then(|d| d.written.as_ref())

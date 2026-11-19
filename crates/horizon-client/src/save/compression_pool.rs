@@ -53,11 +53,8 @@ pub fn pool() -> &'static CompressionPool {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
-            // A browser tells std nothing of its cores: the web build's workers are its pool's.
             .unwrap_or_else(|| {
-                horizon_std::thread::scoped_threads(horizon_threads::worker_count())
-                    .div_ceil(2)
-                    .max(1)
+                horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::SaveCompression)
             });
         // The one-thread web build would run a worker where it starts, waiting forever: it
         // compresses where the records are written.

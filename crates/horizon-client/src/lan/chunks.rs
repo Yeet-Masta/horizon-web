@@ -501,7 +501,7 @@ fn warm_threads() -> usize {
     #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
     return horizon_std::thread::worker_count();
     #[allow(unreachable_code)]
-    horizon_threads::worker_count().saturating_sub(1)
+    horizon_threads::sizing::for_pool(horizon_threads::sizing::Pool::ChunkEncode)
 }
 
 /// The warm-up threads, started the first time; none on a single core or

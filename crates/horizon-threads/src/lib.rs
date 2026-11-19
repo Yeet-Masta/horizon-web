@@ -18,6 +18,7 @@ pub mod process_memory;
 pub mod profile;
 #[cfg(target_os = "linux")]
 pub mod sampler;
+pub mod sizing;
 pub mod stack_dump;
 /// Alt+Space and a bare Alt never open the window's system menu, as in GLFW.
 #[cfg(target_os = "windows")]
@@ -164,12 +165,27 @@ pub fn default_workers() -> usize {
     workers_for(worker_count(), performance_cores)
 }
 
+/// The cores this process has for its pools: [`worker_count`]'s share, narrowed to
+/// the performance cores where the machine tells them apart (its efficiency cores
+/// don't carry a worker, see [`default_workers`]).
+pub(crate) fn usable_cores() -> usize {
+    usable_cores_for(worker_count(), performance_cores)
+}
+
+/// [`usable_cores`] for `cores` cores, of which `performance` (asked only here, the
+/// sysctl) are performance cores where the machine tells them apart (`None` elsewhere).
+fn usable_cores_for(cores: usize, performance: impl FnOnce() -> Option<usize>) -> usize {
+    let fast = performance().filter(|&n| n > 0).unwrap_or(cores);
+    cores.min(fast)
+}
+
 /// [`default_workers`] for `cores` cores, of which `performance` (asked only here, the
 /// sysctl) are performance cores where the machine tells them apart (`None` elsewhere):
 /// one less than the smaller count, at least 1.
 fn workers_for(cores: usize, performance: impl FnOnce() -> Option<usize>) -> usize {
-    let fast = performance().filter(|&n| n > 0).unwrap_or(cores);
-    cores.min(fast).saturating_sub(1).max(1)
+    usable_cores_for(cores, performance)
+        .saturating_sub(1)
+        .max(1)
 }
 
 /// The machine's performance cores:
@@ -987,7 +1003,12 @@ mod tests {
     }
 
     /// The option set is the purge delay: mimalloc v3's default for it is
-    /// 1000 ms, and it is 0 once configured.
+    /// 1000 ms, and it is 0 once configured. Configured, a Linux process also
+    /// takes no transparent huge pages, whatever the system's setting.
+    ///
+    /// The allocator's options are the process's, and libtest runs tests in
+    /// parallel: this must stay the only test here that configures it, or the
+    /// default read first sees another test's setting.
     #[test]
     fn configuring_the_allocator_purges_at_once() {
         // SAFETY: reads and sets one integer option.
@@ -997,24 +1018,19 @@ mod tests {
         }
         super::configure_allocator();
         assert_eq!(get(), 0);
-    }
-
-    /// Configured, the process takes no transparent huge pages, whatever the
-    /// system's setting.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn configuring_the_allocator_turns_transparent_huge_pages_off() {
-        super::configure_allocator();
-        // SAFETY: reads this process's flag.
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
-            1
-        );
-        // SAFETY: reads one integer option.
-        assert_eq!(
-            unsafe { libmimalloc_sys::mi_option_get(super::ALLOW_THP) },
-            0
-        );
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: reads this process's flag.
+            assert_eq!(
+                unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+                1
+            );
+            // SAFETY: reads one integer option.
+            assert_eq!(
+                unsafe { libmimalloc_sys::mi_option_get(super::ALLOW_THP) },
+                0
+            );
+        }
     }
 }
 

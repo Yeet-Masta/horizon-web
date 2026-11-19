@@ -3119,6 +3119,7 @@ dependencies = [
  "horizon-core",
  "horizon-std",
  "horizon-threads",
+ "indexmap",
  "libm",
  "log",
  "lz4_flex",

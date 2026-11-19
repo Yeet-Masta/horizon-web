@@ -64,6 +64,14 @@ pub trait Goal: std::fmt::Debug + Send + Sync {
         false
     }
     fn tick(&mut self, _m: &mut Mob, _cx: &mut Cx) {}
+    /// `RandomStrollGoal.trigger`: the goal's next `canUse` skips the
+    /// interval's draw (only a stroll has one).
+    fn trigger(&mut self) {}
+    /// `GuardianAttackGoal.stop` triggers the guardian's `randomStrollGoal`
+    /// when it stops; the selector is what holds the goals then, so it asks.
+    fn strolls_on_stop(&self) -> bool {
+        false
+    }
     fn box_clone(&self) -> Box<dyn Goal>;
     /// The goal's name for debugging (`Goal.toString`).
     fn name(&self) -> &'static str {
@@ -151,6 +159,16 @@ impl GoalSelector {
         if self.goals[i].running {
             self.goals[i].running = false;
             self.goals[i].goal.stop(m, cx);
+            if self.goals[i].goal.strolls_on_stop() {
+                self.trigger_stroll();
+            }
+        }
+    }
+    /// `RandomStrollGoal.trigger` of the mob's stroll goals: the guardian's
+    /// attack goal asks for one when its beam ends, and its hurt too.
+    pub fn trigger_stroll(&mut self) {
+        for g in &mut self.goals {
+            g.goal.trigger();
         }
     }
     /// GoalSelector.tick
@@ -1132,183 +1150,9 @@ impl Goal for Panic {
         m.ai.panicking = false;
     }
 }
-/// RandomStrollGoal / WaterAvoidingRandomStrollGoal.
-#[derive(Clone, Debug)]
-pub struct Stroll {
-    pub speed: f64,
-    pub interval: i32,
-    pub check_no_action: bool,
-    /// WaterAvoidingRandomStrollGoal probability of a plain stroll.
-    pub water_avoiding: Option<f32>,
-    /// RandomSwimmingGoal: BehaviorUtils.getRandomSwimmablePos.
-    pub swim: bool,
-    /// WaterAvoidingRandomFlyingGoal: a hover spot, else an air or water pos.
-    pub flying: bool,
-    /// `Parrot.ParrotWanderGoal`: to a tree, else as `flying`.
-    pub parrot: bool,
-    pub force: bool,
-    wanted: [f64; 3],
-    /// A subclass's `getPosition` in place of the default pick
-    /// (`GolemRandomStrollInVillageGoal`, `MoveBackToVillageGoal`).
-    position: Option<fn(&mut Mob, &mut Cx) -> Option<[f64; 3]>>,
-    /// A subclass's own `canUse` test, run before the interval's draw.
-    gate: Option<fn(&Mob, &MobWorld) -> bool>,
-    label: Option<&'static str>,
-}
-impl Stroll {
-    /// `RandomStrollGoal.<init>` (interval 120, checks the no-action time).
-    pub fn new(speed: f64) -> Self {
-        Self {
-            speed,
-            interval: 120,
-            check_no_action: true,
-            water_avoiding: None,
-            swim: false,
-            flying: false,
-            parrot: false,
-            force: false,
-            wanted: [0.0; 3],
-            position: None,
-            gate: None,
-            label: None,
-        }
-    }
-    /// The stroll's spot comes from `f` (an overridden `getPosition`).
-    pub fn position(mut self, f: fn(&mut Mob, &mut Cx) -> Option<[f64; 3]>) -> Self {
-        self.position = Some(f);
-        self
-    }
-    /// The stroll may only start while `f` holds (an overridden `canUse`).
-    pub fn gate(mut self, f: fn(&Mob, &MobWorld) -> bool) -> Self {
-        self.gate = Some(f);
-        self
-    }
-    /// The goal's class name, for debugging.
-    pub fn named(mut self, label: &'static str) -> Self {
-        self.label = Some(label);
-        self
-    }
-    pub fn avoiding_water(speed: f64) -> Self {
-        Self {
-            water_avoiding: Some(0.001),
-            ..Self::new(speed)
-        }
-    }
-    pub fn interval(mut self, i: i32) -> Self {
-        self.interval = i;
-        self
-    }
-    /// WaterAvoidingRandomFlyingGoal (a nearby air position).
-    pub fn flying(speed: f64) -> Self {
-        Self {
-            flying: true,
-            ..Self::new(speed)
-        }
-    }
-    /// `Parrot.ParrotWanderGoal(speed)`, a WaterAvoidingRandomFlyingGoal.
-    pub fn parrot(speed: f64) -> Self {
-        Self {
-            water_avoiding: Some(0.001),
-            parrot: true,
-            ..Self::new(speed)
-        }
-    }
-    /// RandomSwimmingGoal(speed, interval)
-    pub fn swimming(speed: f64, interval: i32) -> Self {
-        Self {
-            swim: true,
-            ..Self::new(speed).interval(interval)
-        }
-    }
-}
-impl Goal for Stroll {
-    goal_clone!();
-    fn name(&self) -> &'static str {
-        if let Some(label) = self.label {
-            label
-        } else if self.parrot {
-            "ParrotWander"
-        } else if self.water_avoiding.is_some() {
-            "Stroll"
-        } else if self.swim {
-            "RandomSwimming"
-        } else {
-            "RandomStroll"
-        }
-    }
-    fn flags(&self) -> u8 {
-        MOVE
-    }
-    /// RandomStrollGoal.canUse.
-    fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        if super::riders::mob_controlled(m, cx.w) {
-            return false;
-        }
-        if self.gate.is_some_and(|gate| !gate(m, cx.w)) {
-            return false;
-        }
-        if !self.force {
-            if self.check_no_action && m.ai.no_action_time >= 100 {
-                return false;
-            }
-            if m.random.next_int_bound(reduced(self.interval)).unwrap_or(1) != 0 {
-                return false;
-            }
-        }
-        let pos = match self.water_avoiding {
-            _ if self.position.is_some() => self.position.and_then(|pick| pick(m, cx)),
-            Some(_) if self.parrot => super::parrot::wander_pos(m, cx.w),
-            Some(prob) => {
-                if m.fluids.in_water {
-                    m.land_random_pos(cx.w, 15, 7)
-                        .or_else(|| m.default_random_pos(cx.w, 10, 7))
-                } else if m.random.next_float() >= prob {
-                    m.land_random_pos(cx.w, 10, 7)
-                } else {
-                    m.default_random_pos(cx.w, 10, 7)
-                }
-            }
-            None if self.swim => {
-                let mut p = m.default_random_pos(cx.w, 10, 7);
-                let mut count = 0;
-                while let Some(q) = p {
-                    let s = cx.w.world.block(
-                        q[0].floor() as i32,
-                        q[1].floor() as i32,
-                        q[2].floor() as i32,
-                    );
-                    if cx
-                        .w
-                        .data
-                        .pathfindable(s, super::data::PathComputationType::Water)
-                        || count >= 10
-                    {
-                        break;
-                    }
-                    count += 1;
-                    p = m.default_random_pos(cx.w, 10, 7);
-                }
-                p
-            }
-            None if self.flying => m.flying_stroll_pos(cx.w),
-            None => m.default_random_pos(cx.w, 10, 7),
-        };
-        let Some(p) = pos else { return false };
-        self.wanted = p;
-        self.force = false;
-        true
-    }
-    /// RandomStrollGoal.canContinueToUse.
-    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        !m.ai.nav.is_done() && !super::riders::mob_controlled(m, cx.w)
-    }
-    fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
-        m.nav_move_to(cx.w, self.wanted, self.speed);
-    }
-    fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
-        m.nav_stop();
-    }
-}
+#[path = "goals/stroll.rs"]
+mod stroll;
+pub use stroll::Stroll;
 /// LookAtPlayerGoal (player targets only).
 #[derive(Clone, Debug)]
 pub struct LookAtPlayer {
@@ -1904,19 +1748,28 @@ impl Goal for NearestTarget {
                 let pos = Vec3::new(m.position.x, m.eye_y(), m.position.z);
                 let id = m.id;
                 let attacker = m.species();
-                let candidates: Vec<(u32, Vec3)> =
-                    cx.w.nearby(pos, range, move |s| {
-                        s.id != id
-                            && !s.playing_dead
-                            && !illager_spares(attacker, s)
-                            && match prey {
-                                Prey::Species(list) => list.contains(&s.species),
-                                Prey::Filter(f) => f(s),
-                                Prey::Player => false,
-                            }
-                    })
-                    .map(|s| (s.id, s.position))
-                    .collect();
+                let accepts = move |s: &Seen| {
+                    s.id != id
+                        && !s.playing_dead
+                        && !illager_spares(attacker, s)
+                        && match prey {
+                            Prey::Species(list) => list.contains(&s.species),
+                            Prey::Filter(f) => f(s),
+                            Prey::Player => false,
+                        }
+                };
+                let candidates: Vec<(u32, Vec3)> = match prey {
+                    Prey::Species(list) => {
+                        cx.w.nearby_species(pos, range, list, accepts)
+                            .map(|s| (s.id, s.position))
+                            .collect()
+                    }
+                    _ => {
+                        cx.w.nearby(pos, range, accepts)
+                            .map(|s| (s.id, s.position))
+                            .collect()
+                    }
+                };
                 for (cid, cpos) in candidates {
                     if m.distance_sqr(cpos) > cx.w.reach_sqr(cid, m, range) {
                         continue;
@@ -4190,113 +4043,7 @@ mod target_change_hook_tests {
 }
 
 #[cfg(test)]
-mod breed_xp_tests {
-    use super::*;
-
-    /// Two llamas in love, two blocks apart on a flat grass shelf, ticked by
-    /// the AI until the first breeds: its own events, with the `mob_drops`
-    /// game rule at `drops`. `None` without the vanilla data.
-    fn llama_events(drops: bool) -> Option<Vec<MobEvent>> {
-        // The partner's `Seen` needs its kind, so two loads.
-        let mut kind = None;
-        crate::mobs::world::with_built_test_world_rules(&[], true, drops, shelf, |_, types| {
-            kind = Some(Arc::new(types.types["minecraft:llama"].clone()));
-        });
-        let kind = kind?;
-        let mut partner = Mob::new(2, kind.clone(), Vec3::new(2.5, 64.0, 0.5), 0.0);
-        // AbstractHorse.canParent: only tame llamas breed.
-        partner.extra.tame = true;
-        partner.extra.in_love = 600;
-        let seen = [partner.seen(None, &crate::items::Items::empty())];
-        let mut out = None;
-        crate::mobs::world::with_built_test_world_rules(&seen, true, drops, shelf, |w, _| {
-            let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
-            m.extra.in_love = 600;
-            m.extra.tame = true;
-            let mut test_level = crate::health::TestLevel::new(0);
-            let level = &mut test_level.level();
-            let mut events = Vec::new();
-            for _ in 0..600 {
-                crate::mobs::ai::tick(&mut m, w, level, &mut events);
-                if events
-                    .iter()
-                    .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. }))
-                {
-                    break;
-                }
-            }
-            out = Some(events);
-        });
-        out
-    }
-
-    /// A flat grass shelf two llamas can stand on.
-    fn shelf(world: &mut crate::world::World, registry: &horizon_world::registry::BlockRegistry) {
-        let grass = registry.default_state("minecraft:grass_block").unwrap();
-        for cx in -3..3 {
-            for cz in -3..3 {
-                world
-                    .chunks
-                    .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
-            }
-        }
-        for x in -8..=8 {
-            for z in -8..=8 {
-                world.set(x, 63, z, grass).unwrap();
-            }
-        }
-    }
-
-    /// `finalizeSpawnChildFromBreeding` makes the experience draw only inside
-    /// the `mob_drops` check, from the breeding parent's own random: the
-    /// breed goal carries one 1-7 orb with the rule on, no orb with it off,
-    /// and the pair breeds either way.
-    #[test]
-    #[ignore = "daily"]
-    fn the_breed_xp_follows_the_mob_drops_rule() {
-        let Some(on) = llama_events(true) else {
-            return;
-        };
-        let Some(off) = llama_events(false) else {
-            return;
-        };
-        let orb = |events: &[MobEvent]| {
-            events.iter().find_map(|e| match e {
-                MobEvent::Breed {
-                    experience: crate::mobs::BreedExperience::Drawn(amount),
-                    ..
-                } => *amount,
-                _ => None,
-            })
-        };
-        assert!(
-            orb(&on).is_some_and(|a| (1..=7).contains(&a)),
-            "mob_drops on: one orb of 1-7, got {:?}",
-            orb(&on)
-        );
-        assert!(orb(&off).is_none(), "mob_drops off: no experience draw");
-        assert!(
-            off.iter().any(|e| matches!(
-                e,
-                MobEvent::Breed {
-                    experience: crate::mobs::BreedExperience::Drawn(None),
-                    ..
-                }
-            )),
-            "mob_drops off: the already-decided reward is empty, not deferred"
-        );
-        assert!(
-            on.iter()
-                .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. })),
-            "mob_drops on: the pair breeds"
-        );
-        assert!(
-            off.iter()
-                .any(|e| matches!(e, MobEvent::Breed { parent: 1, .. })),
-            "mob_drops off: the pair still breeds"
-        );
-    }
-}
+mod breed_xp_tests;
 
 #[cfg(test)]
 #[path = "breed_partner_range_tests.rs"]

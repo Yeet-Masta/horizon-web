@@ -49,7 +49,7 @@ fn no_pack_hdr_gain(layered: bool, pack: bool, world: bool) -> bool {
     layered && !pack && world
 }
 
-fn terrain_shader() -> String {
+pub(in crate::gfx) fn terrain_shader() -> String {
     wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("terrain.wgsl")
 }
 
@@ -239,6 +239,7 @@ mod block_entity_positions;
 mod inter_stage_tests;
 #[cfg(test)]
 mod look_pack_tests;
+mod msaa;
 mod section_fade;
 #[cfg(test)]
 mod sprite_arrays_tests;
@@ -426,6 +427,7 @@ pub(crate) fn texture_bytes(texture: &wgpu::Texture) -> u64 {
         })
         .sum::<u64>()
         * u64::from(size.depth_or_array_layers)
+        * u64::from(texture.sample_count())
 }
 
 /// Whether translucent quads have an arena of their own: with Translucent Batching
@@ -1323,6 +1325,8 @@ pub struct ScreenshotRequest {
 pub struct SolidPipeline {
     plain: wgpu::RenderPipeline,
     hdr: Option<wgpu::RenderPipeline>,
+    /// Its four-sample variant (`msaa::Msaa::built`).
+    msaa: Option<Box<SolidPipeline>>,
 }
 
 impl SolidPipeline {
@@ -1336,6 +1340,7 @@ impl SolidPipeline {
 }
 
 pub struct Renderer {
+    msaa: msaa::Msaa,
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
     /// The window's swapchain; `None` when rendering offscreen (`--offscreen`). Shared
@@ -1892,7 +1897,7 @@ fn adapter_requested_split(info: &wgpu::AdapterInfo, asked: Option<u32>, n: u32)
     asked.or((info.backend == wgpu::Backend::Metal).then(|| n.div_ceil(SPRITE_ARRAYS).max(512)))
 }
 /// The split the CPU mip chains are cut by before the adapter is known.
-fn sprite_split() -> u32 {
+pub(crate) fn sprite_split() -> u32 {
     let split = requested_split().unwrap_or(SPRITE_SPLIT);
     // WebGPU promises only 256 layers: the web build splits at what its
     // adapter has, opened before the textures are prepared (on the loader's
@@ -1928,7 +1933,7 @@ fn layer_split(
     Ok(split)
 }
 /// Sprite arrays terrain.wgsl binds (`sprites`, `sprites_1`...).
-const SPRITE_ARRAYS: u32 = 8;
+pub(crate) const SPRITE_ARRAYS: u32 = 8;
 /// The layers to give a square texture of `count` layers viewed as a 2D
 /// array. wgpu's OpenGL backend picks a texture's target from its layer
 /// count when it is created: one layer makes a 2D texture and a multiple of
@@ -2480,6 +2485,14 @@ impl Renderer {
         let reuse = previous.map_or_else(Default::default, |r| r.reuse.clone());
         let generation = reuse.begin();
         let kept = reuse.on(&device);
+        let msaa = msaa::Msaa::new(
+            &kept,
+            &device,
+            &adapter,
+            frame_format,
+            linear_light,
+            settings.msaa4x,
+        );
         let pipelines_step = crate::spans::startup::step("renderer.pipelines_textures");
         let terrain_step = crate::spans::startup::step("renderer.terrain_pipelines");
         let gpu_timer = timing::GpuTimer::new(&device, &queue);
@@ -2566,7 +2579,8 @@ impl Renderer {
                              depth_write: bool,
                              depth_test: bool,
                              blend: Option<wgpu::BlendState>,
-                             hud: Option<bool>| {
+                             hud: Option<bool>,
+                             samples: u32| {
             let mut constants = constants.to_vec();
             // The debug crosshair draws with the HUD, in gamma.
             constants.extend(linear_blend::frame_constants(
@@ -2598,7 +2612,7 @@ impl Renderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: Default::default(),
+                multisample: msaa::state(samples),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(fragment),
@@ -2653,6 +2667,7 @@ impl Renderer {
                 depth_test,
                 blend,
                 None,
+                1,
             )
         };
         // A solid terrain pipeline (`cull` faces culled, depth written, no blend) without HDR
@@ -2663,7 +2678,7 @@ impl Renderer {
                         fragment: &str,
                         buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
                         cull: wgpu::Face| {
-            let build = |constants: &[(&str, f64)]| {
+            let build = |constants: &[(&str, f64)], fragment: &str, samples| {
                 pipeline_with(
                     constants,
                     layout,
@@ -2677,11 +2692,22 @@ impl Renderer {
                     true,
                     None,
                     None,
+                    samples,
                 )
             };
+            let pair = |fragment, samples| SolidPipeline {
+                plain: build(&plain_constants, fragment, samples),
+                hdr: hdr_output
+                    .is_some()
+                    .then(|| build(&sprite_constants, fragment, samples)),
+                msaa: None,
+            };
+            // 4x MSAA draws the solid quads in one pass: the cutout pass's pipelines get none.
+            let multisampled =
+                msaa.built() && fragment == "fs_solid" && !vertex.ends_with("_cutout");
             SolidPipeline {
-                plain: build(&plain_constants),
-                hdr: hdr_output.is_some().then(|| build(&sprite_constants)),
+                msaa: multisampled.then(|| Box::new(pair("fs_solid_msaa", msaa::SAMPLES))),
+                ..pair(fragment, 1)
             }
         };
         let pipeline = |label: &str,
@@ -2943,6 +2969,7 @@ impl Renderer {
                 false,
                 Some(alpha_blend),
                 Some(coverage),
+                1,
             )
         };
         let debug_crosshair = hud_coverage.then(|| crosshair(true));
@@ -4352,6 +4379,7 @@ impl Renderer {
         );
         let views = world_views::Kept::new(flipped, translucent_flipped, entity_pipeline_with);
         Ok(Self {
+            msaa,
             display: None,
             reading: display,
             display_fresh: false,
@@ -6157,7 +6185,10 @@ impl Renderer {
     }
     /// This renderer's output as applied, with what its destination offers and reports.
     pub fn output(&self) -> output::EffectiveOutput {
-        self.output_with_rays()
+        output::EffectiveOutput {
+            msaa: self.msaa_offered(),
+            ..self.output_with_rays()
+        }
     }
     /// What this renderer's display last reported: a renderer made again for the window
     /// starts from it (`Renderer::new`'s `display`).
@@ -6710,6 +6741,7 @@ impl Renderer {
             sprite_views: &self.sprite_views,
             format: self.output.frame.format,
             linear: self.output.frame.linear_light,
+            msaa: self.msaa.built(),
             sprite_tags: &sprite_tags,
             sprite_materials: &sprite_materials,
             entities: &self.entity_bindings,
@@ -7681,6 +7713,28 @@ impl Renderer {
             0,
             bytemuck::bytes_of(&crosshair_globals),
         );
+        // 4x MSAA, unless a classic shader pack runs (a failed or refused one leaves `None`):
+        // it and native displacement keep their single-sample pipelines, as does a material
+        // whose four-sample layers the driver refused. Nor where its targets ran out of video
+        // memory at this size. Decided before culling is, which it switches off: a frame that
+        // can't draw it keeps culling.
+        let (pack_msaa, pack_surface) = (self.external.as_deref())
+            .and_then(|n| n.terrain_layers())
+            .map_or((true, false), |layers| {
+                (
+                    layers.msaa.is_some() && layers.displaced.is_none(),
+                    layers.surface.is_some(),
+                )
+            });
+        let msaa_on = self.msaa.wanted()
+            && !frame.title
+            && self.pack_post.as_ref().is_none_or(|p| p.1.is_none())
+            && pack_msaa
+            && !self.msaa.failed_at(
+                self.world_post
+                    .pack_render_size([self.config.width, self.config.height]),
+                pack_surface,
+            );
         // Frustum culling and camera-relative origins.
         let cull_proj = views.cull().view_proj(pose);
         let view = Frustum {
@@ -7766,6 +7820,7 @@ impl Renderer {
         let radius = (frame.detail_distance / 16.0) as i32;
         let displaced = self.executor.is_some_and(|c| c.displacement);
         let mut gpu_frame = self.gpu_culling.is_some()
+            && !msaa_on
             && !frame.title
             && !pack_terrain
             && shadow_view.is_none()
@@ -8069,6 +8124,7 @@ impl Renderer {
             .as_mut()
             .filter(|c| {
                 self.cull_on
+                    && !msaa_on
                     && !frame.title
                     && !pack_terrain
                     && self.multi_draw
@@ -8087,7 +8143,7 @@ impl Renderer {
         // ones (`Part`), each solid pass drawing its own: `[..opaque_draws]`,
         // then the rest; phase 2 likewise. A fading list's quads all draw in the
         // cutout pass.
-        let split_solid = self.info.backend == wgpu::Backend::Metal;
+        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
         let parts = |fading: bool| -> &'static [(u8, Quads)] {
             match (split_solid, fading) {
                 (false, _) => &[(0, Quads::All)],
@@ -9250,7 +9306,7 @@ impl Renderer {
         let scaled = self.world_post.prepare(
             &self.device,
             [self.config.width, self.config.height],
-            pack_reads_world || fg,
+            pack_reads_world || fg || msaa_on,
             pack_post,
         );
         let (world_view, world_depth) = match &scaled {
@@ -9537,18 +9593,33 @@ impl Renderer {
         let native = (self.external.as_deref()).filter(|_| !frame.title);
         let material = native.and_then(|n| n.terrain_layers());
         let entity_stage = native.and_then(|n| n.entity_layers());
+        // 4x MSAA's targets, at the size of the scaled world `msaa_on` asked `world_post` for:
+        // its seed samples that colour, which the swapchain can't be. Without them (out of video
+        // memory) the terrain draws single-sampled.
+        self.msaa.fit(
+            &self.device,
+            scaled.as_ref().map(|(_, depth)| depth).filter(|_| msaa_on),
+            material.is_some_and(|m| m.surface.is_some()),
+        );
+        let msaa = self.msaa.passes();
         // Without HDR output, the solid shaders without its lighting (`SolidPipeline`).
         let hdr = self.hdr.is_some();
-        let solid_pipeline = material.map_or(self.solid.get(hdr), |m| m.solid);
+        let solid_pipeline = material.map_or(self.solid.antialiased(hdr, msaa.is_some()), |m| {
+            let multisampled = m.msaa.filter(|_| msaa.is_some());
+            multisampled.map_or(m.solid, |(solid, _)| solid)
+        });
         // Two solid passes only where a discard costs the GPU its hidden surface
         // removal: Apple's tiled GPUs, behind Metal. Elsewhere the second pass
         // would double the solid draw calls and vertex work for nothing.
-        let split_solid = self.info.backend == wgpu::Backend::Metal;
+        let split_solid = self.info.backend == wgpu::Backend::Metal && !msaa_on;
         let translucent_pipeline = material.map_or(&self.translucent, |m| m.translucent);
         let pack_flat = material.and_then(|m| m.flat);
+        let pack_flat_msaa = material
+            .filter(|_| msaa.is_some())
+            .and_then(|m| m.msaa?.1.as_ref());
         // A material stage's translucent pass reads a copy of the depth the solid terrain
         // left: it is stored across the pass that ends before the copy.
-        let keep_depth = keep_depth || material.is_some();
+        let keep_depth = keep_depth || material.is_some() || msaa_on;
         // GPU culling's occlusion test splits the world pass as cull.rs's does.
         let gpu_occluding = gpu_frame && self.gpu_culling.as_ref().is_some_and(|g| g.occluding());
         let pack_frame = |pass: &mut wgpu::RenderPass<'_>| {
@@ -9564,6 +9635,7 @@ impl Renderer {
         // Solid terrain through the visibility buffer (`visbuffer`): flat frames without a
         // pack drawing terrain, a material stage, a surface target or a shadow pass.
         let vis_frame = flat_frame
+            && !msaa_on
             && !frame.title
             && !pack_terrain
             && !pack_draws_terrain
@@ -9742,7 +9814,14 @@ impl Renderer {
                 pack_frame(&mut pass);
                 pack_timing::CountedPass::plain(pass)
             };
-            if let Some(surface) = &surface {
+            if let Some(msaa) = msaa {
+                drop(pass);
+                msaa.seed(&self.device, &mut encoder, world_view);
+                let mut multisampled = msaa.begin(&mut encoder).forget_lifetime();
+                multisampled.set_bind_group(0, &self.group, &[]);
+                pack_frame(&mut multisampled);
+                pass = pack_timing::CountedPass::plain(multisampled);
+            } else if let Some(surface) = &surface {
                 drop(pass);
                 pass = terrain_pass(&mut encoder, surface, true);
             }
@@ -9810,7 +9889,11 @@ impl Renderer {
                     let phase2_calls = flat.solid_calls - flat.phase1_calls;
                     type Calls = std::ops::Range<usize>;
                     let passes: &[(&wgpu::RenderPipeline, Calls, Calls)] = match pack_flat {
-                        Some(p) => &[(&p.0, 0..flat.phase1_calls, 0..phase2_calls)],
+                        Some(p) => &[(
+                            pack_flat_msaa.unwrap_or(&p.0),
+                            0..flat.phase1_calls,
+                            0..phase2_calls,
+                        )],
                         None if split_solid => &[
                             (flat.solid_opaque.get(hdr), 0..opaque, 0..phase2_split),
                             (
@@ -9819,7 +9902,11 @@ impl Renderer {
                                 phase2_split..phase2_calls,
                             ),
                         ],
-                        None => &[(flat.solid.get(hdr), 0..flat.phase1_calls, 0..phase2_calls)],
+                        None => &[(
+                            flat.solid.antialiased(hdr, msaa.is_some()),
+                            0..flat.phase1_calls,
+                            0..phase2_calls,
+                        )],
                     };
                     let draw = |pass: &mut wgpu::RenderPass<'_>| {
                         for (pipeline, calls, _) in passes {
@@ -10053,7 +10140,11 @@ impl Renderer {
                 pass.set_bind_group(0, &self.group, &[]);
                 n.draw_displaced(&mut pass, m);
             }
-            if surface.is_some() {
+            if let Some(msaa) = msaa {
+                drop(pass);
+                msaa.resolve(&mut encoder, world_view, world_depth, surface);
+                pass = plain_pass(&mut encoder);
+            } else if surface.is_some() {
                 drop(pass);
                 pass = plain_pass(&mut encoder);
             }
@@ -10815,9 +10906,30 @@ impl Renderer {
                 device: &self.device,
                 encoder: &mut encoder,
                 world: (color, depth),
-                screen: &view_target,
                 size: self.world_post.size().unwrap_or([1, 1]),
+                window: [target_texture.width(), target_texture.height()],
                 scene: self.ray_scene.as_ref().map(|s| (s, frame.camera)),
+            });
+            // The engine's resolve of the pack's world goes here, between its chain and its
+            // output (#16126): the player's FXAA, at the world's size, where no chain draws
+            // the picture. TAA, its upscaling and sharpening stay off under every pack.
+            let resolved = (self.executor.is_some_and(|c| c.engine_fxaa)
+                && self.world_post.antialias)
+                .then(|| self.world_post.resolved(&self.device))
+                .flatten();
+            if let Some(resolved) = &resolved {
+                self.world_post.finish(
+                    &self.queue,
+                    &mut encoder,
+                    resolved,
+                    self.own_timing.as_mut(),
+                );
+            }
+            native.run_output(external::WorldOutput {
+                device: &self.device,
+                encoder: &mut encoder,
+                screen: &view_target,
+                resolved: resolved.as_ref(),
             });
         } else if let (Some((_, generated)), Some((_, depth))) = (&fg_frames, &scaled) {
             let camera = frame_gen::Camera {
@@ -10837,6 +10949,7 @@ impl Renderer {
                 crosshair,
                 first_crosshair: debug_depth + debug_top,
                 world_depth: false,
+                msaa_depth: false,
                 real: false,
                 hand_drawn: !pack_draws_hand,
                 hand_view_proj,
@@ -10916,6 +11029,7 @@ impl Renderer {
             crosshair,
             first_crosshair: debug_depth + debug_top,
             world_depth: scaled.is_none(),
+            msaa_depth: !fg && self.msaa_samples() > 1,
             real: true,
             hand_drawn: !pack_draws_hand,
             hand_view_proj,
@@ -11261,15 +11375,22 @@ impl Renderer {
                 crate::spectator_shaders::chains(),
                 target_texture.format(),
             );
+            // The world's depth: the window's, or 4x MSAA's resolved one where it drew at the
+            // window's size (100% scale); a smaller one doesn't fit the frame.
+            let window = [self.config.width, self.config.height];
+            let depth = if overlay.world_depth {
+                Some(&self.depth)
+            } else {
+                (self.world_post.depth_at(window)).filter(|_| overlay.msaa_depth)
+            };
             post.apply(
                 &self.device,
                 &self.queue,
                 encoder,
                 target_texture,
                 view_target,
-                [self.config.width, self.config.height],
-                // The scaled world pass drew its own depth buffer.
-                overlay.world_depth.then_some(&self.depth),
+                window,
+                depth,
                 &frame.post_effects,
                 timing.as_mut(),
             );
@@ -11592,6 +11713,10 @@ struct Overlay {
     first_crosshair: u32,
     /// The world drew into `depth` (post effects may read it), not a scaled target's.
     world_depth: bool,
+    /// 4x MSAA drew the world, resolved into the scaled target at the window's size, without
+    /// frame generation: post effects read that target's depth. A frame-generation pair keeps
+    /// none, as its made frame has no depth of its own and an effect would flicker.
+    msaa_depth: bool,
     /// The real frame, not frame generation's made one: the world icon grabs it.
     real: bool,
     /// The game drew the first-person hand, in its own pass or at the end of the world's

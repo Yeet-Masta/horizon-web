@@ -8,9 +8,58 @@ use horizon_std::sync::Mutex;
 use serde_json::Value;
 use std::{
     collections::HashMap,
+    hash::{BuildHasher, Hasher, RandomState},
     path::Path,
     sync::{Arc, OnceLock},
 };
+
+/// Append distinct mod stacks while preserving the exported and insertion order.
+fn append_unique_stacks<'a>(
+    items: &mut Vec<ItemStack>,
+    added: impl Iterator<Item = &'a ItemStack>,
+    mut on_append: impl FnMut(&ItemStack),
+) {
+    // Indexing has an upfront cost proportional to the exported list. Budget
+    // actual comparisons so early matches do not trigger an unnecessary index.
+    let mut scan_budget = items.len().saturating_mul(64).max(8 * 1024);
+    let mut index = None;
+    let hash_builder = RandomState::new();
+    let fingerprint = |stack: &ItemStack| {
+        let mut hasher = hash_builder.build_hasher();
+        stack.hash_item_and_components(&mut hasher);
+        hasher.finish()
+    };
+    for stack in added {
+        if index.is_none() && scan_budget == 0 {
+            let mut buckets = HashMap::<u64, Vec<usize>>::with_capacity(items.len());
+            for (position, item) in items.iter().enumerate() {
+                buckets.entry(fingerprint(item)).or_default().push(position);
+            }
+            index = Some(buckets);
+        }
+
+        if let Some(buckets) = &mut index {
+            let candidates = buckets.entry(fingerprint(stack)).or_default();
+            if candidates
+                .iter()
+                .any(|&i| items[i].same_item_same_components(stack))
+            {
+                continue;
+            }
+            candidates.push(items.len());
+        } else {
+            let duplicate = items
+                .iter()
+                .position(|s| s.same_item_same_components(stack));
+            scan_budget = scan_budget.saturating_sub(duplicate.map_or(items.len(), |i| i + 1));
+            if duplicate.is_some() {
+                continue;
+            }
+        }
+        items.push(stack.clone());
+        on_append(stack);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Tab {
@@ -168,6 +217,9 @@ impl Names {
         Self { map }
     }
     pub fn item(&self, id: &str) -> String {
+        if let Some(name) = crate::item_data::default_names::of(id) {
+            return name.plain();
+        }
         let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
         self.map
             .get(&format!("item.{namespace}.{path}"))
@@ -178,6 +230,9 @@ impl Names {
     /// An item's display name in the selected language: `item.*` then
     /// `block.*`, then the pinned English map (`Names::item`).
     pub fn display_item(&self, id: &str) -> String {
+        if let Some(name) = crate::item_data::default_names::of(id) {
+            return name.plain();
+        }
         let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
         if let Some(lang) = crate::lang::current() {
             for prefix in ["item", "block"] {
@@ -453,13 +508,12 @@ impl Creative {
                     .filter(|(_, o)| keep(**o))
                     .map(|(s, _)| s.clone())
                     .collect();
-                for (_, stacks) in added.iter().filter(|(tab, _)| *tab == e.tab.id) {
-                    for stack in stacks.iter().filter(usable) {
-                        if !items.iter().any(|s| s.same_item_same_components(stack)) {
-                            items.push(stack.clone());
-                        }
-                    }
-                }
+                let stacks = added
+                    .iter()
+                    .filter(|(tab, _)| *tab == e.tab.id)
+                    .flat_map(|(_, stacks)| stacks)
+                    .filter(usable);
+                append_unique_stacks(&mut items, stacks, |_| {});
                 let mut tab = Tab {
                     items,
                     ..e.tab.header()
@@ -475,22 +529,16 @@ impl Creative {
             .filter(|(_, _, o)| keep(*o))
             .map(|(s, e, _)| (s.clone(), e.clone()))
             .unzip();
-        for stack in added.iter().flat_map(|(_, stacks)| stacks).filter(usable) {
-            if !self
-                .search_items
-                .iter()
-                .any(|s| s.same_item_same_components(stack))
-            {
-                // No exported tooltip lines or tags: searched by its name.
-                let (namespace, path) = split_id(&java_lower(&stack.item));
-                self.search_index.push(SearchEntry {
-                    namespace,
-                    path,
-                    ..Default::default()
-                });
-                self.search_items.push(stack.clone());
-            }
-        }
+        let stacks = added.iter().flat_map(|(_, stacks)| stacks).filter(usable);
+        append_unique_stacks(&mut self.search_items, stacks, |stack| {
+            // No exported tooltip lines or tags: searched by its name.
+            let (namespace, path) = split_id(&java_lower(&stack.item));
+            self.search_index.push(SearchEntry {
+                namespace,
+                path,
+                ..Default::default()
+            });
+        });
         self.forget_items();
     }
     /// The packs' Polytone creative tab modifiers (wiki "Creative Tab Modifiers"): the tabs are
@@ -1022,8 +1070,18 @@ impl Creative {
     /// `CreativeModeInventoryScreen.checkTabHovering`: the tab whose icon
     /// rectangle, 3 pixels in from its 26x32 slot (`isHovering(x + 3, y + 3,
     /// 21, 27)`), holds the cursor. The screen draws its display name.
-    pub fn hovered_tab(tabs: &[Tab], origin: (f32, f32), cursor: (f32, f32)) -> Option<usize> {
+    /// Tabs on another page share those slots, so only a tab on `page` (or
+    /// one every page shows) can be hovered, as a click already does.
+    pub fn hovered_tab(
+        tabs: &[Tab],
+        page: u32,
+        origin: (f32, f32),
+        cursor: (f32, f32),
+    ) -> Option<usize> {
         tabs.iter().position(|tab| {
+            if tab.page != page && !Self::on_every_page(tab) {
+                return false;
+            }
             let (x, y) = Self::tab_position(tab);
             let (x, y) = (origin.0 + x + 3.0, origin.1 + y + 3.0);
             cursor.0 >= x && cursor.0 < x + 21.0 && cursor.1 >= y && cursor.1 < y + 27.0
@@ -1217,6 +1275,56 @@ mod tests {
             damage: 0,
             extra: None,
         }
+    }
+
+    #[test]
+    fn rebuild_deduplicates_nested_variants_in_category_and_search_order() {
+        let mut creative = tooltip_tabs();
+        let tab_id = "minecraft:building_blocks";
+        let mut added = vec![stack("oak_log", 64), stack("air", 1), stack("stone", 0)];
+        let variants: Vec<_> = (0..256)
+            .map(|variant| {
+                let mut inner = stack("stone", 1 + variant % 2);
+                inner.data_mut().set_other(
+                    "minecraft:custom_data",
+                    Some(Tag::compound([(
+                        "marker",
+                        Tag::List(vec![Tag::Int((variant / 2) as i32)]),
+                    )])),
+                );
+                let mut outer = stack("shulker_box", 1);
+                outer.data_mut().container.push((0, inner));
+                outer
+            })
+            .collect();
+        added.extend(variants.iter().cloned());
+        let mut duplicate = variants[0].clone();
+        duplicate.count = 2;
+        duplicate.data_mut().bundle_selected.0 = 1;
+        added.push(duplicate.clone());
+        let mut expected_search = creative.search_items.clone();
+        expected_search.extend(variants.iter().cloned());
+        let mut expected_category = vec![stack("oak_log", 1)];
+        expected_category.extend(variants);
+        creative.build(
+            false,
+            vec![
+                (tab_id.to_owned(), added),
+                (
+                    "minecraft:natural_blocks".to_owned(),
+                    vec![duplicate.clone()],
+                ),
+            ],
+            &Names::default(),
+        );
+        let category = |id: &str| &creative.tabs.iter().find(|tab| tab.id == id).unwrap().items;
+        assert_eq!(category(tab_id), &expected_category);
+        assert_eq!(
+            category("minecraft:natural_blocks").last(),
+            Some(&duplicate)
+        );
+        assert_eq!(creative.search_items, expected_search);
+        assert_eq!(creative.search_index.len(), creative.search_items.len());
     }
 
     /// A middle-click on a display item copies `getMaxStackSize`. The component
@@ -2144,13 +2252,43 @@ mod tests {
         let tab = &screen.tabs[0];
         let (x, y) = Creative::tab_position(tab);
         let at =
-            |dx: f32, dy: f32| Creative::hovered_tab(&screen.tabs, (0.0, 0.0), (x + dx, y + dy));
+            |dx: f32, dy: f32| Creative::hovered_tab(&screen.tabs, 0, (0.0, 0.0), (x + dx, y + dy));
         assert_eq!(at(4.0, 4.0), Some(0));
         assert_eq!(at(23.5, 4.0), Some(0));
         assert_eq!(at(2.0, 4.0), None);
         assert_eq!(at(24.0, 4.0), None);
         assert_eq!(at(4.0, 2.0), None);
         assert_eq!(at(4.0, 30.0), None);
+    }
+
+    /// Off-page tabs sit in the same slot as the tab drawn there, so hover
+    /// must ignore them and name the tab on the page shown.
+    #[test]
+    fn hovered_tab_follows_the_page_shown() {
+        let stack = |id: &str| format!("{{count:1,id:\"minecraft:{id}\"}}");
+        let tab = |id: &str, column: u32, page: u32| {
+            serde_json::json!({"id": format!("minecraft:{id}"), "type": "CATEGORY", "row": "TOP",
+                "column": column, "page": page, "title": id, "icon": stack("stone"),
+                "visible": true, "items": [stack("stone")]})
+        };
+        let screen = Creative::from_json(&serde_json::json!({"schema": 3, "tabs": [
+            tab("building_blocks", 0, 0),
+            tab("modded", 0, 1),
+            tab("search", 6, 0),
+        ]}))
+        .unwrap();
+        let at = |page: u32, tab: usize| {
+            let (x, y) = Creative::tab_position(&screen.tabs[tab]);
+            Creative::hovered_tab(&screen.tabs, page, (0.0, 0.0), (x + 4.0, y + 4.0))
+        };
+        // Page 0: the vanilla tab in column 0, not the mod tab that shares it.
+        assert_eq!(at(0, 0), Some(0));
+        // Page 1: the same slot is the mod tab; the vanilla tab is not hovered.
+        assert_eq!(at(1, 0), Some(1));
+        assert_eq!(at(1, 1), Some(1));
+        // A right-hand tab (column >= 5) still hovers on every page.
+        assert_eq!(at(0, 2), Some(2));
+        assert_eq!(at(1, 2), Some(2));
     }
 }
 

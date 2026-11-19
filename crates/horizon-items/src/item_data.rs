@@ -9,6 +9,8 @@ pub mod component_values;
 pub mod cooking_fuel;
 #[path = "item_data/custom_model_data.rs"]
 pub mod custom_model_data;
+#[path = "item_data/default_names.rs"]
+pub mod default_names;
 #[path = "item_data/ingredient_components.rs"]
 pub mod ingredient_components;
 use crate::items::{ItemInfo, ItemStack};
@@ -60,7 +62,10 @@ pub fn modifier_rows(tag: &Tag) -> Vec<ModifierRow> {
         })
         .collect()
 }
-use std::sync::Arc;
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 /// Enchantment id and level, in insertion order.
 pub type Levels = Vec<(Arc<str>, u32)>;
@@ -142,6 +147,80 @@ pub struct StackData {
     /// What the server sent for this stack, for sending it back unchanged.
     pub wire: Wire,
 }
+impl Hash for StackData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self {
+            damage_set,
+            enchantments,
+            stored_enchantments,
+            repair_cost,
+            explicit_zero_damage,
+            custom_name,
+            kinetic_weapon,
+            consumable,
+            death_protection: _,
+            potion,
+            potion_extra,
+            trim,
+            container,
+            charged,
+            fireworks,
+            map_id,
+            writable_pages,
+            written,
+            banner_patterns,
+            base_color,
+            ominous_banner,
+            ominous_amplifier,
+            dyed_color,
+            firework_explosion,
+            pot_decorations,
+            bundle_contents,
+            bundle_selected: _,
+            stew_effects,
+            map_post_processing,
+            other,
+            wire: _,
+        } = self;
+        damage_set.hash(state);
+        enchantments.hash(state);
+        stored_enchantments.hash(state);
+        repair_cost.hash(state);
+        explicit_zero_damage.hash(state);
+        custom_name.hash(state);
+        kinetic_weapon
+            .as_ref()
+            .map(|component| component.raw())
+            .hash(state);
+        consumable
+            .as_ref()
+            .map(|component| &component.raw)
+            .hash(state);
+        potion.hash(state);
+        potion_extra.hash(state);
+        trim.hash(state);
+        container.hash(state);
+        charged.hash(state);
+        fireworks.hash(state);
+        map_id.hash(state);
+        writable_pages.hash(state);
+        written.hash(state);
+        banner_patterns.hash(state);
+        base_color.hash(state);
+        ominous_banner.hash(state);
+        ominous_amplifier.hash(state);
+        dyed_color.hash(state);
+        firework_explosion.hash(state);
+        pot_decorations.hash(state);
+        bundle_contents.hash(state);
+        stew_effects.hash(state);
+        map_post_processing.hash(state);
+        // Includes the saved death_protection component. The decoded cache
+        // may contain floats and is only used by exact equality.
+        other.hash(state);
+    }
+}
+
 /// A saved consumable decoded once for use animation, countdown and completion.
 #[derive(Clone, Debug, PartialEq)]
 struct ConsumableComponent {
@@ -428,7 +507,7 @@ fn ominous_tooltip_display() -> Tag {
 }
 
 /// `WrittenBookContent` with the pages as plain text.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Hash)]
 pub struct WrittenBook {
     pub title: String,
     pub author: String,
@@ -468,15 +547,7 @@ pub fn destroyed_container(stack: &mut ItemStack) -> Vec<ItemStack> {
 /// `NbtOps.getBooleanValue`, used by boolean component codecs: every numeric tag
 /// is true unless its double value is zero. In particular, fractions stay true.
 pub fn component_bool(value: &Tag) -> Option<bool> {
-    Some(match value {
-        Tag::Byte(v) => *v != 0,
-        Tag::Short(v) => *v != 0,
-        Tag::Int(v) => *v != 0,
-        Tag::Long(v) => *v != 0,
-        Tag::Float(bits) => f32::from_bits(*bits) != 0.0,
-        Tag::Double(bits) => f64::from_bits(*bits) != 0.0,
-        _ => return None,
-    })
+    horizon_client_core::component_codec::nbt_bool(value)
 }
 
 /// `FoodProperties.DIRECT_CODEC`: required numeric nutrition/saturation and an
@@ -604,6 +675,26 @@ impl ItemStack {
             }
         }
         info.map_or(0, |item| item.damage)
+    }
+    /// The stack's own `max_stack_size` component: `Some(1)` when the stack
+    /// removes it (`!minecraft:max_stack_size`, vanilla's `getOrDefault`
+    /// default of 1), `None` when it leaves the item's.
+    pub fn own_max_stack_size(&self) -> Option<u32> {
+        let data = self.data();
+        if data.is_some_and(|d| d.other("!minecraft:max_stack_size").is_some()) {
+            return Some(1);
+        }
+        match data.and_then(|d| d.other("minecraft:max_stack_size")) {
+            Some(Tag::Int(n)) => Some((*n).clamp(1, 99) as u32),
+            _ => None,
+        }
+    }
+    /// `ItemInstance.getMaxStackSize`: the stack's own `max_stack_size`, else
+    /// the item's. A removed component is vanilla's `getOrDefault` default of
+    /// 1, not the item's size.
+    pub fn max_stack_size(&self, items: &crate::items::Items) -> u32 {
+        self.own_max_stack_size()
+            .unwrap_or_else(|| items.get(&self.item).map_or(64, |i| i.max_stack))
     }
     /// The patch the server sent for this stack, while the stack is still what
     /// it decoded to (its count aside); None once anything else changed.
@@ -749,8 +840,15 @@ impl ItemStack {
     /// saves and reaches clients unchanged; the ominous banner's is modelled
     /// by `ominous_banner` instead.
     pub fn item_name(&self) -> Option<String> {
-        let name = self.data()?.other("minecraft:item_name")?;
-        Some(horizon_client_core::component::name_text(name).plain())
+        self.item_name_text().map(|name| name.plain())
+    }
+    /// `getItemName`'s component as text: the stack's own `minecraft:item_name`, else the
+    /// item's default where it is not its description id's ([`default_names`]).
+    pub fn item_name_text(&self) -> Option<horizon_client_core::text::Text> {
+        match self.data().and_then(|d| d.other("minecraft:item_name")) {
+            Some(name) => Some(horizon_client_core::component::name_text(name)),
+            None => default_names::of(&self.item),
+        }
     }
     pub fn potion(&self) -> Option<&str> {
         self.data().and_then(|d| d.potion.as_deref())
@@ -807,6 +905,14 @@ impl ItemStack {
     pub fn same_item_same_components(&self, other: &Self) -> bool {
         self.item == other.item && self.damage == other.damage && self.data() == other.data()
     }
+    /// Hash candidates for `same_item_same_components`. Confirm a match with
+    /// that comparison, since fingerprints can collide.
+    pub fn hash_item_and_components(&self, state: &mut impl Hasher) {
+        self.item.hash(state);
+        self.damage.hash(state);
+        self.extra.hash(state);
+    }
+
     /// `ItemStack.matches`: the same item, count and components.
     pub fn matches(&self, other: &Self) -> bool {
         self.count == other.count && self.same_item_same_components(other)
