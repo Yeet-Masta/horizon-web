@@ -11,7 +11,7 @@
 use super::LegacyRandom;
 use horizon_std::sync::Mutex;
 use std::sync::{
-    Arc, PoisonError,
+    Arc, Condvar, PoisonError,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -22,7 +22,16 @@ pub struct OrderedDraws {
     state: Mutex<(u64, Option<f64>)>,
     /// The item each lane is on; `usize::MAX` once it has finished.
     lanes: Box<[AtomicUsize]>,
+    /// Lanes asleep in `wait_until`.
+    sleepers: AtomicUsize,
+    parked: Mutex<()>,
+    wake_up: Condvar,
 }
+
+/// Spins a wait makes before it yields its core.
+const SPINS: u32 = 200;
+/// How long a wait yields its core before it sleeps.
+const YIELD_FOR: horizon_std::time::Duration = horizon_std::time::Duration::from_micros(20);
 
 /// A lane's hold on the shared stream, inside its [`LegacyRandom`].
 #[derive(Debug)]
@@ -39,6 +48,9 @@ impl OrderedDraws {
         Arc::new(Self {
             state: Mutex::new((random.state, random.gaussian)),
             lanes: (0..lanes).map(|_| AtomicUsize::new(0)).collect(),
+            sleepers: AtomicUsize::new(0),
+            parked: Mutex::new(()),
+            wake_up: Condvar::new(),
         })
     }
     /// The random lane `lane` draws from: its draws wait for their turn.
@@ -61,33 +73,58 @@ impl OrderedDraws {
     }
     /// Wait until lane `lane` has finished item `item` (it is on a later one, or done).
     pub fn wait_past(&self, lane: usize, item: usize) {
-        let mut spins = 0u32;
-        while self.lanes[lane].load(Ordering::Acquire) <= item {
-            spins += 1;
-            if spins < 64 {
-                std::hint::spin_loop();
-            } else {
-                horizon_std::thread::yield_now();
-            }
-        }
+        self.wait_until(|| self.lanes[lane].load(Ordering::Acquire) > item);
     }
     fn wait_for_turn(&self, lane: usize, item: usize) {
-        let mut spins = 0u32;
-        loop {
-            let ready = self
-                .lanes
+        self.wait_until(|| {
+            self.lanes
                 .iter()
                 .enumerate()
-                .all(|(k, at)| k == lane || at.load(Ordering::Acquire) > item);
-            if ready {
+                .all(|(k, at)| k == lane || at.load(Ordering::Acquire) > item)
+        });
+    }
+    /// Returns once `ready` holds. A wait is mostly short, so it spins first. The lane waited on
+    /// may be a thread the machine has not given a core (the helpers compete with the server's
+    /// other threads), and a waiter that keeps its core then holds that lane up: after a moment
+    /// the waiter sleeps until a lane moves on ([`Self::wake`]).
+    fn wait_until(&self, ready: impl Fn() -> bool) {
+        if ready() {
+            return;
+        }
+        for _ in 0..SPINS {
+            std::hint::spin_loop();
+            if ready() {
                 return;
             }
-            spins += 1;
-            if spins < 64 {
-                std::hint::spin_loop();
-            } else {
-                horizon_std::thread::yield_now();
+        }
+        let until = horizon_std::time::Instant::now() + YIELD_FOR;
+        while horizon_std::time::Instant::now() < until {
+            horizon_std::thread::yield_now();
+            if ready() {
+                return;
             }
+        }
+        self.sleepers.fetch_add(1, Ordering::SeqCst);
+        // The `ready` loads are Acquire: this fence pairs with the waker's SeqCst store and
+        // `sleepers` load, so a weakly ordered CPU cannot see a stale lane and no sleeper.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let mut guard = self.parked.lock().unwrap_or_else(PoisonError::into_inner);
+        while !ready() {
+            // The timeout only guards against a wake that was missed; `wake` takes this lock.
+            guard = self
+                .wake_up
+                .wait_timeout(guard, horizon_std::time::Duration::from_millis(1))
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        drop(guard);
+        self.sleepers.fetch_sub(1, Ordering::SeqCst);
+    }
+    /// A lane has moved on (or finished): wakes the lanes that sleep. Cheap while none does.
+    fn wake(&self) {
+        if self.sleepers.load(Ordering::SeqCst) > 0 {
+            drop(self.parked.lock().unwrap_or_else(PoisonError::into_inner));
+            self.wake_up.notify_all();
         }
     }
 }
@@ -114,7 +151,8 @@ impl LegacyRandom {
     pub fn begin_item(&mut self, item: usize) {
         if let Some(gate) = self.gate.as_deref_mut() {
             gate.item = item;
-            gate.draws.lanes[gate.lane].store(item, Ordering::Release);
+            gate.draws.lanes[gate.lane].store(item, Ordering::SeqCst);
+            gate.draws.wake();
         }
     }
     /// The item's draws are done: the shared stream goes on from where it left it.
@@ -134,7 +172,8 @@ impl LegacyRandom {
     pub fn finish_lane(&mut self) {
         self.end_item();
         if let Some(gate) = self.gate.as_deref_mut() {
-            gate.draws.lanes[gate.lane].store(usize::MAX, Ordering::Release);
+            gate.draws.lanes[gate.lane].store(usize::MAX, Ordering::SeqCst);
+            gate.draws.wake();
         }
     }
     /// A gated random's [`LaneDone`], for its lane's thread to hold while it runs; None for an
@@ -158,7 +197,8 @@ pub struct LaneDone {
 
 impl Drop for LaneDone {
     fn drop(&mut self) {
-        self.draws.lanes[self.lane].store(usize::MAX, Ordering::Release);
+        self.draws.lanes[self.lane].store(usize::MAX, Ordering::SeqCst);
+        self.draws.wake();
     }
 }
 
@@ -181,6 +221,44 @@ mod tests {
             Ok(value) => value,
             Err(panic) => std::panic::resume_unwind(panic),
         }
+    }
+
+    /// A lane that waits long enough to sleep (the lane before it is slow) still draws after it
+    /// and gets the serial stream, and wakes when that lane moves on or finishes.
+    #[test]
+    fn a_long_wait_sleeps_and_wakes_in_order() {
+        let mut serial = LegacyRandom::new(5);
+        let expected = [serial.next_int() as u64, serial.next_int() as u64];
+        let got = bounded(|| {
+            let shared = OrderedDraws::new(&LegacyRandom::new(5), 2);
+            horizon_std::thread::scope(|s| {
+                let slow = {
+                    let shared = Arc::clone(&shared);
+                    s.spawn(move || {
+                        let mut random = shared.lane(0);
+                        random.begin_item(0);
+                        horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(50));
+                        let first = random.next_int() as u64;
+                        random.end_item();
+                        random.finish_lane();
+                        first
+                    })
+                };
+                let fast = {
+                    let shared = Arc::clone(&shared);
+                    s.spawn(move || {
+                        let mut random = shared.lane(1);
+                        random.begin_item(1);
+                        let second = random.next_int() as u64;
+                        random.end_item();
+                        random.finish_lane();
+                        second
+                    })
+                };
+                [slow.join().unwrap(), fast.join().unwrap()]
+            })
+        });
+        assert_eq!(got, expected);
     }
 
     #[test]

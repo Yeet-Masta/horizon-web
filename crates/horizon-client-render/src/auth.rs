@@ -998,6 +998,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn certificates_response() {
         let pair = parse_certificates(&certificates(PRIVATE_B64, PUBLIC_B64)).unwrap();
         assert_eq!(

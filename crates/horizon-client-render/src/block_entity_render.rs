@@ -22,6 +22,7 @@ use crate::{
     world::World,
 };
 use glam::{DVec3, Mat4, Quat, Vec3};
+use horizon_assets::resource_source::{ResourceRoot, ResourceSource};
 use horizon_core::geometry::{
     Direction,
     trig::{self, Mth},
@@ -35,7 +36,6 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     f32::consts::PI,
-    path::Path,
     sync::{
         Arc, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -644,16 +644,11 @@ fn first_line(line: &Text, max_width: f32, advance: &dyn Fn(char, &Style) -> f32
     line.clone()
 }
 
-/// `AbstractSignRenderer.isOutlineVisible`: the camera within 16 blocks of
-/// the sign's centre.
-fn sign_text_near(pos: [i32; 3], camera: DVec3) -> bool {
-    DVec3::new(
-        f64::from(pos[0]) + 0.5,
-        f64::from(pos[1]) + 0.5,
-        f64::from(pos[2]) + 0.5,
-    )
-    .distance_squared(camera)
-        < 256.0
+/// `AbstractSignRenderer.isOutlineVisible`: a first-person camera looking through a
+/// spyglass outlines the text, else the camera is within 16 blocks of its centre.
+fn sign_text_near(scene: &Scene, pos: [i32; 3]) -> bool {
+    let centre = DVec3::new(f64::from(pos[0]), f64::from(pos[1]), f64::from(pos[2])) + 0.5;
+    scene.spyglass_outline || centre.distance_squared(scene.camera) < 256.0
 }
 
 /// `AbstractSignRenderer.submitSignText`: four centred lines, glowing text
@@ -765,7 +760,7 @@ fn sign_text_animated(data: &SignData) -> bool {
 
 /// How far the text of an outlined call sits in front of its outline, in
 /// text units (`Font.DisplayMode.POLYGON_OFFSET`, see `draw_text`).
-const TEXT_OVER_OUTLINE: f32 = 0.05;
+pub const TEXT_OVER_OUTLINE: f32 = 0.05;
 
 /// Draws a text call with the font atlas: 8x8 glyph cells, the outline as
 /// eight one-pixel offsets under the text.
@@ -787,17 +782,17 @@ fn draw_text(scene: &Scene, call: &TextCall, out: &mut Vec<Vertex>) {
             g
         }
     };
-    text_vertices(&glyph, scene.font.map(Font::white), call, out);
+    push_text(&glyph, scene.font.map(Font::white), &call.run(), out);
 }
 
 /// `BakedSheetGlyph.renderChar` / `Font.PreparedTextBuilder.accept`: the
 /// text of `call` as glyph quads in its matrix's plane, 1 unit a font pixel,
 /// y down as the font's, with its outline when it has one. A native mod's
 /// block entity draws its text this way (`native_draw_text`).
-pub fn text_vertices(
+pub fn push_text(
     glyph: &dyn Fn(char) -> Glyph,
     white: Option<Rect>,
-    call: &TextCall,
+    call: &TextRun<'_>,
     out: &mut Vec<Vertex>,
 ) {
     let bold = call.style.is_bold();
@@ -944,10 +939,47 @@ pub struct TextCall {
     /// shines in HDR output and in shader packs (`horizonTier`), as full-bright text does in SDR.
     pub tier: u8,
 }
+impl TextCall {
+    /// The call as [`push_text`] reads it.
+    pub fn run(&self) -> TextRun<'_> {
+        TextRun {
+            matrix: self.matrix,
+            x: self.x,
+            y: self.y,
+            text: &self.text,
+            style: &self.style,
+            color: self.color,
+            outline: self.outline,
+            light: self.light,
+            tier: self.tier,
+        }
+    }
+}
+
+/// A line of text [`push_text`] lays out, borrowing its text: a [`TextCall`]'s, or one a mod
+/// draws each frame, which then allocates nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct TextRun<'a> {
+    pub matrix: Mat4,
+    pub x: f32,
+    pub y: f32,
+    pub text: &'a str,
+    pub style: &'a Style,
+    /// ARGB.
+    pub color: u32,
+    /// ARGB outline colour, 0 for none.
+    pub outline: u32,
+    /// Horizon packed light (sky*16 | block*16 << 8).
+    pub light: u32,
+    /// HDR glyph emission tier, 0 for none.
+    pub tier: u8,
+}
 
 /// Inputs from the game for one frame of block-entity rendering.
 pub struct Scene<'a> {
     pub camera: DVec3,
+    /// `isScoping` in first person: glowing sign text is outlined at any distance.
+    pub spyglass_outline: bool,
     /// `Camera.rotation` (conduit eyes face the camera).
     pub orientation: Quat,
     /// Ticked block-entity state at a position.
@@ -1449,43 +1481,36 @@ const MODELS: [(&str, &str); 27] = [
 const VIEW_DISTANCE: f64 = 64.0;
 
 impl BlockEntityRenderer {
-    pub fn load(root: &Path, registry: &BlockRegistry) -> Result<Self> {
-        let visibility = load_visibility(root, registry)?;
-        Self::load_with_visibility(root, registry, visibility)
+    pub fn load(
+        root: &ResourceRoot,
+        registry: &BlockRegistry,
+        defaults: &horizon_world::item_defaults::ItemDefaults,
+    ) -> Result<Self> {
+        let visibility = load_visibility(root.prepared(), registry)?;
+        Self::load_with_visibility(root, registry, visibility, defaults)
     }
     /// [`BlockEntityRenderer::load`] over the face visibility the meshes use
     /// (`MeshTables::visibility`): a clone shares its shapes and their faces.
     pub fn load_with_visibility(
-        root: &Path,
+        root: &ResourceRoot,
         registry: &BlockRegistry,
         visibility: FaceVisibility,
+        defaults: &horizon_world::item_defaults::ItemDefaults,
     ) -> Result<Self> {
-        Self::load_with_visibility_inner(root, registry, visibility, None, None)
+        Self::load_with_visibility_models_and_defaults(root, registry, visibility, None, defaults)
     }
 
-    /// Load from what the client startup batch already decoded: its entity-model
-    /// document (none reads `entity-models.json`) and the item defaults, avoiding a
-    /// second read and decode of either.
+    /// Reuse the startup batch's decoded entity models and shared item defaults.
     pub fn load_with_visibility_models_and_defaults(
-        root: &Path,
+        root: &ResourceRoot,
         registry: &BlockRegistry,
         visibility: FaceVisibility,
         models: Option<&Value>,
-        defaults: &horizon_world::item_defaults::Defaults,
-    ) -> Result<Self> {
-        Self::load_with_visibility_inner(root, registry, visibility, models, Some(defaults))
-    }
-
-    fn load_with_visibility_inner(
-        root: &Path,
-        registry: &BlockRegistry,
-        visibility: FaceVisibility,
-        models: Option<&Value>,
-        defaults: Option<&horizon_world::item_defaults::Defaults>,
+        defaults: &horizon_world::item_defaults::ItemDefaults,
     ) -> Result<Self> {
         let owned_models = if models.is_none() {
-            Some(serde_json::from_slice(&horizon_std::fs::read(
-                root.join("entity-models.json"),
+            Some(serde_json::from_slice::<Value>(&horizon_std::fs::read(
+                root.prepared().join("entity-models.json"),
             )?)?)
         } else {
             None
@@ -1498,25 +1523,15 @@ impl BlockEntityRenderer {
         let mut renderer = Self::new(models, registry);
         renderer.visibility = Some(Mutex::new(visibility));
         // The packs' custom entity models (`.jem` files), before anything draws.
-        renderer.set_shapes(renderer.shapes_for(root));
+        renderer.set_shapes(renderer.shapes_for(root.source()));
         // Sherd items: provides_pottery_pattern -> decorated_pot_pattern asset id.
-        let owned_defaults = if defaults.is_none() {
-            Some(match horizon_world::item_defaults::read(root) {
-                Ok(items) => items,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
-                Err(e) => return Err(e.into()),
-            })
-        } else {
-            None
-        };
-        let items = defaults.or(owned_defaults.as_ref()).unwrap();
-        for (item, components) in items {
+        for (item, components) in defaults.entries() {
             let Some(pattern) = components["minecraft:provides_pottery_pattern"].as_str() else {
                 continue;
             };
             let name = pattern.strip_prefix("minecraft:").unwrap_or(pattern);
-            let file = root.join(format!("data/minecraft/decorated_pot_pattern/{name}.json"));
-            let Ok(def) = horizon_std::fs::read(file) else {
+            let file = format!("data/minecraft/decorated_pot_pattern/{name}.json");
+            let Ok(def) = root.source().read(&file) else {
                 continue;
             };
             let def: Value = serde_json::from_slice(&def)?;
@@ -1555,7 +1570,7 @@ impl BlockEntityRenderer {
     }
     /// The models the packs under `root` give, their `.jem` files over vanilla's, for
     /// [`Self::set_shapes`] (a pack reload): vanilla's own, shared, without any.
-    pub fn shapes_for(&self, root: &Path) -> Arc<BlockEntityShapes> {
+    pub fn shapes_for(&self, root: &ResourceSource) -> Arc<BlockEntityShapes> {
         match crate::block_entity_cem::reshape(root, &self.vanilla.models) {
             Some((models, textures)) => Arc::new(BlockEntityShapes::new(models, textures)),
             None => self.vanilla.clone(),
@@ -2470,7 +2485,7 @@ impl BlockEntityRenderer {
         let Some(data) = (scene.sign)(pos) else {
             return;
         };
-        let near = (data.front.glowing || data.back.glowing) && sign_text_near(pos, scene.camera);
+        let near = (data.front.glowing || data.back.glowing) && sign_text_near(scene, pos);
         let Ok(mut cache) = self.sign_texts.lock() else {
             return;
         };
@@ -2600,7 +2615,7 @@ impl BlockEntityRenderer {
         scene: &Scene,
         pos: [i32; 3],
         state: u32,
-        stage: [f32; 2],
+        stage: crate::breaking::CrackSprite,
         out: &mut Vec<Vertex>,
     ) {
         if !matches!(
@@ -2797,7 +2812,7 @@ impl BlockEntityRenderer {
                         m *= Mat4::from_translation(Vec3::new(0.0, 1.0 / 3.0, 0.046_666_667))
                             * Mat4::from_scale(s * 0.010_416_667);
                     }
-                    let near = sign_text_near(pos, scene.camera);
+                    let near = sign_text_near(scene, pos);
                     let calls = sign_text_calls(scene, data, text, m, packed, near);
                     match scene.texts {
                         Some(sink) => sink.borrow_mut().extend(calls),
@@ -3656,12 +3671,46 @@ fn portal_cube(m: Mat4, faces: &[Direction], layer: u32, out: &mut Vec<Vertex>) 
 mod tests {
     use super::*;
     use crate::assets::Assets;
-    use horizon_world::nbt::Tag;
+    use horizon_core::nbt::Tag;
+
+    /// The scene a sign-text test renders with: no camera rotation, no ticked
+    /// state, one frame, a flat world and the test's glyph atlas.
+    macro_rules! sign_scene {
+        ($world:expr, $sprites:expr, $glyph:expr) => {
+            Scene {
+                camera: DVec3::ZERO,
+                spyglass_outline: false,
+                orientation: Quat::IDENTITY,
+                anim: &|_| BlockAnim::default(),
+                texts: None,
+                partial: 0.0,
+                game_time: 0,
+                max_y: 320,
+                world: $world,
+                sprites: $sprites,
+                emissive: &Default::default(),
+                translucent_sprites: &HashSet::new(),
+                atlas_revision: 1,
+                nether: false,
+                lid: &|_| 0.0,
+                sign: &|_| None,
+                banner: &|_| Vec::new(),
+                skull: &|_| None,
+                glyph: $glyph,
+                glyphs: 0,
+                font: None,
+                dynamic_visible: None,
+            }
+        };
+    }
     #[test]
-    #[ignore = "requires prepared models/textures in HORIZON_TEST_RESOURCES"]
+    #[ignore = "daily"]
     fn entity_block_particles_and_breaking_use_exported_models() -> Result<()> {
         use crate::{models::catalog::StateModels, sprites::Sprites};
-        use horizon_world::{DATA_VERSION, chunk::BlockState, nbt::Tag};
+        use {
+            horizon_core::nbt::Tag,
+            horizon_world::{DATA_VERSION, chunk::BlockState},
+        };
         let root = std::path::PathBuf::from(
             horizon_std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
         );
@@ -3695,14 +3744,20 @@ mod tests {
                 "defaults",
                 Tag::compound(names.iter().enumerate().map(|(id, name)| {
                     (
-                        horizon_world::nbt::JavaString::from(format!("minecraft:{name}").as_str()),
+                        horizon_core::nbt::JavaString::from(format!("minecraft:{name}").as_str()),
                         Tag::Int(id as i32),
                     )
                 })),
             ),
         ]))?;
         let mut sprites = Sprites::default();
-        let catalog = StateModels::from_facts(&root, &registry, &names, &mut sprites, &facts)?;
+        let catalog = StateModels::from_facts(
+            &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
+            &registry,
+            &names,
+            &mut sprites,
+            &facts,
+        )?;
         for (id, name) in names.iter().enumerate() {
             let models = catalog.collect(
                 BlockStateId(id as u32),
@@ -3752,6 +3807,7 @@ mod tests {
         let cache_lid = |_| cache_open.get();
         let mut scene = Scene {
             camera: DVec3::ZERO,
+            spyglass_outline: false,
             orientation: Quat::IDENTITY,
             anim: &|_| BlockAnim::default(),
             texts: None,
@@ -3827,7 +3883,7 @@ mod tests {
             let mut base = Vec::new();
             renderer.render_block(&scene, [0; 3], state, Mat4::IDENTITY, 0xff, &mut base);
             let mut cracks = Vec::new();
-            renderer.render_breaking(&scene, [0; 3], state, [0.0; 2], &mut cracks);
+            renderer.render_breaking(&scene, [0; 3], state, Default::default(), &mut cracks);
             assert!(!cracks.is_empty());
             assert_eq!(
                 base.iter().map(|v| v.pos).collect::<Vec<_>>(),
@@ -3841,7 +3897,7 @@ mod tests {
                 scene.lid = &|_| 1.0;
             }
             let mut animated = Vec::new();
-            renderer.render_breaking(&scene, [0; 3], state, [0.0; 2], &mut animated);
+            renderer.render_breaking(&scene, [0; 3], state, Default::default(), &mut animated);
             assert!(cracks.iter().zip(&animated).any(|(a, b)| a.pos != b.pos));
             scene.game_time = 0;
             scene.lid = &|_| 0.0;
@@ -4145,29 +4201,7 @@ mod tests {
                 ..Glyph::default()
             }
         };
-        let scene = Scene {
-            camera: DVec3::ZERO,
-            orientation: Quat::IDENTITY,
-            anim: &|_| BlockAnim::default(),
-            texts: None,
-            partial: 0.0,
-            game_time: 0,
-            max_y: 320,
-            world: &world,
-            sprites: &sprites,
-            emissive: &Default::default(),
-            translucent_sprites: &HashSet::new(),
-            atlas_revision: 1,
-            nether: false,
-            lid: &|_| 0.0,
-            sign: &|_| None,
-            banner: &|_| Vec::new(),
-            skull: &|_| None,
-            glyph: &glyph,
-            glyphs: 0,
-            font: None,
-            dynamic_visible: None,
-        };
+        let scene = sign_scene!(&world, &sprites, &glyph);
         let mut call = TextCall {
             matrix: Mat4::IDENTITY,
             x: 0.0,
@@ -4221,29 +4255,7 @@ mod tests {
             advance: 5.0,
             offset: 0.5,
         };
-        let scene = Scene {
-            camera: DVec3::ZERO,
-            orientation: Quat::IDENTITY,
-            anim: &|_| BlockAnim::default(),
-            texts: None,
-            partial: 0.0,
-            game_time: 0,
-            max_y: 320,
-            world: &world,
-            sprites: &sprites,
-            emissive: &Default::default(),
-            translucent_sprites: &HashSet::new(),
-            atlas_revision: 1,
-            nether: false,
-            lid: &|_| 0.0,
-            sign: &|_| None,
-            banner: &|_| Vec::new(),
-            skull: &|_| None,
-            glyph: &glyph,
-            glyphs: 0,
-            font: None,
-            dynamic_visible: None,
-        };
+        let scene = sign_scene!(&world, &sprites, &glyph);
         let call = TextCall {
             matrix: Mat4::IDENTITY,
             x: 10.0,
@@ -4310,7 +4322,7 @@ mod tests {
             },
         };
         let mut out = Vec::new();
-        text_vertices(&glyph, Some(white), &call, &mut out);
+        push_text(&glyph, Some(white), &call.run(), &mut out);
         // BakedSheetGlyph: bold expands by 0.1, italic shears by 1 - y/4,
         // the second bold glyph is 0.5 along and 0.001 in front (Unihex).
         assert_eq!(out.len(), 24);
@@ -4325,7 +4337,7 @@ mod tests {
         assert!(out.iter().all(|v| v.color == 0xff563412 && v.light == 240));
         call.outline = 0xff010203;
         out.clear();
-        text_vertices(&glyph, Some(white), &call, &mut out);
+        push_text(&glyph, Some(white), &call.run(), &mut out);
         // Eight outlines contain glyphs only; effects appear once, in front.
         assert_eq!(out.len(), 8 * 8 + 24);
         assert!((out[0].pos[0] - -1.6).abs() < 1e-6);
@@ -4334,7 +4346,7 @@ mod tests {
         assert!(out.iter().all(|v| v.layer >> 16 == 1));
         call.tier = 0;
         out.clear();
-        text_vertices(&glyph, Some(white), &call, &mut out);
+        push_text(&glyph, Some(white), &call.run(), &mut out);
         assert!(out.iter().all(|v| v.layer >> 16 == 0));
     }
 
@@ -4358,29 +4370,7 @@ mod tests {
             advance: 6.0,
             ..Glyph::default()
         };
-        let scene = Scene {
-            camera: DVec3::ZERO,
-            orientation: Quat::IDENTITY,
-            anim: &|_| BlockAnim::default(),
-            texts: None,
-            partial: 0.0,
-            game_time: 0,
-            max_y: 320,
-            world: &world,
-            sprites: &sprites,
-            emissive: &Default::default(),
-            translucent_sprites: &HashSet::new(),
-            atlas_revision: 1,
-            nether: false,
-            lid: &|_| 0.0,
-            sign: &|_| None,
-            banner: &|_| Vec::new(),
-            skull: &|_| None,
-            glyph: &glyph,
-            glyphs: 0,
-            font: None,
-            dynamic_visible: None,
-        };
+        let scene = sign_scene!(&world, &sprites, &glyph);
         sign_text_calls(&scene, data, &data.front, Mat4::IDENTITY, 0, near)
             .into_iter()
             .map(|c| (c.text, c.x, c.y, c.color, c.outline))
@@ -4545,6 +4535,7 @@ mod tests {
         );
         let mut scene = Scene {
             camera: DVec3::new(3.25, 70.5, -4.75),
+            spyglass_outline: false,
             orientation: Quat::IDENTITY,
             anim: &|_| BlockAnim::default(),
             texts: None,
@@ -4709,7 +4700,13 @@ mod tests {
         }
         let assets = Assets::load(&root).unwrap();
         let registry = assets.registry;
-        let renderer = BlockEntityRenderer::load(&root, registry).unwrap();
+        let defaults = horizon_world::item_defaults::read(&root).unwrap();
+        let renderer = BlockEntityRenderer::load(
+            &horizon_assets::resource_source::ResourceRoot::directory(root.to_path_buf()),
+            registry,
+            &defaults,
+        )
+        .unwrap();
         let state = registry.default_state("minecraft:decorated_pot").unwrap();
         let sprites: HashMap<String, Rect> = [
             "entity/decorated_pot/decorated_pot_base",
@@ -4733,6 +4730,7 @@ mod tests {
         let world = World::new(BlockStateId(0), 1);
         let scene = Scene {
             camera: DVec3::ZERO,
+            spyglass_outline: false,
             orientation: Quat::IDENTITY,
             anim: &|_| BlockAnim::default(),
             texts: None,
@@ -4790,7 +4788,12 @@ mod tests {
         };
         // No block entity's `.jem` (a mob's only): vanilla's shapes, not a copy.
         let empty = pack("render-none", &[("optifine/cem/zombie.jem", "{}".into())]);
-        assert!(Arc::ptr_eq(&renderer.shapes_for(&empty), &renderer.vanilla));
+        assert!(Arc::ptr_eq(
+            &renderer.shapes_for(&horizon_assets::resource_source::ResourceSource::directory(
+                empty.to_path_buf()
+            )),
+            &renderer.vanilla
+        ));
         let root = pack(
             "render-chest",
             &[(
@@ -4801,7 +4804,9 @@ mod tests {
                 ),
             )],
         );
-        renderer.set_shapes(renderer.shapes_for(&root));
+        renderer.set_shapes(renderer.shapes_for(
+            &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
+        ));
         let _ = horizon_std::fs::remove_dir_all(&root);
         let _ = horizon_std::fs::remove_dir_all(&empty);
         let rect = |u0: f32| Rect {
@@ -4823,6 +4828,7 @@ mod tests {
         let world = World::new(BlockStateId(0), 1);
         let scene = Scene {
             camera: DVec3::ZERO,
+            spyglass_outline: false,
             orientation: Quat::IDENTITY,
             anim: &|_| BlockAnim::default(),
             texts: None,

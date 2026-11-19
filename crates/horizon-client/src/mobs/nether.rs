@@ -122,12 +122,15 @@ impl Goal for BlazeAttack {
                         triangle(m, zd, 2.297 * sqd),
                     ];
                     let start = Vec3::new(m.position.x, m.position.y + half + 0.5, m.position.z);
-                    cx.events.push(MobEvent::Projectile(Projectile::fireball(
-                        ProjectileKind::SmallFireball,
-                        start,
-                        Some(Who::Mob(m.id)),
-                        dir,
-                    )));
+                    cx.events.push(MobEvent::Projectile(
+                        Projectile::fireball(
+                            ProjectileKind::SmallFireball,
+                            start,
+                            Some(Who::Mob(m.id)),
+                            dir,
+                        )
+                        .shot_by(m.yaw, m.head_pitch),
+                    ));
                 }
             }
             m.look_at_speed([t.position.x, t.eye_y, t.position.z], 10.0, 10.0);
@@ -192,7 +195,12 @@ pub fn blaze_anim(s: &State, p: &mut Poses) {
     p.xrot("head", s.x_rot.to_radians());
 }
 
+/// `Ghast.explosionPower`'s `Extra::ints` slot.
+const EXPLOSION_POWER: usize = 0;
+
 pub fn register_ghast(m: &mut Mob) {
+    // `Ghast.explosionPower = 1` until a save or a command sets it.
+    m.extra.ints[EXPLOSION_POWER] = 1;
     m.ai.mov.kind = MoveKind::Custom;
     let g = &mut m.ai.goals;
     g.add(5, RandomFloatAround);
@@ -201,11 +209,24 @@ pub fn register_ghast(m: &mut Mob) {
     m.ai.targets.add(
         1,
         NearestTarget::player(true).when(|m, w| {
-            w.player
-                .as_ref()
+            w.selected_player()
                 .is_some_and(|p| (p.position.y - m.position.y).abs() <= 4.0)
         }),
     );
+}
+/// `Ghast.addAdditionalSaveData`: `putByte("ExplosionPower", (byte)explosionPower)`,
+/// the power the blast of the fireball it shoots uses (`LargeFireball.onHit`).
+pub fn to_nbt(m: &Mob, map: &mut horizon_core::nbt::Compound) {
+    map.insert(
+        "ExplosionPower".into(),
+        horizon_core::nbt::Tag::Byte(m.extra.ints[EXPLOSION_POWER] as i8),
+    );
+}
+/// `Ghast.readAdditionalSaveData`: `getByteOr("ExplosionPower", (byte)1)`, any
+/// numeric tag narrowed to a byte.
+pub fn from_nbt(m: &mut Mob, tag: &horizon_core::nbt::Tag) {
+    m.extra.ints[EXPLOSION_POWER] =
+        i32::from(crate::save::number(tag.get("ExplosionPower")).unwrap_or(1) as i8);
 }
 /// `Ghast.GhastMoveControl`: a push toward the wanted point every few ticks.
 pub fn ghast_move_control(m: &mut Mob, w: &MobWorld) {
@@ -379,12 +400,17 @@ impl Goal for GhastShoot {
                     m.position.y + half + 0.5,
                     m.position.z + view[1] * 4.0,
                 );
-                cx.events.push(MobEvent::Projectile(Projectile::fireball(
-                    ProjectileKind::LargeFireball { power: 1 },
-                    start,
-                    Some(Who::Mob(m.id)),
-                    dir,
-                )));
+                cx.events.push(MobEvent::Projectile(
+                    Projectile::fireball(
+                        ProjectileKind::LargeFireball {
+                            power: m.extra.ints[EXPLOSION_POWER],
+                        },
+                        start,
+                        Some(Who::Mob(m.id)),
+                        dir,
+                    )
+                    .shot_by(m.yaw, m.head_pitch),
+                ));
                 self.charge = -40;
             }
         } else if self.charge > 0 {
@@ -402,3 +428,6 @@ pub fn ghast_anim(s: &State, p: &mut Poses) {
         }
     }
 }
+#[cfg(test)]
+#[path = "nether_ghast_power_tests.rs"]
+mod nether_ghast_power_tests;

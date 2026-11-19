@@ -16,6 +16,11 @@ macro_rules! particle_types {
                 let name = name.strip_prefix("minecraft:").unwrap_or(name);
                 match name { $($name => Some(ParticleType::$variant),)* _ => None }
             }
+            /// The registry id (`minecraft:<name>`), which `commands.particle.success`
+            /// names (`BuiltInRegistries.PARTICLE_TYPE.getKey`).
+            pub fn id(self) -> String {
+                format!("minecraft:{}", self.name())
+            }
         }
     };
 }
@@ -190,8 +195,8 @@ impl ParticleType {
     /// `SingleQuadParticle.Layer.translucent`: types whose vanilla particle class
     /// hardcodes the translucent layer, drawn after translucent terrain.
     /// `TerrainParticle`, `BreakingItemParticle` and `BlockMarker` resolve their
-    /// layer from the sprite instead (`Layer.bySprite`); see the `translucent`
-    /// sprite set on the engine.
+    /// layer from the sprite instead (`SingleQuadParticle.Layer.bySprite`); see
+    /// the `translucent` sprite set on the engine.
     pub fn translucent_layer(self) -> bool {
         match self {
             // CampfireSmokeParticle.
@@ -217,5 +222,20 @@ impl ParticleType {
             | Self::VaultConnection => true,
             _ => false,
         }
+    }
+}
+
+/// A particle type as its registry name.
+impl From<&ParticleType> for String {
+    fn from(particle: &ParticleType) -> Self {
+        particle.name().to_owned()
+    }
+}
+
+/// The particle type of a registry name; an unknown name is refused as itself.
+impl TryFrom<String> for ParticleType {
+    type Error = String;
+    fn try_from(name: String) -> Result<Self, String> {
+        Self::from_name(&name).ok_or(name)
     }
 }

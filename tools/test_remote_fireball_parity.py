@@ -80,16 +80,16 @@ def check_thrown(host, guest, out):
 
 
 def main():
-    subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib',
+    subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib',
                     '--bin', 'horizon-client', '--bin', 'horizon-ctl'], cwd=lab.ROOT, check=True)
     metadata = json.loads(subprocess.check_output(
         ['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=lab.ROOT, text=True))
-    ctl = lab.ROOT / metadata['target_directory'] / 'fast' / 'horizon-ctl'
+    ctl = lab.binary(lab.ROOT / metadata['target_directory'] / 'fast', 'horizon-ctl')
     lan.CHECK_FNS['remote-fireball'] = check_motion
     lan.CHECK_FNS['remote-thrown'] = check_thrown
     # Use the runner's current display (xvfb on Linux), with fresh isolated homes.
     lan.game_env = lambda _screen, home: lab.game_env(
-        HORIZON_HOME=home, HORIZON_TELEMETRY_URL='off')
+        HORIZON_HOME=home)
     out = lab.LOCAL / 'remote-fireball-parity'
     out.mkdir(parents=True, exist_ok=True)
     # lan.Game launches each client with lab.game_env and private scratch homes.

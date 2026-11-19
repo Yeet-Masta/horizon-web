@@ -1,5 +1,5 @@
 //! Downloads that reach the game folder only when their checksum matches the source's.
-use super::{safe_name, FileRef};
+use super::{plain_name, FileRef};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;
@@ -13,13 +13,13 @@ const HOSTS: [&str; 5] = [
     "https://cdn.modrinth.com/",
     "https://edge.forgecdn.net/",
     "https://mediafilez.forgecdn.net/",
-    horizon_mods::index::FILE_HOST,
+    horizon_platform::mod_package::index::FILE_HOST,
     // The registry's files at their address before the move to horizon-rust (GitHub redirects it).
     "https://github.com/ludovic111/horizon-mods/releases/download/",
 ];
 /// `https://github.com/<owner>/<repo>/releases/download/<tag>/<name>`: a release asset of a mod's
 /// own repository, which the registry's index lists once its release passed the registry's checks
-/// (docs/api/mod-index.md). Only the address is vouched for here; the index's SHA-256 is what
+/// (docs/modding/src/reference/registry-index.md). Only the address is vouched for here; the index's SHA-256 is what
 /// pins the bytes, and [`save`] refuses any other.
 pub fn github_release_asset(url: &str) -> bool {
     let Some(rest) = url.strip_prefix("https://github.com/") else {
@@ -50,8 +50,10 @@ pub(super) fn agent(url: &str) -> ureq::Agent {
     horizon_port_pack::net::keep("browser", spec.as_deref(), |proxy| {
         let builder = ureq::AgentBuilder::new()
             .user_agent(&format!(
-                "horizon-rust/horizon horizon-launcher/{} (github.com/horizon-rust/horizon)",
-                crate::backend::VERSION
+                "{} horizon-launcher/{} (github.com/{})",
+                crate::backend::REPO,
+                crate::backend::VERSION,
+                crate::backend::REPO
             ))
             .timeout_connect(std::time::Duration::from_secs(15))
             .timeout_read(std::time::Duration::from_secs(60));
@@ -75,7 +77,7 @@ pub fn refuse(file: &FileRef) -> Option<String> {
 
 /// [`refuse`] without the host: the name, the checksum and the size.
 fn refuse_file(file: &FileRef) -> Option<String> {
-    if safe_name(&file.name).is_none() {
+    if plain_name(&file.name).is_none() {
         return Some(format!("{:?} isn't a plain file name.", file.name));
     }
     if file.checksum().is_none() {
@@ -119,8 +121,9 @@ impl Hasher {
     }
 }
 
-/// Copies `reader` into `<folder>/<file.name>`, hashing on the way, and keeps it only when the
-/// size and checksum match: until then it is `.<name>.part`, removed on any failure.
+/// Copies `reader` into `<folder>/<name>`, `name` being the file's [`plain_name`], hashing on the
+/// way, and keeps it only when the size and checksum match: until then it is `.<name>.part`,
+/// removed on any failure.
 /// `progress` gets the fraction done.
 pub fn save(
     file: &FileRef,
@@ -145,9 +148,10 @@ pub(super) fn save_from_anywhere(
         return Err(why);
     }
     let (algo, want) = file.checksum().expect("refuse checks for one");
+    let name = plain_name(&file.name).expect("refuse checks it");
     fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-    let target = folder.join(&file.name);
-    let part = folder.join(format!(".{}.part", file.name));
+    let target = folder.join(&name);
+    let part = folder.join(format!(".{name}.part"));
     let result = (|| {
         let mut out = fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?;
         let mut hasher = Hasher::for_file(file);

@@ -6,11 +6,10 @@
 //! bindings, deadzones and the look curve, button edges from successive pad
 //! states, and `horizon-controller.txt`, kept next to `options.txt` so that
 //! file stays exactly vanilla's. The game reads the pads with gilrs.
-use horizon_std::{
-    fs::{self, PathExt as _},
-    time::{Duration, Instant},
-};
-use std::{collections::BTreeMap, path::Path};
+use horizon_std::time::{Duration, Instant};
+use std::collections::BTreeMap;
+
+use crate::mouse::SmoothDouble;
 
 pub const FILE: &str = "horizon-controller.txt";
 
@@ -256,6 +255,7 @@ pub const HOTBAR_NEXT: &str = "pad.hotbarNext";
 pub const RADIAL: &str = "pad.radial";
 
 mod radial_file;
+pub mod store;
 pub use radial_file::{RadialMode, RadialStick, opener_refused};
 
 /// The `bindLayout` the settings file is written in. 1: the defaults of the binds list as they
@@ -644,6 +644,12 @@ pub struct PadSettings {
     pub play_in_background: bool,
     /// A DualSense's triggers push back (Horizon's; docs/controllers.md).
     pub adaptive_triggers: bool,
+    /// An Xbox One pad's impulse triggers buzz with the handles (docs/controllers.md).
+    pub impulse_triggers: bool,
+    /// A broken block ticks the pad, as in Bedrock (docs/controllers.md).
+    pub block_vibration: bool,
+    /// Splitting a stack buzzes briefly, as in Bedrock (docs/controllers.md).
+    pub split_vibration: bool,
     pub lightbar: Lightbar,
     /// 0..1; 0.5 is the default speed, 1 twice that.
     pub look_sensitivity: f32,
@@ -697,6 +703,9 @@ impl Default for PadSettings {
             vibration: true,
             play_in_background: false,
             adaptive_triggers: true,
+            impulse_triggers: true,
+            block_vibration: true,
+            split_vibration: true,
             lightbar: Lightbar::Health,
             look_sensitivity: 0.5,
             invert_x: false,
@@ -732,19 +741,6 @@ impl PadSettings {
     pub fn by_letter(&self, family: GlyphStyle) -> bool {
         self.nintendo_letters && family == GlyphStyle::Nintendo
     }
-    pub fn load(dir: &Path) -> Self {
-        fs::read_to_string(dir.join(FILE))
-            .map(|t| Self::parse(&t))
-            .unwrap_or_default()
-    }
-    /// Written once something differs from the defaults, so players who
-    /// never touch a controller get no new file.
-    pub fn save(&self, dir: &Path) {
-        let path = dir.join(FILE);
-        if *self != Self::default() || path.fs_exists() {
-            let _ = fs::write(path, self.serialize());
-        }
-    }
     pub fn parse(text: &str) -> Self {
         let mut s = Self::default();
         let mut saved_opener = None;
@@ -777,6 +773,9 @@ impl PadSettings {
                 "vibration" => s.vibration = flag(s.vibration),
                 "playInBackground" => s.play_in_background = flag(s.play_in_background),
                 "adaptiveTriggers" => s.adaptive_triggers = flag(s.adaptive_triggers),
+                "impulseTriggers" => s.impulse_triggers = flag(s.impulse_triggers),
+                "blockVibration" => s.block_vibration = flag(s.block_vibration),
+                "splitVibration" => s.split_vibration = flag(s.split_vibration),
                 "lightbar" => s.lightbar = Lightbar::parse(value),
                 "lookSensitivity" => s.look_sensitivity = unit(s.look_sensitivity),
                 "invertX" => s.invert_x = flag(s.invert_x),
@@ -892,10 +891,13 @@ impl PadSettings {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "enabled:{}\nvibration:{}\nadaptiveTriggers:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nkeyboard:{}\n",
+            "enabled:{}\nvibration:{}\nadaptiveTriggers:{}\nimpulseTriggers:{}\nblockVibration:{}\nsplitVibration:{}\nlightbar:{}\nlookSensitivity:{}\ninvertX:{}\ninvertY:{}\nmoveDeadzone:{}\nlookDeadzone:{}\ntriggerThreshold:{}\ntoggleSneak:{}\nglyphs:{}\nnintendoLetters:{}\nkeyboard:{}\n",
             bool_text(self.enabled),
             bool_text(self.vibration),
             bool_text(self.adaptive_triggers),
+            bool_text(self.impulse_triggers),
+            bool_text(self.block_vibration),
+            bool_text(self.split_vibration),
             self.lightbar.name(),
             self.look_sensitivity,
             bool_text(self.invert_x),
@@ -970,8 +972,17 @@ impl PadSettings {
             self.bindings.insert(name, button);
         }
     }
+    /// Restore an action's default when this stick allows it, otherwise unbind it.
+    pub fn reset_binding(&mut self, action: &str) {
+        let default = Self::default_of(action).filter(|b| self.can_bind(action, *b));
+        self.bind(action, default);
+        if action == RADIAL {
+            self.openers = Default::default();
+        }
+    }
     pub fn reset_bindings(&mut self) {
         self.bindings.clear();
+        self.reset_binding(RADIAL);
     }
     /// Other actions on the same button (marked in the binds list).
     pub fn conflicts(&self, action: &str) -> bool {
@@ -979,7 +990,7 @@ impl PadSettings {
             .is_some_and(|b| self.actions_of(b).iter().any(|a| *a != action))
     }
     pub fn is_default(&self, action: &str) -> bool {
-        !self.bindings.contains_key(action)
+        self.binding(action) == Self::default_of(action).filter(|b| self.can_bind(action, *b))
     }
     /// The actions a button triggers, in `ACTIONS` order.
     pub fn actions_of(&self, button: Button) -> Vec<&'static str> {
@@ -1093,6 +1104,36 @@ pub fn look_delta(
         x * YAW_SPEED * speed * seconds,
         -y * PITCH_SPEED * speed * seconds,
     )
+}
+
+/// The right stick under the cinematic camera (`Options.smoothCamera`): the
+/// turn `look_delta` gives is spread over the following frames by a
+/// `SmoothDouble` per axis, as `MouseHandler.turnPlayer` does the mouse's.
+#[derive(Clone, Debug, Default)]
+pub struct SmoothLook {
+    yaw: SmoothDouble,
+    pitch: SmoothDouble,
+}
+
+impl SmoothLook {
+    /// The `(yaw, pitch)` to turn this frame, in degrees: `turn` itself
+    /// without the cinematic camera, or with it the part of what the stick
+    /// gave that is due now. Call it every frame the stick turns the view,
+    /// centred too, so a turn keeps easing out after the stick is let go.
+    /// `seconds` paces the easing as the frame time does the mouse's at the
+    /// default sensitivity.
+    pub fn turn(&mut self, turn: (f32, f32), seconds: f32, smooth: bool) -> (f64, f64) {
+        if !smooth {
+            self.yaw.reset();
+            self.pitch.reset();
+            return (f64::from(turn.0), f64::from(turn.1));
+        }
+        let seconds = f64::from(seconds);
+        (
+            self.yaw.get_new_delta_value(f64::from(turn.0), seconds),
+            self.pitch.get_new_delta_value(f64::from(turn.1), seconds),
+        )
+    }
 }
 
 /// Menu cursor speed in GUI pixels per second at full tilt.
@@ -1564,6 +1605,8 @@ pub enum Rumble {
         radius: f32,
     },
     Totem,
+    /// The player split a stack into the carried one: a short confirmation tick.
+    ItemStackSplit,
     /// The radial menu's stick reached a slot that would run: a tick.
     RadialSlot,
     /// The radial menu's page turned: a shorter tick.
@@ -1580,6 +1623,7 @@ impl From<crate::input_source::Feedback> for Rumble {
             Feedback::BlockBroken => Rumble::BlockBroken,
             Feedback::Explosion { distance, radius } => Rumble::Explosion { distance, radius },
             Feedback::Totem => Rumble::Totem,
+            Feedback::ItemStackSplit => Rumble::ItemStackSplit,
         }
     }
 }
@@ -1589,6 +1633,9 @@ impl From<crate::input_source::Feedback> for Rumble {
 pub struct Pulse {
     pub strong: f32,
     pub weak: f32,
+    /// The impulse-trigger motors (left, right), 0..1: an Xbox One pad's, which a DualSense
+    /// leaves alone.
+    pub triggers: [f32; 2],
     pub millis: u32,
 }
 use crate::radial::{RADIAL_NOTHING, RADIAL_PAGE_TICK, RADIAL_TICK};
@@ -1599,6 +1646,7 @@ impl Rumble {
             Rumble::BlockBroken => "block",
             Rumble::Explosion { .. } => "explosion",
             Rumble::Totem => "totem",
+            Rumble::ItemStackSplit => "split",
             Rumble::RadialSlot => "radial",
             Rumble::RadialPage => "radial_page",
             Rumble::RadialWrap => "radial_wrap",
@@ -1609,15 +1657,24 @@ impl Rumble {
     pub fn pulse(self) -> Option<Pulse> {
         match self {
             Rumble::Hurt(amount) if amount > 0.0 => Some(Pulse {
-                strong: (0.2 + 0.06 * amount).min(0.8),
-                weak: 0.3,
-                millis: (150.0 + 20.0 * amount).min(400.0) as u32,
+                // A hit is felt everywhere the pad can buzz: both handles and both trigger
+                // motors together. The handles lead, so the trigger motors can't mask them.
+                strong: (0.7 + 0.03 * amount).min(0.9),
+                weak: (0.6 + 0.03 * amount).min(0.8),
+                triggers: [0.65, 0.65],
+                millis: (200.0 + 20.0 * amount).min(450.0) as u32,
             }),
             Rumble::Hurt(_) => None,
+            // Attack is the right trigger by default, but both thumbs are on the pad: the broken
+            // block buzzes all four motors. The grips use the level and length a hit's first step
+            // proved felt (0.7 / 0.6 for 120 ms): 35% for 100 ms sat below what the grip motors
+            // answer, so only the triggers buzzed. The triggers stay at 35%, where they are light
+            // and answer at once. One fixed level, so every block feels the same.
             Rumble::BlockBroken => Some(Pulse {
-                strong: 0.0,
-                weak: 0.25,
-                millis: 60,
+                strong: 0.6,
+                weak: 0.6,
+                triggers: [0.35, 0.35],
+                millis: 120,
             }),
             Rumble::Explosion { distance, radius } => {
                 // Felt up to four times the blast radius, fading with distance.
@@ -1626,6 +1683,7 @@ impl Rumble {
                 (near > 0.05).then_some(Pulse {
                     strong: 0.9 * near,
                     weak: 0.6 * near,
+                    triggers: [0.9 * near, 0.9 * near],
                     millis: 350,
                 })
             }
@@ -1635,7 +1693,17 @@ impl Rumble {
             Rumble::Totem => Some(Pulse {
                 strong: 0.7,
                 weak: 0.7,
+                triggers: [0.7, 0.7],
                 millis: 500,
+            }),
+            // Bedrock's confirmation tick when a stack splits: lighter and shorter than a broken
+            // block, but at a level and length the handle motors answer (as the block tick now
+            // does), so the player feels it in both grips and both triggers.
+            Rumble::ItemStackSplit => Some(Pulse {
+                strong: 0.55,
+                weak: 0.55,
+                triggers: [0.3, 0.3],
+                millis: 90,
             }),
         }
     }
@@ -1649,17 +1717,21 @@ impl Rumble {
         let step = |level: f32, millis: u32| Pulse {
             strong: p.strong * level,
             weak: p.weak * level,
+            triggers: [p.triggers[0] * level, p.triggers[1] * level],
             millis,
         };
         match self {
-            Rumble::BlockBroken => vec![Pulse { millis: 35, ..p }],
+            Rumble::BlockBroken => vec![p],
+            Rumble::ItemStackSplit => vec![p],
             Rumble::RadialSlot
             | Rumble::RadialPage
             | Rumble::RadialWrap
             | Rumble::RadialNothing => vec![p],
             Rumble::Hurt(_) => {
-                let tail = p.millis.saturating_sub(50) / 2;
-                vec![step(1.0, 50), step(0.55, tail), step(0.25, tail)]
+                // The hit holds at full strength long enough to feel in all four motors, then
+                // dies away.
+                let tail = p.millis.saturating_sub(120) / 2;
+                vec![step(1.0, 120), step(0.7, tail), step(0.4, tail)]
             }
             Rumble::Explosion { .. } => vec![
                 step(1.0, 80),
@@ -1817,34 +1889,18 @@ bind_key.hotbar.2:north
     }
 
     #[test]
-    fn navigation_preferences_migrate_and_stay_with_each_player() {
-        let dir = horizon_std::env::temp_dir().join(format!(
-            "horizon-pad-{}-{}",
-            std::process::id(),
-            horizon_std::time::SystemTime::now()
-                .duration_since(horizon_std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let p2 = dir.join("P2");
-        fs::create_dir_all(&p2).unwrap();
-        let fresh = PadSettings::load(&dir);
-        assert_eq!(fresh, PadSettings::default());
+    fn navigation_preferences_migrate_and_round_trip() {
         // An older file, with the removed menuNavigation key: bindings kept.
         let legacy =
             PadSettings::parse("menuNavigation:pointer\nbind_key.jump:east\nlookSensitivity:0.7\n");
         assert_eq!(legacy.binding("key.jump"), Some(Button::East));
         assert_eq!(legacy.look_sensitivity, 0.7);
-        fresh.save(&dir);
-        assert!(!dir.join(FILE).exists(), "defaults write no file");
         let mut other = legacy;
         other.pointer_speed = 2.5;
         other.scroll_speed = 24.0;
         other.repeat_delay = 0.6;
         other.repeat_interval = 0.12;
-        other.save(&p2);
-        assert_eq!(PadSettings::load(&p2), other);
-        assert_eq!(PadSettings::load(&dir), fresh, "P2 did not write P1");
+        assert_eq!(PadSettings::parse(&other.serialize()), other);
         let invalid = PadSettings::parse(
             "pointerSpeed:NaN\nscrollSpeed:inf\nrepeatDelay:-10\nrepeatInterval:20\n",
         );
@@ -1858,7 +1914,6 @@ bind_key.hotbar.2:north
             (bounded.repeat_delay, bounded.repeat_interval),
             (0.35, 0.09)
         );
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2211,6 +2266,34 @@ bind_key.hotbar.2:north
         );
         assert_eq!(look_delta([0.05, 0.05], &s, 1.0, false), (0.0, 0.0));
         assert!(look_delta([1.0, 0.0], &s, 1.0, true).0 < YAW_SPEED * 0.5);
+    }
+
+    #[test]
+    fn the_cinematic_camera_eases_the_sticks_turn_in_and_out() {
+        let frame = 1.0 / 60.0;
+        let mut look = SmoothLook::default();
+        assert_eq!(
+            look.turn((2.0, -1.0), frame, false),
+            (2.0, -1.0),
+            "without it the stick turns at once"
+        );
+        let first = look.turn((2.0, -1.0), frame, true);
+        assert!(
+            first.0 > 0.0 && first.0 < 2.0 && first.1 < 0.0 && first.1 > -1.0,
+            "only part of the turn on its first frame: {first:?}"
+        );
+        let after = look.turn((0.0, 0.0), frame, true);
+        assert!(after.0 > 0.0, "the turn goes on once the stick is centred");
+        let mut total = (first.0 + after.0, first.1 + after.1);
+        for _ in 0..3000 {
+            let (yaw, pitch) = look.turn((0.0, 0.0), frame, true);
+            total.0 += yaw;
+            total.1 += pitch;
+        }
+        assert!(
+            (total.0 - 2.0).abs() < 1e-6 && (total.1 + 1.0).abs() < 1e-6,
+            "all of the turn in the end: {total:?}"
+        );
     }
 
     #[test]
@@ -2609,7 +2692,7 @@ bind_key.hotbar.2:north
         let small = Rumble::Hurt(1.0).pulse().unwrap();
         let big = Rumble::Hurt(10.0).pulse().unwrap();
         assert!(big.strong > small.strong && big.millis > small.millis);
-        assert!(Rumble::Hurt(100.0).pulse().unwrap().strong <= 0.8);
+        assert!(Rumble::Hurt(100.0).pulse().unwrap().strong <= 0.9);
         assert_eq!(Rumble::Hurt(0.0).pulse(), None);
         let near = Rumble::Explosion {
             distance: 2.0,
@@ -2632,7 +2715,12 @@ bind_key.hotbar.2:north
             .pulse(),
             None
         );
-        assert_eq!(Rumble::BlockBroken.pulse().unwrap().strong, 0.0);
+        let broken = Rumble::BlockBroken.pulse().unwrap();
+        // One fixed level: the grips at a level a hit is felt at, the triggers at 35%.
+        assert_eq!(
+            (broken.strong, broken.weak, broken.triggers, broken.millis),
+            (0.6, 0.6, [0.35, 0.35], 120)
+        );
         // Shapes open at the pulse's strength and fade; nothing for what isn't felt.
         for rumble in [
             Rumble::Hurt(4.0),
@@ -2651,8 +2739,82 @@ bind_key.hotbar.2:north
             Rumble::Totem.shape().iter().map(|s| s.millis).sum::<u32>(),
             500
         );
-        assert_eq!(Rumble::BlockBroken.shape()[0].millis, 35);
+        assert_eq!(
+            Rumble::BlockBroken.shape()[0].millis,
+            Rumble::BlockBroken.pulse().unwrap().millis
+        );
         assert!(Rumble::Hurt(0.0).shape().is_empty());
+    }
+
+    #[test]
+    fn impulse_triggers_and_block_vibration_are_on_until_saved_off() {
+        let settings = PadSettings::default();
+        assert!(settings.impulse_triggers && settings.block_vibration && settings.split_vibration);
+        let off = PadSettings::parse(
+            "impulseTriggers:false\nblockVibration:false\nsplitVibration:false\n",
+        );
+        assert!(!off.impulse_triggers && !off.block_vibration && !off.split_vibration);
+        assert!(
+            off.serialize()
+                .contains("impulseTriggers:false\nblockVibration:false\nsplitVibration:false\n")
+        );
+        assert_eq!(PadSettings::parse(&off.serialize()), off);
+    }
+
+    /// The split's tick has its own switch, so turning it off leaves the broken block's tick on,
+    /// and it is lighter and shorter than the block's.
+    #[test]
+    fn a_split_has_its_own_switch_and_a_shorter_buzz_than_a_block() {
+        let off = PadSettings::parse("splitVibration:false\n");
+        assert!(!off.split_vibration);
+        assert!(off.block_vibration, "the block tick has its own switch");
+        assert_eq!(PadSettings::parse(&off.serialize()), off);
+
+        let split = Rumble::ItemStackSplit.pulse().unwrap();
+        let broken = Rumble::BlockBroken.pulse().unwrap();
+        assert!(split.millis < broken.millis);
+        assert!(split.strong < broken.strong);
+        assert!(split.weak > 0.0 && split.triggers.iter().all(|t| *t > 0.0));
+        // One flat step: nothing to fade out of in 90 ms.
+        assert_eq!(Rumble::ItemStackSplit.shape().len(), 1);
+        assert_eq!(Rumble::ItemStackSplit.name(), "split");
+    }
+
+    #[test]
+    fn the_trigger_motors_buzz_where_the_action_is() {
+        // The broken block is felt in each grip and in each trigger.
+        let broken = Rumble::BlockBroken.pulse().unwrap();
+        assert_eq!(broken.triggers, [0.35, 0.35]);
+        assert!(broken.strong > 0.0 && broken.weak > 0.0);
+        // A blast and a totem are felt in both.
+        let blast = Rumble::Explosion {
+            distance: 2.0,
+            radius: 4.0,
+        }
+        .pulse()
+        .unwrap();
+        assert!(blast.triggers[0] > 0.0 && blast.triggers[1] > 0.0);
+        assert!(Rumble::Totem.pulse().unwrap().triggers[0] > 0.0);
+        // A hit is felt in all four motors, the handles strongly enough not to be masked by
+        // the trigger motors, and it holds before fading.
+        let hurt = Rumble::Hurt(4.0).pulse().unwrap();
+        assert!(hurt.strong >= 0.6 && hurt.weak >= 0.5);
+        assert_eq!(hurt.triggers, [0.65, 0.65]);
+        assert!(Rumble::Hurt(4.0).shape()[0].millis >= 120);
+        // The radial ticks are the handles' alone.
+        assert_eq!(Rumble::RadialSlot.pulse().unwrap().triggers, [0.0, 0.0]);
+        // The shaped steps keep them and fade as the handles do.
+        let shape = Rumble::Explosion {
+            distance: 2.0,
+            radius: 4.0,
+        }
+        .shape();
+        assert_eq!(shape[0].triggers, blast.triggers);
+        assert!(
+            shape
+                .windows(2)
+                .all(|w| w[1].triggers[0] < w[0].triggers[0])
+        );
     }
 
     #[test]

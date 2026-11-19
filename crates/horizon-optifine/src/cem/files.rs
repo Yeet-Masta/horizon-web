@@ -1,33 +1,34 @@
 //! Where packs keep their custom entity models and how a game reads one: the `.jem` files of
 //! `emf/cem/` and `optifine/cem/` by model name, each read under [`MAX_BYTES`], parsed, its
-//! warnings logged; and the atlas name of a model's texture. Shared by the mobs' and the block
+//! warnings logged; and the PNGs beside them, the atlas names a model's texture takes (also one
+//! outside `textures/`, which the atlas wouldn't walk). Shared by the mobs' and the block
 //! entities' models.
 
 use super::model::{EntityModel, MAX_BYTES, parse_jem};
-use std::{collections::BTreeMap, fs, path::Path};
+use horizon_assets::resource_source::ResourceSource;
+#[cfg(test)]
+use horizon_std::fs;
+use std::collections::BTreeMap;
 
 /// Every `.jem` of the CEM folders by model name, sorted, each name's files best first:
 /// `emf/cem` before `optifine/cem` whichever form either uses, and within one folder the flat
 /// `<name>.jem` before `<name>/<name>.jem`.
-pub fn jem_files(root: &Path) -> BTreeMap<String, Vec<String>> {
+pub fn jem_files(root: &ResourceSource) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for base in ["assets/minecraft/emf/cem", "assets/minecraft/optifine/cem"] {
-        let Ok(entries) = fs::read_dir(root.join(base)) else {
-            continue;
-        };
         let (mut flat, mut nested) = (Vec::new(), Vec::new());
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if let Some(model) = name.strip_suffix(".jem") {
-                // A directory named `x.jem` isn't a model.
-                if e.path().is_file() {
-                    flat.push((model.to_owned(), format!("{base}/{name}")));
-                }
-            } else {
-                let path = format!("{base}/{name}/{name}.jem");
-                if root.join(&path).is_file() {
-                    nested.push((name, path));
-                }
+        for path in root.list(&format!("{base}/")) {
+            let relative = &path[base.len() + 1..];
+            if let Some(model) = relative
+                .strip_suffix(".jem")
+                .filter(|model| !model.contains('/'))
+            {
+                flat.push((model.to_owned(), path));
+            } else if let Some((model, file)) = relative.split_once('/')
+                && !model.ends_with(".jem")
+                && file == format!("{model}.jem")
+            {
+                nested.push((model.to_owned(), path));
             }
         }
         for (model, path) in flat.into_iter().chain(nested) {
@@ -37,14 +38,34 @@ pub fn jem_files(root: &Path) -> BTreeMap<String, Vec<String>> {
     out
 }
 
+/// Every PNG of the CEM folders, its path from the resource root and its atlas name, in name
+/// order: namespace, then `optifine/cem` before `emf/cem`, then the path. All of them, not only
+/// the ones a loaded `.jem` names, so a model's texture is in the atlas whichever models load.
+pub fn texture_files(root: &ResourceSource) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for namespace in root.namespaces("assets") {
+        for folder in ["optifine/cem", "emf/cem"] {
+            let base = format!("assets/{namespace}/{folder}");
+            for path in root.list(&format!("{base}/")) {
+                if path.ends_with(".png")
+                    && let Some(name) = atlas_name(&path)
+                {
+                    out.push((path, name));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The `.jem` at `path`, its warnings logged; None, with a warning, when it can't be read or
 /// parsed.
-pub fn load_jem(root: &Path, path: &str) -> Option<EntityModel> {
-    let Some(text) = read_small(&root.join(path)) else {
+pub fn load_jem(root: &ResourceSource, path: &str) -> Option<EntityModel> {
+    let Some(text) = read_small(root, path) else {
         log::warn!("Horizon: custom entity model {path}: unreadable or over {MAX_BYTES} bytes");
         return None;
     };
-    let jem = match parse_jem(path, &text, &mut |p: &str| read_small(&root.join(p))) {
+    let jem = match parse_jem(path, &text, &mut |p: &str| read_small(root, p)) {
         Ok(jem) => jem,
         Err(e) => {
             log::warn!("Horizon: custom entity model {e}");
@@ -54,37 +75,35 @@ pub fn load_jem(root: &Path, path: &str) -> Option<EntityModel> {
     for warning in &jem.warnings {
         log::warn!("Horizon: custom entity model {warning}");
     }
-    if let Some(texture) = &jem.texture {
-        if atlas_name(texture).is_none() {
-            log::warn!(
-                "Horizon: custom entity model {path}: its texture {texture} is outside \
-                 assets/minecraft/textures/, so not in the atlas: the vanilla one draws"
-            );
-        } else if !root.join(texture).is_file() {
-            log::warn!(
-                "Horizon: custom entity model {path}: its texture {texture} doesn't exist, \
-                 so not in the atlas: the vanilla one draws"
-            );
-        }
+    // `texture` resolves under `assets/<namespace>/` by construction (`paths::resolve`), so the
+    // atlas always names it; only a missing file keeps it out.
+    if let Some(texture) = &jem.texture
+        && !root.contains(texture)
+    {
+        log::warn!(
+            "Horizon: custom entity model {path}: its texture {texture} doesn't exist, \
+             so not in the atlas: the vanilla one draws"
+        );
     }
     Some(jem)
 }
 
-/// A pack file's text, None when it's missing or larger than a model may read: its size is
-/// checked before anything is read.
-fn read_small(path: &Path) -> Option<String> {
-    let len = fs::metadata(path).ok()?.len();
-    if len > MAX_BYTES as u64 {
-        return None;
-    }
-    fs::read_to_string(path).ok()
+/// A pack file's text, bounded while reading and inflating archive entries.
+fn read_small(root: &ResourceSource, path: &str) -> Option<String> {
+    String::from_utf8(root.read_limited(path, MAX_BYTES as u64).ok()?).ok()
 }
 
-/// The atlas name of a texture resource path: `assets/minecraft/textures/entity/x.png` is
-/// `entity/x`. Textures outside a `textures/` folder are not in the atlas.
+/// The atlas name of a texture resource path, the same one the entity atlas packs it under:
+/// `assets/minecraft/textures/entity/x.png` is `entity/x` and
+/// `assets/minecraft/optifine/cem/x.png` is `minecraft:optifine/cem/x`, as random variants'
+/// names are ([`crate::random_textures::atlas_name`]). None for a path outside the resource
+/// root's `assets/<namespace>/`.
 pub fn atlas_name(path: &str) -> Option<String> {
-    let rest = path.strip_prefix("assets/minecraft/textures/")?;
-    Some(rest.strip_suffix(".png").unwrap_or(rest).to_owned())
+    let (namespace, inner) = path.strip_prefix("assets/")?.split_once('/')?;
+    Some(crate::random_textures::atlas_name(
+        namespace,
+        inner.strip_suffix(".png").unwrap_or(inner),
+    ))
 }
 
 #[cfg(test)]
@@ -93,7 +112,8 @@ mod tests {
 
     #[test]
     fn emf_files_win_and_a_flat_file_beats_its_folder() {
-        let root = std::env::temp_dir().join(format!("horizon-jem-files-{}", std::process::id()));
+        let root =
+            horizon_std::env::temp_dir().join(format!("horizon-jem-files-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for path in [
             // EMF's folder form over OptiFine's flat file.
@@ -110,7 +130,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, "{}").unwrap();
         }
-        let files = jem_files(&root);
+        let files = jem_files(&ResourceSource::directory(root.clone()));
         fs::remove_dir_all(&root).unwrap();
         let paths = |paths: &[&str]| {
             paths
@@ -132,5 +152,54 @@ mod tests {
                 ("sheep".to_owned(), paths(&["optifine/cem/sheep/sheep.jem"])),
             ])
         );
+    }
+
+    /// A model's texture takes the name the entity atlas packs it under, also beside its model
+    /// outside `textures/`, and every PNG of the CEM folders is offered, named or not.
+    #[test]
+    fn cem_textures_take_the_names_the_atlas_packs_them_under() {
+        let root = horizon_std::env::temp_dir()
+            .join(format!("horizon-cem-textures-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for path in [
+            "assets/minecraft/optifine/cem/zombie2.png",
+            "assets/minecraft/optifine/cem/zombie/zombie3.png",
+            "assets/minecraft/emf/cem/cow.png",
+            "assets/mymod/optifine/cem/x.png",
+            "assets/minecraft/textures/entity/pig/pig.png",
+            "assets/minecraft/optifine/cem/zombie.jem",
+        ] {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "png").unwrap();
+        }
+        let files = texture_files(&ResourceSource::directory(root.clone()));
+        fs::remove_dir_all(&root).unwrap();
+        let named = |path: &str, name: &str| (path.to_owned(), name.to_owned());
+        assert_eq!(
+            files,
+            [
+                named(
+                    "assets/minecraft/optifine/cem/zombie/zombie3.png",
+                    "minecraft:optifine/cem/zombie/zombie3"
+                ),
+                named(
+                    "assets/minecraft/optifine/cem/zombie2.png",
+                    "minecraft:optifine/cem/zombie2"
+                ),
+                named("assets/minecraft/emf/cem/cow.png", "minecraft:emf/cem/cow"),
+                named("assets/mymod/optifine/cem/x.png", "mymod:optifine/cem/x"),
+            ]
+        );
+        // A texture under `textures/` keeps the name the walked atlas already gives it.
+        assert_eq!(
+            atlas_name("assets/minecraft/textures/entity/pig/pig.png").as_deref(),
+            Some("entity/pig/pig")
+        );
+        assert_eq!(
+            atlas_name("assets/minecraft/optifine/cem/x.png").as_deref(),
+            Some("minecraft:optifine/cem/x")
+        );
+        assert_eq!(atlas_name("optifine/cem/x.png"), None);
     }
 }

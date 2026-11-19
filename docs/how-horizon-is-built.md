@@ -8,7 +8,7 @@ This page is also on the website: [playhorizon.dev/docs/how-horizon-is-built](ht
 
 Horizon is Ludovic Marie's project: he decides what it does and what ships. **Most of the code is written by AI agents**: Claude sessions that Ludovic runs, and contributors' own AI tools. Some contributors write their code by hand.
 
-Agents say what they are. A pull request opened by one of Ludovic's agents starts with "Opened by Ludovic's AI agent (Claude), not by Ludovic himself.", its comments start with "🤖 Agent:", and its commits name the agent in a `Co-Authored-By` line.
+Agents say what they are. An agent's issues, comments and reviews start with "🤖 Agent:", and a pull request it opened ends with a "🤖 Agent:" line naming the model and the tool that did the work.
 
 ## How changes are checked
 
@@ -25,8 +25,8 @@ Not every line is read by a person. Instead, every change is checked against the
 - **Built from the public code.** Releases are built by GitHub Actions, the build service of GitHub, from the public source. Linux and Windows are built on GitHub's machines, and macOS on Ludovic's Mac mini, which runs GitHub Actions jobs. Every build log is [public](https://github.com/horizon-rust/horizon/actions/workflows/release.yml).
 - **Signed checksums.** Every release has a `SHA256SUMS` file, a fingerprint of each download, and `SHA256SUMS.sig`, a signature of that list made with Horizon's release key, which only release builds from main can use. The launcher and `horizon-server update` check both before they install anything, and refuse a file that does not match. The very first server install with `install.sh` checks the fingerprint but not the signature.
 - **Not yet signed by Apple or Microsoft.** The macOS app is not notarized by Apple, because it is not signed with a paid Apple developer account, so macOS asks you to confirm the first time ([Install](https://playhorizon.dev/docs/install#download-the-launcher) shows how). The Windows programs are not code-signed either, so Windows may warn you too.
-- **Mods are off by default, and reviewed.** A content mod is data and runs no code. A native mod is Rust code with your rights, not sandboxed: the launcher builds it only after a warning and your OK, in a game of its own, and the registry lists one only after a maintainer has read its source. See [Mods](mods.md) and [Native mods](native-mods.md).
-- **Nothing collected unless you say yes.** Data collection is off until you turn it on, with four separate switches. The one exception is an anonymous "I'm playing" ping for the launcher's player count, which holds nothing about you. See [Opt-in data collection](telemetry.md).
+- **Mods are off by default, and reviewed.** A content mod is data and runs no code. A native mod is Rust code with your rights, not sandboxed: the launcher compiles it against a pinned prebuilt game only after a warning and your OK, and the registry lists one only after a maintainer has read its source. See [Making a content mod](modding/src/how-to/content-mods.md) and [Native mods](modding/src/how-to/native-mods.md).
+- **Nothing collected.** The launcher and the game send nothing about you or your machine to any server. See [Horizon sends nothing](telemetry.md).
 
 ## What it doesn't contain
 
@@ -38,4 +38,4 @@ Not every line is read by a person. Instead, every change is checked against the
 - **Read the code and its checks.** [The source](https://github.com/horizon-rust/horizon), [the checks on every pull request](https://github.com/horizon-rust/horizon/actions/workflows/ci.yml) and [the release builds](https://github.com/horizon-rust/horizon/actions/workflows/release.yml).
 - **Compare the fingerprints.** Put a release's files and its `SHA256SUMS` in one folder and run `sha256sum -c SHA256SUMS --ignore-missing` (on macOS `shasum -a 256 -c SHA256SUMS --ignore-missing`, on Windows `Get-FileHash <file>` in PowerShell). Each file should say `OK`.
 - **Check the signature.** Download a whole release into a folder, then from a clone of the repository run `cargo run -p horizon-release-sign -- verify --tag <tag> <folder>`. The public key is in `crates/horizon-release-sign/release-keys.txt`.
-- **Build it yourself.** The README explains how to [build from source](../README.md#build-from-source).
+- **Build it yourself.** The README explains how to [build from source](native-client.md#run-from-a-checkout).

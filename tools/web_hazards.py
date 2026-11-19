@@ -27,7 +27,7 @@ CODES = {"clippy::disallowed_methods", "clippy::disallowed_types"}
 def clippy_messages():
     env = dict(os.environ, CLIPPY_CONF_DIR=str(ROOT / "web" / "clippy-web"))
     cmd = [
-        "cargo", "clippy", "--config", "web/simd.toml", "-p", "horizon-client",
+        "cargo", "clippy", "--config", "web/simd.toml", "-p", "horizon-game",
         "--bin", "horizon-client", "--no-default-features", "--features", "horizon-extras",
         "--target", "wasm32-unknown-unknown", "--message-format", "json",
     ]

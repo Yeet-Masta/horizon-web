@@ -11,15 +11,15 @@ use crate::{
     models,
 };
 
-struct Fixture {
-    assets: Assets,
-    biomes: Biomes,
-    render: RenderAssets,
-    visibility: horizon_world::block_render::FaceVisibility,
-    tables: MeshTables,
+pub(super) struct Fixture {
+    pub(super) assets: Assets,
+    pub(super) biomes: Biomes,
+    pub(super) render: RenderAssets,
+    pub(super) visibility: horizon_world::block_render::FaceVisibility,
+    pub(super) tables: MeshTables,
 }
 
-fn fixture() -> Fixture {
+pub(super) fn fixture() -> Fixture {
     let root = horizon_std::env::var_os("HORIZON_MESH_TEST_RESOURCES")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
@@ -28,10 +28,17 @@ fn fixture() -> Fixture {
         });
     let assets = Assets::load(&root).unwrap();
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
-    let biomes = Biomes::load(&root).unwrap();
-    let render = assets.reload(&root).unwrap();
+    let biomes = Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.clone(),
+    ))
+    .unwrap();
+    let render = assets
+        .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+            root.clone(),
+        ))
+        .unwrap();
     let visibility = models::load_visibility(&root, assets.registry).unwrap();
-    let tables = MeshTables::new(&assets, &render, &facts, visibility.clone()).unwrap();
+    let tables = MeshTables::new(&assets, &render, &facts, visibility.clone(), None).unwrap();
     Fixture {
         assets,
         biomes,
@@ -52,6 +59,7 @@ fn mesh(f: &Fixture, chunk: &Chunk, opaque_ice: bool) -> SectionMesh {
         shader_pack_lighting: false,
         separate_ao: false,
         shader_pack: false,
+        looks: false,
         assets: &f.assets,
         render: &f.render,
         tables: &f.tables,
@@ -64,6 +72,8 @@ fn mesh(f: &Fixture, chunk: &Chunk, opaque_ice: bool) -> SectionMesh {
         opaque_ice,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
+        hidden_states: &[],
+        part_tables: Default::default(),
     };
     mesher.mesh(&region, 0)
 }
@@ -71,7 +81,7 @@ fn mesh(f: &Fixture, chunk: &Chunk, opaque_ice: bool) -> SectionMesh {
 const BASE: i32 = MIN_Y + 4;
 
 #[test]
-#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+#[ignore = "daily"]
 fn off_keeps_regular_ice_in_the_translucent_pass() {
     let f = fixture();
     let mut chunk = Chunk::empty(0, 0);
@@ -82,7 +92,7 @@ fn off_keeps_regular_ice_in_the_translucent_pass() {
 }
 
 #[test]
-#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+#[ignore = "daily"]
 fn on_draws_regular_ice_opaque_in_the_solid_pass() {
     let f = fixture();
     let mut chunk = Chunk::empty(0, 0);
@@ -100,7 +110,7 @@ fn on_draws_regular_ice_opaque_in_the_solid_pass() {
 }
 
 #[test]
-#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+#[ignore = "daily"]
 fn on_culls_the_face_between_two_ice_blocks() {
     let f = fixture();
     let ice = state(&f, "minecraft:ice");
@@ -114,7 +124,7 @@ fn on_culls_the_face_between_two_ice_blocks() {
 }
 
 #[test]
-#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+#[ignore = "daily"]
 fn on_leaves_other_translucent_blocks_alone() {
     let f = fixture();
     let mut chunk = Chunk::empty(0, 0);
@@ -129,7 +139,7 @@ fn on_leaves_other_translucent_blocks_alone() {
 }
 
 #[test]
-#[ignore = "requires prepared 26.3 resources (HORIZON_MESH_TEST_RESOURCES or .local/horizon-client/26.3)"]
+#[ignore = "daily"]
 fn on_leaves_frosted_ice_translucent() {
     let f = fixture();
     let mut chunk = Chunk::empty(0, 0);

@@ -135,7 +135,7 @@ jobs:
         run: |
           mkdir -p results
           set +e
-          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features --features horizon-extras \
+          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-game --bin horizon-client --no-default-features --features horizon-extras \
             --target wasm32-unknown-unknown --config web/simd.toml --config web/threads.toml --message-format short \
             > results/wasm32.log 2>&1
           status=$?
@@ -146,7 +146,7 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features --features horizon-extras \
+          cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-game --bin horizon-client --no-default-features --features horizon-extras \
             --target wasm64-unknown-unknown --profile fast --config web/simd.toml --config web/threads.toml \
             --message-format short > results/wasm64.log 2>&1
           status=$?

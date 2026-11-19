@@ -9,6 +9,10 @@ use super::{
 };
 use horizon_core::random::RandomSource;
 
+#[cfg(test)]
+#[path = "monster_no_action_tests.rs"]
+mod monster_no_action_tests;
+
 pub fn register(m: &mut Mob) {
     use Species as S;
     match m.species() {
@@ -141,8 +145,13 @@ impl Goal for SilverfishWakeUpFriends {
                     {
                         continue;
                     }
-                    if cx.w.mob_griefing {
-                        cx.events.push(MobEvent::BreakBlock { pos, drop: true });
+                    if cx.w.can_grief(m.id) {
+                        cx.events.push(MobEvent::BreakBlock {
+                            pos,
+                            drop: true,
+                            by: Some(m.id),
+                            breaker: None,
+                        });
                     } else {
                         cx.events.push(MobEvent::Infest {
                             pos,
@@ -185,7 +194,7 @@ impl Goal for SilverfishMergeWithStone {
         if m.ai.target.is_some() || !m.ai.nav.is_done() {
             return false;
         }
-        if cx.w.mob_griefing
+        if cx.w.can_grief(m.id)
             && m.random
                 .next_int_bound(super::goals::reduced(10))
                 .unwrap_or(1)
@@ -242,6 +251,15 @@ pub fn mob_brightness(m: &Mob, w: &MobWorld) -> f32 {
         m.position.z.floor() as i32,
     )
 }
+/// The same with the override a mob can give it: `Blaze` and `Vex` report a
+/// constant 1.0 whatever the light.
+pub fn magic_value(m: &Mob, w: &MobWorld) -> f32 {
+    if matches!(m.species(), Species::Blaze | Species::Vex) {
+        1.0
+    } else {
+        mob_brightness(m, w)
+    }
+}
 fn dark_enough(m: &Mob, w: &MobWorld) -> bool {
     mob_brightness(m, w) < 0.5
 }
@@ -260,7 +278,7 @@ impl Goal for SpiderAttack {
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
         if mob_brightness(m, cx.w) >= 0.5 && m.random.next_int_bound(100).unwrap_or(1) == 0 {
-            m.ai.target = None;
+            m.set_ai_target(cx.w, None);
             return false;
         }
         self.0.can_continue(m, cx)
@@ -392,7 +410,13 @@ pub fn creeper_tick(m: &mut Mob, events: &mut Vec<MobEvent>) {
                 .extra
                 .effects
                 .iter()
-                .map(|(id, ticks, amp)| (id.strip_prefix("minecraft:").unwrap_or(id), *ticks, *amp))
+                .map(|e| {
+                    (
+                        e.id.strip_prefix("minecraft:").unwrap_or(e.id),
+                        e.duration,
+                        e.amplifier,
+                    )
+                })
                 .collect();
             let color = horizon_client_core::potions::effects_color(
                 effects
@@ -448,12 +472,12 @@ mod spider_vehicle_tests {
     use super::*;
     use crate::mobs::world::{test_player, with_test_world};
     use horizon_core::geometry::Vec3;
-    use horizon_core::random::LegacyRandom;
     use std::sync::Arc;
 
     /// `SpiderAttackGoal.canUse` is `super.canUse() && !isVehicle()`: a spider
     /// with a player (or a mob) on its back does not start the attack goal.
     #[test]
+    #[ignore = "daily"]
     fn a_spider_carrying_a_player_does_not_start_its_attack() {
         let mut outcomes = None;
         if !with_test_world(&[], |w, types| {
@@ -468,11 +492,11 @@ mod spider_vehicle_tests {
                     m.rider = Some(super::super::equine::Rider::default());
                 }
                 m.ai.goals.add(4, SpiderAttack(MeleeAttack::new(1.0, true)));
-                let mut lr = LegacyRandom::new(0);
+                let mut lr = crate::health::TestLevel::new(0);
                 let mut events = Vec::new();
                 let mut cx = Cx {
                     w: &world,
-                    lr: &mut lr,
+                    level: &mut lr.level(),
                     events: &mut events,
                 };
                 let mut goals = std::mem::take(&mut m.ai.goals);

@@ -8,8 +8,14 @@ description = "The client's lowest layer: chat text and translations, SNBT and N
 
 [dependencies]
 horizon-std = { path = "../horizon-std" }
+horizon-assets = { path = "../horizon-assets" }
+horizon-core = { path = "../horizon-core" }
 horizon-world = { path = "../horizon-world" }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
+
+[features]
+# Mutable thread-local language publication for resource-backed game fixtures only.
+test-language-publication = []
 
 [lints]
 workspace = true

@@ -184,8 +184,8 @@ parts is theirs. Native mods on stable hook points (game/native_hooks.rs, #3345,
 launcher (#3388, #3855); server-side hooks (#3878, #3706); mod-owned screens, input and drawing; tools for mod makers \
 (templates, `native.py check`); the registry (#1634, #1642, #1659); machines with inventories and menus (#1189); mods \
 that read and change the world through the server. \
-docs/native-mods.md."""
-links = ["#3855", "#3351", "#3353", "#3360", "#3706", "#3878", "#3345", "#3346", "#3388", "#3434", "#3435", "#1634", "#1642", "#1659", "#1596", "#1635", "docs/native-mods.md"]
+docs/modding/src/how-to/native-mods.md."""
+links = ["docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "server-tick"
@@ -320,7 +320,7 @@ shipped_in = "v0.2.70"
 area = "rendering"
 plain = """Horizon's own way to make shader packs, with tools to write and test them. Every pack is checked before it \
 runs, and the registry will list them."""
-dev = """`horizon-shader-api` (API 0.1, experimental): WGSL stages with typed inputs inside the renderer's passes, \
+dev = """`horizon-shader-api` (API 0.2, experimental): WGSL stages with typed inputs inside the renderer's passes, \
 options as WGSL override constants, and the `horizon-shader new|check|pack` tool with templates and the \
 example pack Golden Hour. Merged: the check every pack passes (#1820) and the tool, templates and guide \
 (#1822). In review: the post stage running in the game with hot reload (#1861), the sky stage (#1863) and \
@@ -375,9 +375,10 @@ dev = """Redo the comparison after the current performance work (#1073); reliabi
 (#1346); a scene must count as loaded only once its first chunk arrives (#1749). Next: a performance history \
 across releases (an automatic comparison of each release with the last, on a timeline), more report fields \
 (server TPS and MSPT, power, battery drain, temperature, throttling) and more hardware (a MacBook on \
-battery, low-end laptops, community reports). Players' reports come in through `--benchmark` and \
+battery, low-end laptops, community reports). Server scale is published in #12930 and \
+docs/performance/server-vs-vanilla.md. Players' reports come in through `--benchmark` and \
 `horizon-launcher data benchmark` (docs/benchmark.md)."""
-links = ["#1073", "#1346", "#1749", "docs/benchmark.md"]
+links = ["#1073", "#1346", "#1749", "#12930", "docs/benchmark.md", "docs/performance/server-vs-vanilla.md"]
 
 [[item]]
 id = "world-entry"
@@ -476,7 +477,7 @@ status = "later"
 area = "mods"
 plain = """Small mods written as scripts, in the style of KubeJS, with no compiler."""
 dev = """Waits for native mods to settle: a script layer over the native hook points is to be designed."""
-links = ["docs/native-mods.md"]
+links = ["docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "block-storage"
@@ -657,7 +658,7 @@ status = "later"
 area = "mods"
 plain = """The community mod Orbital Laser, made for a fork of Horizon, running on the normal game as a native mod and \
 listed in the registry."""
-dev = """A native port (a horizon-mixins bundle, docs/native-mods.md) of https://github.com/Stink-O/orbital-laser \
+dev = """A native port (a horizon-mixins bundle, docs/modding/src/how-to/native-mods.md) of https://github.com/Stink-O/orbital-laser \
 (MIT), which today runs through its author's fork. Tested in the game, and listed in the registry."""
 links = ["https://github.com/Stink-O/orbital-laser"]
 
@@ -668,7 +669,7 @@ status = "later"
 area = "mods"
 plain = """Built-in versions of the client mods players ask for: block info on hover, a world map, inventory tweaks and schematic overlays."""
 dev = """Done: a mod list and menu, minimap, zoom, keystrokes, an FPS counter and a recipe viewer, as native mods (horizon-mods/native/). Asked for: an angled world map that shows hills, overhangs and caves, inventory tweaks (drag and scroll to move items), block info tooltips and schematic overlays."""
-links = ["docs/extras.md", "docs/native-mods.md"]
+links = ["docs/extras.md", "docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "create-physics"
@@ -686,9 +687,9 @@ title = "Proximity voice chat as a native mod"
 status = "later"
 area = "mods"
 plain = """Hear nearby players talk, as with the voice chat mods of other Minecraft versions, as a Horizon mod."""
-dev = """A native mod (docs/native-mods.md). It needs a way to carry voice between players and an audio path in the \
+dev = """A native mod (docs/modding/src/how-to/native-mods.md). It needs a way to carry voice between players and an audio path in the \
 game before anything can be built."""
-links = ["docs/native-mods.md"]
+links = ["docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "light-default-pack"
@@ -936,9 +937,9 @@ plain = """Making mods that add machines, magic and mobs work in Horizon, in ste
 most of what a big modpack is made of."""
 dev = """333 of the 496 mods in a big pack (ATM10) contain code. Issue #1854 ranks the gaps (ticking block \
 entities, networking, rendering, menus, inventories) that unlock them in tiers, with machines first as the \
-recommended path. Code mods are native mods now (docs/native-mods.md): each port is a horizon-mixins bundle. \
+recommended path. Code mods are native mods now (docs/modding/src/how-to/native-mods.md): each port is a horizon-mixins bundle. \
 The path isn't started yet (docs/modpacks.md)."""
-links = ["#1854", "docs/modpacks.md", "docs/native-mods.md"]
+links = ["docs/modpacks.md", "docs/modding/src/how-to/native-mods.md"]
 
 [[item]]
 id = "datapack-browser"

@@ -2,13 +2,13 @@
 //! (StoredUserList and its entries): a Java HashMap keyed by the UUID string
 //! or the address, saved as a pretty-printed Gson array in that map's order.
 use super::{
-    java_properties::{civil_from_days, days_from_civil, now_millis},
     json::{self, Json},
     properties::parse_uuid,
 };
+use horizon_core::java_hash_map::{JavaHashMap, JavaKey};
 use horizon_core::random::java_string_hash;
+use horizon_java_properties::{civil_from_days, days_from_civil, now_millis};
 use horizon_protocol::crypto::uuid_string;
-use horizon_world::java_hash_map::{JavaHashMap, JavaKey};
 use std::{cmp::Ordering, path::PathBuf};
 
 /// A map key: a Java String.
@@ -112,7 +112,7 @@ pub fn parse_date(s: &str) -> Option<i64> {
 
 /// The `Z` field of that lenient parse, in minutes east of UTC: `+hhmm` / `-hhmm` (exactly four digits,
 /// hours to 23, minutes to 59), `GMT` alone or `GMT+h:mm` / `GMT-hh:mm`, or `UTC`, the names in any case.
-/// What follows the zone is left unread, as `DateFormat.parse(String)` leaves it. Other zone names
+/// What follows the zone is left unread, as Java's date parser leaves it. Other zone names
 /// (`EST`...) are not read here.
 fn zone_offset(zone: &str) -> Option<i64> {
     let digits = |text: &str| text.bytes().all(|b| b.is_ascii_digit());
@@ -335,7 +335,7 @@ impl Entry for BanEntry<String> {
     }
 }
 
-/// JsonElement.getAsInt / getAsBoolean on primitives.
+/// Gson's int and boolean views for primitives.
 fn json_int(v: &Json) -> Option<i32> {
     match v {
         Json::Number(n) => n
@@ -463,12 +463,14 @@ impl<E: Entry> UserList<E> {
     pub fn save(&self) -> std::io::Result<()> {
         horizon_std::fs::write(&self.file, self.to_json())
     }
-    /// StoredUserList.load: a missing file leaves the list as it is.
+    /// StoredUserList.load: a missing file leaves the list as it is; a path that exists but cannot
+    /// be read is an error, as vanilla's reader throws before it clears the map.
     pub fn load(&mut self) -> Result<(), String> {
-        let Ok(text) = horizon_std::fs::read_to_string(&self.file) else {
-            return Ok(());
-        };
-        self.load_str(&text)
+        match read_utf8(&self.file) {
+            Ok(text) => self.load_str(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("{}: {e}", self.file.display())),
+        }
     }
     pub fn load_str(&mut self, text: &str) -> Result<(), String> {
         self.map = JavaHashMap::default();
@@ -494,6 +496,15 @@ pub type OpList = UserList<OpEntry>;
 pub type WhiteList = UserList<WhiteEntry>;
 pub type BanList = UserList<BanEntry<NameAndId>>;
 pub type IpBanList = UserList<BanEntry<String>>;
+
+/// A list or cache file as vanilla reads it, through Guava's UTF-8 reader: a byte
+/// sequence that is not UTF-8 becomes U+FFFD, grouped as Java's decoder groups it (`java_utf8`), and the
+/// rest is kept. A file that cannot be read at all is an error, as before.
+pub(crate) fn read_utf8(file: &std::path::Path) -> std::io::Result<String> {
+    Ok(horizon_protocol::buf::java_utf8(&horizon_std::fs::read(
+        file,
+    )?))
+}
 
 #[cfg(test)]
 mod tests {
@@ -650,6 +661,87 @@ mod tests {
         assert!(bans.add(ban.clone()));
         assert!(!bans.add(ban));
         assert_eq!(*said.lock().unwrap(), 1);
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+    }
+
+    /// `StoredUserList.load` reads through Guava's UTF-8 reader: a byte that is not
+    /// UTF-8 becomes U+FFFD (vanilla's reader gave `0043 0061 0066 fffd` for `Caf\xE9`), so the entry is
+    /// kept, and the next save writes it back with the others instead of losing the file.
+    #[test]
+    fn a_byte_that_is_not_utf8_is_replaced_not_a_missing_file() {
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-lists-latin1-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("whitelist.json");
+        let mut bytes = br#"[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Caf"#.to_vec();
+        bytes.extend(b"\xE9\"}]");
+        horizon_std::fs::write(&file, &bytes).unwrap();
+        let mut white = WhiteList::new(&file);
+        white.load().unwrap();
+        let names: Vec<String> = white
+            .entries()
+            .iter()
+            .map(|e| e.user.name.clone())
+            .collect();
+        assert_eq!(names, ["Caf\u{fffd}"]);
+        assert!(white.add(WhiteEntry {
+            user: NameAndId::offline("Kim")
+        }));
+        let saved = horizon_std::fs::read_to_string(&file).unwrap();
+        assert!(
+            saved.contains("Caf\u{fffd}") && saved.contains("Kim"),
+            "{saved}"
+        );
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+    }
+
+    /// Java's reader gives one U+FFFD for an encoded UTF-16 surrogate (`ED A0 80`, and its truncated
+    /// prefixes), where `String::from_utf8_lossy` gives two or three; both are read, not taken as missing.
+    #[test]
+    fn an_encoded_surrogate_is_one_replacement_as_java_reads_it() {
+        let dir =
+            horizon_std::env::temp_dir().join(format!("horizon-lists-cesu-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ops.json");
+        for (bytes, expected) in [
+            (&b"\xED\xA0\x80"[..], "\u{fffd}"),
+            (&b"\xED\xA0"[..], "\u{fffd}"),
+            (&b"\xED\xBFA"[..], "\u{fffd}A"),
+            (&b"Caf\xE9"[..], "Caf\u{fffd}"),
+        ] {
+            horizon_std::fs::write(&file, bytes).unwrap();
+            assert_eq!(read_utf8(&file).unwrap(), expected, "{bytes:x?}");
+        }
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+    }
+
+    /// `StoredUserList.load` only treats a missing path as a no-op: a path that exists but cannot
+    /// be read (here a directory in place of the JSON file) throws before the map is touched.
+    #[test]
+    fn a_list_that_cannot_be_read_is_an_error_and_keeps_its_entries() {
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-lists-unreadable-{}", std::process::id()));
+        horizon_std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("whitelist.json");
+        horizon_std::fs::write(
+            &file,
+            r#"[{"uuid":"069a79f4-44e9-4726-a5be-fca90e38aaf5","name":"Alex"}]"#,
+        )
+        .unwrap();
+        let mut white = WhiteList::new(&file);
+        white.load().unwrap();
+        assert_eq!(white.entries().len(), 1);
+
+        horizon_std::fs::remove_file(&file).unwrap();
+        horizon_std::fs::create_dir(&file).unwrap();
+        let error = white.load().unwrap_err();
+        assert!(error.contains("whitelist.json"), "{error}");
+        assert_eq!(white.entries().len(), 1, "the entries survive a read error");
+
+        let mut missing = WhiteList::new(dir.join("missing.json"));
+        missing.load().unwrap();
+        assert!(missing.is_empty());
+
         let _ = horizon_std::fs::remove_dir_all(&dir);
     }
 

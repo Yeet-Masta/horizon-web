@@ -184,6 +184,7 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "daily"]
     fn a_deadline_ends_the_stream_unless_dropped() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let _kept = TcpStream::connect(l.local_addr().unwrap()).unwrap();
@@ -217,6 +218,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_deadline_ends_a_peer_that_sends_one_byte_at_a_time() {
         use std::io::Write;
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -245,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn tcp_keepalive_configures_stream() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(l.local_addr().unwrap()).unwrap();

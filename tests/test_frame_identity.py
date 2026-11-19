@@ -1,12 +1,15 @@
 """The frame identity harness's PNG comparison: pixels decide, not how the encoder filtered its rows."""
+import json
 import math
 import re
 import struct
+import tomllib
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from tools import test_frame_identity_parity as identity
 
@@ -108,6 +111,13 @@ class SessionCheckTests(unittest.TestCase):
     def shot(self, name, rows=None):
         encode(self.dir / name, 4, 4, 8, rows or self.rows, 0)
 
+    def loaded(self, *sessions):
+        """Each session's log with its pack's load line, as the game prints it."""
+        for name in sessions:
+            pack = identity.SESSIONS[name][1]['HORIZON_SHADER_PACK']
+            meta = tomllib.loads((identity.pack_dir(pack) / 'horizon-shaders.toml').read_text(encoding='utf-8'))
+            (self.dir / f'{name}.log').write_text(f'INFO shader pack {meta["id"]} {meta["version"]}: Warm horizon in 12 ms\n')
+
     def test_a_missing_scene_cannot_pass_when_other_screenshots_exist(self):
         scenes = identity.SESSIONS['vanilla'][2]
         for scene in scenes[1:]:
@@ -129,6 +139,7 @@ class SessionCheckTests(unittest.TestCase):
         for scene in hdr_scenes:
             self.shot(f'golden_hour_hdr.{scene}.png')
             self.shot(f'golden_hour_hdr.{scene}-hdr.png')
+        self.loaded('golden_hour', 'golden_hour_hdr')
         problems = identity.session_checks(self.dir, ['vanilla', 'golden_hour', 'golden_hour_hdr', 'hdr_toggle'])
         self.assertEqual(sorted(problems), sorted(
             [f'golden_hour.{s}: the same as without the pack: it didn\'t run' for s in scenes]
@@ -149,8 +160,42 @@ class SessionCheckTests(unittest.TestCase):
             self.shot(f'hdr_toggle.{scene}.png')
             self.shot(f'hdr_toggle.{scene}-hdr.png')
             self.shot(f'hdr_toggle.off.{scene}.png')
+        self.loaded('golden_hour', 'golden_hour_hdr')
         self.assertEqual(identity.session_checks(
             self.dir, ['vanilla', 'golden_hour', 'golden_hour_hdr', 'hdr_toggle']), [])
+
+    def test_a_terrain_pack_session_needs_its_pack_and_labpbr_maps_in_the_log(self):
+        # 🤖 Agent: relief is shot only with the pack, so no picture without it shows whether the pack ran.
+        for scene in identity.SESSIONS['terrain_pack'][2]:
+            self.shot(f'terrain_pack.{scene}.png')
+        log = self.dir / 'terrain_pack.log'
+        log.write_text('INFO shader pack golden_hour 2.0.0: Warm horizon in 12 ms\n')
+        self.assertEqual(identity.session_checks(self.dir, ['terrain_pack']), [
+            'terrain_pack: the log has no load line of shader pack frame_identity_terrain',
+            'terrain_pack: no LabPBR maps were loaded'])
+        log.write_text('INFO Horizon: LabPBR maps at 16 px, 900 layers\n'
+                       'INFO shader pack frame_identity_terrain 1.0.0: Terrain, Colour in 40 ms\n')
+        self.assertEqual(identity.session_checks(self.dir, ['terrain_pack']), [])
+
+    def test_a_world_pack_is_held_to_the_plain_float_frame_and_its_timed_session_to_timed_passes(self):
+        # 🤖 Agent: vanilla shoots none of world_plain's scenes, so those are what shows the pack ran.
+        other = [bytes(255 - v for v in r) for r in self.rows]
+        plain = identity.SESSIONS['world_plain'][2]
+        for scene in plain:
+            self.shot(f'world_plain.{scene}.png')
+        for name in ('world_pack', 'world_pack_timed'):
+            for scene in identity.SESSIONS[name][2]:
+                self.shot(f'{name}.{scene}.png', self.rows if scene == 'night_sky' else other)
+        self.loaded('world_pack', 'world_pack_timed')
+        sessions = ['world_plain', 'world_pack', 'world_pack_timed']
+        self.assertEqual(sorted(identity.session_checks(self.dir, sessions)), [
+            "world_pack.night_sky: the same as without the pack: it didn't run",
+            "world_pack_timed.night_sky: the same as without the pack: it didn't run",
+            'world_pack_timed: no GPU pass was timed'])
+        self.shot('world_pack.night_sky.png', other)
+        self.shot('world_pack_timed.night_sky.png', other)
+        (self.dir / 'world_pack_timed.stats.json').write_text(json.dumps({'gpu_passes': {'World': 0.1}}))
+        self.assertEqual(identity.session_checks(self.dir, sessions), [])
 
     def test_float_oit_must_change_the_float_picture(self):
         for scene in identity.SESSIONS['float_hdr'][2]:
@@ -172,6 +217,59 @@ class SessionCheckTests(unittest.TestCase):
         (self.dir / 'float_visbuffer.log').write_text('drawing through a visibility buffer')
         self.assertEqual(identity.session_checks(self.dir, ['float_visbuffer']), [])
 
+    def test_a_change_that_stops_the_visibility_buffer_fails_where_the_base_ran_it(self):
+        for label in ('base', 'change'):
+            (self.dir / label).mkdir()
+            for scene in identity.SESSIONS['visbuffer'][2]:
+                encode(self.dir / label / f'visbuffer.{scene}.png', 4, 4, 8, self.rows, 0)
+        (self.dir / 'base' / 'visbuffer.log').write_text('Horizon: solid terrain through a visibility buffer')
+        (self.dir / 'change' / 'visbuffer.log').write_text('Horizon: drawing forward')
+        self.assertEqual(identity.build_checks(self.dir, ['visbuffer']),
+                         ["change: visbuffer: the visibility buffer didn't run"])
+
+    def test_each_build_is_held_to_the_load_line_of_its_own_pack(self):
+        # 🤖 Agent: the base draws its own version of a pack where it has one (pack_dir), and its log names that one.
+        change = identity.pack_dir('frame_identity_terrain')
+        base_packs = self.dir / 'base-packs'
+        folder = base_packs / change.relative_to(identity.ROOT)
+        folder.mkdir(parents=True)
+        manifest = (change / 'horizon-shaders.toml').read_text(encoding='utf-8')
+        version = tomllib.loads(manifest)['version']
+        (folder / 'horizon-shaders.toml').write_text(
+            manifest.replace(f'version = "{version}"', 'version = "0.9.0"'), encoding='utf-8')
+        for label, drawn in (('base', '0.9.0'), ('change', version)):
+            (self.dir / label).mkdir()
+            for scene in identity.SESSIONS['terrain_pack'][2]:
+                encode(self.dir / label / f'terrain_pack.{scene}.png', 4, 4, 8, self.rows, 0)
+            (self.dir / label / 'terrain_pack.log').write_text(
+                'INFO Horizon: LabPBR maps at 16 px, 900 layers\n'
+                f'INFO shader pack frame_identity_terrain {drawn}: Terrain, Colour in 40 ms\n')
+        with mock.patch.object(identity, 'BASE_PACKS', base_packs):
+            self.assertEqual(identity.build_checks(self.dir, ['terrain_pack']), [])
+
+    def test_improved_transparency_beside_a_missing_reference_shot_reports_the_missing_shot(self):
+        missing, *rest = identity.SESSIONS['vanilla'][2]
+        self.assertIn(missing, identity.SESSIONS['oit'][2])
+        for scene in rest:
+            self.shot(f'vanilla.{scene}.png')
+        for scene in identity.SESSIONS['oit'][2]:
+            self.shot(f'oit.{scene}.png', [row[::-1] for row in self.rows])
+        self.assertEqual(identity.session_checks(self.dir, ['vanilla', 'oit']),
+                         [f'vanilla.{missing}: screenshot missing'])
+
+    def test_the_visibility_buffer_line_stays_in_a_log_longer_than_400_lines(self):
+        for scene in identity.SESSIONS['visbuffer'][2]:
+            self.shot(f'visbuffer.{scene}.png')
+        log = self.dir / 'latest.log'
+        lines = [f'line {i}' for i in range(16)] + ['Horizon: solid terrain through a visibility buffer']
+        log.write_text('\n'.join(lines + [f'line {i}' for i in range(600)]) + '\n')
+
+        def ctl(*words, **options):
+            # 🤖 Agent: horizon-ctl logs prints the log's last --lines lines.
+            return '\n'.join(log.read_text().splitlines()[-int(words[words.index('--lines') + 1]):])
+        identity.save_log(SimpleNamespace(ctl=ctl), self.dir / 'visbuffer.log')
+        self.assertEqual(identity.session_checks(self.dir, ['visbuffer']), [])
+
 
 class HdrGateTests(unittest.TestCase):
     """The HDR gates' arithmetic, against the standards and the shader's own checkpoints, and what they report."""
@@ -184,11 +282,74 @@ class HdrGateTests(unittest.TestCase):
         for nits, signal in ((0, 0.0), (100, 0.5081), (203, 0.5807), (1000, 0.7518), (10000, 1.0)):
             self.assertAlmostEqual(identity.pq(nits), signal, places=4)
 
-    def test_unshoulder_inverts_the_screenshot_shoulder(self):
-        # 🤖 Agent: hdr.rs sdr_screenshots_roll_off_the_world_and_keep_the_hud_as_drawn's checkpoints, light to shot.
-        for light, shot in ((0.5, 0.5), (1.0, 0.8), (2.0, 0.9111111), (4.0, 0.9578947), (8.0, 0.9794872)):
-            for got, want in zip(identity.unshoulder([shot, shot / 2, 0.0]), (light, light / 2, 0.0)):
-                self.assertAlmostEqual(got, want, places=4)
+    def test_light_above_white_keeps_its_hue_in_a_lit_screenshot(self):
+        # 🤖 Agent: float_hdr: paper white 203, peak 1000. hdr.wgsl screenshot_world divides light from white up by
+        # its brightest channel: the HDR shot is the screenshot's light times one factor, up to the peak. A 64x64
+        # world shot, its corner pixel `sdr` over HDR light `light`, the rest black.
+        peak = 1000 / 203
+
+        def problems(sdr, light):
+            sdr_rows = [bytes(sdr) + bytes(3 * 63)] + [bytes(3 * 64)] * 63
+            word = b''.join((round(c) << 6).to_bytes(2, 'big') for c in identity.hdr10(light, 203, peak))
+            hdr_rows = [word + bytes(6 * 63)] + [bytes(6 * 64)] * 63
+            encode(self.dir / 'float_hdr.day_water.png', 64, 64, 8, sdr_rows, 0)
+            encode(self.dir / 'float_hdr.day_water-hdr.png', 64, 64, 16, hdr_rows, 0)
+            return identity.hdr_gates(self.dir, ['float_hdr'])
+        orange = [1.0, (128 / 255) ** 2.2, 0.0]
+        # 🤖 Agent: White, red and orange at white, scaled up, and neutral white at the peak and past it.
+        for sdr, light in (((255, 0, 0), [1.0, 0, 0]), ((255, 0, 0), [3.0, 0, 0]), ((255, 0, 0), [peak, 0, 0]),
+                           ((255, 128, 0), orange), ((255, 128, 0), [3 * c for c in orange]),
+                           ((255, 255, 255), [1.0] * 3), ((255, 255, 255), [peak] * 3), ((255, 255, 255), [6.0] * 3)):
+            self.assertEqual(problems(sdr, light), [], (sdr, light))
+        # 🤖 Agent: Red shot as white at the peak, orange with its green raised, each channel alone in range; and
+        # orange darker than white, or past the peak's factor.
+        for sdr, light in (((255, 0, 0), [peak] * 3), ((255, 0, 0), [3.0, 1.0, 1.0]),
+                           ((255, 128, 0), [3.0, 1.15 * 3 * orange[1], 0.0]), ((255, 128, 0), [0.9 * c for c in orange]),
+                           ((255, 128, 0), [6.0, 6 * orange[1], 0.0])):
+            self.assertIn('1 pixels', '\n'.join(problems(sdr, light)), (sdr, light))
+
+    def test_white_in_a_lit_screenshot_is_the_huds_white_or_the_worlds_light_from_white_up(self):
+        # 🤖 Agent: float_visbuffer: paper white 200, peak 300, the HUD at half of paper white. A 64x64 shot's corner
+        # is the world, and its middle is under the crosshair.
+        def problems(world, hud):
+            codes = {(0, 0): identity.hdr10([world] * 3, 200), (32, 32): identity.hdr10([hud] * 3, 200)}
+            sdr = [b''.join(b'\xff' * 3 if (x, y) in codes else bytes(3) for x in range(64)) for y in range(64)]
+            hdr = [b''.join(b''.join((round(c) << 6).to_bytes(2, 'big') for c in codes.get((x, y), (0, 0, 0)))
+                            for x in range(64)) for y in range(64)]
+            encode(self.dir / 'float_visbuffer.day_water.png', 64, 64, 8, sdr, 0)
+            encode(self.dir / 'float_visbuffer.day_water-hdr.png', 64, 64, 16, hdr, 0)
+            return identity.hdr_gates(self.dir, ['float_visbuffer'])
+        # 🤖 Agent: The world's white and its light above it both shoot as white; so does the HUD's white, and light
+        # behind it.
+        for world, hud in ((1.0, 0.5), (1.5, 0.5), (1.5, 1.5), (1.0, 0.7)):
+            self.assertEqual(problems(world, hud), [], (world, hud))
+        # 🤖 Agent: Not light below white in the world, nor white under the HUD below both.
+        for world, hud in ((0.5, 0.5), (0.9, 0.5), (1.0, 0.3)):
+            self.assertIn('1 pixels', '\n'.join(problems(world, hud)), (world, hud))
+
+    def test_a_hud_scenes_white_is_at_ui_brightness_and_blends_with_the_world_lie_between(self):
+        # 🤖 Agent: float_visbuffer again: the HUD's white is 100 nits, half of paper white. A 64x64 HUD scene with
+        # a block of opaque white HUD `count` pixels large at `hud` of paper white, and one more white pixel at `one`.
+        def problems(hud, one, count=identity.HUD_WHITE):
+            def light(x, y):
+                return one if (x, y) == (63, 63) else hud if y * 64 + x < count else None
+            sdr = [b''.join(bytes(3) if light(x, y) is None else b'\xff' * 3 for x in range(64)) for y in range(64)]
+            hdr = [b''.join(b''.join((round(c) << 6).to_bytes(2, 'big') for c in (
+                (0, 0, 0) if light(x, y) is None else identity.hdr10([light(x, y)] * 3, 200)))
+                for x in range(64)) for y in range(64)]
+            encode(self.dir / 'float_visbuffer.hud_lava.png', 64, 64, 8, sdr, 0)
+            encode(self.dir / 'float_visbuffer.hud_lava-hdr.png', 64, 64, 16, hdr, 0)
+            return identity.hdr_gates(self.dir, ['float_visbuffer'])
+        # 🤖 Agent: The HUD's white, with translucent white HUD over a white world (between the two), and white HUD
+        # over light above white.
+        for one in (0.5, 0.75, 1.0, 1.4):
+            self.assertEqual(problems(0.5, one), [], one)
+        # 🤖 Agent: Opaque white HUD at paper white, not at UI Brightness: every pixel passes for light behind the
+        # HUD, so the count catches it. So it does a HUD too dim, and too little HUD.
+        self.assertEqual(problems(1.0, 0.75), ['float_visbuffer.hud_lava: white HUD isn\'t at UI Brightness: 0 white '
+                                               f'pixels there, of at least {identity.HUD_WHITE}'])
+        self.assertIn('white HUD isn\'t at UI Brightness: 0 white', '\n'.join(problems(0.4, 0.75)))
+        self.assertIn(f'{identity.HUD_WHITE - 1} white pixels', '\n'.join(problems(0.5, 0.75, identity.HUD_WHITE - 1)))
 
     def unlit(self, sdr, hdr):
         """Every float_unlit scene shot as `sdr` with its HDR shot `hdr`, and HDR off's as `self.vanilla`."""
@@ -208,7 +369,7 @@ class HdrGateTests(unittest.TestCase):
             [4.0] * 3 if (x, y) in sun else [(v / 255) ** 2.2 for v in row[3 * x:3 * x + 3]], 203))
             for y, row in enumerate(rows)]
 
-    def test_hdr_lighting_off_must_be_sdr(self):
+    def test_the_vanilla_look_must_be_sdr(self):
         self.vanilla = picture(4, 4, 8)
         self.assertEqual(self.unlit(self.vanilla, self.hdr(self.vanilla)), [])
         # 🤖 Agent: A step of rounding apart is the float frame's.
@@ -248,6 +409,124 @@ class HdrGateTests(unittest.TestCase):
         for scene in ('sun', 'hud_sun'):
             self.assertIn(f'float_unlit.{scene}: the SDR screenshot isn\'t HDR off\'s within rounding', lifted)
             self.assertIn(f'float_unlit.{scene}: the HDR shot isn\'t its SDR screenshot\'s picture: 4 pixels', lifted)
+
+
+class ReliefPackTests(unittest.TestCase):
+    def test_the_normal_maps_hold_the_heights_and_lean_down_their_slopes(self):
+        folder = Path(tempfile.mkdtemp()) / 'relief'
+        identity.relief_pack(folder)
+        width, height, bpp, raw, (depth, colour) = identity.read_png(
+            folder / 'assets/minecraft/textures/block/stone_n.png')
+        self.assertEqual((width, height, depth, colour), (16, 16, 8, 6))
+        rows = identity.unfilter(width, height, bpp, raw)
+        texel = lambda x, y: tuple(rows[y][4 * x:4 * x + 4])
+        # 🤖 Agent: The top of a bump: flat, at full height. Halfway down its east side, at height 0.55, the
+        # normal leans east (r above 128) and not along y.
+        self.assertEqual(texel(0, 0), (128, 128, 255, 255))
+        r, g, _, a = texel(2, 0)
+        self.assertGreater(r, 160)
+        self.assertEqual((g, a), (128, 140))
+        self.assertEqual(json.loads((folder / 'pack.mcmeta').read_text())['pack']['min_format'], 97)
+
+
+class LookGateTests(unittest.TestCase):
+    """Horizon's HDR look drawn by its pack is held to the look the game draws itself, where the pack reaches."""
+    WIDTH, HEIGHT = 240, 64
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+
+    def shots(self, changed=None, look=None):
+        """Both sessions' shots of every scene, a flat grey; `changed` and `look` map (scene, kind) to the pack's and
+        the look's own pixels that differ, as {(x, y): (r, g, b)}."""
+        for name, own in (('float_hdr', look), ('horizon_hdr', changed)):
+            for scene in identity.SESSIONS['horizon_hdr'][2]:
+                for kind, depth, grey in (('.png', 8, bytes((100,))), ('-hdr.png', 16, (400 << 6).to_bytes(2, 'big'))):
+                    rows = [bytearray(grey * 3 * self.WIDTH) for _ in range(self.HEIGHT)]
+                    for (x, y), rgb in (own or {}).get((scene, kind), {}).items():
+                        rows[y][x * len(grey) * 3:(x + 1) * len(grey) * 3] = b''.join(
+                            (v << 6).to_bytes(2, 'big') if depth == 16 else bytes((v,)) for v in rgb)
+                    encode(self.dir / f'{name}.{scene}{kind}', self.WIDTH, self.HEIGHT, depth, rows, 0)
+        self.loaded('Blocks, Tone curve, Entities')
+
+    def loaded(self, labels):
+        (self.dir / 'horizon_hdr.log').write_text(
+            f'[10:22:24] [Render thread/INFO]: shader pack horizon_hdr 1.0.0: {labels} in 9 ms\n')
+
+    def gate(self):
+        return identity.look_gates(self.dir, ['float_hdr', 'horizon_hdr'])
+
+    def test_the_hotbar_box_covers_the_selected_slot_at_an_odd_gui_width(self):
+        # 🤖 Agent: 854x480 is scale 2 and 427 GUI pixels wide: the hotbar centres on GUI pixel 213, and its selected
+        # slot's frame starts a GUI pixel before the bar, (213 - 91 - 1) * 2 = 242, and ends at 610.
+        self.assertEqual(identity.hud_boxes(854, 480)[1], (242, 432, 610, 480))
+        self.assertEqual(identity.hud_boxes(1068, 600)[1], (350, 552, 718, 600))
+
+    def test_the_pack_must_have_run_every_stage(self):
+        self.shots()
+        self.assertEqual(self.gate(), [])
+        # 🤖 Agent: Without its [tonemap] the game's own curve draws the same picture.
+        self.loaded('Blocks, Entities')
+        self.assertEqual(self.gate(), ['horizon_hdr: the log has no load line of horizon_hdr with Blocks, Entities, '
+                                       'Tone curve'])
+        (self.dir / 'horizon_hdr.log').unlink()
+        self.assertEqual(len(self.gate()), 1)
+
+    def test_a_shot_that_holds_nothing_or_is_missing(self):
+        white = {(x, y): (255, 255, 255) for x in range(self.WIDTH) for y in range(self.HEIGHT)}
+        self.shots(look={('glass', '.png'): white})
+        self.assertEqual(self.gate(), ['horizon_hdr.glass.png: no pixel is held'])
+        self.shots()
+        (self.dir / 'horizon_hdr.glass-hdr.png').unlink()
+        self.assertEqual(self.gate(), [])
+
+    def test_the_packs_rounding_passes_and_a_larger_step_fails(self):
+        self.shots({('glass', '.png'): {(0, 0): (101, 100, 99)}, ('glass', '-hdr.png'): {(0, 0): (402, 400, 398)}})
+        self.assertEqual(self.gate(), [])
+        self.shots({('glass', '.png'): {(1, 0): (100, 102, 100)},
+                    ('nether', '-hdr.png'): {(2, 0): (400, 400, 403), (3, 0): (397, 400, 400)}})
+        self.assertEqual(self.gate(), [
+            'horizon_hdr.glass.png: 1 pixels differ from float_hdr by more than 1, largest step 2, first at 1,0: '
+            '(100, 100, 100) against (100, 102, 100) (240x64)',
+            'horizon_hdr.nether-hdr.png: 2 pixels differ from float_hdr by more than 2, largest step 3, first at 2,0: '
+            '(400, 400, 400) against (400, 400, 403) (240x64)'])
+
+    def test_what_the_pack_does_not_reach_is_not_held(self):
+        (_, y, x, _), (hx, _, _, hy) = identity.hud_boxes(self.WIDTH, self.HEIGHT)
+        ax, ay = (int(f * size) + 1 for f, size in zip(identity.LOOK_APART['entities'][0], (self.WIDTH, self.HEIGHT)))
+        far = (0, 0, 0)
+        # 🤖 Agent: Under the crosshair and the hotbar, the End crystal, and where the look's screenshot shows white.
+        self.shots({('glass', '.png'): {(x - 1, y): far, (hx, hy - 1): far},
+                    ('glass', '-hdr.png'): {(x - 1, y): far, (hx, hy - 1): far},
+                    ('entities', '.png'): {(ax, ay): far}, ('entities', '-hdr.png'): {(ax, ay): far}},
+                   look={('glass', '.png'): {(5, 5): (255, 90, 90)}})
+        self.assertEqual(self.gate(), [])
+        # 🤖 Agent: The same places in another scene, and beside them; and white the pack's screenshot shows alone.
+        self.shots({('glass', '-hdr.png'): {(ax, ay): far}, ('entities', '.png'): {(x, y): far},
+                    ('nether', '.png'): {(5, 5): (255, 0, 0)}})
+        self.assertEqual(len(self.gate()), 3)
+
+    def test_the_session_check_asks_only_that_the_pack_loaded(self):
+        for name in ('hdr_toggle', 'horizon_hdr'):
+            for scene in identity.SESSIONS[name][2]:
+                for kind in ('.png', '-hdr.png'):
+                    encode(self.dir / f'{name}.{scene}{kind}', 4, 4, 8, picture(4, 4, 8), 0)
+
+        def problems():
+            return [p for p in identity.session_checks(self.dir, ['hdr_toggle', 'horizon_hdr'])
+                    if p.startswith('horizon_hdr')]
+        self.assertEqual(problems(), ['horizon_hdr: the log has no load line of shader pack horizon_hdr'])
+        (self.dir / 'horizon_hdr.log').write_text('INFO shader pack horizon_hdr 1.0.0: Blocks, Entities in 9 ms\n')
+        self.assertEqual(problems(), [])
+
+    def test_the_pack_is_not_drawn_without_the_look_it_is_held_to(self):
+        sessions = 'vanilla,horizon_hdr,float_dim,horizon_hdr_dim'
+        with mock.patch.object(identity.sys, 'argv', ['tool', '--sessions', sessions]), \
+                mock.patch.object(identity, 'base_revision', side_effect=AssertionError('went on to its base')):
+            with self.assertRaises(SystemExit) as stopped:
+                identity.main()
+        self.assertEqual(stopped.exception.code,
+                         '--sessions leaves out a session another is held to: horizon_hdr needs float_hdr')
 
 
 class BaseTests(unittest.TestCase):

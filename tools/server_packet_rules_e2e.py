@@ -16,7 +16,7 @@ A survival dedicated server in a flat world, a world border 20 blocks wide aroun
 
 horizon-bots stand in for the clients (`--attack`, `--raw`). The server runs in a fresh folder with fresh
 HORIZON_HOME and XDG folders (lab.game_env), on a free port. Build first:
-    cargo build --profile fast -p horizon-client --bin horizon-client
+    cargo build --profile fast -p horizon-game --bin horizon-client
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -29,7 +29,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -222,7 +221,7 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     os.environ.update(lab.game_env())
-    with tempfile.TemporaryDirectory(prefix='server-packet-rules-e2e-') as scratch:
+    with lab.temp_folder('server-packet-rules-e2e-') as scratch:
         try:
             run(bins, Path(scratch) / 'server', out)
         except (Failed, RuntimeError) as e:

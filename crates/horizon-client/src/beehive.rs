@@ -5,8 +5,8 @@
 //! or the mob AI probe) loads and adds the bees through [`HiveHost`].
 pub use crate::chunk::block_entity::{Beehive, Occupant};
 use crate::mobs::{Mob, Species, bee};
+use horizon_core::nbt::{Compound, Tag};
 use horizon_core::random::{LegacyRandom, RandomSource};
-use horizon_world::nbt::{Compound, Tag};
 
 pub const MAX_OCCUPANTS: usize = 3;
 /// `BeehiveBlockEntity.IGNORED_BEE_TAGS`: dropped from a bee going in, and
@@ -60,7 +60,7 @@ pub trait HiveHost {
     /// `EntityType.loadEntityRecursive` (the tag has its `id` and a `Pos`):
     /// a new entity, or `None` for anything but a `#beehive_inhabitors`.
     fn load(&mut self, tag: &Tag) -> Option<Mob>;
-    /// `Level.addFreshEntity`.
+    /// `LevelWriter.addFreshEntity`.
     fn add(&mut self, m: Mob) -> bool;
     fn sound(&mut self, name: &'static str, at: [f64; 3]);
     /// `BlockEntity.setChanged`: the hive's saved bees changed.

@@ -213,9 +213,10 @@ impl Control {
     }
 }
 
-/// The wait before a scene's flight, spent timing Horizon's own render passes on the GPU:
-/// `gpu_pass.<scene>.<pass>_ms`, where a slow GPU spends its frame. The timing is off again for
-/// the flight, whose frames it would slow. False, having waited for nothing, on Metal: its passes
+/// The wait before a scene's flight, spent timing the render passes on the GPU, where a slow
+/// GPU spends its frame: Horizon's own as `gpu_pass.<scene>.<pass>_ms`, a shader pack's as
+/// `shader_pass.<scene>.<pass>_ms`. The timing is off again for the flight, whose frames it
+/// would slow. False, having waited for nothing, on Metal: its passes
 /// overlap on the GPU, so their times add up to more than the frame.
 fn time_passes(control: &Control, scene: &str, report: &mut Report) -> Result<bool, String> {
     if report
@@ -229,18 +230,21 @@ fn time_passes(control: &Control, scene: &str, report: &mut Report) -> Result<bo
     control.call("gpu-passes on")?;
     let held = control.call(&format!("bench {}", SETTLE.as_secs_f64()));
     control.call("gpu-passes off")?;
-    for (pass, ms) in held?["gpu_passes"].as_object().into_iter().flatten() {
-        let pass: String = pass
-            .trim()
-            .chars()
-            .map(|c| match c {
-                'a'..='z' | '0'..='9' => c,
-                'A'..='Z' => c.to_ascii_lowercase(),
-                _ => '_',
-            })
-            .collect();
-        if let Some(ms) = ms.as_f64() {
-            report.metric(&format!("gpu_pass.{scene}.{pass}_ms"), &[ms]);
+    let held = held?;
+    for (key, metric) in [("gpu_passes", "gpu_pass"), ("shader_passes", "shader_pass")] {
+        for (pass, ms) in held[key].as_object().into_iter().flatten() {
+            let pass: String = pass
+                .trim()
+                .chars()
+                .map(|c| match c {
+                    'a'..='z' | '0'..='9' => c,
+                    'A'..='Z' => c.to_ascii_lowercase(),
+                    _ => '_',
+                })
+                .collect();
+            if let Some(ms) = ms.as_f64() {
+                report.metric(&format!("{metric}.{scene}.{pass}_ms"), &[ms]);
+            }
         }
     }
     Ok(true)
@@ -923,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn the_load_waits_for_the_chunks_a_teleport_starts() {
         // Right after a teleport the game reports steady counts and nothing
         // queued for over a second, before the integrated server has sent the
@@ -956,7 +961,8 @@ mod tests {
     }
 
     /// The wait before a flight times the passes and turns the timing off again before the
-    /// flight; the report gets one metric per pass. Not on Metal.
+    /// flight; the report gets one metric per pass, a shader pack's apart from Horizon's own.
+    /// Not on Metal.
     #[test]
     fn the_wait_times_the_passes_but_not_the_flight() {
         let time_on = |backend: &str| {
@@ -968,6 +974,7 @@ mod tests {
                         serde_json::json!({
                             "frames": 120,
                             "gpu_passes": {"World": 1.5, "World after culling": 0.25, "HUD": 0.01},
+                            "shader_passes": {"Sky": 0.5, "World": 0.75},
                         })
                     } else {
                         serde_json::json!({ "ok": true })
@@ -998,7 +1005,9 @@ mod tests {
         assert_eq!(mean("gpu_pass.forest.world_ms"), Some(1.5));
         assert_eq!(mean("gpu_pass.forest.world_after_culling_ms"), Some(0.25));
         assert_eq!(mean("gpu_pass.forest.hud_ms"), Some(0.01));
-        assert_eq!(metrics.len(), 3);
+        assert_eq!(mean("shader_pass.forest.sky_ms"), Some(0.5));
+        assert_eq!(mean("shader_pass.forest.world_ms"), Some(0.75));
+        assert_eq!(metrics.len(), 5);
 
         let (timed, lines, metrics) = time_on("metal");
         assert!(!timed);
@@ -1046,6 +1055,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn the_trip_flies_512_blocks_then_holds_four_blocks_at_its_end() {
         let (tx, rx) = mpsc::channel::<Request>();
         let server = trip_server(rx);
@@ -1103,6 +1113,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_refused_command_ends_the_trip_with_the_games_reason() {
         let (tx, rx) = mpsc::channel::<Request>();
         let server = thread::spawn(move || {
@@ -1216,6 +1227,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn the_blocks_run_b_a_a_b_and_each_arm_is_timed_by_pass() {
         let (tx, rx) = mpsc::channel::<Request>();
         let server = culling_server(rx, false, true, None);
@@ -1269,6 +1281,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_setting_that_was_on_is_on_again_after_the_run() {
         let (tx, rx) = mpsc::channel::<Request>();
         let server = culling_server(rx, true, true, None);
@@ -1288,6 +1301,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn the_setting_is_put_back_when_the_run_fails_midway() {
         let (tx, rx) = mpsc::channel::<Request>();
         // The 3rd block is A: the setting is off when it fails.
@@ -1313,6 +1327,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_refused_switch_ends_the_run_with_the_games_reason_and_changes_nothing() {
         let (tx, rx) = mpsc::channel::<Request>();
         let server = culling_server(rx, false, false, None);

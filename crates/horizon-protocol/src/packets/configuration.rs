@@ -3,16 +3,16 @@
 use crate::{
     Result,
     buf::{
-        Bool, Byte, Codec, Ident, Int, List, Long, Nbt, Opt, Reader, Rest, Str, StrN, UByte, Uuid,
+        Bool, Byte, Codec, Ident, Int, List, Long, Nbt, Opt, Reader, Str, StrN, UByte, Uuid,
         VarInt, Writer,
     },
     packet, packet_enum,
     packets::Empty,
 };
-use horizon_world::nbt::Tag;
+use horizon_core::nbt::Tag;
 
 packet!(CookieRequest { key: String => Ident });
-packet!(CustomPayload { channel: String => Ident, data: Vec<u8> => Rest });
+pub use super::custom_payload::CustomPayload;
 packet!(
     /// Common disconnect: a chat component (NBT).
     Disconnect { reason: Tag => Nbt }
@@ -33,7 +33,9 @@ packet!(ResourcePackPush {
     required: bool => Bool,
     prompt: Option<Tag> => Opt<Nbt>,
 });
-packet!(StoreCookie { key: String => Ident, payload: Vec<u8> => crate::buf::Bytes });
+/// Vanilla's cookie payloads are `ByteBufCodecs.byteArray(5120)`.
+pub const MAX_COOKIE: usize = 5120;
+packet!(StoreCookie { key: String => Ident, payload: Vec<u8> => crate::buf::BytesN<MAX_COOKIE> });
 packet!(Transfer { host: String => Str, port: i32 => VarInt });
 packet!(UpdateEnabledFeatures { features: Vec<String> => List<Ident> });
 packet!(TagEntry { name: String => Ident, ids: Vec<i32> => List<VarInt> });
@@ -122,7 +124,7 @@ impl Codec<Option<Tag>> for ClickPayload {
 
 packet_enum!(Clientbound, crate::ids::configuration::clientbound {
     CookieRequest(CookieRequest) = COOKIE_REQUEST,
-    CustomPayload(CustomPayload) = CUSTOM_PAYLOAD,
+    CustomPayload(CustomPayload) = CUSTOM_PAYLOAD => super::custom_payload::ClientboundPayload,
     Disconnect(Disconnect) = DISCONNECT,
     FinishConfiguration(Empty) = FINISH_CONFIGURATION,
     KeepAlive(KeepAlive) = KEEP_ALIVE,
@@ -201,7 +203,7 @@ impl Codec<ClientInformation> for ClientInformation {
         w.varint(v.particle_status);
     }
 }
-packet!(CookieResponse { key: String => Ident, payload: Option<Vec<u8>> => Opt<crate::buf::Bytes> });
+packet!(CookieResponse { key: String => Ident, payload: Option<Vec<u8>> => Opt<crate::buf::BytesN<MAX_COOKIE>> });
 packet!(
     /// ServerboundResourcePackPacket.Action: 0 loaded, 1 declined, 2 failed
     /// download, 3 accepted, 4 downloaded, 5 invalid url, 6 failed reload, 7 discarded.
@@ -211,7 +213,7 @@ packet!(
 packet_enum!(Serverbound, crate::ids::configuration::serverbound {
     ClientInformation(ClientInformation) = CLIENT_INFORMATION,
     CookieResponse(CookieResponse) = COOKIE_RESPONSE,
-    CustomPayload(CustomPayload) = CUSTOM_PAYLOAD,
+    CustomPayload(CustomPayload) = CUSTOM_PAYLOAD => super::custom_payload::ServerboundPayload,
     FinishConfiguration(Empty) = FINISH_CONFIGURATION,
     KeepAlive(KeepAlive) = KEEP_ALIVE,
     Pong(Ping) = PONG,
@@ -220,6 +222,66 @@ packet_enum!(Serverbound, crate::ids::configuration::serverbound {
     AcceptCodeOfConduct(Empty) = ACCEPT_CODE_OF_CONDUCT,
     CustomClickAction(CustomClickAction) = CUSTOM_CLICK_ACTION,
 });
+
+// Generated retained-allocation traversals; regenerate with protocol-retained-gen.
+impl crate::retained::OwnedHeap for ServerLinkKind {
+    fn owned_heap_bytes(&self) -> usize {
+        match self {
+            Self::Known(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Custom(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+        }
+    }
+}
+impl crate::retained::OwnedHeap for ServerLink {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self { kind, link } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(kind))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(link))
+    }
+}
+impl crate::retained::OwnedHeap for ClickPayload {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+impl crate::retained::OwnedHeap for ClientInformation {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            language,
+            view_distance,
+            chat_visibility,
+            chat_colors,
+            model_customisation,
+            main_hand,
+            text_filtering,
+            allows_listing,
+            particle_status,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(language))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(view_distance))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(
+                chat_visibility,
+            ))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(chat_colors))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(
+                model_customisation,
+            ))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(main_hand))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(text_filtering))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(allows_listing))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(
+                particle_status,
+            ))
+    }
+}
+// End generated retained traversals.
 
 #[cfg(test)]
 mod tests {

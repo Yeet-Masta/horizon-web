@@ -33,6 +33,16 @@ class ParityRunnerTests(unittest.TestCase):
         self.assertEqual(parity.artifacts_of(["cargo", "build", "--release", "-p", "horizon-world", "--bin=horizon-world"]),
                          [["bin", "horizon-world", "release", ["-p", "horizon-world"], False]])
 
+    def test_artifacts_keep_combined_short_package_and_feature_flags(self):
+        combined = parity.artifacts_of(["cargo", "run", "-pfoo", "-Ffeat", "--example", "p"])
+        separated = parity.artifacts_of(["cargo", "run", "-p", "foo", "--features", "feat", "--example", "p"])
+        self.assertEqual(combined, [["example", "p", "dev", ["-p", "foo", "--features", "feat"], True]])
+        self.assertEqual(combined, separated)
+        self.assertEqual(
+            parity.prebuild_commands(combined, {("example", "p"): "foo"}),
+            [["cargo", "build", "--locked", "--profile", "dev", "-p", "foo", "--features", "feat", "--example", "p"]],
+        )
+
     def test_prebuild_follows_a_moved_target_without_losing_features(self):
         selection = ["-p", "horizon-client", "--no-default-features", "--features", "horizon-client/rng-trace"]
         artifacts = [["example", "client_probe", "fast", selection, True],
@@ -156,6 +166,26 @@ class ParityRunnerTests(unittest.TestCase):
             source.write_text("two!")
             self.assertTrue(parity.stale("x", state, hasher, "env"))
 
+    def test_a_group_file_added_after_the_record_counts(self):
+        # tools/command_exec_groups/ modules are found by file name (#16833): one added later is in no record.
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)),                 mock.patch.object(parity, "SHARED", Path(temp, "shared")):
+            groups = Path(temp, "tools", "command_exec_groups")
+            groups.mkdir(parents=True)
+            (groups / "old.py").write_text("old")
+            found = {name: Path(temp, "tools", f"test_{name}_parity.py") for name in ("command_exec", "food")}
+            records = {"command_exec": {"status": "pass", "dependencies": ["tools/command_exec_groups/old.py"]},
+                       "food": {"status": "pass", "dependencies": ["tools/lab.py"]}}
+            state = {"harnesses": records, "hashes": {}}
+            hasher = parity.Hasher(state["hashes"])
+            for record in records.values():
+                record["key"] = parity.key(record, hasher, "env")
+            self.assertFalse(parity.stale("command_exec", state, hasher, "env"))
+            (groups / "new.py").write_text("new")
+            self.assertTrue(parity.stale("command_exec", state, hasher, "env"))
+            self.assertFalse(parity.stale("food", state, hasher, "env"))
+            self.assertEqual(parity.affected_harnesses(found, records, {"tools/command_exec_groups/new.py"}),
+                             {"command_exec"})
+
     def test_a_change_affects_the_harnesses_that_depend_on_it(self):
         with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
                 mock.patch.object(parity, "SHARED", Path(temp, "shared")):
@@ -215,6 +245,21 @@ class ParityRunnerTests(unittest.TestCase):
             self.assertEqual(parity.platform_skips(config, "playhorizon"), {"remote_fireworks": "starved"})
             self.assertEqual(parity.platform_skips(config, "macmini"), {})
             self.assertEqual(parity.platform_skips(config, "elsewhere"), {})
+
+    def test_known_failing_harnesses_report_without_failing_the_run(self):
+        results = {"crafter": {"status": "fail"}, "datafix#1": {"status": "fail"}, "datafix#2": {"status": "pass"},
+                   "sculk": {"status": "pass"}, "mace": {"status": "fail"}, "boat_void": {"status": "pass"}}
+        known = {"crafter": "#1: max_damage", "datafix": "#2: paths", "sculk": "#3: phase"}
+        blocking, again, passed = parity.split_known_failing(results, known)
+        self.assertEqual(blocking, ["mace"])  # not on the list: it fails the run
+        self.assertEqual(again, ["crafter", "datafix#1"])  # a failing shard counts under its harness
+        self.assertEqual(passed, ["sculk"])  # passes now: datafix doesn't, as one of its shards failed
+        self.assertEqual(parity.split_known_failing({"crafter": {"status": "fail"}}, known)[0], [])
+        # A listed shard covers only itself.
+        self.assertEqual(parity.split_known_failing(results, {"datafix#1": "#2: paths"})[:2],
+                         (["crafter", "mace"], ["datafix#1"]))
+        self.assertEqual(parity.split_known_failing(results, {"datafix#2": "#2: paths"})[2], ["datafix#2"])
+        self.assertEqual(parity.known_failing({}), {})
 
     def test_named_only_harnesses_are_listed_from_the_host_config(self):
         self.assertEqual(parity.named_only({"named_only": {"lan_integration": "slow"}}), {"lan_integration": "slow"})
@@ -412,6 +457,15 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(sorted(parity.harnesses()), ["x#1", "x#2", "x#3", "y"])
             self.assertEqual(parity.SHARDS["x#2"], "2/3")
             self.assertEqual(parity.base_name("x#2"), "x")
+
+    def test_a_manual_proof_script_is_left_out(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.object(parity, "ROOT", Path(temp)), \
+                mock.patch.dict(parity.MANUAL, clear=True):
+            (Path(temp) / "tools").mkdir()
+            (Path(temp) / "tools/test_x_parity.py").write_text('import sys\nPARITY_MANUAL = "--side java, then --side native"\n')
+            (Path(temp) / "tools/test_y_parity.py").write_text("")
+            self.assertEqual(sorted(parity.harnesses()), ["y"])
+            self.assertEqual(parity.MANUAL, {"x": "--side java, then --side native"})
 
 
 class OracleArgumentTests(unittest.TestCase):
@@ -726,6 +780,14 @@ class WorkspaceManifestTests(unittest.TestCase):
         self.assertEqual(self.verdict({"crates/horizon-client/Cargo.toml": self.CLIENT}, feature), set())
         resolver = {"Cargo.toml": '[workspace]\nmembers = ["a"]\nresolver = "3"\n'}
         self.assertEqual(self.verdict({"Cargo.toml": '[workspace]\nmembers = ["a"]\nresolver = "2"\n'}, resolver), set())
+
+    def test_a_hash_inside_a_quoted_value_is_not_a_comment(self):
+        git = '[dependencies]\nserde_json = {{ git = "https://example.invalid/repo.git#{}" }}\n'
+        self.assertNotEqual(parity.manifest_lines(git.format("rev1")), parity.manifest_lines(git.format("rev2")))
+        self.assertEqual(parity.manifest_lines("[dependencies]\nserde_json = \"1.0\" # note\nx = '#a' # b\n"),
+                         {("[dependencies]", 'serde_json = "1.0"'), ("[dependencies]", "x = '#a'")})
+        path = "crates/foo/Cargo.toml"
+        self.assertEqual(self.verdict({path: git.format("rev1")}, {path: git.format("rev2")}), set())
 
     def test_a_feature_of_a_workspace_crate_counts_through_its_sources(self):
         items = '[package]\nname = "horizon-items"\n\n[features]\ntest-support = []\n'

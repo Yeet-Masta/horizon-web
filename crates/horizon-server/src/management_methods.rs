@@ -1,7 +1,7 @@
 //! The methods of vanilla's management protocol (`management.rs`), as vanilla 26.3's `methods/*Service` answer
 //! them: the players, the server's state, and the lists. Kicks, saves and messages go through the game's
 //! console, so they log and save as an operator's command would; the lists change through the game's
-//! `management` request (game/dedicated/management.rs), which finds the players and sends the shut-out away as
+//! `management` request (game/interface/dedicated/management.rs), which finds the players and sends the shut-out away as
 //! vanilla's services do.
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
     management::{self, Failure, INTERNAL_ERROR, invalid_params},
 };
 use horizon_platform::server_files::properties::{ServerProperties, SystemEntropy};
+use horizon_server_launch::config;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -423,12 +424,15 @@ fn component(message: &Value) -> Option<Value> {
         let mut c = json!({ "translate": key });
         // Vanilla's Message takes its parameters as strings: plain text here too, never a
         // selector, score or nbt component that tellraw would resolve with the console's rights.
-        if let Some(with) = message["translatableParams"].as_array() {
-            c["with"] = Value::Array(
-                with.iter()
-                    .map(|p| json!({ "text": p.as_str().unwrap_or_default() }))
-                    .collect(),
-            );
+        // Its codec reads them leniently (`lenientOptionalFieldOf`): one entry that is not a string
+        // and the message has no parameters at all.
+        let params = message["translatableParams"].as_array().and_then(|with| {
+            with.iter()
+                .map(|p| p.as_str().map(|text| json!({ "text": text })))
+                .collect::<Option<Vec<_>>>()
+        });
+        if let Some(with) = params {
+            c["with"] = Value::Array(with);
         }
         return Some(c);
     }
@@ -539,7 +543,7 @@ impl Game<'_> {
                 "enforce_allowlist" => "enforce_whitelist",
                 _ => unreachable!("allowlist setting is validated by its callers"),
             };
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 property,
@@ -594,7 +598,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "pause-when-empty-seconds",
@@ -617,7 +621,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "force-gamemode",
@@ -663,7 +667,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "allow-flight",
@@ -686,7 +690,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "hide-online-players",
@@ -709,7 +713,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "enable-status",
@@ -755,7 +759,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "player-idle-timeout",
@@ -778,7 +782,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "server",
                 "max_players",
@@ -801,7 +805,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "world",
                 "game_mode",
@@ -832,7 +836,7 @@ impl Game<'_> {
         }
         if let Some(value) = value {
             let value = reply["value"].as_i64().unwrap_or(i64::from(value));
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "properties",
                 "op-permission-level",
@@ -856,7 +860,7 @@ impl Game<'_> {
         }
         // server.toml's `motd` writes server.properties' at each start: keep the new one there too.
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "server",
                 "motd",
@@ -879,7 +883,7 @@ impl Game<'_> {
             return Err((INTERNAL_ERROR, Some(error.to_owned())));
         }
         if let Some(value) = value {
-            crate::config::update(
+            config::update(
                 &self.shared.dir,
                 "world",
                 "difficulty",
@@ -1236,17 +1240,37 @@ mod tests {
 
     use super::*;
 
+    /// `Message.CODEC` reads `translatableParams` with `Codec.STRING.listOf().lenientOptionalFieldOf`: a
+    /// list of strings is the parameters, as plain text; anything else (an entry that is a component or a
+    /// number, or no list) is as if no parameters were sent. Never a selector, score or nbt component that
+    /// tellraw would resolve with the console's rights.
     #[test]
     fn translatable_parameters_are_plain_text() {
-        let message = json!({
-            "translatable": "chat.type.announcement",
-            "translatableParams": ["Server", {"selector": "@e"}, 3],
-        });
+        let component_of = |params: Value| {
+            component(&json!({
+                "translatable": "chat.type.announcement",
+                "translatableParams": params,
+            }))
+            .unwrap()
+        };
         assert_eq!(
-            component(&message).unwrap(),
+            component_of(json!(["Server", "@e"])),
             json!({"translate": "chat.type.announcement",
-                "with": [{"text": "Server"}, {"text": ""}, {"text": ""}]})
+                "with": [{"text": "Server"}, {"text": "@e"}]})
         );
+        // Vanilla's codec gives `translation{key='chat.type.announcement', args=[]}` for each of these.
+        for params in [
+            json!(["Server", {"selector": "@e"}, 3]),
+            json!(["Server", 3]),
+            json!([{"score": {"name": "@s", "objective": "x"}}]),
+            json!("Server"),
+        ] {
+            assert_eq!(
+                component_of(params.clone()),
+                json!({"translate": "chat.type.announcement"}),
+                "{params}"
+            );
+        }
     }
 
     fn shared() -> std::sync::Arc<Shared> {

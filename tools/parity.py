@@ -31,6 +31,11 @@ that fails runs once more from scratch instead, and a pass then counts. Every
 retry is printed as a RETRIED line in the summary and in the CI job's summary.
 Fix the cause, then take the harness off the list: nothing else gets this retry.
 
+A harness or shard (datafix#2) listed in parity_hosts.json's "known_failing"
+("#issue: what differs") runs and reports as usual, but its failure, of any kind,
+doesn't fail the run: parity-main and the Nightly stop only for new failures
+(docs/parity-workflow.md).
+
 Harness probes build into .local/parity-target with release optimisations but
 without LTO and with 16 codegen units (`PROFILE` below), which builds in
 seconds instead of minutes. Rust does not let those settings change results:
@@ -90,27 +95,33 @@ FAILURE_TAILS, FAILURE_TAIL_LINES = 10, 30  # the summary prints the end of the 
 
 
 def harness_settings(path):
-    """PARITY_SHARDS and PARITY_RUST_SCOPE, read from a harness's source without running it."""
+    """PARITY_SHARDS, PARITY_RUST_SCOPE and PARITY_MANUAL, read from a harness's source without running it."""
     import ast
     text = Path(path).read_text(encoding="utf-8")
     settings = {}
     if "PARITY_" in text:
         for node in ast.parse(text).body:
             if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) \
-                    and node.targets[0].id in ("PARITY_SHARDS", "PARITY_RUST_SCOPE"):
+                    and node.targets[0].id in ("PARITY_SHARDS", "PARITY_RUST_SCOPE", "PARITY_MANUAL"):
                 settings[node.targets[0].id] = ast.literal_eval(node.value)
     return settings
 
 
 SHARDS = {}  # "datafix#2" -> "2/8": the share of a sharded harness each entry runs (PARITY_SHARD)
+MANUAL = {}  # "guest_close_event" -> how to run it: a proof script that needs arguments, which no run starts
 
 
 def harnesses():
-    """Harness names and scripts. A harness declaring PARITY_SHARDS = N runs as N entries, NAME#1 to NAME#N."""
+    """Harness names and scripts. A harness declaring PARITY_SHARDS = N runs as N entries, NAME#1 to NAME#N.
+    A script declaring PARITY_MANUAL = "<how to run it>" is a proof run by hand with arguments: left out (MANUAL)."""
     found = {}
     for path in sorted((ROOT / "tools").glob("test_*_parity.py")):
         name = path.name[len("test_"):-len("_parity.py")]
-        count = harness_settings(path).get("PARITY_SHARDS", 1)
+        settings = harness_settings(path)
+        if settings.get("PARITY_MANUAL"):
+            MANUAL[name] = settings["PARITY_MANUAL"]
+            continue
+        count = settings.get("PARITY_SHARDS", 1)
         if count > 1:
             for index in range(1, count + 1):
                 found[f"{name}#{index}"] = path
@@ -200,9 +211,22 @@ def environment_key(hasher):
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
 
+# Directories whose modules a harness finds by file name (tools/command_exec_corpus.py, discovered_groups): a
+# harness that recorded one of their files depends on all of them, also on one added after its record was made.
+GROUP_DIRECTORIES = ("tools/command_exec_groups/",)
+
+
+def group_files(dependencies):
+    """The .py files now in the GROUP_DIRECTORIES that dependencies name a file of, as paths from ROOT."""
+    plain = {path.split(KEEP)[0].replace("\\", "/") for path in dependencies}
+    return {file.relative_to(ROOT).as_posix()
+            for directory in GROUP_DIRECTORIES if any(path.startswith(directory) for path in plain)
+            for file in (ROOT / directory).glob("*.py")}
+
+
 def key(record, hasher, environment):
     digest = hashlib.sha256(environment.encode())
-    for path in sorted(record["dependencies"]):
+    for path in sorted({*record["dependencies"], *group_files(record["dependencies"])}):
         digest.update(f"{path}\0{hasher(ROOT / path)}\n".encode())
     return digest.hexdigest()
 
@@ -252,7 +276,9 @@ def artifacts_of(arguments):
     index = 1
     while index < len(arguments):
         argument = arguments[index]
-        flag, _, value = argument.partition("=")
+        flag, sep, value = argument.partition("=")
+        if not sep and flag[:2] in ("-p", "-F") and len(flag) > 2:
+            flag, value = flag[:2], flag[2:]
         if flag in SELECTION_FLAGS | {"--profile", "--example", "--bin"} and not value and index + 1 < len(arguments):
             value = arguments[index + 1]
             index += 1
@@ -395,7 +421,7 @@ def impl_targets(header, text, workspace):
 def narrow_rust_sources(sources, scope):
     """Drop the workspace Rust sources a harness's declared PARITY_RUST_SCOPE proves it can't reach.
 
-    The scope lists source prefixes (crates/horizon-world/src/nbt.rs,
+    The scope lists source prefixes (crates/horizon-core/src/nbt.rs,
     crates/horizon-world/src/datafix/). It applies only if it is closed: no
     file in it names a module, crate item or macro outside it (crate::,
     super::, other workspace crates), declares a module it doesn't cover, or
@@ -820,7 +846,8 @@ def outcome(name, script, passed, elapsed, trace_path, hasher=None):
         if passed:
             clear_large_outputs(name, trace)
         if hasher is not None:
-            record["hashes"] = {path: hasher(ROOT / path) for path in record["dependencies"]}
+            record["hashes"] = {path: hasher(ROOT / path)
+                                for path in {*record["dependencies"], *group_files(record["dependencies"])}}
     else:
         record["dependencies"], record["artifacts"] = [], []
     return record
@@ -1185,7 +1212,7 @@ def run(selected, state, hasher, environment_digest, executors, reuse_oracles, r
                           rounds=len(runs))
             if name in second_chance:
                 record["retried"] = "known flaky"
-            elif label in retried:
+            elif any(harness_of(rl) == name for rl in retried):
                 record["retried"] = "reused oracle results"
             if len({run["status"] for run in runs}) > 1:
                 record["flaky"] = [run["status"] for run in runs]
@@ -1370,13 +1397,17 @@ def git_show(base, path):
     return result.stdout if result.returncode == 0 else None
 
 
+# A TOML line up to its comment: a "#" inside a basic ("...", with escapes) or literal ('...') string is kept.
+MANIFEST_COMMENT = re.compile(r'''^((?:[^#"']|"(?:[^"\\]|\\.)*"|'[^']*')*).*$''')
+
+
 def manifest_lines(text):
     """A Cargo.toml's lines that decide what is built: (section, line) pairs, without its package's identity and
     targets, comments, or workspace crates (whose code counts through its own sources)."""
     lines, section = set(), ""
     name = re.search(r'^\[package\][^\[]*?^name\s*=\s*"([^"]+)"', text or "", re.M | re.S)
     for raw in (text or "").splitlines():
-        line = re.sub(r"\s+", " ", raw.split("#", 1)[0]).strip()
+        line = re.sub(r"\s+", " ", MANIFEST_COMMENT.sub(r"\1", raw) if "#" in raw else raw).strip()
         if not line:
             continue
         if line.startswith("["):
@@ -1523,6 +1554,9 @@ def affected_harnesses(found, records, changed, reach=True, base=None):
         dependencies = [canonical_dependency_path(path) for path in dependencies]
         plain = {path.split(KEEP)[0] for path in dependencies}
         hit = (plain & changed) | parity_reach.unrecorded(ROOT, plain, changed)
+        # A group file added since the record was made isn't in it: the directory's other files stand for it.
+        hit |= {path for path in changed for directory in GROUP_DIRECTORIES
+                if path.startswith(directory) and any(known.startswith(directory) for known in plain)}
         if not hit:
             continue
         if graph is None or any(not path.startswith("crates/") for path in hit):
@@ -1564,6 +1598,46 @@ def known_flaky(config):
     """Harnesses tools/parity_hosts.json lists as failing now and then for a cause not fixed yet: one that fails runs
     once more, and passing then counts, reported as RETRIED. {name: reason}"""
     return dict(config.get("known_flaky", {}))
+
+
+def known_failing(config):
+    """Harnesses tools/parity_hosts.json lists as failing on main until their issue is fixed ({name: "#issue: why"}):
+    they still run and report, but their failure doesn't fail the run, so main's parity-main and the Nightly it gates
+    stay held only by new failures. Without this, one regression on main kept every later parity-main red, each run
+    rechecked every merge since the last green one, and no Nightly shipped for days (2026-11-15 to 11-17)."""
+    return dict(config.get("known_failing", {}))
+
+
+def known_entry(name, known):
+    """The known_failing entry covering a harness or shard: the shard's own (datafix#2), else its harness's (datafix,
+    every shard), else None."""
+    return name if name in known else base_name(name) if base_name(name) in known else None
+
+
+def split_known_failing(results, known):
+    """(failures that fail the run, known failing harnesses that failed again, known failing entries all of whose
+    harnesses or shards that ran here passed)."""
+    failed = sorted(name for name, record in results.items() if record["status"] != "pass")
+    blocking = [name for name in failed if known_entry(name, known) is None]
+    again = [name for name in failed if known_entry(name, known) is not None]
+    passed = sorted({known_entry(name, known) for name, record in results.items()
+                     if record["status"] == "pass" and known_entry(name, known) is not None}
+                    - {known_entry(name, known) for name in again})
+    return blocking, again, passed
+
+
+def report_known_failing(again, passed, known):
+    """Say which known failing harnesses failed again, and which passed here, here and in the CI job's summary."""
+    lines = [f"KNOWN FAILING {name}: failed again, not counted ({known[known_entry(name, known)]})" for name in again]
+    # A run of some shards only can pass an entry whose other shards still fail: parity-main's full run decides.
+    lines += [f"KNOWN FAILING {name} passed here: once parity-main passes it too, take it off "
+              f"tools/parity_hosts.json's known_failing ({known[name]})" for name in passed]
+    for line in lines:
+        print(line, flush=True)
+    if lines and os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write("### Known failing harnesses (tools/parity_hosts.json)\n" +
+                          "".join(f"- {line}\n" for line in lines))
 
 
 def solo_harnesses(config):
@@ -1620,6 +1694,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("names", nargs="*", help="harness names, e.g. food or block_update")
     parser.add_argument("--all", action="store_true", help="run every harness from scratch, ignoring earlier passes")
+    parser.add_argument("--exclude", action="append", default=[], help="exclude a harness and its shards")
     parser.add_argument("--fresh", action="store_true", help="run the vanilla oracles even if their inputs are unchanged")
     parser.add_argument("--failed", action="store_true", help="rerun the harnesses that failed last time")
     parser.add_argument("--list", action="store_true", help="print what would run, then stop")
@@ -1652,6 +1727,9 @@ def main():
     # A sharded harness's name stands for all its shards.
     args.names = [entry for name in args.names for entry in ([name] if name in found else
                   [shard for shard in found if base_name(shard) == name] or [name])]
+    by_hand = [name for name in args.names if name in MANUAL]
+    if by_hand:
+        parser.error("; ".join(f"{name} is run by hand, not by parity.py: {MANUAL[name]}" for name in by_hand))
     unknown = [name for name in args.names if name not in found]
     if unknown:
         parser.error("unknown harnesses: " + ", ".join(unknown))
@@ -1671,7 +1749,11 @@ def main():
         chosen = [name for name in found if records.get(name, {}).get("status") == "fail"]
     elif args.changed or args.changed_files:
         if args.changed_files:
-            changed, since = set(Path(args.changed_files).read_text(encoding="utf-8").split("\n")) - {""}, ""
+            try:
+                text = Path(args.changed_files).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                parser.error(f"cannot read changed-files path {args.changed_files}: {error}")
+            changed, since = set(text.split("\n")) - {""}, ""
         else:
             changed, since = changed_files(args.changed), f" since the merge base with {args.changed}"
         if changed is None:
@@ -1690,6 +1772,7 @@ def main():
               f"depend on them, {len(chosen)} without a pass for their current inputs.", flush=True)
     else:
         chosen = [name for name in found if stale(name, state, hasher, environment)]
+    chosen = [name for name in chosen if base_name(name) not in args.exclude]
     skips = platform_skips(host_config())
     for name in [name for name in chosen if base_name(name) in skips and not args.names]:
         print(f"skipped on {HOST} ({sys.platform}): {name}: {skips[base_name(name)]}", flush=True)
@@ -1700,7 +1783,8 @@ def main():
         chosen.remove(name)
     rounds = {name: args.repeat for name in chosen} if args.repeat > 1 else {}
     if args.flake_check:
-        changed = {name for name in changed_harnesses(found, records, args.flake_check) if base_name(name) not in manual}
+        changed = {name for name in changed_harnesses(found, records, args.flake_check)
+                   if base_name(name) not in manual and base_name(name) not in args.exclude}
         for name in sorted(changed):
             # A pass counts for a changed harness only if it held over enough runs.
             if name not in chosen and records.get(name, {}).get("rounds", 1) < args.flake_rounds:
@@ -1778,7 +1862,11 @@ def main():
     finished_run(failed)
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed in {elapsed / 60:.1f} min.")
     report_retries(results, known_flaky(config))
-    for index, name in enumerate(failed):
+    known = known_failing(config)
+    blocking, again, passed = split_known_failing(results, known)
+    report_known_failing(again, passed, known)
+    # The new failures' logs first: they are what fails the run.
+    for index, name in enumerate(blocking + again):
         log = STATE_DIR / 'logs' / (name + '.log')
         print(f"  {name}: {log}")
         # The end of a harness's output says why it failed, and CI shows only this output.
@@ -1789,7 +1877,7 @@ def main():
                 lines = []
             for line in lines:
                 print(f"    {line[:300]}")
-    return 1 if failed else 0
+    return 1 if blocking else 0
 
 
 if __name__ == "__main__":

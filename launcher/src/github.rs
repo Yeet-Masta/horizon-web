@@ -19,7 +19,7 @@ use sha2::Digest;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const API: &str = "https://api.github.com";
+pub(crate) const API: &str = "https://api.github.com";
 /// Kira's read-only mirror of Horizon's release reads. `HORIZON_GITHUB_MIRROR` replaces it (an
 /// empty value turns it off).
 pub const MIRROR: &str = "https://mcp.playhorizon.dev/github/public";
@@ -27,6 +27,15 @@ pub const MIRROR: &str = "https://mcp.playhorizon.dev/github/public";
 /// How long a saved answer is used without asking again: the launcher looks for releases every
 /// [`backend::CHECK_EVERY`], so a few minutes late at worst.
 pub const FRESH_SECS: u64 = 5 * 60;
+
+/// How long one source may take to start answering, its connection included. With only the
+/// agent's limits (15 s to connect, 60 s for each read) a source that took the request and said
+/// nothing held the release list for two minutes, GitHub's turn and the mirror's one after the
+/// other (#18074). The body is then read for as long as it keeps coming, each read under the
+/// agent's limit: the release list is about 2 MB, which a slow line takes most of a minute to
+/// bring. Tests wait less.
+const HEADERS: std::time::Duration =
+    std::time::Duration::from_secs(if cfg!(test) { 1 } else { 20 });
 
 /// What one source answered.
 #[derive(Debug)]
@@ -42,12 +51,27 @@ pub(crate) enum Answer {
     Failed(String),
 }
 
-/// GitHub's JSON for `url` (`https://api.github.com/...`). A 404 is the error `<url> answered 404`.
+/// GitHub's JSON for a required resource. Missing resources are reported as errors.
 pub fn json(url: &str) -> Result<serde_json::Value, String> {
+    json_optional(url)?.ok_or_else(|| format!("{url} answered 404"))
+}
+
+/// GitHub's JSON when the resource may not exist, such as a repository's latest release.
+/// A 404 is None, distinct from a connection or rate-limit failure.
+pub fn json_optional(url: &str) -> Result<Option<serde_json::Value>, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     json_with(url, &cache_dir(), now, github, mirror)
+}
+
+/// [`json_optional`] as GitHub or the mirror answer it now, never a copy kept on disk (fresh or
+/// not): for a list that must be current, such as after a download that failed its check.
+pub fn json_from_network(url: &str) -> Result<Option<serde_json::Value>, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    json_with_mode(url, &cache_dir(), now, true, github, mirror)
 }
 
 /// [`json`] with its cache folder, the time (Unix seconds) and its two sources given (tests).
@@ -57,13 +81,25 @@ pub(crate) fn json_with(
     now: u64,
     github: impl Fn(&str, Option<&str>) -> Answer,
     mirror: impl Fn(&str) -> Answer,
-) -> Result<serde_json::Value, String> {
+) -> Result<Option<serde_json::Value>, String> {
+    json_with_mode(url, cache, now, false, github, mirror)
+}
+
+/// [`json_with`]; `network_only`: a copy on disk is never the answer, only its ETag is sent.
+pub(crate) fn json_with_mode(
+    url: &str,
+    cache: &Path,
+    now: u64,
+    network_only: bool,
+    github: impl Fn(&str, Option<&str>) -> Answer,
+    mirror: impl Fn(&str) -> Answer,
+) -> Result<Option<serde_json::Value>, String> {
     let file = cache.join(cache_name(url));
     let kept = read_kept(&file, url);
-    if let Some(k) = kept.as_ref() {
+    if let Some(k) = kept.as_ref().filter(|_| !network_only) {
         // A copy saved "later" than now (the clock was set back) is not trusted as fresh.
         if now >= k.saved && now - k.saved < FRESH_SECS {
-            return Ok(k.body.clone());
+            return Ok(Some(k.body.clone()));
         }
     }
     let etag = kept
@@ -73,17 +109,17 @@ pub(crate) fn json_with(
     let why = match github(url, etag) {
         Answer::Fresh(body, etag) => {
             write_kept(&file, url, etag.as_deref().unwrap_or(""), &body, now);
-            return Ok(body);
+            return Ok(Some(body));
         }
         Answer::NotModified => match kept {
             Some(k) => {
                 write_kept(&file, url, &k.etag, &k.body, now);
-                return Ok(k.body);
+                return Ok(Some(k.body));
             }
             // A 304 to a request that had no ETag: can't happen, but don't trust it.
             None => "GitHub answered 304 without a saved copy".to_owned(),
         },
-        Answer::NotFound => return Err(format!("{url} answered 404")),
+        Answer::NotFound => return Ok(None),
         Answer::RateLimited => RATE_LIMITED.to_owned(),
         Answer::Failed(e) => e,
     };
@@ -91,17 +127,17 @@ pub(crate) fn json_with(
         Some(m) => match mirror(&m) {
             Answer::Fresh(body, _) => {
                 write_kept(&file, url, "", &body, now);
-                return Ok(body);
+                return Ok(Some(body));
             }
-            Answer::NotFound => return Err(format!("{url} answered 404")),
+            Answer::NotFound => return Ok(None),
             Answer::RateLimited => Some("too many requests from this network".to_owned()),
             Answer::Failed(e) => Some(e),
             Answer::NotModified => Some("an unexpected 304".to_owned()),
         },
         None => None,
     };
-    if let Some(k) = kept {
-        return Ok(k.body);
+    if let Some(k) = kept.filter(|_| !network_only) {
+        return Ok(Some(k.body));
     }
     Err(match from_mirror {
         Some(m) => format!(
@@ -142,7 +178,7 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
     if let Some(etag) = etag {
         request = request.set("If-None-Match", etag);
     }
-    match request.call() {
+    match call(request, url) {
         Ok(r) if r.status() == 304 => Answer::NotModified,
         Ok(r) => {
             let etag = r.header("ETag").map(str::to_owned);
@@ -151,17 +187,36 @@ fn github(url: &str, etag: Option<&str>) -> Answer {
                 Err(e) => Answer::Failed(e.to_string()),
             }
         }
-        Err(e) => failure(url, e),
+        Err(answer) => answer,
     }
 }
 
 fn mirror(url: &str) -> Answer {
-    match backend::agent(url).get(url).call() {
+    match call(backend::agent(url).get(url), url) {
         Ok(r) => match r.into_json() {
             Ok(body) => Answer::Fresh(body, None),
             Err(e) => Answer::Failed(e.to_string()),
         },
-        Err(e) => failure(url, e),
+        Err(answer) => answer,
+    }
+}
+
+/// `request`'s response once its headers are in, or the source's failure; one that takes
+/// longer than [`HEADERS`] fails.
+fn call(request: ureq::Request, url: &str) -> Result<ureq::Response, Answer> {
+    let (sent, response) = std::sync::mpsc::channel();
+    // A late request is left to end on its own, within the agent's limits (15 s to connect, 60 s
+    // for a read); what it brings back is dropped.
+    std::thread::spawn(move || {
+        let _ = sent.send(request.call());
+    });
+    match response.recv_timeout(HEADERS) {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(failure(url, e)),
+        Err(_) => Err(Answer::Failed(format!(
+            "No connection: {url} didn't answer within {} s",
+            HEADERS.as_secs()
+        ))),
     }
 }
 

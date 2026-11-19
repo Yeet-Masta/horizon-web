@@ -255,7 +255,7 @@ fn repeats(last: &Message, next: &Message) -> bool {
 /// The local hour and minute.
 fn local_time() -> (u8, u8) {
     use chrono::Timelike;
-    let now = chrono::Local::now();
+    let now = crate::logging::local_now();
     (now.hour() as u8, now.minute() as u8)
 }
 
@@ -301,7 +301,7 @@ impl Tag {
             text: Text::empty()
                 .append(Text::translate("chat.tag.modified", &[]))
                 .append(Text::literal("\n"))
-                .append(Text::literal(original_content).with_color(text::GRAY)),
+                .append(Text::untrusted(original_content).with_color(text::GRAY)),
         }
     }
 }
@@ -326,6 +326,9 @@ pub struct Chat {
     history_file: Option<std::path::PathBuf>,
     scroll: usize,
     new_since_scroll: bool,
+    /// `ChatComponent`'s delayed queue size (`ChatListener.queueSize`): the
+    /// `chat.queue` row under the messages, while Chat Delay holds some.
+    pub queue: usize,
     pub options: ChatOptions,
     /// The smooth chat extra: a new line slides in from the left while it
     /// fades in, instead of appearing whole.
@@ -350,6 +353,25 @@ pub struct Chat {
     #[cfg(test)]
     clock: Option<(u8, u8)>,
 }
+/// `ChatComponent.QUEUE_EXPAND_ID`: the queue row's click event, handled by
+/// the chat screen itself (`ChatListener.acceptNextDelayedMessage`).
+pub const QUEUE_EXPAND_ID: &str = "minecraft:internal/expand_chat_queue";
+
+/// `ChatComponent`'s queue row: how many messages Chat Delay holds, with the
+/// style that shows the next one (a click, and `chat.queue.tooltip` on hover).
+pub fn queue_line(queued: usize) -> Text {
+    Text::translate("chat.queue", &[Text::literal(queued.to_string())]).with_style(&Style {
+        click: Some(ClickEvent::Custom {
+            id: QUEUE_EXPAND_ID.into(),
+            payload: None,
+        }),
+        hover: Some(std::sync::Arc::new(Text::translate(
+            "chat.queue.tooltip",
+            &[],
+        ))),
+        ..Style::default()
+    })
+}
 impl Chat {
     pub fn lines_per_page(&self, focused: bool) -> usize {
         (self.options.height_px(focused) / self.options.line_height().max(1)) as usize
@@ -360,6 +382,7 @@ impl Chat {
     }
     /// ChatComponent.addMessage: wrap, prepend and trim to 100 lines. A
     /// message the Chat option hides is dropped, unlogged.
+    #[horizon_mod_api_macros::replaceable]
     pub fn add(
         &mut self,
         atlas: &HudAtlas,
@@ -773,7 +796,7 @@ impl Chat {
         let bottom_to_text =
             (8.0 * (o.line_spacing + 1.0) - 4.0 * o.line_spacing + 0.5).floor() as i32;
         // Vanilla's 200-tick fade reads the whole GUI ticks
-        // (`Gui.getGuiTicks`); only the smooth chat extra eases it per frame.
+        // (`Hud.getGuiTicks`); only the smooth chat extra eases it per frame.
         let fade_ticks = if self.smooth { ticks } else { ticks.floor() };
         let alpha_of = |line: &Line| {
             if focused {
@@ -884,23 +907,99 @@ impl Chat {
                 ));
             }
         }
+        if self.queue > 0 {
+            // ChatComponent: the queue row under the messages, a background
+            // band and the count at half text opacity.
+            out.push(hud_layout::fill(
+                -2,
+                chat_bottom,
+                max_width + 4,
+                chat_bottom + 9,
+                hud_layout::as8(background_opacity) << 24,
+            ));
+            out.push(GuiDraw::Text {
+                text: queue_line(self.queue),
+                x: 0,
+                y: chat_bottom + 1,
+                color: hud_layout::white(0.5 * text_opacity),
+                shadow: true,
+            });
+        }
         out.push(GuiDraw::Pop);
         out
+    }
+    /// `ChatComponent`'s queue row under the cursor while the chat is open: the
+    /// style of its glyph (`queue_line`'s click and hover).
+    pub fn queue_style_at(
+        &self,
+        font: &crate::font::Font,
+        height: i32,
+        x: f64,
+        y: f64,
+    ) -> Option<Style> {
+        if self.queue == 0 || self.lines.is_empty() {
+            return None;
+        }
+        let o = &self.options;
+        let scale = o.scale as f32;
+        let chat_bottom = hud_layout::floor((height - 40) as f32 / scale);
+        let (mouse_x, mouse_y) = (x / f64::from(scale) - 4.0, y / f64::from(scale));
+        if mouse_y < f64::from(chat_bottom + 1) || mouse_y >= f64::from(chat_bottom + 10) {
+            return None;
+        }
+        let line = queue_line(self.queue);
+        let mut x = mouse_x;
+        if x < 0.0 {
+            return None;
+        }
+        for (c, style) in line.resolve_legacy().chars() {
+            x -= f64::from(font.advance(c, style));
+            if x < 0.0 {
+                return Some(style.clone());
+            }
+        }
+        None
     }
     /// Draws [`Chat::layout`] into the HUD batch, and with the chat screen
     /// open the restricted prompt above the lines.
     pub fn draw(&self, batch: &mut HudBatch, atlas: &HudAtlas, ticks: f32, focused: bool) {
-        let draws = self.layout(batch.height as i32, ticks, focused);
-        hud_layout::paint(batch, atlas, &draws);
+        self.draw_at(batch, atlas, ticks, focused, [0.0; 2]);
+    }
+    /// [`Chat::draw`] moved by `offset` GUI pixels (a mod's `CustomizeGuiOverlayEvent.Chat`,
+    /// `Gui.renderChat`'s translate).
+    pub fn draw_at(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        ticks: f32,
+        focused: bool,
+        offset: [f32; 2],
+    ) {
+        let paint = |batch: &mut HudBatch, draws: Vec<GuiDraw>| {
+            if offset == [0.0; 2] {
+                hud_layout::paint(batch, atlas, &draws);
+            } else {
+                let mut moved = Vec::with_capacity(draws.len() + 2);
+                moved.push(GuiDraw::Push(vec![PoseOp::Translate(offset[0], offset[1])]));
+                moved.extend(draws);
+                moved.push(GuiDraw::Pop);
+                hud_layout::paint(batch, atlas, &moved);
+            }
+        };
+        paint(batch, self.layout(batch.height as i32, ticks, focused));
         let restricted = focused && self.abilities.any_restriction();
         if restricted {
-            let prompt = self.restricted_prompt(&atlas.font, batch.height as i32);
-            hud_layout::paint(batch, atlas, &prompt);
+            paint(
+                batch,
+                self.restricted_prompt(&atlas.font, batch.height as i32),
+            );
         }
         if focused && self.search_prompt {
             let row = if restricted { 2 } else { 1 };
-            let prompt = self.search_prompt(&atlas.font, batch.height as i32, row);
-            hud_layout::paint(batch, atlas, &prompt);
+            paint(
+                batch,
+                self.search_prompt(&atlas.font, batch.height as i32, row),
+            );
         }
     }
     /// `ChatComponent.extractRenderState` for `FOREGROUND_RESTRICTED`: a
@@ -995,7 +1094,9 @@ impl Chat {
     /// The hover text under a GUI-space cursor while chat is focused
     /// (ChatScreen.render's `renderComponentHoverEffect`).
     pub fn hover_at(&self, font: &crate::font::Font, height: i32, x: f64, y: f64) -> Option<Text> {
-        self.style_at(font, height, x, y)?.hover.map(|h| *h)
+        self.style_at(font, height, x, y)?
+            .hover
+            .map(std::sync::Arc::unwrap_or_clone)
     }
     /// The wrapped line under a GUI-space cursor while chat is focused, and
     /// the cursor's x within it (the text starts at 0).
@@ -1013,7 +1114,7 @@ impl Chat {
         }
         Some((self.lines.get(self.scroll + row)?, x))
     }
-    /// ChatComponent.getClickedComponentStyleAt.
+    /// ChatComponent.captureClickableText (through `ActiveTextCollector.ClickableStyleFinder`).
     pub fn style_at(
         &self,
         font: &crate::font::Font,
@@ -1026,10 +1127,14 @@ impl Chat {
             return None;
         }
         let content = line.content.resolve_legacy();
-        for (c, style) in content.chars() {
-            x -= f64::from(font.advance(c, style));
-            if x < 0.0 {
-                return Some(style.clone());
+        for span in &content.spans {
+            for c in span.text.chars() {
+                x -= f64::from(font.advance(c, &span.style));
+                if x < 0.0 {
+                    let mut style = span.style.clone();
+                    style.click = span.click_event().cloned();
+                    return Some(style);
+                }
             }
         }
         None
@@ -1279,6 +1384,9 @@ pub struct ChatScreen {
     /// `CommandSuggestions.setRestrictions`: what the Chat option allows.
     pub abilities: ChatAbilities,
     pub layout: SuggestLayout,
+    /// `MouseHandler.lastClick`: a click within 250 ms of the last one on
+    /// this screen is a double click.
+    last_click: Option<horizon_std::time::Instant>,
 }
 /// Local completions waiting for the server's reply to request `id`.
 struct Awaiting {
@@ -1401,6 +1509,7 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities,
             layout: SuggestLayout::CHAT,
+            last_click: None,
         };
         s.update_command_info(m, c);
         s
@@ -1439,6 +1548,7 @@ impl ChatScreen {
             auto_suggestions: true,
             abilities: ChatAbilities::new(ChatVisibility::Full),
             layout: SuggestLayout::COMMAND_BLOCK,
+            last_click: None,
         };
         s.update_command_info(m, c);
         s
@@ -1500,23 +1610,10 @@ impl ChatScreen {
             self.edited(m, c);
         }
     }
-    /// Edit the existing input and refresh its command responder when it changes.
+    /// An edit of the input box from outside its own keys: the suggestions follow it.
     pub fn edit_input(&mut self, m: &Measure, c: &Commands, f: impl FnOnce(&mut TextField)) {
-        let before = (
-            self.input.value.clone(),
-            self.input.cursor,
-            self.input.highlight,
-        );
         f(&mut self.input);
-        if before
-            != (
-                self.input.value.clone(),
-                self.input.cursor,
-                self.input.highlight,
-            )
-        {
-            self.edited(m, c);
-        }
+        self.edited(m, c);
     }
     /// Typed text (`charTyped` per character).
     pub fn type_text(&mut self, m: &Measure, c: &Commands, text: &str) {
@@ -1531,6 +1628,7 @@ impl ChatScreen {
         }
     }
     /// `CommandSuggestions.updateCommandInfo`.
+    #[horizon_mod_api_macros::replaceable]
     fn update_command_info(&mut self, m: &Measure, c: &Commands) {
         let command = self.input.value.clone();
         if self.parse.as_ref().is_some_and(|p| p.input != command) {
@@ -1951,8 +2049,21 @@ impl ChatScreen {
             self.history_pos = new;
         }
     }
-    /// A left click (`ChatScreen.mouseClicked`): a suggestion, else the input.
+    /// A live left click: `MouseHandler` recognizes a double click after a handled click.
     pub fn click(&mut self, m: &Measure, c: &Commands, x: f64, y: f64) -> bool {
+        let now = horizon_std::time::Instant::now();
+        let double = self
+            .last_click
+            .is_some_and(|at| now.duration_since(at).as_millis() < 250);
+        let handled = self.click_event(m, c, x, y, double);
+        if handled {
+            self.last_click = Some(now);
+        }
+        handled
+    }
+
+    /// `ChatScreen.mouseClicked`: the caller supplies the event's double-click flag.
+    pub fn click_event(&mut self, m: &Measure, c: &Commands, x: f64, y: f64, double: bool) -> bool {
         if let Some(mut l) = self.suggestions.take() {
             let (xi, yi) = (x as i32, y as i32);
             if l.contains(xi, yi) {
@@ -1967,7 +2078,7 @@ impl ChatScreen {
             self.suggestions = Some(l);
         }
         if self.input.contains(x, y) {
-            self.input.click(m, x, false);
+            self.input.click(m, x, false, double);
             return true;
         }
         false

@@ -32,7 +32,7 @@ def run_json(words, cwd, env):
 
 def whole(bins, file, work, env):
     """Whether horizon-perf reads the file, which it does only once the writer has closed the stream."""
-    result = subprocess.run([str(bins / 'horizon-perf'), 'summary', str(file)], cwd=work, env=env, capture_output=True)
+    result = subprocess.run([str(lab.binary(bins, 'horizon-perf')), 'summary', str(file)], cwd=work, env=env, capture_output=True)
     return result.returncode == 0
 
 
@@ -42,8 +42,8 @@ def profiler(ctl, action):
 
 def commands(bins, work, env):
     socket = work / 'c.sock'
-    ctl = lambda *words: run_json([bins / 'horizon-ctl', '--socket', socket, *words], work, env)
-    perf = lambda *words: run_json([bins / 'horizon-perf', *words], work, env)
+    ctl = lambda *words: run_json([lab.binary(bins, 'horizon-ctl'), '--socket', socket, *words], work, env)
+    perf = lambda *words: run_json([lab.binary(bins, 'horizon-perf'), *words], work, env)
     return ctl, perf, socket
 
 
@@ -262,7 +262,7 @@ def main():
     if args.bin_dir:
         bins = Path(args.bin_dir).resolve()
     else:
-        subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib',
+        subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib',
                         '-p', 'horizon-perf', '--bins'], cwd=ROOT, check=True)
         meta = json.loads(subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=ROOT,
                                          capture_output=True, text=True, check=True).stdout)

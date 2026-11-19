@@ -4,7 +4,7 @@
 use super::super::animal_brain::{Bx, transition};
 use super::super::world::with_test_world;
 use super::*;
-use horizon_core::{geometry::Vec3, random::LegacyRandom};
+use horizon_core::geometry::Vec3;
 use std::sync::Arc;
 
 fn sniffer(types: &super::super::MobTypes) -> Mob {
@@ -17,6 +17,7 @@ fn sniffer(types: &super::super::MobTypes) -> Mob {
 }
 
 #[test]
+#[ignore = "daily"]
 fn silent_sniffer_mutes_the_state_and_seed_sounds() {
     let ran = with_test_world(&[], |w, types| {
         let states = [
@@ -29,12 +30,12 @@ fn silent_sniffer_mutes_the_state_and_seed_sounds() {
             for silent in [true, false] {
                 let mut m = sniffer(types);
                 m.silent = silent;
-                let mut lr = LegacyRandom::new(1);
+                let mut lr = crate::health::TestLevel::new(1);
                 let mut events = Vec::new();
                 {
                     let mut cx = Bx {
                         w,
-                        lr: &mut lr,
+                        level: &mut lr.level(),
                         events: &mut events,
                         now: 0,
                     };
@@ -70,5 +71,5 @@ fn silent_sniffer_mutes_the_state_and_seed_sounds() {
             );
         }
     });
-    let _ = ran;
+    assert!(ran, "vanilla data is missing");
 }

@@ -45,14 +45,18 @@ enum Source {
 struct Plan {
     phase1_calls: usize,
     solid_calls: usize,
-    /// Where the shadow camera's solid and translucent calls begin.
-    shadow_calls: [usize; 2],
+    /// Where each of `prepare`'s marks' calls begin.
+    marks: [usize; MARKS],
     /// Where Metal's opaque pass ends and its cutout pass begins in phase 1's calls,
     /// and where its cutout pass begins in phase 2's.
     pass_calls: [usize; 3],
     total: u64,
 }
 const QUADS: u32 = u32::MAX;
+/// The draws `prepare` gives calls of their own from, past the camera's (`usize::MAX`: none):
+/// the shadow camera's solid and translucent ones, then each world view's
+/// (`view_sections::Sections::marks`).
+pub const MARKS: usize = 2 + 2 * crate::render_views::MAX_WORLD_VIEWS;
 const GROUP_LIMIT: u32 = 65535;
 /// The page keys of the translucent arena (`Renderer::translucent_arena`, Translucent
 /// Batching): its page plus this. The section arena's pages are their own keys, all far
@@ -70,15 +74,6 @@ struct PageTable {
     arena: Option<wgpu::Buffer>,
 }
 
-/// Writes the fragment's alpha over the frame's and leaves its colour.
-pub(super) const ALPHA_ONLY: wgpu::BlendState = wgpu::BlendState {
-    color: wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Zero,
-        dst_factor: wgpu::BlendFactor::One,
-        operation: wgpu::BlendOperation::Add,
-    },
-    alpha: wgpu::BlendComponent::REPLACE,
-};
 /// A run of the frame's index list drawn from one arena page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Call {
@@ -105,7 +100,8 @@ pub struct Flat {
     /// The solid draws as the water mirror's camera draws them (`fs_solid_mirror`).
     pub solid_mirror: wgpu::RenderPipeline,
     pub translucent: wgpu::RenderPipeline,
-    pub translucent_mark: wgpu::RenderPipeline,
+    /// `solid` and `translucent` as a mirrored world view draws them, culling the front.
+    pub(crate) flipped: super::world_views::Flipped,
     flatten: wgpu::ComputePipeline,
     compute_layout: wgpu::BindGroupLayout,
     flatten_seen: wgpu::ComputePipeline,
@@ -127,6 +123,9 @@ pub struct Flat {
     translucent_blocks_per_page: u64,
     /// Block tables by page key.
     pages: Vec<Option<PageTable>>,
+    /// Each page key's quad looks (`looks::LookGroups`), bound beside the page while a pack
+    /// reads them (`bind_looks`).
+    looks: Vec<wgpu::BindGroup>,
     free_ids: Vec<u32>,
     next_id: u32,
     origins: wgpu::Buffer,
@@ -155,6 +154,8 @@ pub struct Flat {
     /// begin (`calls.len()` without them): the camera's translucent calls
     /// end at the first.
     pub shadow_calls: [usize; 2],
+    /// Where each mark's calls begin (`calls.len()` without them).
+    marks: [usize; MARKS],
     /// Frames with fewer sections in view keep the per-section draws.
     pub min_sections: usize,
     range_align: u64,
@@ -331,7 +332,7 @@ fn plan(
     pages: &[(u32, Option<u32>)],
     phase1_draws: usize,
     solid_draws: usize,
-    shadow: [usize; 2],
+    marks: [usize; MARKS],
     passes: [usize; 3],
     align: u64,
     key: impl Fn(u32, Option<u32>) -> u32,
@@ -343,7 +344,7 @@ fn plan(
     ranges.clear();
     segments.clear();
     let (mut phase1_calls, mut solid_calls) = (None, None);
-    let mut shadow_calls = [None; 2];
+    let mut mark_calls = [None; MARKS];
     let mut pass_calls = [None; 3];
     let mut total = 0u64;
     let mut by_source: Vec<(Source, Vec<Range>)> = Vec::new();
@@ -354,9 +355,9 @@ fn plan(
         if i == solid_draws {
             solid_calls = Some(calls.len());
         }
-        for (k, &from) in shadow.iter().enumerate() {
+        for (k, &from) in marks.iter().enumerate() {
             if i == from {
-                shadow_calls[k].get_or_insert(calls.len());
+                mark_calls[k].get_or_insert(calls.len());
             }
         }
         for (k, &from) in passes.iter().enumerate() {
@@ -365,7 +366,7 @@ fn plan(
             }
         }
         let starts =
-            i == phase1_draws || i == solid_draws || shadow.contains(&i) || passes.contains(&i);
+            i == phase1_draws || i == solid_draws || marks.contains(&i) || passes.contains(&i);
         let page = key(page, sorted);
         match calls.last_mut() {
             Some(last) if last.page == page && !starts => last.count += d[0],
@@ -405,7 +406,7 @@ fn plan(
     Plan {
         phase1_calls,
         solid_calls,
-        shadow_calls: shadow_calls.map(|c| c.unwrap_or(calls.len())),
+        marks: mark_calls.map(|c| c.unwrap_or(calls.len())),
         pass_calls: {
             let [opaque, cutout, phase2] = pass_calls.map(|c| c.unwrap_or(calls.len()));
             [
@@ -438,7 +439,7 @@ impl Flat {
             Option<wgpu::Face>,
             bool,
         ) -> wgpu::RenderPipeline,
-        solid: impl Fn(&wgpu::PipelineLayout, &str, &str, &str) -> SolidPipeline,
+        solid: impl Fn(&wgpu::PipelineLayout, &str, &str, &str, wgpu::Face) -> SolidPipeline,
     ) -> Self {
         let vertex = wgpu::ShaderStages::VERTEX;
         let compute = wgpu::ShaderStages::COMPUTE;
@@ -497,6 +498,7 @@ impl Flat {
         let storage_usage = wgpu::BufferUsages::STORAGE;
         let back = Some(wgpu::Face::Back);
         Self {
+            looks: Vec::new(),
             // The solid draws read either layout of the solid quads (`mesher::packed`) from
             // the page; translucent ones keep their vertex buffer.
             solid: solid(
@@ -504,18 +506,21 @@ impl Flat {
                 "Terrain solid (flat)",
                 "vs_section_flat",
                 "fs_solid",
+                wgpu::Face::Back,
             ),
             solid_opaque: solid(
                 &layout,
                 "Terrain solid opaque (flat)",
                 "vs_section_flat_opaque",
                 "fs_opaque",
+                wgpu::Face::Back,
             ),
             solid_cutout: solid(
                 &layout,
                 "Terrain solid cutout (flat)",
                 "vs_section_flat_cutout",
                 "fs_solid",
+                wgpu::Face::Back,
             ),
             // The mirror flips the winding: its solid terrain culls the front.
             solid_mirror: pipeline(
@@ -536,15 +541,24 @@ impl Flat {
                 back,
                 false,
             ),
-            translucent_mark: pipeline(
-                &layout,
-                "Terrain translucent HDR mark (flat)",
-                "vs_terrain_flat",
-                "fs_translucent_mark",
-                Some(ALPHA_ONLY),
-                back,
-                false,
-            ),
+            flipped: super::world_views::Flipped {
+                solid: solid(
+                    &layout,
+                    "Terrain solid flipped (flat)",
+                    "vs_section_flat",
+                    "fs_solid",
+                    wgpu::Face::Front,
+                ),
+                translucent: pipeline(
+                    &layout,
+                    "Terrain translucent flipped (flat)",
+                    "vs_terrain_flat",
+                    "fs_translucent",
+                    Some(wgpu::BlendState::ALPHA_BLENDING),
+                    Some(wgpu::Face::Front),
+                    false,
+                ),
+            },
             flatten,
             compute_layout,
             flatten_seen,
@@ -591,6 +605,7 @@ impl Flat {
             solid_calls: 0,
             pass_calls: [0; 3],
             shadow_calls: [0; 2],
+            marks: [0; MARKS],
             min_sections,
             range_align: (u64::from(device.limits().min_storage_buffer_offset_alignment) / 16)
                 .max(1),
@@ -681,6 +696,19 @@ impl Flat {
         self.free_ids.clear();
         self.next_id = 0;
     }
+    /// Takes over `from`'s block tables and section ids, with the arenas they describe
+    /// (`Renderer::take_world`). Their bind groups name `from`'s origins: `bind_pages` makes
+    /// them again.
+    pub fn take_tables(&mut self, from: &mut Self) {
+        self.clear();
+        self.pages = std::mem::take(&mut from.pages);
+        for table in self.pages.iter_mut().flatten() {
+            (table.group, table.arena) = (None, None);
+        }
+        self.free_ids = std::mem::take(&mut from.free_ids);
+        self.next_id = from.next_id;
+        self.translucent_blocks_per_page = from.translucent_blocks_per_page;
+    }
     /// Forgets the tables of pages the arenas released (`live`, by page key).
     pub fn trim(&mut self, live: impl Fn(u32) -> bool) {
         for (i, page) in self.pages.iter_mut().enumerate() {
@@ -709,7 +737,7 @@ impl Flat {
         pages: &[(u32, Option<u32>)],
         phase1_draws: usize,
         solid_draws: usize,
-        shadow: [usize; 2],
+        marks: [usize; MARKS],
         passes: [usize; 3],
         phase2: Option<&wgpu::Buffer>,
         translucent_arena: bool,
@@ -755,7 +783,7 @@ impl Flat {
         let Plan {
             phase1_calls,
             solid_calls,
-            shadow_calls,
+            marks: mark_calls,
             pass_calls,
             total,
         } = plan(
@@ -763,7 +791,7 @@ impl Flat {
             pages,
             phase1_draws,
             solid_draws,
-            shadow,
+            marks,
             passes,
             self.range_align,
             // Translucent draws, and only they, have sorted indices.
@@ -777,7 +805,8 @@ impl Flat {
         );
         self.phase1_calls = phase1_calls;
         self.solid_calls = solid_calls;
-        self.shadow_calls = shadow_calls;
+        self.shadow_calls = [mark_calls[0], mark_calls[1]];
+        self.marks = mark_calls;
         self.pass_calls = pass_calls;
         if total == 0 || total * 4 > device.limits().max_storage_buffer_binding_size {
             // Do not retain bindings for a frame that cannot use flat draws.
@@ -787,6 +816,7 @@ impl Flat {
             self.phase1_calls = 0;
             self.solid_calls = 0;
             self.shadow_calls = [0; 2];
+            self.marks = [0; MARKS];
             self.pass_calls = [0; 3];
             return false;
         }
@@ -1001,6 +1031,14 @@ impl Flat {
             }));
         }
     }
+    /// Binds `looks`' group of each page with it from now on (none: no looks).
+    pub fn bind_looks(&mut self, looks: Option<&super::looks::LookGroups>) {
+        self.looks.clear();
+        if let Some(looks) = looks {
+            let keys = 0..self.pages.len() as u32;
+            self.looks.extend(keys.map(|k| looks.get(k).clone()));
+        }
+    }
     /// The bind group of the section arena's page `page` (`bind_pages`), which the solid
     /// draws read their vertices through.
     pub fn page_group(&self, page: u32) -> Option<&wgpu::BindGroup> {
@@ -1028,6 +1066,19 @@ impl Flat {
     /// The camera's translucent calls.
     pub fn translucent_calls(&self) -> &[Call] {
         &self.calls[self.solid_calls..self.shadow_calls[0]]
+    }
+    /// The shadow camera's translucent calls.
+    pub fn shadow_translucent_calls(&self) -> &[Call] {
+        &self.calls[self.shadow_calls[1]..self.marks[2]]
+    }
+    /// World view `k`'s solid and translucent calls.
+    pub fn view_calls(&self, k: usize) -> [&[Call]; 2] {
+        let end = self.marks.get(4 + 2 * k).map_or(self.calls.len(), |&m| m);
+        let [solid, translucent] = [self.marks[2 + 2 * k], self.marks[3 + 2 * k]];
+        [
+            &self.calls[solid..translucent],
+            &self.calls[translucent..end],
+        ]
     }
 
     /// Draws `calls` with a flat pipeline set and `vertices` giving each
@@ -1143,6 +1194,9 @@ impl Flat {
             .expect("prepared page");
         pass.set_vertex_buffer(0, vertices(page));
         pass.set_bind_group(1, table, &[]);
+        if let Some(looks) = self.looks.get(page as usize) {
+            pass.set_bind_group(super::looks::GROUP, looks, &[]);
+        }
     }
 }
 
@@ -1275,7 +1329,7 @@ mod tests {
             &pages,
             solid,
             solid,
-            [draws.len(); 2],
+            [draws.len(); MARKS],
             [draws.len(), 0, solid],
             4,
             |page, _| page,
@@ -1324,7 +1378,7 @@ mod tests {
             &pages,
             solid,
             solid,
-            [draws.len(); 2],
+            [draws.len(); MARKS],
             [3, 1, solid],
             4,
             |page, _| page,
@@ -1346,21 +1400,24 @@ mod tests {
         );
     }
 
-    /// A shader pack's shadow draws follow the camera's, in calls of their
-    /// own even from the same page: solid ones, then translucent ones.
+    /// A shader pack's shadow draws follow the camera's, and a world view's follow them, in
+    /// calls of their own even from the same page: solid ones, then translucent ones.
     #[test]
-    fn plan_gives_the_shadow_lists_calls_of_their_own() {
+    fn plan_gives_the_shadow_and_view_lists_calls_of_their_own() {
         let (mut draws, mut pages, solid) = sample();
         let camera = draws.len();
         draws.extend([[6, 1, 0, 40, 6], [6 * 2, 1, 0, 64, 7], [6, 1, 6, 80, 7]]);
-        pages.extend([(0, None), (0, None), (0, Some(0))]);
+        draws.extend([[6, 1, 0, 88, 8], [6, 1, 12, 90, 8]]);
+        pages.extend([(0, None), (0, None), (0, Some(0)), (0, None), (0, Some(0))]);
         let (mut calls, mut ranges, mut segments) = (Vec::new(), Vec::new(), Vec::new());
+        let mut marks = [usize::MAX; MARKS];
+        marks[..4].copy_from_slice(&[camera, camera + 2, camera + 3, camera + 4]);
         let plan = plan(
             &draws,
             &pages,
             solid,
             solid,
-            [camera, camera + 2],
+            marks,
             [camera, 0, solid],
             4,
             |page, _| page,
@@ -1368,13 +1425,24 @@ mod tests {
             &mut ranges,
             &mut segments,
         );
-        assert_eq!((plan.solid_calls, plan.shadow_calls), (3, [4, 5]));
+        assert_eq!(plan.solid_calls, 3);
+        // the views not asked for start at the end
+        assert_eq!(
+            plan.marks,
+            [4, 5, 6, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]
+        );
         let call = |page, first, count| Call { page, first, count };
         assert_eq!(
             &calls[3..],
-            [call(0, 60, 18), call(0, 78, 18), call(0, 96, 6)]
+            [
+                call(0, 60, 18),
+                call(0, 78, 18),
+                call(0, 96, 6),
+                call(0, 102, 6),
+                call(0, 108, 6)
+            ]
         );
-        assert_eq!(plan.total, 6 * 17);
+        assert_eq!(plan.total, 6 * 19);
     }
 
     /// Phase 2's draws (here the third and fourth) get calls of their own,
@@ -1389,7 +1457,7 @@ mod tests {
             &pages,
             2,
             solid,
-            [draws.len(); 2],
+            [draws.len(); MARKS],
             [draws.len(), 0, solid],
             4,
             |page, _| page,
@@ -1402,7 +1470,7 @@ mod tests {
             Plan {
                 phase1_calls: 1,
                 solid_calls: 3,
-                shadow_calls: [4, 4],
+                marks: [4; MARKS],
                 pass_calls: [1, 0, 3],
                 total: 6 * 13
             }
@@ -1429,6 +1497,7 @@ mod tests {
     /// of the draws the test saw, in order, and their calls count them.
     #[test]
     fn flatten_writes_the_indices_of_the_per_section_draws() {
+        let _gpu = crate::gfx::test_gpu::lock();
         let instance = crate::gfx::test_gpu::instance();
         let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
             eprintln!("no GPU adapter: skipped");
@@ -1507,7 +1576,7 @@ mod tests {
                 &pages,
                 phase1,
                 solid,
-                [draws.len(); 2],
+                [draws.len(); MARKS],
                 [draws.len(), 0, solid],
                 align,
                 |page, _| page,

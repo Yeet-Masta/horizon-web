@@ -217,14 +217,17 @@ Screen. Test/preview consumers must exercise the actual modules without exposing
 
 ## Host adapters: independently reviewable, separate from UI logic
 
-These are engine integration PRs, not Play with Friends host code. Require U1..U8 plus T2 and
-an agreed entry-placement decision; remain blocked while the overlapping migration interface
-or icon ownership is unsettled. Each must say which public behaviour it enables and must not
-ship disabled buttons or placeholder flows as completed parity.
+These are engine integration PRs, not Play with Friends host code. They require U1..U8 plus T2
+and approval of the [entry allocation](friends-overlay-part2.md#ownership-and-entry-decisions).
+I1 also requires the replacement Play with Friends pause row; I2 requires the replacement Join a
+Friend Multiplayer entry and the approved disposition of non-join `Place::Title` pages.
+Implement and verify each replacement extension route before its icon switch. Until then,
+preserve the current routes. Each integration PR must say which public behaviour it enables
+and must not ship disabled buttons or placeholder flows as completed parity.
 
 | ID / budget | Allowed files and reference | Acceptance / non-goals |
 | --- | --- | --- |
-| P0 / <=400 per pure move | If needed, extract existing title/game/HUD responsibilities into sibling modules, before adding overlay behaviour. | No behaviour change; compare before/after existing tests and screenshots where visible. Record move additions/deletions separately. No file already over3000 lines grows; no compression trick or NUL loss. Split multiple relocations rather than mixing them. |
+| P0 / <=400 per pure move | If needed, extract existing title/game/HUD responsibilities into sibling modules, before adding overlay behaviour. | No behaviour change; compare before/after existing tests and screenshots where visible. Record move additions/deletions separately. No compression trick or NUL loss. Split multiple relocations rather than mixing them. |
 | W0 / 80-200 per generic fix | Existing `horizon-client-render/src/ui.rs` Caret/sprite helpers only when U3/U8 needs a demonstrably missing generic contract. | Check existing editor/sprite consumers as well as overlay. Blink after cursor moves and scroll-to are separate behaviours if their diff needs splitting. No overlay-specific branch in generic widgets. |
 | I1 / 180-350 | New `R/game/friends_overlay.rs` adapter; small dispatch replacement in gameplay screen/render/input paths. Reuse pause layout, do not edit the host/share implementation. | `PauseScreen.createPauseMenu`/`FriendsOverlayScreen.extractBackground`: correct demo/offline gate, consent, badge1..5/more, background draw without hover then blur, actual-parent return, pause semantics, listener cleanup, resize; no fifth icon unless separately approved. Dynamic registered pause rows remain intact. |
 | I2 / 200-400 | New `R/title/friends_overlay.rs` adapter; minimal title mode/dispatch replacement; P0 first where necessary. | `TitleScreen.init/tick`: same vanilla gate/positioning, badge refresh, consent, Escape/outside restores actual title state, panorama/background blur, no lost notifications during startup/world entry; leave Join by Code reachable through agreed extension entry. Do not add another renderer/skin worker. |

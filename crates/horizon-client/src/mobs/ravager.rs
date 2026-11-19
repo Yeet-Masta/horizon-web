@@ -49,6 +49,10 @@ pub fn register(m: &mut Mob) {
 pub fn immobile(m: &Mob) -> bool {
     m.extra.counter > 0 || m.extra.counter2 > 0 || m.extra.anim_ticks > 0
 }
+/// `Ravager.hasLineOfSight`: false while stunned or roaring (not while biting, unlike [`immobile`]).
+pub fn blind(m: &Mob) -> bool {
+    m.species() == Species::Ravager && (m.extra.counter2 > 0 || m.extra.anim_ticks > 0)
+}
 /// `Ravager.doHurtTarget`: the bite animation (entity event 4 for clients).
 pub fn on_attack(m: &mut Mob, events: &mut Vec<MobEvent>) {
     m.extra.counter = 10;
@@ -105,7 +109,7 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         base + (max - base) * 0.1
     };
     super::finalize::set_base(m, super::finalize::Attr::MovementSpeed, speed);
-    if m.horizontal_collision && w.mob_griefing {
+    if m.horizontal_collision && w.can_grief(m.id) {
         let b = m
             .bounds()
             .inflate(horizon_core::geometry::Vec3::new(0.2, 0.2, 0.2));
@@ -114,25 +118,39 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
             for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
                 for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
-                    let name = w.block_name(x, y, z);
-                    if name.ends_with("_leaves") {
+                    // `block instanceof LeavesBlock`: the class chain, which a
+                    // content mod's block copies from its template.
+                    let facts = w.facts.get(w.world.block(x, y, z));
+                    if facts.has_class("LeavesBlock") {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],
                             drop: true,
+                            by: Some(m.id),
+                            breaker: None,
                         });
                         destroyed = true;
                     }
                 }
             }
         }
-        if !destroyed && m.on_ground {
-            m.ai.jumping = true;
+        if m.on_ground {
+            if !destroyed {
+                m.ai.jumping = true;
+            } else if w.asks_living_destroy_block {
+                // The jump follows only when the game kept every leaf.
+                events.push(MobEvent::IfBroke {
+                    mob: m.id,
+                    effects: Vec::new(),
+                    otherwise: vec![MobEvent::Jump { mob: m.id }],
+                });
+            }
         }
     }
     // Entity.checkInsideBlocks -> CropBlock.entityInside: a ravager walking
     // through a crop destroys it, drops and all, with mobGriefing; a pitcher
     // crop (PitcherCropBlock.entityInside) goes the same way, both halves.
-    if w.mob_griefing {
+    // Mods are asked through `can_grief` for each crop, the pitcher crop too.
+    if w.griefing_possible() {
         let b = m
             .bounds()
             .deflate(horizon_core::geometry::Vec3::new(1.0e-5, 1.0e-5, 1.0e-5));
@@ -140,18 +158,18 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
             for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
                 for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
-                    if matches!(
-                        w.block_name(x, y, z),
-                        "minecraft:wheat"
-                            | "minecraft:carrots"
-                            | "minecraft:potatoes"
-                            | "minecraft:beetroots"
-                            | "minecraft:torchflower_crop"
-                            | "minecraft:pitcher_crop"
-                    ) {
+                    // `state.getBlock() instanceof CropBlock`: the class chain,
+                    // so a mod crop that copies `wheat` breaks too.
+                    let facts = w.facts.get(w.world.block(x, y, z));
+                    // Mods are asked through `can_grief` for each crop, the pitcher crop too.
+                    if (facts.has_class("CropBlock") || facts.has_class("PitcherCropBlock"))
+                        && w.can_grief(m.id)
+                    {
                         events.push(MobEvent::BreakBlock {
                             pos: [x, y, z],
                             drop: true,
+                            by: None,
+                            breaker: Some(m.id),
                         });
                     }
                 }
@@ -233,15 +251,15 @@ fn roar(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
         let dd = (xd * xd + zd * zd).max(0.001);
         [xd / dd * 4.0, 0.2, zd / dd * 4.0]
     };
-    if let Some(p) = &w.player
+    if let Some(p) = w.selected_player()
         && p.alive
         && p.bounds.intersects(area)
     {
-        events.push(MobEvent::AttackPlayer(6.0, from));
-        events.push(MobEvent::Push {
+        events.push(w.route_player_event(MobEvent::AttackPlayer(6.0, from)));
+        events.push(w.route_player_event(MobEvent::Push {
             target: Who::Player,
             velocity: fling(p.position),
-        });
+        }));
     }
     for s in w.others_near(area) {
         if s.id == m.id || !s.alive || s.species == Species::Ravager || !s.bounds.intersects(area) {
@@ -332,4 +350,275 @@ pub fn anim(m: &Mob, s: &State, p: &mut Poses) {
     p.xrot("left_hind_leg", (pos * 0.6662 + PI).mcos() * leg);
     p.xrot("right_front_leg", (pos * 0.6662 + PI).mcos() * leg);
     p.xrot("left_front_leg", (pos * 0.6662).mcos() * leg);
+}
+
+#[cfg(test)]
+#[path = "ravager_crush_tests.rs"]
+mod ravager_crush_tests;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    #[test]
+    #[ignore = "daily"]
+    fn modded_collision_without_leaves_jumps_without_if_broke() {
+        assert!(super::super::world::with_test_world(&[], |world, types| {
+            let mut world = world.clone();
+            world.asks_living_destroy_block = true;
+            let mut mob = Mob::new(
+                1,
+                Arc::new(types.types.get("minecraft:ravager").unwrap().clone()),
+                Vec3::new(0.5, 64.0, 0.5),
+                0.0,
+            );
+            mob.horizontal_collision = true;
+            mob.on_ground = true;
+            let mut events = Vec::new();
+            ai_step(&mut mob, &world, &mut events);
+            assert!(mob.ai.jumping);
+            assert!(!events.iter().any(|e| matches!(e, MobEvent::IfBroke { .. })));
+        }));
+    }
+
+    /// `CropBlock.entityInside` and `PitcherCropBlock.entityInside`:
+    /// `destroyBlock(pos, true, ravager)` names the ravager for the loot, and
+    /// `LivingDestroyBlockEvent` doesn't hear of it.
+    #[test]
+    #[ignore = "daily"]
+    fn a_trampled_crop_names_the_ravager() {
+        for crop in ["minecraft:wheat", "minecraft:pitcher_crop"] {
+            let build =
+                |world: &mut crate::world::World,
+                 registry: &horizon_world::registry::BlockRegistry| {
+                    world
+                        .chunks
+                        .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                    let state = registry.default_state(crop).unwrap();
+                    world.set(0, 64, 0, state).unwrap();
+                };
+            assert!(super::super::world::with_built_test_world(
+                &[],
+                build,
+                |world, types| {
+                    let mut world = world.clone();
+                    world.mob_griefing = true;
+                    let mut mob = Mob::new(
+                        1,
+                        Arc::new(types.types.get("minecraft:ravager").unwrap().clone()),
+                        Vec3::new(0.5, 64.0, 0.5),
+                        0.0,
+                    );
+                    let mut events = Vec::new();
+                    ai_step(&mut mob, &world, &mut events);
+                    assert!(events.iter().any(|e| matches!(
+                        e,
+                        MobEvent::BreakBlock {
+                            pos: [0, 64, 0],
+                            drop: true,
+                            by: None,
+                            breaker: Some(1),
+                        }
+                    )));
+                },
+            ));
+        }
+    }
+
+    /// A mod that lets the ravager grief against the rule (`canEntityGrief`)
+    /// has it trample a crop and a pitcher crop with `mobGriefing` off.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_lets_the_ravager_trample_crops_with_the_rule_off() {
+        struct Allow;
+        impl crate::mobs::MobHooks for Allow {
+            fn enderman_anger_suppressed(&self, _: u32, _: &crate::mobs::PlayerView) -> bool {
+                false
+            }
+            fn can_grief(&self, _: u32, _: bool) -> bool {
+                true
+            }
+            fn grief_hooked(&self) -> bool {
+                true
+            }
+            fn living_visibility(&self, _: &crate::mobs::PlayerView, _: u32, v: f64) -> f64 {
+                v
+            }
+        }
+        for crop in ["minecraft:wheat", "minecraft:pitcher_crop"] {
+            let build =
+                |world: &mut crate::world::World,
+                 registry: &horizon_world::registry::BlockRegistry| {
+                    world
+                        .chunks
+                        .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+                    let state = registry.default_state(crop).unwrap();
+                    world.set(0, 64, 0, state).unwrap();
+                };
+            assert!(super::super::world::with_built_test_world_rules(
+                &[],
+                false,
+                true,
+                build,
+                |world, types| {
+                    let ravager = || {
+                        Mob::new(
+                            1,
+                            Arc::new(types.types.get("minecraft:ravager").unwrap().clone()),
+                            Vec3::new(0.5, 64.0, 0.5),
+                            0.0,
+                        )
+                    };
+                    let tramples = |world: &MobWorld<'_>| {
+                        let mut events = Vec::new();
+                        ai_step(&mut ravager(), world, &mut events);
+                        events.iter().any(|e| {
+                            matches!(
+                                e,
+                                MobEvent::BreakBlock {
+                                    pos: [0, 64, 0],
+                                    ..
+                                }
+                            )
+                        })
+                    };
+                    assert!(!tramples(world), "{crop}: the rule off keeps it");
+                    let mut world = world.clone();
+                    world.mob_hooks = Some(&Allow);
+                    assert!(tramples(&world), "{crop}: the mod lets it trample");
+                },
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn modded_collision_with_leaves_defers_jump() {
+        let build = |world: &mut crate::world::World,
+                     registry: &horizon_world::registry::BlockRegistry| {
+            world
+                .chunks
+                .insert((0, 0), Arc::new(crate::chunk::Chunk::empty(0, 0)));
+            world
+                .set(
+                    0,
+                    64,
+                    0,
+                    registry.default_state("minecraft:oak_leaves").unwrap(),
+                )
+                .unwrap();
+        };
+        assert!(super::super::world::with_built_test_world(
+            &[],
+            build,
+            |world, types| {
+                let mut world = world.clone();
+                world.asks_living_destroy_block = true;
+                let mut mob = Mob::new(
+                    1,
+                    Arc::new(types.types.get("minecraft:ravager").unwrap().clone()),
+                    Vec3::new(0.5, 64.0, 0.5),
+                    0.0,
+                );
+                mob.horizontal_collision = true;
+                mob.on_ground = true;
+                let mut events = Vec::new();
+                ai_step(&mut mob, &world, &mut events);
+                assert!(!mob.ai.jumping);
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| matches!(e, MobEvent::BreakBlock { .. }))
+                );
+                assert!(events.iter().any(|e| matches!(e, MobEvent::IfBroke { otherwise, .. } if matches!(otherwise.as_slice(), [MobEvent::Jump { mob: 1 }]))));
+                world.asks_living_destroy_block = false;
+                let mut mob = Mob::new(
+                    2,
+                    Arc::new(types.types.get("minecraft:ravager").unwrap().clone()),
+                    Vec3::new(0.5, 64.0, 0.5),
+                    0.0,
+                );
+                mob.horizontal_collision = true;
+                mob.on_ground = true;
+                let mut events = Vec::new();
+                ai_step(&mut mob, &world, &mut events);
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, MobEvent::IfBroke { .. }))
+                );
+                assert!(!mob.ai.jumping);
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod sight_tests {
+    use super::*;
+    use crate::mobs::world::{test_player, with_built_test_world};
+    use horizon_core::geometry::Vec3;
+    use std::sync::Arc;
+
+    /// `Ravager.hasLineOfSight` (`Sensing.hasLineOfSight` calls it): a stunned or roaring ravager sees nobody,
+    /// a biting one still sees. The player stands ten blocks away on a flat floor with nothing between.
+    #[test]
+    #[ignore = "daily"]
+    fn a_stunned_or_roaring_ravager_does_not_see_the_player() {
+        let build = |world: &mut crate::world::World,
+                     registry: &horizon_world::registry::BlockRegistry| {
+            for cx in -1..1 {
+                for cz in -1..1 {
+                    world
+                        .chunks
+                        .insert((cx, cz), Arc::new(crate::chunk::Chunk::empty(cx, cz)));
+                }
+            }
+            let stone = registry.default_state("minecraft:stone").unwrap();
+            for x in -4..5 {
+                for z in -4..15 {
+                    world.set(x, 64, z, stone).unwrap();
+                }
+            }
+        };
+        let ran = with_built_test_world(&[], build, |w, types| {
+            let mut world = w.clone();
+            world.player = Some(test_player(Vec3::new(0.5, 65.0, 10.5)));
+            // (the mob's state, whether it sees the player), each on a new mob: sight is cached per tick.
+            let sees = |stunned: i32, roar: i32, bite: i32| {
+                let mut m = Mob::new(
+                    1,
+                    Arc::new(types.types["minecraft:ravager"].clone()),
+                    Vec3::new(0.5, 65.0, 0.5),
+                    0.0,
+                );
+                (m.extra.counter2, m.extra.anim_ticks, m.extra.counter) = (stunned, roar, bite);
+                m.sees(&world, Who::Player)
+            };
+            assert!(sees(0, 0, 0), "a plain ravager sees a player in the open");
+            assert!(
+                sees(0, 0, 10),
+                "a biting ravager still sees (attackTick is not in hasLineOfSight)"
+            );
+            assert!(!sees(40, 0, 0), "a stunned ravager sees nobody");
+            assert!(!sees(0, 20, 0), "a roaring ravager sees nobody");
+            assert!(
+                !blind_of_other_species(&world, types),
+                "only a ravager is blind"
+            );
+        });
+        assert!(ran, "vanilla data is missing");
+    }
+
+    fn blind_of_other_species(world: &MobWorld, types: &crate::mobs::MobTypes) -> bool {
+        let mut m = Mob::new(
+            2,
+            Arc::new(types.types["minecraft:pillager"].clone()),
+            Vec3::new(0.5, 65.0, 0.5),
+            0.0,
+        );
+        (m.extra.counter2, m.extra.anim_ticks) = (40, 20);
+        !m.sees(world, Who::Player)
+    }
 }

@@ -5,6 +5,7 @@
 //! everywhere.
 pub mod check;
 pub mod inputs;
+pub mod kept;
 pub mod manifest;
 pub mod package;
 pub mod reference;
@@ -13,8 +14,8 @@ pub mod stages;
 pub use check::{Problem, Report, check};
 pub use inputs::Frame;
 pub use manifest::{
-    API, Api, Blend, LightColor, MANIFEST, Manifest, Material, OptionKind, OptionPage, PackOption,
-    PackTexture, PageItem, Primaries, SCHEMA, SpriteTag, Stage,
+    API, Blend, Coverage, Fog, LightColor, MANIFEST, Manifest, Material, OptionKind, OptionPage,
+    PackOption, PackTexture, PageItem, Primaries, SCHEMA, SpriteTag, Stage,
 };
-pub use package::{EXTENSION, Pack};
-pub use stages::{Composed, StageKind, compose};
+pub use package::{Declared, EXTENSION, Pack};
+pub use stages::{Composed, StageKind, compose, compose_scene};

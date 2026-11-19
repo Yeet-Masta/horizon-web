@@ -3,7 +3,8 @@
 //! (difficulty, the default game mode, the whitelist) and through its management settings (the message of the
 //! day, the player limit) at once; the rest applies at the next start.
 
-use crate::{api::Client, config, engine};
+use crate::{api::Client, engine};
+use horizon_server_launch::config;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, path::Path};
 
@@ -138,12 +139,17 @@ pub fn parse_change(
 }
 
 /// The values vanilla uses for the numbers it clamps (`ChunkMap` keeps both distances within 2 to 32).
-fn range(section: &str, field: &str) -> Option<std::ops::RangeInclusive<i64>> {
+pub(crate) fn range(section: &str, field: &str) -> Option<std::ops::RangeInclusive<i64>> {
     match (section, field) {
         ("server", "view_distance" | "simulation_distance") => Some(2..=32),
         ("server", "max_view_distance") => Some(0..=32),
+        ("server", "max_viewed_loaded_chunks" | "max_viewed_ticking_chunks") => Some(0..=65536),
+        (
+            "server",
+            "max_viewed_loaded_chunks_per_level" | "max_viewed_ticking_chunks_per_level",
+        ) => Some(0..=1_048_576),
         ("server", "max_players") => Some(1..=1000),
-        ("backups", "keep") => Some(1..=1000),
+        ("backups", "keep") => Some(config::BACKUPS_KEEP),
         _ => None,
     }
 }
@@ -260,6 +266,9 @@ pub fn changeable_remotely(key: &str) -> bool {
     }
     let (section, field) = key.split_once('.').unwrap_or((key, ""));
     !matches!(section, "engine" | "panel" | "api" | "discord")
+        // Files the game writes player text to, or reads its word list from.
+        && !(matches!(section, "chat_filter" | "anticheat")
+            && matches!(field, "log" | "words_file" | "strikes"))
         && !(section == "properties"
             && (field.starts_with("rcon.")
                 || field.starts_with("management-server-")
@@ -295,11 +304,23 @@ mod tests {
             " properties.enable-rcon",
             "properties. rcon.password",
             "panel\n.allow_public",
+            "chat_filter.log",
+            "chat_filter.words_file",
+            "anticheat.log",
+            "anticheat.strikes",
         ] {
             assert!(!changeable_remotely(key), "{key:?}");
         }
         assert!(changeable_remotely("world.difficulty"));
         assert!(changeable_remotely("properties.motd"));
+        assert!(changeable_remotely("chat_filter.enabled"));
+        assert!(changeable_remotely("anticheat.alerts"));
+    }
+
+    #[test]
+    fn backups_keep_zero_is_refused() {
+        let table = toml::Table::try_from(config::Config::default()).unwrap();
+        assert!(parse_change(&table, "backups.keep=0").is_err());
     }
 
     fn table() -> toml::Table {
@@ -584,5 +605,43 @@ mod tests {
         assert!(set(&dir, &["world.name=a/b", "server.port=1"]).is_err());
         assert_eq!(config::Config::load(&dir).unwrap(), cfg);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `horizon-server help` says which settings `config set` gives a running server at once; every setting it
+    /// names has a way to apply it (`live_line`), and `view_distance`, which has none, is not named.
+    #[test]
+    fn the_help_names_what_config_set_applies_at_once() {
+        let help = crate::HELP;
+        let paragraph = &help[help.find("  config set").unwrap()..];
+        let paragraph = &paragraph[..paragraph.find("  import FILE").unwrap()];
+        let (text, number) = (
+            |s: &str| toml::Value::String(s.into()),
+            |n| toml::Value::Integer(n),
+        );
+        for (named, section, field, value) in [
+            ("difficulty", "world", "difficulty", text("hard")),
+            ("default game mode", "world", "game_mode", text("creative")),
+            (
+                "whitelist",
+                "server",
+                "whitelist",
+                toml::Value::Boolean(true),
+            ),
+            ("message of the day", "server", "motd", text("Hi")),
+            ("player limit", "server", "max_players", number(8)),
+            ("backup", "backups", "keep", number(3)),
+            ("update", "updates", "keep", number(2)),
+        ] {
+            assert!(
+                live_line(section, field, &value).is_some(),
+                "{section}.{field} is applied at once"
+            );
+            assert!(
+                paragraph.contains(named),
+                "the help names {named:?}: {paragraph}"
+            );
+        }
+        assert!(live_line("server", "view_distance", &number(8)).is_none());
+        assert!(!paragraph.contains("view distance"));
     }
 }

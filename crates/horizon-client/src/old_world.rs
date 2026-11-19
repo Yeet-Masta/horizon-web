@@ -4,19 +4,21 @@
 use crate::{biome::Biomes, chunk::Chunk, save::SaveDir};
 use horizon_core::position::ChunkPos;
 use horizon_std::sync::Mutex;
-use horizon_world::{
-    nbt::Tag,
-    registry::BlockStateId,
-    worldgen::{
-        biome::BiomeId,
-        biome_chunk::BiomeChunk,
-        blending::{BlendingData, Direction8, OldChunk, OldWorld, Sides},
-        generator::GeneratorData,
-    },
-};
 use std::{
     collections::HashMap,
     sync::{Arc, OnceLock},
+};
+use {
+    horizon_core::nbt::Tag,
+    horizon_world::{
+        registry::BlockStateId,
+        worldgen::{
+            biome::BiomeId,
+            biome_chunk::BiomeChunk,
+            blending::{BlendingData, Direction8, OldChunk, OldWorld, Sides},
+            generator::GeneratorData,
+        },
+    },
 };
 
 /// A level's saved chunks that an older version generated.

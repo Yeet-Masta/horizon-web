@@ -9,3 +9,12 @@ docs/api/*-reference.md text eol=lf
 # The web branch's own README: upstream merges keep it (`git config merge.ours.driver true`, once
 # per clone that merges; web/README.md, "Merging upstream").
 README.md merge=ours
+crates/horizon-mod-api-gen/crossing-foreign.json text eol=lf
+# The package layout's one number, read by Rust, Python and shell alike.
+crates/horizon-mod-package/src/sdk/package-format text eol=lf
+
+launcher/lang/*.json merge=horizon-lang
+crates/horizon-client/assets/horizon/lang/*.json merge=horizon-lang
+
+# The carried horizon-mixins patch is hashed into its tool's release tag: the same bytes on every OS.
+tools/mixins/*.patch text eol=lf

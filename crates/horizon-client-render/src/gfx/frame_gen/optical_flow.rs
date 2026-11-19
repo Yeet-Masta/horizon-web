@@ -341,15 +341,17 @@ impl OpticalFlow {
     }
 
     /// The flow from the previous call's `color` to this one's. `color`: `display` size,
-    /// a float texture holding Horizon's frame (gamma-encoded RGB, the swapchain's
-    /// values: AMD's SDR back buffer). `reset`: the previous frame is unrelated (first
-    /// frame, resize, teleport).
+    /// a float texture holding Horizon's frame (gamma-encoded RGB: the swapchain's values,
+    /// AMD's SDR back buffer, or the float frame's light, 1 at paper white). `peak`: on the
+    /// float frame, the display's peak in paper whites. `reset`: the previous frame is
+    /// unrelated (first frame, resize, teleport).
     pub fn dispatch(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         color: &wgpu::TextureView,
+        peak: Option<f32>,
         reset: bool,
     ) {
         let reset = reset || self.first;
@@ -371,8 +373,8 @@ impl OpticalFlow {
                 level: level as u32,
                 level_count: LEVELS as u32,
                 frame_index: self.frame_index,
-                transfer_function: 0,
-                min_max_luminance: [0.0, 1.0],
+                transfer_function: if peak.is_some() { 3 } else { 0 },
+                min_max_luminance: [0.0, peak.unwrap_or(1.0)],
             };
             queue.write_buffer(buffer, 0, bytemuck::bytes_of(&params));
         }
@@ -484,12 +486,30 @@ pub(super) mod tests {
         .unwrap();
     }
 
-    /// A device with WebGPU's default limits (what every GPU wgpu runs on has), or `None`
-    /// without a GPU.
+    /// A default-limits device that can write the optical-flow storage format,
+    /// or `None` with an observable reason when no suitable adapter is available.
     pub fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = crate::gfx::test_gpu::instance();
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
-        pollster::block_on(adapter.request_device(&Default::default())).ok()
+        let adapter = crate::gfx::test_gpu::adapter()?;
+        if !crate::gfx::test_gpu::supports_texture_usage(
+            &adapter,
+            wgpu::TextureFormat::Rg32Sint,
+            wgpu::TextureUsages::STORAGE_BINDING,
+        ) {
+            return None;
+        }
+        if !adapter
+            .get_texture_format_features(wgpu::TextureFormat::Rg32Sint)
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY)
+        {
+            let info = adapter.get_info();
+            eprintln!(
+                "skipped: {} / {:?} lacks Rg32Sint storage write access",
+                info.name, info.backend
+            );
+            return None;
+        }
+        Some(crate::gfx::test_gpu::device(&adapter))
     }
 
     /// Noise in 4x4 pixel cells, moved by `shift` pixels: what was at `p` is at `p + shift`.
@@ -598,7 +618,7 @@ pub(super) mod tests {
         reset: bool,
     ) {
         let mut encoder = device.create_command_encoder(&Default::default());
-        flow.dispatch(device, queue, &mut encoder, color, reset);
+        flow.dispatch(device, queue, &mut encoder, color, None, reset);
         queue.submit([encoder.finish()]);
     }
 
@@ -634,6 +654,7 @@ pub(super) mod tests {
     /// (-16, -8), and nothing reads as a scene change. A much darker frame then does.
     #[test]
     fn finds_a_shift_and_a_scene_change() {
+        let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device() else {
             return;
         };
@@ -671,6 +692,7 @@ pub(super) mod tests {
 
     #[test]
     fn repeated_cuts_and_stable_frames_update_the_history() {
+        let _gpu = crate::gfx::test_gpu::lock();
         let Some((device, queue)) = device() else {
             return;
         };

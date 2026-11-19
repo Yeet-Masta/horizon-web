@@ -1,8 +1,28 @@
 {
+ "/home/yeetmasta/Github/horizon-web-webtree/crates/horizon-client/src/game/interface/dedicated/mod.rs": {
+  "std::path::Path::canonicalize": 1,
+  "std::process::exit": 1,
+  "std::process::id": 1
+ },
+ "/home/yeetmasta/Github/horizon-web-webtree/crates/horizon-client/src/game/network/remote_chunks.rs": {
+  "std::sync::Condvar::wait": 1
+ },
+ "/home/yeetmasta/Github/horizon-web-webtree/crates/horizon-client/src/game/runtime/repro.rs": {
+  "std::sync::mpsc::Receiver::recv": 2
+ },
+ "/home/yeetmasta/Github/horizon-web-webtree/crates/horizon-client/src/game/world/integrated.rs": {
+  "std::process::exit": 1
+ },
  "crates/horizon-bench/src/lib.rs": {
   "std::fs::create_dir_all": 1,
   "std::fs::write": 1,
   "std::time::SystemTime::now": 1
+ },
+ "crates/horizon-client-gameplay/src/occlusion_culling.rs": {
+  "std::sync::mpsc::Receiver::recv": 2
+ },
+ "crates/horizon-client-gameplay/src/particle_culling.rs": {
+  "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/benchmark.rs": {
   "std::sync::mpsc::Receiver::recv_timeout": 2
@@ -11,18 +31,11 @@
   "std::path::Path::exists": 1,
   "std::sync::mpsc::Receiver::recv": 1
  },
- "crates/horizon-client-lib/../horizon-client/src/crafting.rs": {
-  "std::path::Path::is_dir": 1
- },
  "crates/horizon-client-lib/../horizon-client/src/lan/anticheat.rs": {
-  "chrono::Local::now": 1,
   "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/lan/chunks.rs": {
-  "std::sync::Condvar::wait": 1
- },
- "crates/horizon-client-lib/../horizon-client/src/lan/conn.rs": {
-  "std::sync::mpsc::Receiver::recv_timeout": 1
+  "std::sync::Condvar::wait_timeout": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/lan/data.rs": {
   "std::path::Path::exists": 1,
@@ -46,49 +59,50 @@
  "crates/horizon-client-lib/../horizon-client/src/lod_net/server.rs": {
   "std::sync::Condvar::wait": 1
  },
- "crates/horizon-client-lib/../horizon-client/src/mobs/finalize.rs": {
-  "chrono::Local::now": 1
- },
  "crates/horizon-client-lib/../horizon-client/src/mod_content.rs": {
-  "std::path::Path::exists": 6,
-  "std::path::Path::is_dir": 1,
-  "std::path::absolute": 2
+  "std::path::Path::exists": 6
  },
- "crates/horizon-client-lib/../horizon-client/src/no_resources.rs": {
-  "std::path::absolute": 1
- },
- "crates/horizon-client-lib/../horizon-client/src/save.rs": {
-  "std::path::Path::exists": 5,
+ "crates/horizon-client-lib/../horizon-client/src/raw_payloads/connection.rs": {
   "std::sync::Condvar::wait": 1
  },
+ "crates/horizon-client-lib/../horizon-client/src/raw_payloads/connection/payload_queue.rs": {
+  "std::sync::Condvar::wait_timeout": 1
+ },
+ "crates/horizon-client-lib/../horizon-client/src/save/compression_pool.rs": {
+  "std::sync::Condvar::wait": 1,
+  "std::sync::Condvar::wait_timeout": 1
+ },
+ "crates/horizon-client-lib/../horizon-client/src/save/writes.rs": {
+  "std::sync::Condvar::wait": 1
+ },
+ "crates/horizon-client-lib/../horizon-client/src/splashes.rs": {
+  "std::path::Path::canonicalize": 2
+ },
  "crates/horizon-client-lib/../horizon-client/src/studio/recorder.rs": {
-  "chrono::Local::now": 1,
   "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/title.rs": {
-  "chrono::Utc::now": 2
+  "chrono::Utc::now": 1
  },
  "crates/horizon-client-lib/../horizon-client/src/vanillagen/lod.rs": {
   "std::sync::Condvar::wait": 1
  },
+ "crates/horizon-client-lib/build.rs": {
+  "std::env::var_os": 1,
+  "std::fs::write": 1
+ },
  "crates/horizon-client-render/src/bluemap.rs": {
   "std::sync::Condvar::wait_timeout": 1
  },
- "crates/horizon-client-render/src/chat.rs": {
-  "chrono::Local::now": 1
- },
- "crates/horizon-client-render/src/cit.rs": {
-  "std::path::Path::is_file": 1
- },
  "crates/horizon-client-render/src/crash.rs": {
-  "chrono::Local::now": 1,
-  "std::process::exit": 1
+  "std::process::exit": 1,
+  "std::sync::mpsc::Receiver::recv_timeout": 1
  },
  "crates/horizon-client-render/src/datapack.rs": {
   "std::path::Path::is_file": 3
  },
- "crates/horizon-client-render/src/fusion.rs": {
-  "std::path::Path::is_dir": 2
+ "crates/horizon-client-render/src/gfx/device.rs": {
+  "std::sync::mpsc::Receiver::recv_timeout": 1
  },
  "crates/horizon-client-render/src/gfx/dx12_compiler.rs": {
   "std::path::Path::is_file": 1
@@ -99,8 +113,8 @@
  "crates/horizon-client-render/src/gfx/occlusion.rs": {
   "std::sync::mpsc::Receiver::recv": 2
  },
- "crates/horizon-client-render/src/gfx/screenshot_save.rs": {
-  "std::sync::mpsc::Receiver::recv_timeout": 1
+ "crates/horizon-client-render/src/gfx/screenshot_readback.rs": {
+  "std::sync::mpsc::Receiver::recv": 1
  },
  "crates/horizon-client-render/src/gfx/submit.rs": {
   "std::sync::mpsc::Receiver::recv": 1
@@ -116,18 +130,12 @@
  "crates/horizon-client-render/src/logging.rs": {
   "std::sync::mpsc::Receiver::recv_timeout": 1
  },
- "crates/horizon-client-render/src/model_library.rs": {
-  "std::path::Path::is_dir": 1
- },
  "crates/horizon-client-render/src/pack_browser.rs": {
   "std::path::Path::exists": 2
  },
  "crates/horizon-client-render/src/packs.rs": {
   "std::path::Path::exists": 2,
-  "std::path::Path::is_dir": 5
- },
- "crates/horizon-client-render/src/particles.rs": {
-  "std::path::Path::is_dir": 1
+  "std::path::Path::is_dir": 4
  },
  "crates/horizon-client-render/src/server_terrain.rs": {
   "std::path::Path::is_dir": 1
@@ -139,86 +147,22 @@
  "crates/horizon-client-render/src/split_profiles/store.rs": {
   "std::path::Path::exists": 1
  },
- "crates/horizon-client-render/src/ui.rs": {
-  "std::path::Path::is_dir": 1
- },
  "crates/horizon-client/../../packaging/windows/exe.rs": {
-  "std::env::var": 2,
+  "std::env::var": 3,
   "std::env::var_os": 4,
   "std::path::Path::canonicalize": 1
  },
  "crates/horizon-client/build.rs": {
-  "std::env::var": 1,
-  "std::env::var_os": 2,
-  "std::path::Path::is_file": 1
- },
- "crates/horizon-client/src/entry.rs": {
-  "std::path::absolute": 3,
-  "std::process::exit": 1
- },
- "crates/horizon-client/src/game.rs": {
-  "std::path::absolute": 1
- },
- "crates/horizon-client/src/game/chat.rs": {
+  "std::env::var": 4,
+  "std::env::var_os": 1,
+  "std::fs::write": 2,
   "std::path::Path::is_dir": 1
  },
- "crates/horizon-client/src/game/command_minecarts.rs": {
-  "chrono::Local::now": 1
+ "crates/horizon-client/src/entry.rs": {
+  "std::process::exit": 1
  },
- "crates/horizon-client/src/game/dedicated.rs": {
-  "std::path::Path::canonicalize": 1,
-  "std::path::Path::exists": 1,
-  "std::process::exit": 1,
-  "std::process::id": 1
- },
- "crates/horizon-client/src/game/extras/pvp.rs": {
-  "chrono::Local::now": 1
- },
- "crates/horizon-client/src/game/functions.rs": {
-  "std::path::Path::exists": 2
- },
- "crates/horizon-client/src/game/launch_options.rs": {
-  "std::path::absolute": 4
- },
- "crates/horizon-client/src/game/loading_screen.rs": {
-  "std::path::absolute": 1
- },
- "crates/horizon-client/src/game/mods.rs": {
-  "std::path::Path::exists": 1,
-  "std::path::Path::is_file": 1
- },
- "crates/horizon-client/src/game/native_configs.rs": {
-  "std::path::Path::exists": 1,
-  "std::path::Path::is_file": 1
- },
- "crates/horizon-client/src/game/native_server.rs": {
-  "std::path::Path::is_file": 1
- },
- "crates/horizon-client/src/game/occlusion_culling.rs": {
-  "std::sync::mpsc::Receiver::recv": 2
- },
- "crates/horizon-client/src/game/particle_culling.rs": {
-  "std::sync::mpsc::Receiver::recv": 1
- },
- "crates/horizon-client/src/game/profile_capture.rs": {
-  "std::path::Path::is_file": 1
- },
- "crates/horizon-client/src/game/remote_chunks.rs": {
-  "std::sync::Condvar::wait": 1
- },
- "crates/horizon-client/src/game/repro.rs": {
-  "chrono::Local::now": 2,
-  "std::path::Path::exists": 2,
-  "std::path::Path::is_dir": 8,
-  "std::path::Path::is_file": 8,
-  "std::path::Path::metadata": 1,
-  "std::sync::mpsc::Receiver::recv": 2
- },
- "crates/horizon-client/src/game/split/players.rs": {
-  "std::path::Path::exists": 1
- },
- "crates/horizon-client/src/game/world_loading.rs": {
-  "std::path::Path::exists": 1
+ "crates/horizon-core/src/random/ordered.rs": {
+  "std::sync::Condvar::wait_timeout": 1
  },
  "crates/horizon-cosmetics/src/feed.rs": {
   "std::sync::Condvar::wait_while": 1
@@ -226,6 +170,9 @@
  "crates/horizon-cosmetics/src/fetch.rs": {
   "std::sync::Condvar::wait_timeout": 1,
   "std::sync::Condvar::wait_while": 1
+ },
+ "crates/horizon-engine-slots/build.rs": {
+  "std::env::var_os": 2
  },
  "crates/horizon-friends/src/direct.rs": {
   "std::thread::Builder::spawn": 3,
@@ -263,6 +210,28 @@
   "std::env::var": 1,
   "std::time::Instant::now": 2
  },
+ "crates/horizon-game-discovery/src/exports.rs": {
+  "std::fs::read_to_string": 1,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-game-discovery/src/lib.rs": {
+  "std::fs::read_dir": 5,
+  "std::fs::read_to_string": 3,
+  "std::path::Path::canonicalize": 3,
+  "std::path::Path::is_dir": 2,
+  "std::path::Path::is_file": 2
+ },
+ "crates/horizon-game/../../packaging/windows/exe.rs": {
+  "std::env::var": 3,
+  "std::env::var_os": 4,
+  "std::path::Path::canonicalize": 1
+ },
+ "crates/horizon-game/build.rs": {
+  "std::env::var": 1
+ },
+ "crates/horizon-guest-stack/src/lib.rs": {
+  "std::process::exit": 1
+ },
  "crates/horizon-items/src/items.rs": {
   "std::path::Path::exists": 1
  },
@@ -270,28 +239,206 @@
   "std::path::Path::is_dir": 1
  },
  "crates/horizon-mod-api-gen/src/build.rs": {
-  "std::env::var_os": 1,
+  "std::env::var": 2,
+  "std::fs::read": 1,
   "std::fs::read_dir": 1,
+  "std::fs::write": 2,
+  "std::path::Path::exists": 1,
+  "std::path::Path::is_dir": 2,
+  "std::path::Path::is_file": 2,
+  "std::thread::scope": 2,
+  "std::time::Instant::now": 1
+ },
+ "crates/horizon-mod-api-gen/src/build/vocab_boundary.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/build/vocab_boundary/modules.rs": {
+  "std::fs::read_dir": 1,
+  "std::path::Path::canonicalize": 2,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/catalog.rs": {
+  "std::fs::read_dir": 2,
   "std::fs::read_to_string": 2,
+  "std::path::Path::is_dir": 1,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/crossing.rs": {
+  "std::env::var_os": 1,
+  "std::fs::read_to_string": 1,
   "std::fs::write": 1,
-  "std::path::Path::is_dir": 1
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/dispatch.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/dispatch_fixtures.rs": {
+  "std::fs::read_to_string": 3,
+  "std::fs::write": 1,
+  "std::path::Path::is_dir": 2
+ },
+ "crates/horizon-mod-api-gen/src/functions.rs": {
+  "std::fs::read": 2,
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 1,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/game_modules.rs": {
+  "std::fs::read_to_string": 1,
+  "std::fs::write": 1,
+  "std::path::Path::canonicalize": 3
+ },
+ "crates/horizon-mod-api-gen/src/hook_targets.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/host.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 3,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/incremental.rs": {
+  "std::env::current_exe": 1,
+  "std::fs::File::open": 1,
+  "std::fs::create_dir_all": 1,
+  "std::fs::read": 2,
+  "std::fs::read_dir": 3,
+  "std::fs::remove_dir_all": 1,
+  "std::fs::remove_file": 2,
+  "std::fs::rename": 1,
+  "std::path::Path::is_dir": 2,
+  "std::process::id": 1,
+  "std::time::Instant::now": 1,
+  "std::time::SystemTime::now": 1
+ },
+ "crates/horizon-mod-api-gen/src/index.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/internals.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 6,
+  "std::fs::write": 1,
+  "std::path::Path::is_file": 3
+ },
+ "crates/horizon-mod-api-gen/src/layout.rs": {
+  "std::fs::read_to_string": 2
  },
  "crates/horizon-mod-api-gen/src/lib.rs": {
-  "std::fs::create_dir_all": 1,
+  "std::fs::read_to_string": 1,
+  "std::fs::write": 2,
+  "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-api-gen/src/loops.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/named_hooks.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-api-gen/src/parts.rs": {
+  "std::fs::read_to_string": 4,
+  "std::path::Path::exists": 1,
+  "std::path::Path::is_dir": 1
+ },
+ "crates/horizon-mod-api-gen/src/parts/installation.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 2,
+  "std::path::Path::exists": 1,
+  "std::path::Path::is_dir": 1
+ },
+ "crates/horizon-mod-api-gen/src/patch.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 4,
+  "std::path::Path::is_dir": 1
+ },
+ "crates/horizon-mod-api-gen/src/points.rs": {
+  "std::fs::read_to_string": 3,
+  "std::fs::write": 1
+ },
+ "crates/horizon-mod-api-gen/src/replace.rs": {
   "std::fs::read_dir": 3,
   "std::fs::read_to_string": 8,
   "std::fs::write": 3,
+  "std::path::Path::exists": 3,
   "std::path::Path::is_dir": 1
  },
- "crates/horizon-mod-api-gen/src/staged.rs": {
+ "crates/horizon-mod-api-gen/src/source.rs": {
   "std::fs::read_to_string": 1
  },
- "crates/horizon-mods/src/content.rs": {
+ "crates/horizon-mod-api-gen/src/staged.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 3,
+  "std::path::Path::is_dir": 2
+ },
+ "crates/horizon-mod-api-gen/src/staging.rs": {
+  "std::fs::write": 3,
+  "std::path::Path::exists": 1,
+  "std::time::Instant::now": 7
+ },
+ "crates/horizon-mod-api-gen/src/surface/behaviours.rs": {
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 2
+ },
+ "crates/horizon-mod-api-gen/src/surface/mod.rs": {
+  "std::fs::read_to_string": 2,
+  "std::thread::scope": 1
+ },
+ "crates/horizon-mod-api-gen/src/surface/notes.rs": {
+  "std::fs::read": 1,
+  "std::fs::read_dir": 1
+ },
+ "crates/horizon-mod-api-gen/src/wire/mod.rs": {
+  "std::fs::create_dir_all": 1,
+  "std::fs::read_dir": 1,
+  "std::fs::read_to_string": 2,
   "std::path::Path::is_dir": 1
  },
- "crates/horizon-mods/src/manifest.rs": {
-  "std::path::Path::is_dir": 1,
+ "crates/horizon-mod-api-gen/src/wire/trait_roles.rs": {
+  "std::fs::read_dir": 1,
+  "std::path::Path::exists": 1
+ },
+ "crates/horizon-mod-api-macros/src/lib.rs": {
+  "std::env::var": 1
+ },
+ "crates/horizon-mod-package/src/install_lock.rs": {
+  "std::path::Path::canonicalize": 1,
+  "std::sync::Condvar::wait": 1
+ },
+ "crates/horizon-mod-package/src/selection/context.rs": {
+  "std::path::absolute": 1
+ },
+ "crates/horizon-mod-runtime/src/byte_channel.rs": {
+  "std::sync::Condvar::wait": 4,
+  "std::sync::Condvar::wait_timeout": 1
+ },
+ "crates/horizon-mod-source/src/mod_uses.rs": {
+  "std::fs::File::open": 1,
+  "std::fs::read_dir": 1,
   "std::path::Path::is_file": 1
+ },
+ "crates/horizon-mod-source/src/modules.rs": {
+  "std::fs::read_to_string": 1,
+  "std::path::Path::is_file": 2
+ },
+ "crates/horizon-mod-source/src/wire_types.rs": {
+  "std::fs::read_to_string": 1
+ },
+ "crates/horizon-mod-surface/src/child.rs": {
+  "std::env::var_os": 2,
+  "std::process::exit": 8,
+  "std::thread::scope": 2,
+  "std::thread::sleep": 2,
+  "std::thread::spawn": 4,
+  "std::time::Instant::now": 4
+ },
+ "crates/horizon-mod-surface/src/syntax.rs": {
+  "std::thread::scope": 1
+ },
+ "crates/horizon-mod-surface/src/uses.rs": {
+  "std::env::current_exe": 2
+ },
+ "crates/horizon-mod-vocab/build.rs": {
+  "std::env::var_os": 2,
+  "std::fs::read_to_string": 1,
+  "std::fs::write": 1
  },
  "crates/horizon-narrator/src/lib.rs": {
   "std::env::var_os": 1
@@ -301,32 +448,6 @@
   "std::sync::mpsc::Receiver::recv_timeout": 1,
   "std::thread::Builder::spawn": 1,
   "std::time::Instant::now": 2
- },
- "crates/horizon-optifine/src/blink.rs": {
-  "std::fs::read_dir": 1,
-  "std::fs::read_to_string": 1,
-  "std::path::Path::is_file": 3
- },
- "crates/horizon-optifine/src/cem/files.rs": {
-  "std::fs::metadata": 1,
-  "std::fs::read_dir": 1,
-  "std::fs::read_to_string": 1,
-  "std::path::Path::is_file": 3
- },
- "crates/horizon-optifine/src/emissive.rs": {
-  "std::fs::metadata": 1,
-  "std::fs::read": 1,
-  "std::fs::read_dir": 1,
-  "std::path::Path::is_file": 2
- },
- "crates/horizon-optifine/src/paths.rs": {
-  "std::fs::metadata": 1,
-  "std::fs::read_dir": 2
- },
- "crates/horizon-optifine/src/random_textures.rs": {
-  "std::fs::metadata": 1,
-  "std::fs::read": 1,
-  "std::fs::read_dir": 1
  },
  "crates/horizon-perf-format/src/brief.rs": {
   "std::fs::File::open": 1
@@ -343,10 +464,12 @@
   "std::thread::Builder::spawn": 1
  },
  "crates/horizon-protocol/src/connection.rs": {
-  "std::sync::Condvar::wait": 1,
-  "std::sync::Condvar::wait_timeout": 1,
   "std::sync::mpsc::Receiver::recv": 1,
   "std::sync::mpsc::Receiver::recv_timeout": 1
+ },
+ "crates/horizon-protocol/src/connection/memory.rs": {
+  "std::sync::Condvar::wait": 2,
+  "std::sync::Condvar::wait_timeout": 1
  },
  "crates/horizon-server-files/src/private_file.rs": {
   "std::process::id": 1
@@ -385,12 +508,10 @@
  },
  "crates/horizon-threads/src/jobs.rs": {
   "std::sync::Condvar::wait": 1,
-  "std::sync::Condvar::wait_timeout": 1,
-  "std::sync::Condvar::wait_while": 1
+  "std::sync::Condvar::wait_timeout": 1
  },
  "crates/horizon-threads/src/lib.rs": {
-  "std::env::var": 1,
-  "std::thread::scope": 1
+  "std::env::var": 1
  },
  "crates/horizon-world/build.rs": {
   "std::env::var": 1,
@@ -402,12 +523,6 @@
  },
  "crates/horizon-world/src/datafix/world_upgrader.rs": {
   "std::path::Path::exists": 1
- },
- "crates/horizon-world/src/json_folder.rs": {
-  "std::path::Path::is_dir": 1
- },
- "crates/horizon-world/src/loot.rs": {
-  "std::path::Path::is_dir": 1
  },
  "crates/horizon-world/src/worldgen/generator_structures.rs": {
   "std::sync::Condvar::wait": 1

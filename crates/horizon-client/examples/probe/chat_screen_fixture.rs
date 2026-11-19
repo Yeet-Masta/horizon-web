@@ -24,7 +24,9 @@ pub fn main() -> horizon_client::Result<()> {
     let [root, registries, inputs, output] = args.as_slice() else {
         return Err("usage: chat_screen_fixture RESOURCES REGISTRIES CASES OUTPUT".into());
     };
-    let atlas = HudAtlas::build(root)?;
+    let atlas = HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+        root.to_path_buf(),
+    ))?;
     lang::set(lang::Language::load(&[root], lang::DEFAULT));
     let m = Measure(&atlas.font);
     let reg = registries::registries(&serde_json::from_slice(&fs::read(registries)?)?, 4);
@@ -62,11 +64,12 @@ pub fn main() -> horizon_client::Result<()> {
             match a["type"].as_str().unwrap_or_default() {
                 "type" => screen.type_text(&m, &c, a["text"].as_str().unwrap_or_default()),
                 "click" => {
-                    screen.click(
+                    screen.click_event(
                         &m,
                         &c,
                         a["x"].as_f64().unwrap_or(0.0),
                         a["y"].as_f64().unwrap_or(0.0),
+                        a["doubleClick"].as_bool().unwrap_or(false),
                     );
                 }
                 "key" => {

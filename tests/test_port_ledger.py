@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import struct
@@ -7,10 +8,14 @@ import tempfile
 import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from test_class_index import Pool
+try:
+    from .test_class_index import Pool
+except ImportError:  # unittest discover -s tests imports this module at top level
+    from test_class_index import Pool
 from tools import port_ledger
 
 SCRIPT = Path(port_ledger.__file__).resolve()
@@ -29,6 +34,30 @@ def class_bytes(name: str, parent: str, fields: tuple[str, ...] = (), methods: t
 
 
 class PortLedgerJarOnlyTests(unittest.TestCase):
+    def test_default_build_inventories_the_lab_imported_jars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "research-lock.json").write_text(json.dumps({"minecraft": {"version": "fixture"}}),
+                                                    encoding="utf-8")
+            jars = root / ".local/minecraft/fixture/jars"
+            jars.mkdir(parents=True)
+            for filename, name, method in (("client.jar", "ClientOnly", "clientTick"),
+                                           ("server-game.jar", "ServerOnly", "serverTick")):
+                with zipfile.ZipFile(jars / filename, "w") as archive:
+                    archive.writestr(f"net/minecraft/test/{name}.class", class_bytes(
+                        f"net/minecraft/test/{name}", "java/lang/Object", methods=(method,)))
+            out = root / "output"
+            env = dict(os.environ, PORT_LEDGER_ROOT=str(root), PORT_LEDGER_OUT=str(out),
+                       HOME=str(root / "home"), APPDATA=str(root / "appdata"))
+            done = subprocess.run([sys.executable, str(SCRIPT), "build", "--jobs", "1"],
+                                  cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            ledger = json.loads((out / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(ledger["methods"]), {
+                "net/minecraft/test/ClientOnly#clientTick",
+                "net/minecraft/test/ServerOnly#serverTick",
+            })
+
     def test_jar_only_and_partial_sources_preserve_field_and_stale_citations(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -78,6 +107,85 @@ class PortLedgerJarOnlyTests(unittest.TestCase):
                         self.assertIn("Child.missing", stale)
 
 
+class PortLedgerStaleScanTests(unittest.TestCase):
+    """A citation is stale only when its own vanilla class and all its supertypes lack the method."""
+
+    SOURCES = {
+        "net/minecraft/test/SimplexNoise.java":
+            "package net.minecraft.test;\n"
+            "public class SimplexNoise { public double get(double x, double y) { return 0.0; } }\n",
+        "net/minecraft/test/AbstractScrollArea.java":
+            "package net.minecraft.test;\n"
+            "public abstract class AbstractScrollArea { public void updateScrolling() {} }\n",
+        "net/minecraft/test/AbstractSelectionList.java":
+            "package net.minecraft.test;\n"
+            "public abstract class AbstractSelectionList<E extends AbstractSelectionList.Entry<E>>\n"
+            "   extends AbstractScrollArea { public static class Entry<E> {} }\n",
+        "net/minecraft/test/Base.java":
+            "package net.minecraft.test;\npublic class Base { public void inherited() {} }\n",
+        "net/minecraft/test/Middle.java":
+            "package net.minecraft.test;\npublic class Middle extends Base { }\n",
+        "net/minecraft/test/Leaf.java":
+            "package net.minecraft.test;\npublic class Leaf extends Middle { }\n",
+        "net/minecraft/test/QualifiedLeaf.java":
+            "package net.minecraft.test;\npublic class QualifiedLeaf extends net.minecraft.test.Base { }\n",
+        "net/minecraft/test/Level.java":
+            "package net.minecraft.test;\npublic abstract class Level implements LevelAccessor, AutoCloseable { }\n",
+        "net/minecraft/test/LevelAccessor.java":
+            "package net.minecraft.test;\n"
+            "public interface LevelAccessor extends CollisionGetter, EntityGetter { }\n",
+        "net/minecraft/test/CollisionGetter.java":
+            "package net.minecraft.test;\n"
+            "public interface CollisionGetter { default void getBlockCollisions() {} }\n",
+        "net/minecraft/test/EntityGetter.java":
+            "package net.minecraft.test;\n"
+            "public interface EntityGetter { default void getEntitiesOfClass() {} }\n",
+        "net/minecraft/world/level/gameevent/vibrations/VibrationSystem.java":
+            "package net.minecraft.world.level.gameevent.vibrations;\n"
+            "public interface VibrationSystem { class Listener { boolean present() { return false; } } }\n",
+        **{f"net/minecraft/test/Chain{depth}.java":
+            f"package net.minecraft.test;\npublic class Chain{depth}"
+            + (f" extends Chain{depth + 1}" if depth < 14 else "")
+            + (" { public void deep() {} }\n" if depth == 14 else " { }\n")
+            for depth in range(15)},
+    }
+    RUST = (
+        "/// Math.max for the bounds.\nfn a() {}\n"
+        "/// Ranges.margins for the viewport.\nfn b() {}\n"
+        "/// SimplexNoise.getValue, which 1.21 had; 26.3 spells it get.\nfn c() {}\n"
+        "/// VibrationSystem.Listener.isOccluded for the allay.\nfn d() {}\n"
+        "/// VibrationSystem.Listener.present does exist.\nfn e() {}\n"
+        "/// AbstractSelectionList.updateScrolling, through the generic superclass.\nfn f() {}\n"
+        "/// Leaf.inherited, from Base through Middle.\nfn g() {}\n"
+        "/// Level.getBlockCollisions, through LevelAccessor to CollisionGetter.\nfn h() {}\n"
+        "/// Level.getEntitiesOfClass, through the second superinterface.\nfn i() {}\n"
+        "/// QualifiedLeaf.inherited, through a fully qualified superclass.\nfn j() {}\n"
+        "/// Chain0.deep, from the deepest supertype in a long chain.\nfn k() {}\n"
+    )
+
+    def test_only_a_known_vanilla_class_makes_a_citation_stale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sources = root / "sources"
+            for rel, text in self.SOURCES.items():
+                source = sources / rel
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(text, encoding="utf-8")
+            rust = root / "crates/example/src/lib.rs"
+            rust.parent.mkdir(parents=True)
+            rust.write_text(self.RUST, encoding="utf-8")
+            out = root / "output"
+            with mock.patch.multiple(port_ledger, ROOT=root, OUT=out, LEDGER=out / "ledger.json",
+                                     MAP_DIR=root / "maps", ORACLE_DIR=root / "oracles",
+                                     ProcessPoolExecutor=ThreadPoolExecutor), \
+                    mock.patch.object(port_ledger, "rust_files", return_value=["crates/example/src/lib.rs"]):
+                result = port_ledger.build([str(sources)], [], 1)
+                stale = {g["cite"] for g in result["gaps"] if g["kind"] == "stale"}
+                # Math (JDK) and Ranges (Horizon) are not vanilla classes, and every inherited method
+                # is found through its supertypes; only the rename and the nested-class miss are stale.
+                self.assertEqual(stale, {"SimplexNoise.getValue", "VibrationSystem.Listener.isOccluded"})
+
+
 class PortLedgerCliTests(unittest.TestCase):
     """--json is read the same before or after the query's name (port_ledger.py's docstring)."""
 
@@ -114,6 +222,88 @@ class PortLedgerCliTests(unittest.TestCase):
             helped = self.run_cli(tmp, "where", "--help")
             self.assertEqual(helped.returncode, 0, helped.stderr)
             self.assertIn("--json", helped.stdout)
+
+
+class PortLedgerFixTests(unittest.TestCase):
+    """Pure-Python regressions: inherited methods, untracked ports, lost methods and dotted names."""
+
+    @staticmethod
+    def ledger(classes=None, methods=None):
+        return {
+            "classes": classes or {}, "methods": methods or {}, "fns": {}, "gaps": [],
+            "ported": {}, "mapped": {}, "mentioned": {}, "named": {}, "linked": {},
+            "structural": {}, "inferred": {}, "skipped": {}, "absent": {}, "homes": {},
+            "harness": {}, "callers": {}, "class_cites": {}, "file_class_cites": {},
+        }
+
+    @staticmethod
+    def method(cls, name):
+        return {"class": cls, "name": name, "file": cls + ".java",
+                "lines": [[10, 20]], "callees": [], "client": False, "size": 20}
+
+    def test_where_finds_method_declared_on_a_supertype(self):
+        parent, middle, child = ("net/minecraft/test/" + n for n in ("Parent", "Middle", "Child"))
+        led = self.ledger(
+            classes={child: {"file": "Child.java", "extends": [middle]},
+                     middle: {"file": "Middle.java", "extends": [parent]},
+                     parent: {"file": "Parent.java", "extends": []}},
+            methods={parent + "#inherited": self.method(parent, "inherited"),
+                     parent + "#deep": self.method(parent, "deep")},
+        )
+        for query, want in (("Child.inherited", "Parent.inherited"), ("Child.deep", "Parent.deep")):
+            with self.subTest(query=query), redirect_stdout(io.StringIO()) as out:
+                port_ledger.cmd_where(led, query, True)
+            self.assertEqual([v["vanilla"] for v in json.loads(out.getvalue())], [want])
+
+    def test_match_classes_and_class_cmd_accept_dotted_fqns(self):
+        outer = "net/minecraft/world/level/block/DispenserBlock"
+        inner = outer + "$DispenseBehavior"
+        led = self.ledger(
+            classes={outer: {"file": "DispenserBlock.java"}, inner: {"file": "DispenserBlock.java"}},
+            methods={outer + "#dispenseFrom": self.method(outer, "dispenseFrom")},
+        )
+        for query in ("DispenserBlock", outer.replace("/", "."), outer):
+            with self.subTest(query=query):
+                self.assertEqual(port_ledger.match_classes(led, query), [outer])
+        self.assertEqual(port_ledger.match_classes(led, inner.replace("/", ".").replace("$", ".")), [inner])
+        with redirect_stdout(io.StringIO()) as out:
+            port_ledger.cmd_class(led, outer.replace("/", "."), True)
+        self.assertEqual(json.loads(out.getvalue())[0]["class"], "DispenserBlock")
+
+    def test_map_check_accepts_dotted_fqn(self):
+        cls = "net/minecraft/world/level/block/DispenserBlock"
+        led = self.ledger(classes={cls: {"file": "DispenserBlock.java"}})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "verdicts.tsv"
+            path.write_text("net.minecraft.world.level.block.DispenserBlock\tmissing\t\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()) as out:
+                port_ledger.cmd_map_check(led, [str(path)])
+        self.assertIn("no problems", out.getvalue())
+
+    def test_changed_ranges_includes_untracked_rust_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rust = root / "crates" / "newport.rs"
+            rust.parent.mkdir(parents=True)
+            rust.write_text("fn newport() {}\nfn second() {}\n", encoding="utf-8")
+            replies = [subprocess.CompletedProcess([], 0, stdout="base\n", stderr=""),
+                       subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                       subprocess.CompletedProcess([], 0, stdout="crates/newport.rs\n", stderr="")]
+            with mock.patch.object(port_ledger, "ROOT", root), \
+                    mock.patch.object(port_ledger.subprocess, "run", side_effect=replies) as run:
+                mb, ranges = port_ledger.changed_ranges("main")
+            self.assertEqual(mb, "base")
+            self.assertEqual(ranges["crates/newport.rs"], [(1, 2)])
+            self.assertEqual([c.args[0][:2] for c in run.call_args_list],
+                             [["git", "merge-base"], ["git", "diff"], ["git", "ls-files"]])
+
+    def test_diff_ledgers_reports_removed_method(self):
+        cls, k = "a/b/C", "a/b/C#m"
+        old = self.ledger(classes={cls: {"file": "C.java"}}, methods={k: self.method(cls, "m")})
+        old["ported"][k] = {}
+        result = port_ledger.diff_ledgers(old, self.ledger())
+        self.assertEqual(result["lost"], ["C.m: ported -> missing"])
+        self.assertEqual(result["newly found"], [])
 
 
 if __name__ == "__main__":

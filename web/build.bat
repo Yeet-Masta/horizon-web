@@ -85,7 +85,7 @@ if not "%have%"=="%pinned%" (
 
 rem No sound device, controllers or mod runtime in a browser (web\README.md); Horizon's own
 rem extras (cosmetics, Play with Friends, its settings pages) as in the official game.
-set "crate=-p horizon-client --bin horizon-client --no-default-features --features horizon-extras --config web/simd.toml%extra%"
+set "crate=-p horizon-game --bin horizon-client --no-default-features --features horizon-extras --config web/simd.toml%extra%"
 rem wasm64 is a tier 3 target, and threads need std built with atomics: std is built here, with
 rem the nightly toolchain. web\threads.toml adds shared memory and atomics. Builds that make std
 rem can unwind (web\unwind.toml, unless --abort); the one-thread wasm32 build, on stable's prebuilt

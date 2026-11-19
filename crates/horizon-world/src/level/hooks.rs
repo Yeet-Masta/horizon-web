@@ -1,13 +1,16 @@
 //! `neighborChanged`, `onPlace`, `affectNeighborsAfterRemoval` and
 //! `updateIndirectNeighbourShapes` for the overriding vanilla classes.
-use super::{
-    LevelAccess, LevelEvent, Sim,
-    classes::Class,
-    states::BlockId,
-    update::{below, rel},
-};
 use crate::registry::BlockStateId;
 use horizon_core::{geometry::Direction, position::BlockPos, random::RandomSource};
+use {
+    super::{
+        LevelAccess, LevelEvent, Sim,
+        classes::Class,
+        states::BlockId,
+        update::{below, rel},
+    },
+    horizon_core::neighbour_update::NeighbourUpdate,
+};
 
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `BlockState.handleNeighborChanged`.
@@ -29,7 +32,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         moved: bool,
     ) {
         self.level
-            .observe_neighbor_changed(pos, state, changed, moved);
+            .observe_neighbor_changed(self.ticks, pos, state, changed, moved);
         let b = self.b;
         let block = b.block(state);
         let chain = &b.data(state).chain;
@@ -98,7 +101,11 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 Class::RedstoneLamp => self.lamp_neighbor_changed(pos, state),
                 Class::RedstoneTorch => self.torch_neighbor_changed(pos, state),
                 Class::RedstoneWire => {
-                    if self.level.redstone_experiments() && changed == b.named.redstone_wire {
+                    // RedStoneWireBlock.neighborChanged: a client's wire keeps the power the
+                    // server sent (#16864).
+                    if self.level.is_client_side()
+                        || self.level.redstone_experiments() && changed == b.named.redstone_wire
+                    {
                         return;
                     }
                     if self.can_survive(state, pos) {
@@ -209,7 +216,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 }
                 Class::RedstoneTorch => self.torch_notify_neighbors(pos, state),
                 Class::RedstoneWire => {
-                    if !same {
+                    if !same && !self.level.is_client_side() {
                         self.wire_update_power(pos, state, None, true);
                         for direction in [Direction::Up, Direction::Down] {
                             self.update_neighbors_at(rel(pos, direction), block);
@@ -293,8 +300,37 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         }
     }
 
-    /// `BlockState.affectNeighborsAfterRemoval`.
+    /// `BlockState.affectNeighborsAfterRemoval`: the block's own class first, as an override's
+    /// `super` call, then the updates a mod's part asked for, in the order it asked.
     pub fn affect_neighbors_after_removal(
+        &mut self,
+        state: BlockStateId,
+        pos: BlockPos,
+        moved: bool,
+    ) {
+        self.class_affect_neighbors_after_removal(state, pos, moved);
+        let mut updates = Vec::new();
+        self.level
+            .affect_neighbors_after_removal(pos, state, moved, &mut updates);
+        let block = self.b.block(state);
+        for update in updates {
+            self.neighbour_update(pos, block, update);
+        }
+    }
+
+    /// One `NeighbourUpdate` from `pos`, `block` being the block vanilla passes as the one that
+    /// changed there.
+    pub fn neighbour_update(&mut self, pos: BlockPos, block: BlockId, update: NeighbourUpdate) {
+        match update {
+            NeighbourUpdate::OutputSignal => self.update_neighbour_for_output_signal(pos, block),
+            NeighbourUpdate::Neighbours => self.update_neighbors_at(pos, block),
+            NeighbourUpdate::NeighboursExcept(skip) => {
+                self.update_neighbors_at_except(pos, block, skip)
+            }
+        }
+    }
+
+    fn class_affect_neighbors_after_removal(
         &mut self,
         state: BlockStateId,
         pos: BlockPos,
@@ -377,8 +413,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                         self.torch_notify_neighbors(pos, state);
                     }
                 }
+                // RedStoneWireBlock.affectNeighborsAfterRemoval takes a ServerLevel (#16864).
                 Class::RedstoneWire => {
-                    if !moved {
+                    if !moved && !self.level.is_client_side() {
                         for direction in Direction::ALL {
                             self.update_neighbors_at(rel(pos, direction), block);
                         }
@@ -429,6 +466,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         pos: BlockPos,
         creative: bool,
         correct_tool: bool,
+        source: Option<super::LevelEventPlayer>,
     ) -> bool {
         let b = self.b;
         let p = b.props;
@@ -453,7 +491,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     b.air()
                 };
                 self.set_block(bottom, replacement, 35);
-                self.level_event(2001, bottom, bottom_state.0 as i32);
+                self.level_event_from(source, 2001, bottom, bottom_state.0 as i32);
             }
         }
         if creative && data.is(Class::AbstractBed) && b.table.text(state, p.part) == "foot" {
@@ -461,7 +499,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             let head = self.state(head_pos);
             if b.is_block(head, b.block(state)) && b.table.text(head, p.part) == "head" {
                 self.set_block(head_pos, b.air(), 35);
-                self.level_event(2001, head_pos, head.0 as i32);
+                self.level_event_from(source, 2001, head_pos, head.0 as i32);
             }
         }
         // PistonHeadBlock.playerWillDestroy: in creative, destroy the base piston
@@ -481,7 +519,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if data.is(Class::BaseFire) {
             self.level_event(1009, pos, 0);
         } else {
-            self.level_event(2001, pos, state.0 as i32);
+            self.level_event_from(source, 2001, pos, state.0 as i32);
         }
         self.game_event(pos, "minecraft:block_destroy");
         let removed = self.remove_block(pos, false);
@@ -593,6 +631,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             self.level.level_key(),
             super::LevelKey::OVERWORLD | super::LevelKey::NETHER
         ) && let Some(shape) = self.find_empty_portal_shape(pos, true)
+            && self.level.allow_portal_spawn(pos, state, &shape)
         {
             self.create_portal_blocks(&shape);
             return;

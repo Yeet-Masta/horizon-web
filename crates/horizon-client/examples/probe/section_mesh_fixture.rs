@@ -8,7 +8,7 @@ use horizon_client::{
     blocks::BlockFacts,
     chunk::{Chunk, Light, MIN_Y, index},
     graphics::LeafCullingMode,
-    mesher::{EMISSION_BITS, FLUID_FACE_BITS, MeshTables, Mesher, OPAQUE_LAYER, TerrainVertex},
+    mesher::{FLUID_BIT, LEVEL_BITS, MeshTables, Mesher, OPAQUE_LAYER, TIER_BITS, TerrainVertex},
     models,
 };
 use horizon_core::biome::BiomeZoom;
@@ -131,6 +131,7 @@ fn scene(
         shader_pack_lighting: false,
         separate_ao: false,
         shader_pack: false,
+        looks: false,
         assets,
         render,
         tables,
@@ -143,6 +144,8 @@ fn scene(
         opaque_ice: false,
         translucent_layers: &[],
         leaf_culling: LeafCullingMode::Off,
+        hidden_states: &[],
+        part_tables: Default::default(),
     };
     let section_y = int(&row["section_y"])?;
     let started = Instant::now();
@@ -174,7 +177,7 @@ fn scene(
                         z,
                         u,
                         w,
-                        argb(v.color | EMISSION_BITS | FLUID_FACE_BITS),
+                        argb(v.color | TIER_BITS | FLUID_BIT | LEVEL_BITS),
                         light_coords(v.light)
                     ])
                 })
@@ -193,11 +196,15 @@ pub fn main() -> Result<()> {
     }
     let root = PathBuf::from(&args[0]);
     let assets = Assets::load(&root)?;
-    let render = assets.reload(&root)?;
+    let render = assets.reload(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.to_path_buf(),
+    ))?;
     let facts = BlockFacts::load(&root, assets.registry)?;
-    let mut biomes = Biomes::load(&root)?;
+    let mut biomes = Biomes::load(&horizon_assets::resource_source::ResourceRoot::directory(
+        root.to_path_buf(),
+    ))?;
     let visibility = models::load_visibility(&root, assets.registry)?;
-    let tables = MeshTables::new(&assets, &render, &facts, visibility)?;
+    let tables = MeshTables::new(&assets, &render, &facts, visibility, None)?;
     let names: BTreeMap<u32, &str> = render
         .sprite_layers
         .iter()

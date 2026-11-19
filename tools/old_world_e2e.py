@@ -42,7 +42,7 @@ def close(g):
 
 
 def build():
-    subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib',
+    subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib',
                     '--bin', 'horizon-client', '--bin', 'horizon-ctl', '--example', 'old_world_fixture'], cwd=lan.ROOT, check=True)
     meta = json.loads(subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=lan.ROOT,
                                      capture_output=True, text=True, check=True).stdout)
@@ -56,7 +56,7 @@ def main():
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     bins = build()
-    ctl, resources = bins / 'horizon-ctl', lab.RESOURCES.resolve()
+    ctl, resources = lab.binary(bins, 'horizon-ctl'), lab.RESOURCES.resolve()
     # 1. The source world: terrain of one seed around the origin.
     src = game(ctl, resources, 'source')
     try:

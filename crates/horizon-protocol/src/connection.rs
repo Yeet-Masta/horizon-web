@@ -1,5 +1,6 @@
 //! A blocking connection with vanilla's pipeline: optional AES/CFB8
-//! encryption, VarInt21 framing and threshold compression. After login it
+//! encryption, VarInt21 framing and threshold compression on TCP. Memory pipes
+//! use private u64-length framing without network compression or size limits. After login it
 //! splits into a reader (for a receive thread) and a shareable writer, or
 //! gives its stream up ([`Connection::detach`]) to be polled without blocking,
 //! the halves then keeping only the framing, compression and encryption. It
@@ -7,153 +8,18 @@
 //! (vanilla's `LocalChannel`, which an integrated server's player uses), or
 //! on the web build over a WebSocket, whose reads wait in [`ConnReader::recv_async`].
 use crate::{Error, Result, buf::Reader, crypto::Cfb8, frame};
-use horizon_std::sync::Mutex;
 use horizon_std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
     sync::{
-        Arc, Condvar,
+        Arc,
         atomic::{AtomicI64, Ordering},
     },
 };
 
-/// Called when a [`Pipe`] end has bytes to read or was closed ([`Pipe::on_ready`]).
-type Notify = Arc<dyn Fn() + Send + Sync>;
-
-/// One direction of a [`Pipe`]: the bytes written and not read yet, and
-/// whether either end closed it.
-#[derive(Default)]
-struct Channel {
-    state: Mutex<(std::collections::VecDeque<u8>, bool)>,
-    ready: Condvar,
-    /// The reading end's [`Pipe::on_ready`].
-    notify: Mutex<Option<Notify>>,
-}
-impl Channel {
-    fn close(&self) {
-        self.state.lock().unwrap().1 = true;
-        self.ready.notify_all();
-        self.notify();
-    }
-    /// Tell a reader that doesn't block, outside the state's lock.
-    fn notify(&self) {
-        let notify = self.notify.lock().unwrap().clone();
-        if let Some(notify) = notify {
-            notify();
-        }
-    }
-}
-/// The channels of one end; dropping the end's last clone closes them, as
-/// a socket closes with its process.
-struct End {
-    incoming: Arc<Channel>,
-    outgoing: Arc<Channel>,
-}
-impl Drop for End {
-    fn drop(&mut self) {
-        self.incoming.close();
-        self.outgoing.close();
-    }
-}
-/// One end of an in-memory byte pipe: what one end writes the other reads.
-pub struct Pipe {
-    end: Arc<End>,
-    /// The read timeout (`set_read_timeout`).
-    timeout: Mutex<Option<Duration>>,
-    /// Reads with nothing to read fail with `WouldBlock` instead of waiting.
-    nonblocking: bool,
-    /// It carries a connection from the network ([`Pipe::bridged`]).
-    bridged: bool,
-}
-impl Pipe {
-    /// Two connected ends.
-    pub fn pair() -> (Self, Self) {
-        let (a, b) = (Arc::new(Channel::default()), Arc::new(Channel::default()));
-        let end = |incoming, outgoing| Self {
-            end: Arc::new(End { incoming, outgoing }),
-            timeout: Mutex::new(None),
-            nonblocking: false,
-            bridged: false,
-        };
-        (end(a.clone(), b.clone()), end(b, a))
-    }
-    fn try_clone(&self) -> Self {
-        Self {
-            end: self.end.clone(),
-            timeout: Mutex::new(*self.timeout.lock().unwrap()),
-            nonblocking: self.nonblocking,
-            bridged: self.bridged,
-        }
-    }
-    /// This end, carrying a connection from the network that something copies
-    /// to and from the other end (the web build's friends, whose data channels
-    /// stay on the page): a connection over it is not a memory connection.
-    pub fn bridged(mut self) -> Self {
-        self.bridged = true;
-        self
-    }
-    /// Reads with nothing to read fail with `WouldBlock`, as a non-blocking socket's do.
-    pub fn set_nonblocking(&mut self, nonblocking: bool) {
-        self.nonblocking = nonblocking;
-    }
-    /// Call `notify` whenever bytes arrive at this end or the pipe closes (also
-    /// now, if either already happened), as a poller's readiness would: a
-    /// non-blocking reader then reads until `WouldBlock`.
-    pub fn on_ready(&self, notify: impl Fn() + Send + Sync + 'static) {
-        let incoming = &self.end.incoming;
-        *incoming.notify.lock().unwrap() = Some(Arc::new(notify));
-        let state = incoming.state.lock().unwrap();
-        let ready = !state.0.is_empty() || state.1;
-        drop(state);
-        if ready {
-            incoming.notify();
-        }
-    }
-    /// Close both directions: reads at either end then see the end of the stream.
-    pub fn shutdown(&self) {
-        self.end.incoming.close();
-        self.end.outgoing.close();
-    }
-}
-impl Read for Pipe {
-    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-        let deadline = self.timeout.lock().unwrap().map(|t| Instant::now() + t);
-        let mut state = self.end.incoming.state.lock().unwrap();
-        if self.nonblocking && state.0.is_empty() && !state.1 {
-            return Err(std::io::ErrorKind::WouldBlock.into());
-        }
-        while state.0.is_empty() && !state.1 {
-            state = match deadline {
-                None => self.end.incoming.ready.wait(state).unwrap(),
-                Some(deadline) => {
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    if left.is_zero() {
-                        return Err(std::io::ErrorKind::TimedOut.into());
-                    }
-                    self.end.incoming.ready.wait_timeout(state, left).unwrap().0
-                }
-            };
-        }
-        state.0.read(out)
-    }
-}
-impl Write for Pipe {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        let mut state = self.end.outgoing.state.lock().unwrap();
-        if state.1 {
-            return Err(std::io::ErrorKind::BrokenPipe.into());
-        }
-        state.0.extend(data);
-        self.end.outgoing.ready.notify_all();
-        drop(state);
-        self.end.outgoing.notify();
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+mod memory;
+pub use memory::Pipe;
 
 /// What a connection runs over.
 enum Stream {
@@ -250,6 +116,7 @@ pub struct Counters {
 }
 
 pub struct ConnReader {
+    memory: bool,
     stream: Stream,
     /// Bytes read: `buffer[start..end]` are not consumed yet, and reads go
     /// straight into `buffer[end..]`.
@@ -274,6 +141,7 @@ impl Closer {
 }
 
 pub struct ConnWriter {
+    memory: bool,
     stream: Stream,
     encrypt: Option<Cfb8>,
     pub threshold: Option<usize>,
@@ -422,8 +290,10 @@ impl Connection {
     fn over(stream: Stream) -> Result<Self> {
         let counters = Arc::new(Counters::default());
         let write = stream.try_clone()?;
+        let memory = matches!(stream, Stream::Memory(_));
         Ok(Self {
             reader: ConnReader {
+                memory,
                 stream,
                 buffer: Vec::new(),
                 start: 0,
@@ -436,6 +306,7 @@ impl Connection {
                 older_client: None,
             },
             writer: ConnWriter {
+                memory,
                 stream: write,
                 encrypt: None,
                 threshold: None,
@@ -467,7 +338,7 @@ impl Connection {
     }
     /// `Connection.isMemoryConnection`: through a [`Pipe`] rather than a socket.
     pub fn is_memory(&self) -> bool {
-        matches!(&self.reader.stream, Stream::Memory(p) if !p.bridged)
+        matches!(&self.reader.stream, Stream::Memory(p) if !p.is_bridged())
     }
     /// ClientboundLoginCompressionPacket: negative thresholds disable compression.
     pub fn set_compression(&mut self, threshold: i32) {
@@ -525,6 +396,20 @@ enum Next {
     Partial(usize),
 }
 impl ConnReader {
+    fn header(&self) -> Result<Option<(usize, usize)>> {
+        let bytes = &self.buffer[self.start..self.end];
+        if !self.memory {
+            return frame::header(bytes);
+        }
+        if bytes.len() < 8 {
+            return Ok(None);
+        }
+        let len = usize::try_from(u64::from_le_bytes(bytes[..8].try_into().unwrap()))
+            .ok()
+            .filter(|len| len.checked_add(8).is_some())
+            .ok_or_else(|| Error::new("memory frame length overflows address space"))?;
+        Ok(Some((8, len)))
+    }
     /// Read exactly `len` bytes as they are, with no framing.
     pub fn read_raw(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut out = vec![0u8; len];
@@ -534,6 +419,13 @@ impl ConnReader {
     /// Block until a whole packet arrives: (id, payload).
     pub fn recv(&mut self) -> Result<(i32, Vec<u8>)> {
         if let Some(packet) = self.adapter.as_ref().and_then(|a| a.next_incoming()) {
+            return Ok(packet);
+        }
+        if let Some(packet) = self
+            .older_client
+            .as_ref()
+            .and_then(|c| c.next_serverbound())
+        {
             return Ok(packet);
         }
         loop {
@@ -595,6 +487,13 @@ impl ConnReader {
     /// more: for a detached reader, after [`Self::read_from`]. Only an older
     /// client's renumbering applies (a server's connection has no other).
     pub fn buffered(&mut self) -> Result<Option<(i32, Vec<u8>)>> {
+        if let Some(packet) = self
+            .older_client
+            .as_ref()
+            .and_then(|c| c.next_serverbound())
+        {
+            return Ok(Some(packet));
+        }
         loop {
             match self.next()? {
                 Next::Packet((id, payload)) if self.older_client.is_some() => {
@@ -621,7 +520,7 @@ impl ConnReader {
     }
     /// The completed next frame header: (length-prefix bytes, payload bytes).
     fn next_header(&self) -> Result<Option<(usize, usize)>> {
-        frame::header(&self.buffer[self.start..self.end])
+        self.header()
     }
     /// Take the next frame off the buffer, if it is whole.
     fn next(&mut self) -> Result<Next> {
@@ -649,7 +548,11 @@ impl ConnReader {
     /// empty compressed frame is skipped and the connection stays up.
     fn packet(&mut self, frame: std::ops::Range<usize>) -> Result<Option<(i32, Vec<u8>)>> {
         let frame = &self.buffer[frame];
-        match frame::body(frame, self.threshold, &mut self.inflater)? {
+        match if self.memory {
+            frame::Body::Plain(0)
+        } else {
+            frame::body(frame, self.threshold, &mut self.inflater)?
+        } {
             frame::Body::Plain(at) => {
                 let body = &frame[at..];
                 if body.is_empty() {
@@ -728,7 +631,63 @@ impl ConnReader {
         Ok(self.stream.set_read_timeout(timeout)?)
     }
 }
+/// Immutable post-login packet framing for a connection.
+#[derive(Clone, Copy, Debug)]
+pub enum Framing {
+    /// Private local transport, without network packet limits.
+    Memory,
+    /// TCP framing, optionally with threshold compression.
+    Network(Option<usize>),
+}
+impl Framing {
+    /// Prepare contents without an outer length prefix.
+    pub fn contents(self, body: &[u8]) -> Result<Vec<u8>> {
+        match self {
+            Self::Memory => Ok(body.to_vec()),
+            Self::Network(t) => frame::contents(body, t),
+        }
+    }
+    /// Prepare contents, retaining ownership when no compression is needed.
+    pub fn contents_owned(self, body: Vec<u8>) -> Result<Vec<u8>> {
+        match self {
+            Self::Memory => Ok(body),
+            Self::Network(t) => frame::contents_owned(body, t),
+        }
+    }
+}
 impl ConnWriter {
+    /// Remove this exact writer, leaving an explicitly disconnected placeholder.
+    pub fn take(&mut self) -> Self {
+        let placeholder = Self {
+            memory: self.memory,
+            stream: Stream::Detached,
+            encrypt: None,
+            threshold: None,
+            counters: self.counters.clone(),
+            adapter: None,
+            older_client: None,
+        };
+        std::mem::replace(self, placeholder)
+    }
+
+    /// An independent shutdown handle for this writer.
+    pub fn closer(&self) -> Result<Closer> {
+        Ok(Closer(self.stream.try_clone()?))
+    }
+    /// Encode frame contents for this transport. Memory packets bypass network
+    /// compression and its size limits; use this before `frame_into` when detached.
+    pub fn contents(&self, body: &[u8]) -> Result<Vec<u8>> {
+        self.framing().contents(body)
+    }
+    /// Capture the connection's immutable framing mode after login.
+    pub fn framing(&self) -> Framing {
+        if self.memory {
+            Framing::Memory
+        } else {
+            Framing::Network(self.threshold)
+        }
+    }
+
     /// The server release selected for this connection (local play uses the pinned release).
     pub fn server_version(&self) -> crate::adapter::ServerVersion {
         self.adapter
@@ -741,6 +700,16 @@ impl ConnWriter {
         self.adapter
             .as_ref()
             .and_then(|a| a.legacy_secure_chat_enforcement())
+    }
+
+    /// Observe live secure-chat metadata after moving the writer to another thread.
+    pub fn legacy_secure_chat_observer(&self) -> impl Fn() -> Option<bool> + Send + Sync + 'static {
+        let adapter = self.adapter.clone();
+        move || {
+            adapter
+                .as_ref()
+                .and_then(|a| a.legacy_secure_chat_enforcement())
+        }
     }
 
     /// Write bytes as they are, with no framing: the legacy server list ping
@@ -762,23 +731,22 @@ impl ConnWriter {
     pub fn send(&mut self, body: &[u8]) -> Result<()> {
         if self.older_client.is_some() {
             return match self.for_client(body)? {
-                Some(body) => self.send_contents(&frame::contents(&body, self.threshold)?),
+                Some(body) => self.send_contents(&self.contents(&body)?),
                 None => Ok(()),
             };
         }
         if let Some(a) = self.adapter.clone() {
             if let Some(body) = a.serverbound(body)? {
-                self.send_contents(&frame::contents(&body, self.threshold)?)?;
+                self.send_contents(&self.contents(&body)?)?;
             }
             for body in a.take_outgoing() {
-                self.send_contents(&frame::contents(&body, self.threshold)?)?;
+                self.send_contents(&self.contents(&body)?)?;
             }
             return Ok(());
         }
-        self.send_contents(&frame::contents(body, self.threshold)?)
+        self.send_contents(&self.contents(body)?)
     }
-    /// Send a frame whose contents [`frame::contents`] made with this
-    /// writer's threshold.
+    /// Send a frame whose contents [`Self::contents`] made for this transport.
     pub fn send_contents(&mut self, contents: &[u8]) -> Result<()> {
         let mut framed = Vec::with_capacity(contents.len() + 3);
         self.frame_into(contents, &mut framed);
@@ -790,7 +758,11 @@ impl ConnWriter {
     /// runs on).
     pub fn frame_into(&mut self, contents: &[u8], out: &mut Vec<u8>) {
         let at = out.len();
-        crate::buf::write_varint(out, contents.len() as i32);
+        if self.memory {
+            out.extend_from_slice(&(contents.len() as u64).to_le_bytes());
+        } else {
+            crate::buf::write_varint(out, contents.len() as i32);
+        }
         out.extend_from_slice(contents);
         if let Some(c) = &mut self.encrypt {
             c.encrypt(&mut out[at..]);
@@ -808,6 +780,7 @@ impl ConnWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_std::sync::Mutex;
     use std::net::TcpListener;
 
     #[test]
@@ -847,6 +820,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn connects_to_ipv4_although_the_resolver_lists_ipv6_first() {
         // Both listen, as with a server whose IPv6 address accepts and then resets.
         let Some(v6_listener) = ipv6_loopback() else {
@@ -861,6 +835,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn falls_back_to_ipv6_when_ipv4_refuses() {
         let Some(v6_listener) = ipv6_loopback() else {
             return;
@@ -876,6 +851,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_dead_address_does_not_hold_up_the_next() {
         // A controlled pending dial cannot be intercepted by a VPN or proxy.
         let held_listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -913,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn every_failure_reports_the_first_address() {
         let closed = |_| {
             TcpListener::bind("127.0.0.1:0")
@@ -932,6 +909,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_silent_peer_times_out_and_a_closed_one_ends_the_stream() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -949,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn loopback_with_compression_and_encryption() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -983,6 +962,7 @@ mod tests {
     fn fragmented_plain_frame_header_and_following_packet() {
         let (pipe, _peer) = Pipe::pair();
         let mut connection = Connection::local(pipe);
+        connection.reader.memory = false;
         let payload: Vec<u8> = (0..300).map(|i| i as u8).collect();
         let mut body = vec![0xac, 0x02]; // Packet id 300, two-byte VarInt.
         body.extend_from_slice(&payload);
@@ -1023,6 +1003,7 @@ mod tests {
         ] {
             let (pipe, _peer) = Pipe::pair();
             let mut connection = Connection::local(pipe);
+            connection.reader.memory = false;
             let mut input = header;
             assert_eq!(
                 connection.reader.read_from(&mut input).unwrap(),
@@ -1067,6 +1048,7 @@ mod tests {
                 for _ in 0..SAMPLES_PER_RUN {
                     let (pipe, _peer) = Pipe::pair();
                     let mut connection = Connection::local(pipe);
+                    connection.reader.memory = false;
                     let started = Instant::now();
 
                     for _ in 0..PACKETS_PER_SAMPLE {
@@ -1119,6 +1101,7 @@ mod tests {
     /// Packets from one byte to past the read size, compressed and
     /// encrypted, arrive whole and in order however the reads cut them.
     #[test]
+    #[ignore = "daily"]
     fn packets_of_every_size_arrive_whole() {
         let (a, b) = Pipe::pair();
         let bodies: Vec<Vec<u8>> = (0..400u32)
@@ -1170,6 +1153,7 @@ mod tests {
     /// Encrypted bytes that arrive in the same read as the last plain packet
     /// are decrypted once encryption is enabled.
     #[test]
+    #[ignore = "daily"]
     fn encrypted_bytes_read_before_enabling_encryption() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1195,6 +1179,7 @@ mod tests {
     /// skips it (its PacketDecoder only reads a packet from a readable
     /// buffer), so the client stays connected.
     #[test]
+    #[ignore = "daily"]
     fn an_empty_compressed_frame_is_skipped() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1217,6 +1202,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn tcp_stream_enables_nodelay_and_keepalive() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

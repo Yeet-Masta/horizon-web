@@ -1,7 +1,6 @@
 //! `FollowMobGoal` skips an invisible mob: the flag or the invisibility effect.
 use super::goals::{Cx, FollowMob};
 use super::{Mob, Species};
-use crate::mobs::LegacyRandom;
 use crate::mobs::world::with_test_world;
 use horizon_core::geometry::Vec3;
 use std::sync::Arc;
@@ -9,6 +8,7 @@ use std::sync::Arc;
 /// `FollowMobGoal.canUse` skips an invisible mob (`!isInvisible()`), which
 /// is the flag or the invisibility effect.
 #[test]
+#[ignore = "daily"]
 fn a_follow_mob_goal_ignores_an_invisible_mob() {
     use crate::mobs::sensor_scan_tests::kind;
     let mut outcomes = Vec::new();
@@ -21,17 +21,17 @@ fn a_follow_mob_goal_ignores_an_invisible_mob() {
             let mut m = Mob::new(1, Arc::new(follower_kind), Vec3::new(0.5, 64.0, 0.5), 0.0);
             let mut target = Mob::new(2, Arc::new(target_kind), Vec3::new(1.5, 64.0, 0.5), 0.0);
             target.invisible = invisible;
-            let seen = [target.seen(None)];
+            let seen = [target.seen(None, &crate::items::Items::empty())];
             let world = crate::mobs::MobWorld {
                 others: &seen,
                 ..w.clone()
             };
             m.ai.goals.add(1, FollowMob::new(1.0, 3.0, 7.0));
-            let mut lr = LegacyRandom::new(0);
+            let mut lr = crate::health::TestLevel::new(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w: &world,
-                lr: &mut lr,
+                level: &mut lr.level(),
                 events: &mut events,
             };
             let mut goals = std::mem::take(&mut m.ai.goals);

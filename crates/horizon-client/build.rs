@@ -4,28 +4,64 @@
 mod windows_exe;
 
 fn main() {
-    let root =
-        std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let root = std::path::Path::new(&dir).join("../..");
     let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("crates/horizon-client/src/game").display()
+    );
+    std::fs::write(
+        out_dir.join("game_modules.rs"),
+        horizon_game_discovery::declarations(
+            &root.join("crates/horizon-client/src/game"),
+            &["native_hooks", "host", "creatures"],
+        )
+        .expect("discovering game modules"),
+    )
+    .expect("writing game modules");
+    let tests =
+        root.join("crates/horizon-client/src/crafting/ingredient/builtin_kinds_tests/families");
+    println!("cargo:rerun-if-changed={}", tests.display());
+    std::fs::write(
+        out_dir.join("builtin_ingredient_test_modules.rs"),
+        horizon_game_discovery::folder_modules(&tests).expect("discovering ingredient tests"),
+    )
+    .expect("writing ingredient test modules");
     horizon_mod_api_gen::generate(&root, &out_dir, horizon_mod_api_gen::Target::Client)
         .expect("generating native mod API");
-    // A workspace horizon-mixins changed holds native mods, whichever tool ran it (the launcher,
-    // or a mod's own script with no `native-mods.json` beside its game): `HORIZON_MIXIN_MODS`
-    // names them for `game::mods::built_with_native_mods`. Watched only once it exists: a
-    // bundle applied in place also edits `game/`, which `generate` watches.
-    let stage = root.join(horizon_mod_api_gen::MIXINS_STAGE);
-    if stage.is_file() {
-        println!("cargo:rerun-if-changed={}", stage.display());
+    // Whether a native mod can run in a mob's turn (`game/creatures/mob_islands.rs`). The
+    // launcher adds trait packages to the workspace's members.
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("Cargo.toml").display()
+    );
+    for dir in ["native-api", "native-crates"] {
+        if root.join(dir).is_dir() {
+            println!("cargo:rerun-if-changed={}", root.join(dir).display());
+        }
     }
-    // The web build's page thread too: wasm-ld gives 1 MB, below the module's data, and a
-    // release build's handoff to the game (`Loading::finish`, `start_game`, `Game::new`, their
-    // inlined structs) took more, the overflow reading past the end of memory.
-    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
-        println!("cargo:rustc-link-arg-bin=horizon-client=-zstack-size=8388608");
+    if let Some(found) = horizon_mod_api_gen::mob_turn(&root) {
+        println!("cargo:rustc-env=HORIZON_MOB_TURN={found}");
     }
-    let staged = horizon_mod_api_gen::staged_mods(&root);
-    if !staged.is_empty() {
-        println!("cargo:rustc-env=HORIZON_MIXIN_MODS={}", staged.join(","));
+    // The SDK builds this library, not the platform executable. Carry the same executable
+    // policy without asking Cargo to link a binary this package no longer owns.
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").expect("Cargo must provide the target OS");
+    let target_env =
+        std::env::var("CARGO_CFG_TARGET_ENV").expect("Cargo must provide the target environment");
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("packaging/executable_link.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("crates/horizon-guest-stack/src/guest_stack_constants.rs")
+            .display()
+    );
+    for arg in windows_exe::executable_link::arguments(&target_os, &target_env) {
+        println!("cargo:horizon-executable-link-arg={arg}");
     }
-    windows_exe::resources("horizon-client");
+    if std::env::var("CARGO_PKG_NAME").as_deref() != Ok("horizon-client") {
+        windows_exe::resources("horizon-client");
+    }
 }

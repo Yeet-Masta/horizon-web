@@ -12,9 +12,9 @@ use super::{
 };
 use crate::{
     datafix::dynamic::{as_bool_opt, as_float, as_number},
-    nbt::Tag,
     worldgen::block_feature::FeatureBlockBindings,
 };
+use horizon_core::nbt::Tag;
 use std::sync::Arc;
 
 fn text(tag: &Tag, key: &str) -> Option<String> {
@@ -27,6 +27,24 @@ fn mirror(tag: &Tag, key: &str) -> Option<Mirror> {
     [Mirror::None, Mirror::LeftRight, Mirror::FrontBack]
         .into_iter()
         .find(|m| Some(m.saved_name()) == text(tag, key).as_deref())
+}
+
+/// Whether [`read`] reads this piece: a `TemplateStructurePiece`'s constructor resets the
+/// orientation to NORTH and rebuilds the box from the template, unlike the other saved
+/// pieces, which keep their saved `BB`/`O`.
+pub(crate) fn is_template_piece(piece: &Tag) -> bool {
+    matches!(
+        crate::worldgen::generator_structures::saved_piece_name(piece).as_deref(),
+        Some(
+            "minecraft:shipwreck"
+                | "minecraft:orp"
+                | "minecraft:iglu"
+                | "minecraft:rupo"
+                | "minecraft:wmp"
+                | "minecraft:nefos"
+                | "minecraft:ecp"
+        )
+    )
 }
 
 /// `TemplateStructurePiece(StructurePieceType, CompoundTag, ...)` and its subclasses' tag
@@ -185,7 +203,7 @@ mod tests {
 
     #[test]
     fn saved_templates_round_trip_and_whole_start_fallback() {
-        let (mut registry_tag, _) = crate::nbt::parse_snbt(
+        let (mut registry_tag, _) = horizon_core::nbt::parse_snbt(
             r#"{DataVersion:0,states:[
             {id:"minecraft:air"},{id:"minecraft:cave_air"},{id:"minecraft:void_air"},
             {id:"minecraft:structure_block"},{id:"minecraft:sand"},{id:"minecraft:gravel"},
@@ -343,7 +361,7 @@ mod tests {
         let mut original = StructureStart::new(7, &def, chunk, pieces);
         original.references = 3;
         let tag = original.save().unwrap();
-        let read_start = |t: &Tag| read_saved_start(7, &def, chunk, t, &resources, &bindings);
+        let read_start = |t: &Tag| read_saved_start(7, &def, chunk, t, 1234, &resources, &bindings);
         let loaded = read_start(&tag).expect("all seven types decode");
         assert_eq!(loaded.save(), Some(tag.clone()));
         assert_eq!(
@@ -364,8 +382,9 @@ mod tests {
             original.save(),
             "rebuild box and NORTH orientation"
         );
-        // `tejp` is a piece type Horizon cannot read yet.
-        for (key, value) in [("id", "minecraft:tejp"), ("Rot", "broken")] {
+        // An id no piece type binds rejects the entire start, and so does a
+        // readable id whose own fields are broken (the shipwreck's rotation).
+        for (key, value) in [("id", "minecraft:unknown_piece"), ("Rot", "broken")] {
             let mut broken = tag.clone();
             let Some(Tag::List(children)) = broken.get_mut("Children") else {
                 unreachable!()

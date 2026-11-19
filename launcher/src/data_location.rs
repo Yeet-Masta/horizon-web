@@ -35,9 +35,25 @@ pub fn bootstrap_path() -> Result<PathBuf> {
     {
         return pointer_path(Path::new(&path));
     }
+    if cfg!(test) {
+        return Ok(test_home().join("location.json"));
+    }
     dirs::config_dir()
         .map(|p| p.join("horizon-launcher-location").join("location.json"))
         .ok_or_else(|| "Cannot locate the platform configuration folder for location.json".into())
+}
+
+/// Where the library's own tests keep the launcher's and the game's data (`launcher`, `game`,
+/// `location.json` inside) unless `HORIZON_LAUNCHER_HOME` or `HORIZON_HOME` name another:
+/// never a player's install. A fixed path, not an environment change, so it holds from the
+/// first call on any thread, and a test that runs its own binary again shares it.
+///
+/// The temporary folder in its real spelling, as [`crate::backend::build_dir`] resolves it:
+/// Windows can name it by its 8.3 short form (`C:\Users\RUNNER~1\…`), so every test path
+/// compares under one spelling.
+pub fn test_home() -> PathBuf {
+    let temp = std::env::temp_dir();
+    crate::backend::plain(temp.canonicalize().unwrap_or(temp)).join("horizon-launcher-lib-tests")
 }
 
 fn overridden(name: &str) -> bool {
@@ -76,6 +92,17 @@ fn remember_startup_error(error: Option<String>) {
 pub fn configured_roots() -> Result<Option<Roots>> {
     if FORCE_DEFAULT.load(Ordering::Acquire) {
         return Ok(None);
+    }
+    // A unit test never reaches the player's real folders: unless it points at a location file
+    // of its own, its roots are this test process's, under the temporary folder.
+    if cfg!(test) && !overridden("HORIZON_LAUNCHER_LOCATION_FILE") {
+        let home =
+            std::env::temp_dir().join(format!("horizon-launcher-test-{}", std::process::id()));
+        return Ok(Some(Roots {
+            launcher: home.join("launcher"),
+            game: home.join("game"),
+            build: home.join("launcher"),
+        }));
     }
     let mut slot = location();
     if slot.is_none() {
@@ -273,7 +300,7 @@ pub fn migrate_current_with_prepare(
     let bootstrap = bootstrap_path()?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let lease = loop {
-        match lock_at(&bootstrap, true) {
+        match MigrationLease::take(&bootstrap) {
             Ok(lease) => break lease,
             Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(e),
@@ -301,8 +328,26 @@ pub fn migrate_with_prepare(
     progress: impl FnMut(&str),
     prepare: impl FnOnce(&Roots, &Roots) -> Result<()>,
 ) -> Result<Roots> {
-    let lease = lock_at(bootstrap, true)?;
+    let lease = MigrationLease::take(bootstrap)?;
     migrate_locked(source, target, bootstrap, progress, prepare, &lease)
+}
+
+/// A migration's exclusive lock, released before its file closes. A child process spawned while
+/// it is held, by any thread, has a copy of the descriptor until its exec, and closing ours alone
+/// would leave the lock taken through that copy: the next migration would read "Cannot lock"
+/// (#18138). `horizon_platform::mod_package::locks::Locked` releases its locks the same way.
+struct MigrationLease(File);
+
+impl MigrationLease {
+    fn take(bootstrap: &Path) -> Result<Self> {
+        lock_at(bootstrap, true).map(Self)
+    }
+}
+
+impl Drop for MigrationLease {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 fn migrate_locked(
@@ -311,7 +356,7 @@ fn migrate_locked(
     bootstrap: &Path,
     mut progress: impl FnMut(&str),
     prepare: impl FnOnce(&Roots, &Roots) -> Result<()>,
-    _lease: &File,
+    _lease: &MigrationLease,
 ) -> Result<Roots> {
     let source = validate_roots(source)?;
     if let Some(current) = resolve_at(bootstrap)? {
@@ -349,18 +394,28 @@ fn migrate_locked(
             target.display()
         ));
     }
-    let destination = layout(&source, &target);
-    tool_safe(&destination.build)?;
-    fs::create_dir_all(&target).map_err(|e| problem(&target, e))?;
+    let mut destination = layout(&source, &target);
+    // MinGW needs the *physical* path to be ASCII: aliases are canonicalized by rustc.
+    // Reserve a fresh sibling, never reuse or modify another location's build data.
+    let separate_build = tool_safe(&destination.build).is_err();
+    if separate_build {
+        destination.build = reserve_build_folder(&source, &target, bootstrap)?;
+    }
     let stage = target.join(".relocation-staging");
-    let staged = layout(&source, &stage);
+    let mut staged = layout(&source, &stage);
+    if separate_build {
+        // This unique folder is not published until the location pointer commits. It need
+        // not be renamed across volumes, and preparation sees its final, tool-safe path.
+        staged.build = destination.build.clone();
+    }
     let result = (|| {
+        fs::create_dir_all(&target).map_err(|e| problem(&target, e))?;
         private_dir(&stage)?;
         progress("Copying and verifying launcher data");
         copy_tree(&source.launcher, &staged.launcher, bootstrap, &mut progress)?;
         progress("Copying and verifying game data");
         copy_tree(&source.game, &staged.game, bootstrap, &mut progress)?;
-        if !within(&source.build, &source.launcher) {
+        if separate_build || !within(&source.build, &source.launcher) {
             progress("Copying and verifying build data");
             copy_tree(&source.build, &staged.build, bootstrap, &mut progress)?;
         } else if !staged.build.exists() {
@@ -377,9 +432,53 @@ fn migrate_locked(
         sync_dir(&target)?;
         progress("Committing data location");
         commit(bootstrap, &destination)?;
-        Ok(destination)
+        Ok(destination.clone())
     })();
-    result.map_err(|e: String| format!("{e}. Original data was kept. Partial copies may remain in {}; choose an empty folder to retry", target.display()))
+    result.map_err(|e: String| {
+        crate::i18n::trf(
+            "{error}. Original data was kept. Partial copies may remain in {target} and {build}; choose an empty folder to retry",
+            &[("error", &e), ("target", &target.display().to_string()), ("build", &destination.build.display().to_string())],
+        )
+    })
+}
+
+/// Prefer the chosen drive's nearest existing ASCII ancestor. If it is not writable
+/// (or a UNC share itself is non-ASCII), try alongside the existing build data. No
+/// environment lookup: explicit migration fixtures never reach the real user profile.
+fn reserve_build_folder(source: &Roots, target: &Path, bootstrap: &Path) -> Result<PathBuf> {
+    for parent in target
+        .ancestors()
+        .skip(1)
+        .chain(source.build.ancestors().skip(1))
+    {
+        let Ok(parent) = checked_path(parent) else {
+            continue;
+        };
+        if !parent.is_dir()
+            || tool_safe(&parent).is_err()
+            || [&source.launcher, &source.game, &source.build]
+                .iter()
+                .any(|root| within(&parent, root))
+        {
+            continue;
+        }
+        let Ok(folder) = tempfile::Builder::new()
+            .prefix("horizon-build-")
+            .tempdir_in(&parent)
+        else {
+            continue;
+        };
+        let real = checked_path(folder.path())?;
+        tool_safe(&real)?;
+        if overlaps(&real, &pointer_path(bootstrap)?) || overlaps(&real, target) {
+            continue;
+        }
+        // Keep partial copies just as the main destination does: after a failed commit
+        // no pointer names this folder, and the error tells the player where it remains.
+        let _ = folder.keep();
+        return Ok(real.join("build"));
+    }
+    Err(crate::i18n::tr("Could not create a Windows-compatible build folder. Choose a destination with a writable parent folder whose full path contains only ASCII characters and no spaces.").into())
 }
 
 fn layout(source: &Roots, target: &Path) -> Roots {
@@ -544,10 +643,10 @@ fn tool_safe(path: &Path) -> Result<()> {
             .to_str()
             .is_some_and(|s| s.is_ascii() && !s.bytes().any(|b| b.is_ascii_whitespace()))
     {
-        return Err(
-            "Choose a destination with only ASCII characters and no spaces for Windows build tools"
-                .into(),
-        );
+        return Err(crate::i18n::trf(
+            "Windows build tools cannot use the build folder \"{path}\" because its full path contains spaces, other whitespace, or non-ASCII characters. Choose an empty destination whose full path uses English letters, numbers, underscores or hyphens, for example D:\\Horizon_Data. Check every parent folder too.",
+            &[("path", &path.display().to_string())],
+        ));
     }
     Ok(())
 }

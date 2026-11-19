@@ -91,6 +91,8 @@ fn nits_setting(nits: u32) -> u32 {
 /// Simple-level presets. `Custom` leaves every option as the player set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Preset {
+    /// Every saving on, over the lowest settings (`preset::table`).
+    FullPerformance,
     Performance,
     Balanced,
     Quality,
@@ -99,7 +101,8 @@ pub enum Preset {
     Custom,
 }
 impl Preset {
-    pub const ALL: [Preset; 5] = [
+    pub const ALL: [Preset; 6] = [
+        Preset::FullPerformance,
         Preset::Performance,
         Preset::Balanced,
         Preset::Quality,
@@ -108,6 +111,7 @@ impl Preset {
     ];
     pub fn name(self) -> &'static str {
         match self {
+            Preset::FullPerformance => "full_performance",
             Preset::Performance => "performance",
             Preset::Balanced => "balanced",
             Preset::Quality => "quality",
@@ -117,6 +121,7 @@ impl Preset {
     }
     pub fn label(self) -> &'static str {
         match self {
+            Preset::FullPerformance => "Full Performance",
             Preset::Performance => "Performance",
             Preset::Balanced => "Balanced",
             Preset::Quality => "Quality",
@@ -574,6 +579,29 @@ impl HdrMode {
     }
 }
 
+/// What Horizon does with HDR's range above paper white, where no shader pack lights the world.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HdrLook {
+    /// Horizon's lift: light sources and the sun shine above paper white; lit surfaces stay at
+    /// it.
+    #[default]
+    Horizon,
+    /// Nothing lifted: HDR output shows the same picture as SDR.
+    Vanilla,
+}
+impl HdrLook {
+    pub const ALL: [Self; 2] = [Self::Horizon, Self::Vanilla];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Horizon => "horizon",
+            Self::Vanilla => "vanilla",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|look| look.name() == value)
+    }
+}
+
 static TRANSLUCENT_BATCHING_OFFERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 /// Whether the device can batch translucent quads (`Graphics::translucent_batching`): set when
@@ -585,6 +613,45 @@ pub fn offer_translucent_batching(on: bool) {
 }
 pub fn translucent_batching_offered() -> bool {
     TRANSLUCENT_BATCHING_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Parallel Tick's setting, for the worlds this game runs itself (single player, open to LAN):
+/// whether the server tick's phases that give the same result in any order share their work
+/// among helper threads (`parallel`). Auto shares it only while the tick is heavy and sharing
+/// makes it faster; a quiet world stays on one thread and starts no helper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ParallelTickMode {
+    #[default]
+    Off = 0,
+    Auto = 1,
+    On = 2,
+}
+impl ParallelTickMode {
+    pub const ALL: [ParallelTickMode; 3] = [
+        ParallelTickMode::Off,
+        ParallelTickMode::Auto,
+        ParallelTickMode::On,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::On => "on",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Auto => "Auto",
+            Self::On => "On",
+        }
+    }
+    fn parse(s: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.name() == s)
+            .unwrap_or_default()
+    }
 }
 
 /// GPU Culling's setting: off, on where it is offered, or Auto, which has it on only where the
@@ -774,9 +841,9 @@ pub struct Graphics {
     pub cave_culling: bool,
     /// Near solid terrain culled, and its draws listed, on the GPU (`gfx::gpu_culling`), where it
     /// is offered (`gpu_culling_offer`). Off by default (GPU Culling, Performance graphics); it
-    /// applies at once, and no preset sets it. Every save writes it, so a default turned on later
-    /// needs a new key, as `batchTranslucent` did. Auto turns it on only where the CPU limits the
-    /// frame and it makes the frame faster (`autotune`).
+    /// applies at once, and every preset sets it to Auto. Every save writes it, so a default
+    /// turned on later needs a new key, as `batchTranslucent` did. Auto turns it on only where
+    /// the CPU limits the frame and it makes the frame faster (`autotune`).
     pub gpu_culling: GpuCullingMode,
     /// Skip drawing entities hidden behind opaque terrain, synchronously or asynchronously.
     pub entity_culling: EntityCullingMode,
@@ -822,6 +889,9 @@ pub struct Graphics {
     pub pacing: Pacing,
     /// Chunk worker threads; 0 uses every core but one. Applies at the next start.
     pub workers: u32,
+    /// Parallel Tick (Performance graphics, beside Worker Threads): applies from the next tick,
+    /// and no preset sets it.
+    pub parallel_tick: ParallelTickMode,
     pub overlay: Overlay,
     /// World resolution as a percentage of the window's (50..=200).
     pub resolution_scale: u32,
@@ -856,9 +926,13 @@ pub struct Graphics {
     /// HDR brightness of the HUD and menus, in nits; 0 is Auto: at paper white
     /// ([`Graphics::ui_nits`]). The first-person hand stays at the world's.
     pub hdr_ui_nits: u32,
-    /// HDR Lighting: Horizon's own HDR look, light sources, the sun and sunlight above paper
-    /// white. Off, HDR output shows the same picture as SDR, for shader packs or the vanilla look.
-    pub hdr_lighting: bool,
+    /// HDR Color Boost, 0..=100 percent: how far HDR output stretches the picture's BT.709
+    /// colours toward the display's own primaries (`gfx::hdr::gamut`), as wide-gamut displays
+    /// often show SDR. 0, the default, shows the colours exactly. scRGB output on Wayland is left
+    /// unboosted (`EffectiveOutput::compositor_stretches`).
+    pub hdr_color_boost: u32,
+    /// HDR's look with no shader pack running.
+    pub hdr_look: HdrLook,
     /// The graphics driver whose last start ended before HDR output showed a frame (the
     /// marker found, [`HDR_MARKER`]): a window on it stays SDR whatever the mode, until the
     /// mode is changed or the window starts on another driver ([`Graphics::hdr_held`]).
@@ -881,11 +955,6 @@ pub struct Graphics {
     /// `batchTranslucent`: `translucentBatching`, which every save wrote as false while it was
     /// off by default and had no switch, stays ignored.
     pub translucent_batching: bool,
-    /// Smooth Gradients (HDR page, on by default): with HDR output on, the frame is drawn in
-    /// 16 bits, so dark gradients don't band (`Renderer::frame_format`). Read when a renderer
-    /// is made (start, resource-pack reload), like `translucent_batching`, where the renderer's
-    /// device draws it (`EffectiveOutput::wide_frame_supported`).
-    pub hdr_smooth_gradients: bool,
     /// The native `horizon:<manifest-id>` or classic filename picked in `shaderpacks/`; empty: none. Its key is
     /// not `shaderPack`, which versions before the clean-room rewrite saved and which stays
     /// ignored.
@@ -926,6 +995,7 @@ impl Default for Graphics {
             present_mode: PresentMode::Auto,
             pacing: Pacing::Efficient,
             workers: 0,
+            parallel_tick: ParallelTickMode::Off,
             overlay: Overlay::Off,
             resolution_scale: 100,
             dynamic_resolution: false,
@@ -941,13 +1011,13 @@ impl Default for Graphics {
             hdr_peak: 0,
             hdr_black_level: 0,
             hdr_ui_nits: 0,
-            hdr_lighting: true,
+            hdr_color_boost: 0,
+            hdr_look: HdrLook::Horizon,
             hdr_failed_start: None,
             battery: false,
             shadow_cache: false,
             api: GraphicsApi::Auto,
             translucent_batching: true,
-            hdr_smooth_gradients: true,
             shader_pack: String::new(),
         }
     }
@@ -1016,6 +1086,8 @@ impl Graphics {
         let mut g = Self::default();
         // UI Brightness: `hdrUiNits`, else an older file's share of Paper White.
         let (mut ui_nits, mut ui_share) = (None, None);
+        // The look: `hdrLook`, else an older file's `hdrLighting`, whose off was Vanilla.
+        let (mut look, mut lighting) = (None, None);
         for line in text.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -1048,6 +1120,7 @@ impl Graphics {
                 "particleCulling" => g.particle_culling = ParticleCullingMode::parse(value),
                 "leafCulling" => g.leaf_culling = LeafCullingMode::parse(value),
                 "opaqueIce" => g.opaque_ice = flag(g.opaque_ice),
+                "parallelTick" => g.parallel_tick = ParallelTickMode::parse(value),
                 "blockEntityCache" => {
                     let enabled = flag(false);
                     g.cache_shulker_boxes = enabled;
@@ -1106,7 +1179,8 @@ impl Graphics {
                 }
                 "frameGeneration" => g.frame_generation = FrameGeneration::parse(value),
                 "hdr" => g.hdr = HdrMode::parse(value, g.hdr),
-                "hdrLighting" => g.hdr_lighting = flag(g.hdr_lighting),
+                "hdrLook" => look = HdrLook::parse(value),
+                "hdrLighting" => lighting = Some(flag(lighting.unwrap_or(true))),
                 "hdrPaperWhite" => g.hdr_paper_white = nits_setting(number(g.hdr_paper_white)),
                 "hdrUiNits" => ui_nits = value.parse().ok().map(nits_setting),
                 "hdrUiBrightness" => ui_share = value.parse::<u32>().ok(),
@@ -1117,11 +1191,11 @@ impl Graphics {
                     }
                 }
                 "hdrBlackLevel" => g.hdr_black_level = number(g.hdr_black_level).min(100),
+                "hdrColorBoost" => g.hdr_color_boost = number(g.hdr_color_boost).min(100),
                 "hdrFailedStart" => g.hdr_failed_start = Some(value.to_owned()),
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
                 "batchTranslucent" => g.translucent_batching = flag(g.translucent_batching),
-                "hdrSmoothGradients" => g.hdr_smooth_gradients = flag(g.hdr_smooth_gradients),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
@@ -1143,11 +1217,15 @@ impl Graphics {
             }
             _ => 0,
         });
+        g.hdr_look = look.unwrap_or(match lighting {
+            Some(false) => HdrLook::Vanilla,
+            _ => HdrLook::Horizon,
+        });
         g
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrLighting:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\nhdrSmoothGradients:{}\ngpuCulling:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrColorBoost:{}\nhdrLook:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ngpuCulling:{}\nparallelTick:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1197,14 +1275,15 @@ impl Graphics {
             self.hdr_peak,
             self.hdr_black_level,
             self.hdr_ui_nits,
-            bool_text(self.hdr_lighting),
+            self.hdr_color_boost,
+            self.hdr_look.name(),
             bool_text(self.battery),
             bool_text(self.shadow_cache),
             self.api.name(),
             self.shader_pack,
             bool_text(self.translucent_batching),
-            bool_text(self.hdr_smooth_gradients),
             self.gpu_culling.key(),
+            self.parallel_tick.name(),
         );
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
@@ -1287,37 +1366,9 @@ impl Graphics {
     }
 }
 
-/// A preset's values for vanilla's options and Horizon's own.
-pub fn apply_preset(preset: Preset, s: &mut crate::settings::Settings) {
-    let (rd, sim, clouds, particles, shadows, blend, mipmaps, entity, leaves, weather_r) =
-        match preset {
-            Preset::Performance => (8, 6, "false", 2, false, 0, 0, 0.5, false, 3),
-            Preset::Balanced => (12, 8, "fast", 1, true, 1, 2, 0.75, true, 5),
-            Preset::Quality => (16, 12, "true", 0, true, 2, 4, 1.0, true, 10),
-            Preset::Ultra => (24, 12, "true", 0, true, 3, 4, 1.5, true, 10),
-            Preset::Custom => return,
-        };
-    s.render_distance = rd;
-    s.simulation_distance = sim;
-    s.clouds = clouds.into();
-    s.particles = particles;
-    s.entity_shadows = shadows;
-    s.biome_blend = blend;
-    s.mipmap_levels = mipmaps;
-    s.entity_distance = entity;
-    s.cutout_leaves = leaves;
-    s.weather_radius = weather_r;
-    s.graphics_preset = "custom".into();
-    let g = &mut s.horizon;
-    g.preset = preset;
-    g.cave_culling = true;
-    g.animated_textures = true;
-    g.chunk_updates = 0;
-    g.upload_budget_kib = 0;
-    g.sky = true;
-    g.fog = true;
-    g.weather = true;
-}
+#[path = "graphics_preset.rs"]
+mod preset;
+pub use preset::apply_preset;
 
 #[cfg(test)]
 mod tests {
@@ -1371,6 +1422,58 @@ mod tests {
         assert_eq!(g.ui_nits(reported), 120);
         g.hdr_ui_nits = 400;
         assert_eq!((g.ui_nits(None), g.ui_nits(reported)), (400, 400));
+    }
+
+    /// Color Boost is saved as its percentage, 0 when the file has none, kept within 0..=100.
+    #[test]
+    fn color_boost_round_trips_through_the_file() {
+        for (file, boost) in [
+            ("", 0),
+            ("hdrColorBoost:35\n", 35),
+            ("hdrColorBoost:100\n", 100),
+            ("hdrColorBoost:250\n", 100),
+            ("hdrColorBoost:x\n", 0),
+        ] {
+            let g = Graphics::parse(file);
+            assert_eq!(g.hdr_color_boost, boost, "{file}");
+            let saved = g.serialize();
+            assert!(
+                saved.contains(&format!("\nhdrColorBoost:{boost}\n")),
+                "{file}"
+            );
+            assert_eq!(Graphics::parse(&saved), g, "{file}");
+        }
+    }
+
+    /// HDR Lighting's On and Off became the looks Horizon and Vanilla: an older file keeps its
+    /// choice, and only the new key is written.
+    #[test]
+    fn hdr_look_reads_an_older_files_hdr_lighting() {
+        use HdrLook::{Horizon, Vanilla};
+        for (file, look) in [
+            ("", Horizon),
+            ("hdrLighting:true\n", Horizon),
+            ("hdrLighting:false\n", Vanilla),
+            ("hdrLook:vanilla\n", Vanilla),
+            ("hdrLook:horizon\n", Horizon),
+            // The new key wins wherever the old one stands; a look this build doesn't know
+            // doesn't.
+            ("hdrLook:horizon\nhdrLighting:false\n", Horizon),
+            ("hdrLighting:true\nhdrLook:vanilla\n", Vanilla),
+            ("hdrLighting:false\nhdrLook:filmic\n", Vanilla),
+            ("hdrLook:filmic\n", Horizon),
+            // A value that is neither keeps the one before it, as every switch does.
+            ("hdrLighting:false\nhdrLighting:unknown\n", Vanilla),
+        ] {
+            let g = Graphics::parse(file);
+            assert_eq!(g.hdr_look, look, "{file}");
+            let saved = g.serialize();
+            assert!(
+                saved.contains(&format!("hdrLook:{}\n", look.name())),
+                "{file}"
+            );
+            assert!(!saved.contains("hdrLighting"), "{file}");
+        }
     }
 
     #[test]
@@ -1553,6 +1656,7 @@ mod tests {
             present_mode: PresentMode::Mailbox,
             pacing: Pacing::Precise,
             workers: 6,
+            parallel_tick: ParallelTickMode::Auto,
             overlay: Overlay::Graph,
             resolution_scale: 75,
             dynamic_resolution: false,
@@ -1568,7 +1672,8 @@ mod tests {
             hdr_peak: 1400,
             hdr_black_level: 12,
             hdr_ui_nits: 160,
-            hdr_lighting: false,
+            hdr_color_boost: 35,
+            hdr_look: HdrLook::Vanilla,
             hdr_failed_start: Some(
                 "Vulkan 10de:2684 NVIDIA GeForce RTX 4090; NVIDIA; 581.57".into(),
             ),
@@ -1576,7 +1681,6 @@ mod tests {
             shadow_cache: true,
             api: GraphicsApi::Dx12,
             translucent_batching: false,
-            hdr_smooth_gradients: false,
             shader_pack: "Golden Hour".into(),
         };
         assert_eq!(Graphics::parse(&g.serialize()), g);
@@ -1627,9 +1731,17 @@ mod tests {
         // off by default, not a choice.
         assert!(Graphics::default().translucent_batching);
         assert!(!Graphics::parse("batchTranslucent:false\n").translucent_batching);
-        // Smooth Gradients is on; its 16-bit frame needs HDR on too (`output::resolve_frame`).
-        assert!(Graphics::default().hdr_smooth_gradients);
-        assert!(!Graphics::parse("hdr:true\nhdrSmoothGradients:false\n").hdr_smooth_gradients);
+        // Smooth Gradients went with its 16-bit frame: a file that still has its key reads as
+        // one without it, and no save writes the key.
+        assert_eq!(
+            Graphics::parse("hdrSmoothGradients:false\n"),
+            Graphics::default()
+        );
+        assert!(
+            !Graphics::default()
+                .serialize()
+                .contains("hdrSmoothGradients")
+        );
         assert!(Graphics::parse("translucentBatching:false\n").translucent_batching);
         // GPU Culling is opt-in: only the file or its switch turns it on.
         assert_eq!(Graphics::default().gpu_culling, GpuCullingMode::Off);

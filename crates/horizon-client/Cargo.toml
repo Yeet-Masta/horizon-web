@@ -1,6 +1,5 @@
 [package]
 name = "horizon-client"
-default-run = "horizon-client"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -10,14 +9,25 @@ autobins = false
 autoexamples = false
 autotests = false
 
+[build-dependencies]
+horizon-game-discovery = { path = "../horizon-game-discovery" }
+horizon-mod-api-gen = { path = "../horizon-mod-api-gen" }
+# The build script runs on the host, but embeds resources based on the target OS.
+winresource = "0.1"
+
 [dependencies]
 # std::fs, std::time and std::thread, or the browser's on the web build (web/README.md).
 horizon-std = { path = "../horizon-std" }
-# Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md). The
-# anonymous "I'm playing" ping is the Horizon layer's (`horizon-heartbeat`, in the official executable).
-horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
+horizon-guest-stack = { path = "../horizon-guest-stack" }
 horizon-cosmetics = { path = "../horizon-cosmetics" }
+horizon-hooks = { path = "../horizon-hooks" }
+horizon-mod-runtime = { path = "../horizon-mod-runtime" }
+mod_api = { package = "horizon-mod-vocab", path = "../horizon-mod-vocab" }
+horizon-engine-slots = { path = "../horizon-engine-slots" }
+horizon-mod-api-macros = { path = "../horizon-mod-api-macros" }
 horizon-client-lib = { path = "../horizon-client-lib", default-features = false }
+horizon-gameplay = { path = "../horizon-gameplay" }
+horizon-client-gameplay = { path = "../horizon-client-gameplay" }
 horizon-assets = { path = "../horizon-assets" }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-client-input = { path = "../horizon-client-input" }
@@ -25,8 +35,6 @@ horizon-client-render = { path = "../horizon-client-render" }
 horizon-command = { path = "../horizon-command" }
 horizon-items = { path = "../horizon-items" }
 horizon-core = { path = "../horizon-core" }
-# Extension points for the crates above the engine (docs/layers.md, "How a Horizon crate plugs in").
-horizon-hooks = { path = "../horizon-hooks" }
 # OptiFine-format pack files: custom entity models, random entity textures.
 horizon-optifine = { path = "../horizon-optifine" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
@@ -37,6 +45,8 @@ horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
 horizon-server-files = { path = "../horizon-server-files" }
+# The JDK's clock, for the LAN host's random seed and the probes.
+horizon-java-properties = { path = "../horizon-java-properties" }
 # The dedicated server's anticheat, off unless server.toml's [anticheat] turns it on (docs/anticheat.md).
 horizon-anticheat = { path = "../horizon-anticheat" }
 # The dedicated server's chat filter: [chat_filter], the slur list, mutes (docs/chat-filter.md);
@@ -50,9 +60,9 @@ horizon-shader-api = { path = "../horizon-shader-api" }
 horizon-friends = { path = "../horizon-friends", optional = true }
 # The narrator (GameNarrator): text-to-speech of chat, system messages and screens.
 horizon-narrator = { path = "../horizon-narrator" }
-# Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/mods.md).
+# Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/modding/src/how-to/content-mods.md).
 # Their runtime is the `mods` feature.
-horizon-mods = { path = "../horizon-mods", default-features = false, features = ["index"] }
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -75,23 +85,32 @@ log = "0.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 horizon-theme = { path = "../horizon-theme" }
-horizon-bench = { path = "../horizon-bench" }
-# The machine and process probes (the dedicated server's performance report).
+# Machine and process probes for benchmark and dedicated-server performance reports.
 horizon-system = { path = "../horizon-system" }
+# Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md). The
+# anonymous "I'm playing" ping is the Horizon layer's (`horizon-heartbeat`, in the official executable).
+horizon-telemetry = { path = "../horizon-telemetry", default-features = false }
+horizon-bench = { path = "../horizon-bench" }
 crc32fast = "1"
 zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 # Controllers (evdev + libudev on Linux, IOKit on macOS, Windows.Gaming.Input); the `controllers` feature.
 gilrs = { version = "0.11", optional = true }
-# The DualSense's rumble, adaptive triggers and lights over HID (gilrs only reads it).
+# The DualSense's rumble, adaptive triggers and lights, and an Xbox One pad's impulse triggers,
+# over HID (gilrs only reads them).
 horizon-dualsense = { path = "../horizon-dualsense", optional = true }
 unicode-bidi = "0.3.18"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+# Native mods' holder processes: the web build has no processes.
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["runtime-process"] }
 # HTTPS to the Minecraft services (online-mode session join); the web build speaks TLS in
 # the page (horizon-std's web::https).
 ureq = { version = "2", default-features = false, features = ["tls"] }
 # `LevelStorageAccess.estimateDiskSpace`: usable disk space, without unsafe code on Windows.
 fs4 = { version = "1.1.0", default-features = false, features = ["sync"] }
+# Mod file roots are descriptor-bound: no symlink race can leave a mod's area.
+cap-std = "3"
+cap-fs-ext = "3"
 
 # The web build (web/README.md): WebGPU on a canvas, the page's event loop.
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -118,21 +137,20 @@ glam = { version = "0.30", features = ["core-simd"] }
 rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
-# Resolve virtualized folders to shell-compatible physical paths.
-dunce = "1.0.5"
-# Use the registered URI handler without routing links through Explorer/cmd.
-open = { version = "5.4.5", features = ["shellexecute-on-windows"] }
 # DirectX 12, where Vulkan has no adapter or device, or by choice (`graphicsApi`, graphics.rs).
 # Shaders compile with FXC (d3dcompiler_47.dll, part of Windows), or on integrated GPUs with DXC
 # (dxcompiler.dll beside the game, gfx/dx12_compiler.rs).
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Splitscreen: a window filling a monitor goes over its menu bar (game/split/windows.rs
+# Splitscreen: a window filling a monitor goes over its menu bar (game/runtime/split/windows.rs
 # `above_menu_bar`); all already in the tree through winit and wgpu.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSScreen"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
 
 [target.'cfg(not(any(target_os = "macos", target_family = "wasm")))'.dependencies]
 # OpenGL (WGL on Windows, EGL on Linux), the last fallback, for GPUs with no Vulkan or
@@ -140,26 +158,35 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 wgpu = { version = "30.0.1", default-features = false, features = ["gles"] }
 
 [features]
+# Source retention only: not compiled/tested on the fork; incompatible with typed residency.
+# Do not enable (including via --all-features); integration is tracked in arismoko/horizon#3491.
+upstream-parallel-mobs = ["horizon-gameplay/upstream-parallel-mobs"]
 default = ["audio", "controllers", "horizon-extras"]
+# Scoped trait-mod installation for a mod's own tests.
+testing = []
+# Per-level-tick state digest for determinism checks (game/state_digest.rs).
+state-digest = []
 # Sound output. Without it (and `controllers`) the program links neither libasound nor libudev on
 # Linux: the server build (`--no-default-features`, released as horizon-engine; docs/server.md).
 audio = ["horizon-client-render/audio", "horizon-client-lib/audio"]
-# Controllers: gilrs, and the DualSense's own output. Without it only `horizon-ctl pad`'s virtual pad.
+# Controllers: gilrs, and the DualSense's and Xbox One's own output. Without it only `horizon-ctl pad`'s
+# virtual pad.
 controllers = ["horizon-client-lib/controllers", "dep:gilrs", "dep:horizon-dualsense", "horizon-client-input/controllers"]
 # Horizon's own extras over the vanilla game, for a fork that wants them out (docs/forking.md):
 # cosmetics and emotes, the "Horizon player" presence, the official server added to
-# the server list, the Horizon Settings and Mods pages and Play with Friends, and ray tracing on
-# request (`HORIZON_RAY_TRACING=1`). Players always get them; there is no switch. `grep -rn horizon-extras crates/` lists
+# the server list, the Horizon Settings and Mods pages and Play with Friends. Players always get
+# them; there is no switch. `grep -rn horizon-extras crates/` lists
 # every place it gates. Without it (`--no-default-features --features audio,controllers`) the
 # client is best effort: CI builds only the default.
-horizon-extras = ["horizon-client-render/horizon-extras", "friends"]
+horizon-extras = ["friends"]
 # Play with Friends: sharing a world behind an invite code (game/friends.rs). Joining one is
 # horizon-friends' `game` side, which horizon-official registers (`horizon_hooks::tunnel`).
 friends = ["dep:horizon-friends"]
 # Records the call sites of mob random draws (`mob_ai_probe` traces).
 rng-trace = ["horizon-core/rng-trace", "horizon-client-lib/rng-trace"]
 # Rust's allocations go to the system heap instead of mimalloc, where heap profilers that replace
-# malloc (heaptrack, valgrind's massif) see them. For profiling only: mimalloc is faster.
+# malloc (heaptrack, valgrind's massif) see them. Also the Windows and macOS prebuilt archives' allocator
+# (tools/prebuilt_game.py, arismoko/horizon#2394, arismoko/horizon#3877): there std's shared library keeps its own allocator. Otherwise mimalloc is faster.
 system-allocator = ["horizon-threads/system-allocator"]
 # mimalloc that counts each thread's allocations and frees (`stats` replies with `alloc`).
 alloc-count = ["horizon-threads/alloc-count"]
@@ -171,41 +198,26 @@ windows-mimalloc = []
 # Opt-in Windows heap experiment; see docs/windows-allocators.md.
 windows-segment-heap = []
 
-[[bin]]
-name = "horizon-client"
-path = "src/main.rs"
-
 [[test]]
-name = "datapack_biome_sync"
-path = "tests/datapack_biome_sync.rs"
-
-[[test]]
-name = "launch_api"
-path = "tests/launch_api.rs"
-
-[[test]]
-name = "mod_api_hooks"
-path = "tests/mod_api_hooks.rs"
-
-[[example]]
-name = "native_gui_overlay_probe"
-path = "examples/native_gui_overlay_probe.rs"
-
-[[example]]
-name = "wind_burst_hook_probe"
-path = "examples/wind_burst_hook_probe.rs"
-
-[build-dependencies]
-horizon-mod-api-gen = { path = "../horizon-mod-api-gen" }
-# The build script runs on the host, but embeds resources based on the target OS.
-winresource = "0.1"
+name = "it"
+path = "tests/it/main.rs"
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+horizon-client-core = { path = "../horizon-client-core", features = ["test-language-publication"] }
+horizon-client-lib = { path = "../horizon-client-lib", default-features = false, features = ["test-payload-probe", "test-publication-scope", "test-residency-observer"] }
+horizon-mod-wasm = { path = "../horizon-mod-wasm", features = ["runtime-fixture", "listener-fixture", "test-copy-probe"] }
+wat = "1.261"
+tempfile = "3"
+horizon-mod-runtime = { path = "../horizon-mod-runtime", features = ["test-work-count"] }
+horizon-threads = { path = "../horizon-threads", features = ["test-allocation-count"] }
+mod_platform = { package = "horizon-mod-api", path = "../horizon-mod-api", features = ["testing"] }
+mod_api = { package = "horizon-mod-vocab", path = "../horizon-mod-vocab", features = ["testing"] }
 horizon-client-render = { path = "../horizon-client-render", features = ["test-support"] }
 horizon-items = { path = "../horizon-items", features = ["test-support"] }
+horizon-gameplay = { path = "../horizon-gameplay", features = ["test-support"] }
 horizon-perf = { path = "../horizon-perf" }
 # Every WGSL shader translated as wgpu's DirectX 12 backend does (gfx.rs tests).
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out", "msl-out", "spv-out"] }

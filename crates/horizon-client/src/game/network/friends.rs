@@ -1,0 +1,457 @@
+// game-module-cfg: feature = "friends"
+//! Play with friends, host side: "Start Sharing" on the Play with Friends
+//! screen (`screen`, the pause menu's Friends button) opens the world to LAN if
+//! it isn't (with Open to LAN's defaults) and shares that port behind an
+//! invite code (horizon-friends). The code holds this computer's addresses
+//! and the key, so friends join with no server of ours; a relay the player
+//! configured adds a short code and a fallback. The integrated server is the
+//! LAN one, unchanged: tunnelled guests are LAN guests that connect from the
+//! loopback address. The joining side is horizon-friends' (`game`), registered by
+//! horizon-official.
+//!
+//! The web build has no ports to share: the world gets a room on the page's
+//! WebSocket relay instead ([`WebHost`]), whose code friends join with from
+//! their own browsers over WebRTC (web/README.md).
+use super::{Game, lan::LanSettings};
+use horizon_client::{Result, hud::HudBatch, lang, text::Text};
+#[cfg(target_family = "wasm")]
+use horizon_friends::host::HostState;
+#[cfg(not(target_family = "wasm"))]
+use horizon_friends::{Host, HostConfig, PathMode, host::DEFAULT_PORT, stun};
+use horizon_friends::{HostEvent, reach};
+#[cfg(not(target_family = "wasm"))]
+use horizon_protocol::{GAME_VERSION, PROTOCOL_VERSION};
+use horizon_std::time::{Duration, Instant};
+
+#[cfg(target_family = "wasm")]
+type Host = WebHost;
+
+/// The web build's sharing: a room on the WebSocket relay. Its events read
+/// as horizon-friends' host's, and the friends' data channels wait in
+/// `guests` for the LAN to take them.
+#[cfg(target_family = "wasm")]
+pub(super) struct WebHost {
+    room: horizon_std::web::rtc::Host,
+    state: HostState,
+    sessions: u64,
+    guests: Vec<horizon_std::web::socket::Socket>,
+    /// The integrated server's LAN, on its worker: friends' data channels
+    /// stay on the page's thread, and their connections run beside it.
+    door: Option<horizon_client::lan::Door>,
+}
+#[cfg(target_family = "wasm")]
+impl WebHost {
+    fn start(relay: &str, door: Option<horizon_client::lan::Door>) -> Self {
+        Self {
+            room: horizon_std::web::rtc::Host::start(
+                relay,
+                &horizon_client::net::web_stun_servers(),
+            ),
+            state: HostState::default(),
+            sessions: 0,
+            guests: Vec::new(),
+            door,
+        }
+    }
+    fn poll(&mut self) -> Vec<HostEvent> {
+        use horizon_std::web::rtc::HostEvent as Room;
+        let mut events = Vec::new();
+        for event in self.room.poll() {
+            match event {
+                Room::Code(code) => {
+                    self.state.invite = Some(code.clone());
+                    self.state.summary =
+                        "Friends join with this code from their own browser (Join a Friend), through the same relay.".to_owned();
+                    events.push(HostEvent::Code(code));
+                }
+                Room::Guest(socket) => {
+                    self.sessions += 1;
+                    self.guests.push(socket);
+                    events.push(HostEvent::Connected {
+                        session: self.sessions,
+                        direct: true,
+                    });
+                }
+                Room::Closed(reason) => {
+                    self.state.relay_problem = Some(format!("The relay's room closed: {reason}."));
+                }
+            }
+        }
+        events
+    }
+    fn state(&self) -> HostState {
+        self.state.clone()
+    }
+    fn sessions(&self) -> u64 {
+        self.sessions
+    }
+    fn stop(&mut self) {
+        self.room.stop();
+    }
+}
+
+#[path = "friends/screen.rs"]
+mod screen;
+
+use screen::{self as friends_screen, Action, FriendsView};
+pub use screen::{TITLE, title};
+
+pub(super) struct Sharing {
+    host: Host,
+    /// Sharing opened the world to LAN, so stopping closes it again.
+    opened_lan: bool,
+    code: Option<String>,
+    /// Wrong codes tried so far.
+    wrong: u32,
+    notice: Option<String>,
+    copied: Option<Instant>,
+    /// Sessions carried directly and through the relay so far.
+    paths: (u32, u32),
+}
+
+pub const HELP: &[&str] = &[
+    "friends host                   share the open world behind an invite code",
+    "friends stop                   stop sharing",
+    "friends status                 the code, how friends reach this host, the guests",
+];
+
+/// `HORIZON_STUN_SERVERS`, else `friendsStun` in horizon.txt, else the defaults.
+#[cfg(not(target_family = "wasm"))]
+fn stun_servers() -> Vec<String> {
+    if horizon_std::env::var_os("HORIZON_STUN_SERVERS").is_some() {
+        return stun::servers_from_env();
+    }
+    let dir = horizon_std::env::current_dir().unwrap_or_default();
+    match horizon_client::ui_theme::preference(&dir, "friendsStun") {
+        Some(list) => stun::parse_servers(&list),
+        None => stun::servers_from_env(),
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn env_flag(name: &str, default: bool) -> bool {
+    horizon_std::env::var(name).map_or(default, |v| v != "0")
+}
+
+impl Game<'_> {
+    /// Start sharing the open world.
+    pub(super) fn friends_start(&mut self) -> Result<()> {
+        if self.friends.is_some() {
+            return Ok(());
+        }
+        // Single player on its server thread shares that server, as Open to
+        // LAN publishes it; another server can't be shared.
+        if self.title.is_some() || (self.remote.is_some() && self.integrated.is_none()) {
+            return Err("open a singleplayer world first".into());
+        }
+        let opened_lan = self.lan_port().is_none();
+        if opened_lan {
+            // ShareToLanScreen's defaults, as the world options screen offers them.
+            self.lan_open(LanSettings {
+                port: horizon_client::lan::available_port(),
+                guest_commands: false,
+                force_game_mode: true,
+            })?;
+        }
+        #[cfg(target_family = "wasm")]
+        let door = self
+            .integrated
+            .as_ref()
+            .and_then(|server| server.call(|g| g.lan.as_ref().map(|h| h.hub.lan.door())))
+            .flatten();
+        #[cfg(target_family = "wasm")]
+        let host = match horizon_client::net::web_relay() {
+            Some(relay) => WebHost::start(&relay, door),
+            None => {
+                if opened_lan {
+                    self.lan_close(true);
+                }
+                return Err(horizon_client::net::NO_WEB_RELAY.into());
+            }
+        };
+        #[cfg(not(target_family = "wasm"))]
+        let port = self.lan_port().ok_or("the world isn't open to LAN")?;
+        #[cfg(not(target_family = "wasm"))]
+        let host = match Host::start(HostConfig {
+            lan: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            protocol: PROTOCOL_VERSION,
+            game: GAME_VERSION.to_owned(),
+            relay: horizon_client::net::friends_relay_setting(),
+            path: PathMode::from_env(),
+            port: horizon_std::env::var("HORIZON_FRIENDS_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_PORT),
+            reach: reach::Options {
+                // HORIZON_FRIENDS_UPNP=0 leaves the router alone.
+                map_port: env_flag("HORIZON_FRIENDS_UPNP", true),
+                stun: stun_servers(),
+                // Both ends on one machine (tests).
+                loopback: env_flag("HORIZON_FRIENDS_LOOPBACK", false),
+            },
+        }) {
+            Ok(h) => h,
+            Err(e) => {
+                if opened_lan {
+                    self.lan_close(true);
+                }
+                return Err(e.into());
+            }
+        };
+        self.friends = Some(Sharing {
+            host,
+            opened_lan,
+            code: None,
+            wrong: 0,
+            notice: None,
+            copied: None,
+            paths: (0, 0),
+        });
+        Ok(())
+    }
+
+    /// Stop sharing: the code ends (direct port closed, router mapping
+    /// deleted); the world closes to LAN again if sharing opened it.
+    pub(super) fn friends_stop(&mut self) {
+        let Some(mut sharing) = self.friends.take() else {
+            return;
+        };
+        sharing.host.stop();
+        if sharing.opened_lan {
+            self.lan_close(true);
+        } else {
+            self.system_message(Text::literal(lang::get_or(
+                "horizon.friends.stopped",
+                "Stopped sharing the invite code.",
+            )));
+        }
+    }
+
+    /// The LAN server is closing: the code goes with it.
+    pub(super) fn friends_lan_closed(&mut self) {
+        if let Some(mut sharing) = self.friends.take() {
+            sharing.host.stop();
+        }
+    }
+
+    /// New codes and sessions, once a tick and while the pause menu is drawn.
+    pub(super) fn tick_friends(&mut self) {
+        let Some(sharing) = self.friends.as_mut() else {
+            return;
+        };
+        let mut announce = false;
+        let mut stopped = None;
+        for event in sharing.host.poll() {
+            match event {
+                HostEvent::Code(code) => {
+                    if sharing.code.is_some() && sharing.wrong >= horizon_friends::host::MAX_WRONG {
+                        sharing.notice = Some(lang::get_or(
+                            "horizon.friends.short_code_changed",
+                            "Someone kept trying a wrong short code, so it changed.",
+                        ));
+                        sharing.wrong = 0;
+                    }
+                    announce = sharing.code.is_none();
+                    sharing.code = Some(code);
+                }
+                HostEvent::WrongCode { count } => {
+                    sharing.wrong = count;
+                    sharing.notice = Some(lang::get_or(
+                        "horizon.friends.wrong_code",
+                        "Someone tried a wrong code.",
+                    ));
+                }
+                HostEvent::Connected { direct: true, .. } => sharing.paths.0 += 1,
+                HostEvent::Connected { direct: false, .. } => sharing.paths.1 += 1,
+                HostEvent::Disconnected { .. } => {}
+                HostEvent::RelayStopped => {
+                    let text = lang::get_or(
+                        "horizon.friends.relay_stopped",
+                        "Too many wrong short codes, so the relay is off until you share again. Friends can still join with the full code.",
+                    );
+                    sharing.notice = Some(text.clone());
+                    stopped = Some(text);
+                }
+            }
+        }
+        // Friends' browsers whose data channels opened join as LAN guests.
+        #[cfg(target_family = "wasm")]
+        for socket in sharing.host.guests.drain(..) {
+            match (&sharing.host.door, &self.lan) {
+                (Some(door), _) => door.accept_web(socket),
+                (None, Some(lan)) => lan.hub.lan.accept_web(socket),
+                (None, None) => {}
+            }
+        }
+        if let Some(text) = stopped {
+            self.system_message(Text::literal(text));
+        }
+        if announce {
+            self.system_message(Text::literal(lang::get_or(
+                "horizon.friends.code_ready",
+                "Your invite code is ready: Game Menu, Play with Friends. Copy it and send it to your friends.",
+            )));
+        }
+    }
+
+    pub(super) fn friends_copy(&mut self) {
+        let Some(code) = self.friends.as_ref().and_then(|s| s.code.clone()) else {
+            return;
+        };
+        use horizon_client::clipboard::Clipboard;
+        self.clipboard.set(&code);
+        if let Some(s) = self.friends.as_mut() {
+            s.copied = Some(Instant::now());
+        }
+    }
+
+    /// Play with Friends. The world is paused under it in singleplayer, so
+    /// new codes and sessions are read while it is drawn.
+    pub(super) fn draw_friends_screen(&mut self, batch: &mut HudBatch) {
+        self.tick_friends();
+        let view = self.friends_view();
+        horizon_client::widgets::begin_screen(|| {
+            horizon_client::widgets::ScreenInfo::new("friends", friends_screen::TITLE)
+        });
+        friends_screen::draw(
+            batch,
+            &self.gui.atlas,
+            self.cursor,
+            &view,
+            true,
+            &mut |phase, batch| self.draw_screen_phase(batch, phase),
+        );
+    }
+    pub(super) fn friends_screen_click(&mut self) {
+        let view = self.friends_view();
+        let Some(action) =
+            friends_screen::click(&self.gui.atlas, self.gui_size(), self.cursor, &view)
+        else {
+            return;
+        };
+        self.audio.play_button_click();
+        match action {
+            Action::Share => {
+                if let Err(e) = self.friends_start() {
+                    self.system_message(Text::literal(
+                        lang::get_or(
+                            "horizon.friends.share_failed",
+                            "Couldn't share the world: %s",
+                        )
+                        .replacen("%s", &e.to_string(), 1),
+                    ));
+                }
+            }
+            Action::Copy => self.friends_copy(),
+            Action::Stop => self.friends_stop(),
+            // The system browser, as the folder buttons open their folders.
+            Action::Help => {
+                if let Some(url) = &view.help {
+                    super::packs::open_uri(url);
+                }
+            }
+            Action::Done => self.set_screen(super::Screen::Paused),
+        }
+    }
+
+    /// Whether the pause menu offers Play with Friends (a singleplayer world).
+    pub(super) fn friends_shown(&self) -> bool {
+        self.friends_view().shown
+    }
+
+    /// What Play with Friends shows.
+    pub(super) fn friends_view(&self) -> FriendsView {
+        let guests = match &self.lan {
+            Some(h) => h.hub.guests.iter().map(|g| g.name.clone()).collect(),
+            // On the server thread: the other players the server lists.
+            None if self.integrated.is_some() => {
+                let me = self.options.player_name();
+                let mut names = self.remote_online_names().unwrap_or_default();
+                names.retain(|n| *n != me);
+                names
+            }
+            None => Vec::new(),
+        };
+        let Some(s) = &self.friends else {
+            return FriendsView {
+                shown: self.remote.is_none() || self.integrated.is_some(),
+                ..FriendsView::default()
+            };
+        };
+        let state = s.host.state();
+        let mut status = if s.code.is_none() {
+            lang::get_or(
+                "horizon.friends.finding_route",
+                "Finding how friends can reach you…",
+            )
+        } else {
+            state.summary.clone()
+        };
+        if let Some(short) = &state.short {
+            status.push_str(&format!(" Short code for the relay: {short}."));
+        }
+        if let Some(problem) = &state.relay_problem {
+            status.push(' ');
+            status.push_str(problem);
+        }
+        // A browser's friends come through the relay's room: nothing to
+        // troubleshoot on this side.
+        let reachable = horizon_std::WEB
+            || matches!(
+                state.verdict,
+                Some(reach::Verdict::Mapped(_) | reach::Verdict::Public)
+            )
+            || state.short.is_some();
+        FriendsView {
+            shown: true,
+            sharing: true,
+            code: s.code.clone(),
+            status,
+            reachable,
+            help: (!reachable && s.code.is_some()).then(|| reach::HELP_URL.to_owned()),
+            guests,
+            notice: s.notice.clone(),
+            copied: s
+                .copied
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(2)),
+        }
+    }
+
+    /// `horizon-ctl friends ...`.
+    pub(super) fn friends_control(&mut self, words: &[&str]) -> Result<Option<serde_json::Value>> {
+        use serde_json::json;
+        if words[0] != "friends" {
+            return Ok(None);
+        }
+        match words.get(1).copied() {
+            Some("host") => {
+                self.friends_start()?;
+                Ok(Some(json!({ "ok": true, "lan_port": self.lan_port() })))
+            }
+            Some("stop") => {
+                self.friends_stop();
+                Ok(Some(json!({ "ok": true })))
+            }
+            Some("status") => {
+                self.tick_friends();
+                let view = self.friends_view();
+                let state = self.friends.as_ref().map(|s| s.host.state());
+                Ok(Some(json!({
+                    "sharing": view.sharing,
+                    "code": view.code,
+                    "short": state.as_ref().and_then(|s| s.short.as_ref().map(ToString::to_string)),
+                    "summary": view.status,
+                    "reachable": view.reachable,
+                    "verdict": state.as_ref().and_then(|s| s.verdict.as_ref().map(|v| format!("{v:?}"))),
+                    "direct_port": state.as_ref().map(|s| s.port),
+                    "sessions": self.friends.as_ref().map_or(0, |s| s.host.sessions()),
+                    "direct": self.friends.as_ref().map_or(0, |s| s.paths.0),
+                    "relayed": self.friends.as_ref().map_or(0, |s| s.paths.1),
+                    "guests": view.guests,
+                    "lan_port": self.lan_port(),
+                })))
+            }
+            _ => Err("friends host|stop|status".into()),
+        }
+    }
+}

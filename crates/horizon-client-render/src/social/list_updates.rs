@@ -1,6 +1,5 @@
-use super::{
-    Failure, FriendData, ResultCode, Service, fetch_friends, lock, parse_friends, session,
-};
+use super::service::{Failure, Service, fetch_friends, session};
+use super::{FriendData, ResultCode, lock, parse_friends};
 use horizon_std::{
     thread,
     time::{Duration, Instant},

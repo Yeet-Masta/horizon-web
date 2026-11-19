@@ -16,7 +16,8 @@ except ImportError:
     import lab
     import test_rust_parity as base
 
-TEST = 'level::tests::fresh_chunk_'
+# The sculk regression's tests are in level::tests.
+TEST = 'fresh_chunk_'
 
 
 def main():

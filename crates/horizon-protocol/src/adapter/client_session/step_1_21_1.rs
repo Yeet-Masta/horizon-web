@@ -66,7 +66,7 @@ pub(super) fn clientbound(state: State, id: i32, payload: &[u8]) -> Result<Optio
         cb::LEVEL_PARTICLES => particles(payload)?,
         cb::TELEPORT_ENTITY => teleport_entity(payload)?,
         cb::PLAYER_POSITION => player_position(payload)?,
-        cb::PLAYER_INFO_UPDATE => player_info(payload)?,
+        cb::PLAYER_INFO_UPDATE => player_info(payload, false)?,
         cb::EXPLODE => explode(payload)?,
         _ => return Ok(None),
     }))
@@ -143,7 +143,7 @@ fn spawn_info_down(payload: &[u8], login: bool) -> Result<Vec<u8>> {
 }
 
 /// 1.21.2's two booleans (long distance, always visible) as 1.21.1's one: the second goes.
-fn particles(payload: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn particles(payload: &[u8]) -> Result<Vec<u8>> {
     let mut r = Reader::new(payload);
     let long_distance = r.bool()?;
     r.bool()?;
@@ -202,12 +202,13 @@ fn player_position(payload: &[u8]) -> Result<Vec<u8>> {
 
 /// 1.21.2's player list entries as 1.21.1's: the list order (0x40, a VarInt after the display name) and the hat
 /// (0x80, a boolean last) go with their bits; 1.21.1 has neither. The other actions are laid out alike.
-fn player_info(payload: &[u8]) -> Result<Vec<u8>> {
+/// `list_order`: whether the client has UPDATE_LIST_ORDER (1.21.2 and 1.21.3 do; only UPDATE_HAT, 1.21.4's, goes).
+pub(super) fn player_info(payload: &[u8], list_order: bool) -> Result<Vec<u8>> {
     let mut r = Reader::new(payload);
     let actions = r.u8()?;
     let n = r.count(r.remaining())?;
     let mut w = Writer::new();
-    w.u8(actions & 0x3F);
+    w.u8(actions & if list_order { 0x7F } else { 0x3F });
     w.varint(n as i32);
     for _ in 0..n {
         w.uuid(r.uuid()?);
@@ -246,7 +247,10 @@ fn player_info(payload: &[u8]) -> Result<Vec<u8>> {
             }
         }
         if actions & 0x40 != 0 {
-            r.varint()?;
+            let order = r.varint()?;
+            if list_order {
+                w.varint(order);
+            }
         }
         if actions & 0x80 != 0 {
             r.bool()?;
@@ -321,8 +325,30 @@ pub(super) fn serverbound(state: State, id: i32, payload: &[u8]) -> Result<Optio
             Ok(Some(out))
         }
         sb::PLAYER_INPUT => player_input(payload).map(Some),
+        sb::USE_ITEM_ON => use_item_on(payload).map(Some),
         _ => Ok(None),
     }
+}
+
+/// A 1.21.1 client's use_item_on ends its block hit with `inside` and goes straight to the sequence; 1.21.2 added
+/// the world-border flag between them (`BlockHitResult` in `FriendlyByteBuf`, read by javap on both clients). The
+/// client was never at a world border hit: the flag is false.
+fn use_item_on(payload: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Reader::new(payload);
+    let mut w = Writer::new();
+    w.varint(r.varint()?);
+    w.bytes(r.bytes(8)?);
+    w.varint(r.varint()?);
+    for _ in 0..3 {
+        w.f32(r.f32()?);
+    }
+    w.bool(r.bool()?);
+    w.bool(false);
+    w.varint(r.varint()?);
+    if r.remaining() != 0 {
+        return Err(Error::new("1.21.1 use_item_on with trailing bytes"));
+    }
+    Ok(w.data)
 }
 
 /// 1.21.1's client information with 1.21.2's particle status after it: all particles
@@ -686,5 +712,39 @@ mod tests {
         e.string("a:b");
         e.bool(false);
         assert_eq!(out, e.data);
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The 1.21.1 client's use_item_on (no world-border flag) reaches 26.3's reader with the flag false.
+    #[test]
+    fn a_1_21_1_use_item_on_gains_the_world_border_flag() {
+        // The same independent vanilla bytes as translate's test: 1.21.1's and 1.21.2's ServerboundUseItemOnPacket.
+        let old = hex("010000007fffffd040023e8000003f0000003f40000001ac02");
+        let modern = hex("010000007fffffd040023e8000003f0000003f4000000101ac02");
+        // Byte 22 is `inside`, byte 23 the world-border flag (set in the 1.21.2 bytes).
+        let mut with_flag = modern.clone();
+        with_flag[23] = 0;
+        assert_eq!(
+            serverbound(
+                State::Play,
+                packet_ids::play::serverbound::USE_ITEM_ON,
+                &old
+            )
+            .unwrap(),
+            Some(with_flag.clone())
+        );
+        let p = play::UseItemOn::read(&mut Reader::new(&with_flag)).unwrap();
+        assert!(p.inside && !p.world_border);
+        assert_eq!(p.sequence, 300);
+        assert!(use_item_on(&old[..old.len() - 1]).is_err());
+        let mut trailing = old;
+        trailing.push(0);
+        assert!(use_item_on(&trailing).is_err());
     }
 }

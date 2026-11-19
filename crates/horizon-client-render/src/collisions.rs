@@ -1,6 +1,10 @@
 //! Collision queries against the same resident chunks used by the renderer.
 //! The development scene has no entities, block entities or world border.
 //! Entity-dependent rules use the defaults for players and the supported mobs.
+// The defining module of the collide entries: they delegate to each other and
+// the border tests exercise them directly; the `clippy.toml` ban (arismoko/horizon#2414)
+// targets their callers elsewhere, not this file.
+#![allow(clippy::disallowed_methods)]
 use crate::{Result, world::World};
 use horizon_core::{
     geometry::{Aabb, Vec3, VoxelShape, border::BorderGeometry},
@@ -37,7 +41,8 @@ pub fn load<'r>(root: &Path, registry: &'r BlockRegistry) -> Result<BlockCollisi
 /// What powder snow's and liquids' contextual collisions ask of the colliding
 /// entity (`PowderSnowBlock` and `LiquidBlock.getCollisionShape`).
 #[derive(Clone, Copy, Debug, Default)]
-pub struct PowderSnowSubject {
+pub struct PowderSnowSubject<'a> {
+    pub main_hand: Option<CollisionItem<'a>>,
     pub fall_distance: f64,
     /// `FallingBlockEntity`.
     pub falling_block: bool,
@@ -79,7 +84,7 @@ pub struct SceneCollisions<'w, 'r> {
     pub world: &'w World,
     pub binding: &'w BlockCollisionRegistry<'r>,
     /// The entity colliding, for powder snow; None: no fall, no boots.
-    pub subject: Option<PowderSnowSubject>,
+    pub subject: Option<PowderSnowSubject<'w>>,
 }
 /// Already selected entity boxes alongside the resident block collision world.
 pub struct EntityCollisions<'a, W> {
@@ -219,11 +224,10 @@ where
         )?)
     }
 }
-impl SceneCollisions<'_, '_> {
+impl<'w> SceneCollisions<'w, '_> {
     /// Position contexts permit geometric movement probes without inventing a
-    /// player, inventory, effects or fluid-standing behavior; a lava walker or
-    /// a living entity in leather boots collides as the living entity it is,
-    /// empty-handed.
+    /// player, inventory, effects or fluid-standing behavior. A supplied subject
+    /// collides as a living entity with its captured main-hand stack.
     pub fn resolve(
         &mut self,
         bounds: Aabb,
@@ -234,7 +238,7 @@ impl SceneCollisions<'_, '_> {
         self.resolve_with_context(bounds, movement, max_step, on_ground, self.context(bounds))
     }
     /// [`Self::resolve`], also stopped by the world border's walls when one is
-    /// given with the moving entity's x and z: `Entity.collectColliders` adds
+    /// given with the moving entity's x and z: `Entity.collectAllColliders` adds
     /// `WorldBorder.getCollisionShape` for any entity inside and close to it.
     pub fn resolve_in_border(
         self,
@@ -289,21 +293,18 @@ impl SceneCollisions<'_, '_> {
             },
         )?)
     }
-    fn context(&self, bounds: Aabb) -> CollisionContext<'static> {
+    fn context(&self, bounds: Aabb) -> CollisionContext<'w> {
         let y = bounds.min_position().y;
-        if !self
-            .subject
-            .is_some_and(|s| s.lava_walker || s.leather_boots)
-        {
+        let Some(subject) = self.subject else {
             return CollisionContext::position(y);
-        }
+        };
         CollisionContext::for_entity(
             CollisionEntity {
                 identity: EntityIdentity(0),
                 kind: horizon_world::collision_context::EntityContextKind::Living,
                 y,
                 descending: false,
-                main_hand: Some(CollisionItem::EMPTY),
+                main_hand: Some(subject.main_hand.unwrap_or(CollisionItem::EMPTY)),
             },
             false,
         )
@@ -1099,7 +1100,11 @@ mod section_tests {
             return;
         }
         let assets = crate::assets::Assets::load(&root).unwrap();
-        let render = assets.reload(&root).unwrap();
+        let render = assets
+            .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap();
         let binding = load(&root, assets.registry).unwrap();
         let mut world = World::test_scene(&assets, &render, 3).unwrap();
         let state = |name: &str| assets.registry.default_state(name).unwrap();

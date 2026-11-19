@@ -109,8 +109,7 @@ run at once there, and each must finish within 10 seconds however slowly its byt
 - **A relay** (only if one is configured) sees the IP addresses of the host and the guests, the short
   code's first half, when sessions start and end and the size of encrypted frames. It can't see the
   secret, the key or the game (names, chat, the world). It logs counts every five minutes, nothing else.
-- **Horizon** runs no service for it. The game's anonymous "I'm playing" ping says only whether a
-  LAN or friends world is open, never its address, code or name ([telemetry.md](telemetry.md)).
+- **Horizon** runs no service for it, and the game sends nothing about it ([telemetry.md](telemetry.md)).
 
 ## Identity
 
@@ -166,7 +165,9 @@ shows the address the relay sees for you: behind a proxy that hides client addre
 platforms' TCP proxies), set `RELAY_PER_ADDRESS_LIMITS=0`. Run **one** instance per address: codes live
 in its memory.
 
-Settings, all optional:
+Settings, all optional (an empty variable counts as unset; one that is set and does not parse, such as
+`RELAY_PER_ADDRESS_LIMITS=false` (a flag is a number, `0` for off), stops the relay at start with a
+message that names it):
 
 | Variable | Default | |
 | --- | --- | --- |

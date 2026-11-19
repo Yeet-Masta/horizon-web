@@ -27,13 +27,15 @@ mod items;
 pub mod json;
 pub mod progress;
 pub mod schema;
+mod single;
 mod tables;
 mod text;
 pub mod world_upgrader;
 
-use crate::nbt::Tag;
 use dynamic::{as_str, string};
+use horizon_core::nbt::Tag;
 use schema::{Key, Ty, key, walk};
+pub use single::{MAX_DEPTH, UpgradeError, upgrade_block_entity, upgrade_entity};
 pub use tables::{available as tables_available, set_resources};
 
 /// The DataVersion of the game.
@@ -314,7 +316,7 @@ pub const FLATTENING: i32 = 1519;
 /// A block state, `name` with `props` (`key`, `value`), as written at `data_version`, upgraded as the datafixers
 /// do it: a state from before the flattening comes out with its 1.13 name and properties (the table of
 /// `BlockStateData`); any other, or one the table doesn't know, is returned as it is. The numeric block ids of
-/// the oldest chunks are not read here. API @API:upgrade_block_state@.
+/// the oldest chunks are not read here. API 620.
 pub fn native_upgrade_block_state(
     name: &str,
     props: &[(String, String)],

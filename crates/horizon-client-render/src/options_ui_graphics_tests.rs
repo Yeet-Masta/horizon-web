@@ -27,6 +27,65 @@ fn calibrates(ui: &mut OptionsUi, s: &mut Settings, atlas: &HudAtlas) -> bool {
     ui.page() == Page::HdrCalibration
 }
 
+/// The renderer keeps the last world's shader pack at the title, and a `shaders/` pack's frame
+/// with it, where the pack draws nothing and another pick waits for the next world: the Look
+/// row is the pack's over a world only.
+#[test]
+fn look_is_the_packs_only_over_a_world() {
+    use crate::gfx::output::tests::{snapshot, window};
+    use crate::graphics_ui::{H, Item};
+    let atlas = atlas();
+    let mut s = Settings::default();
+    s.horizon.hdr = crate::graphics::HdrMode::On;
+    s.horizon.shader_pack = "Sunny.zip".into();
+    let (caps, reading) = window(Some(crate::gfx::HdrOutput::Pq), Some(true));
+    let look = Item::Horizon(H::HdrLook);
+    let mut ui = OptionsUi::default();
+    for (shaders_pack, name, reason) in [
+        (
+            false,
+            Some("Sunny Day"),
+            "The shader pack lights the world. Pick it under Shaders.",
+        ),
+        (
+            true,
+            None,
+            "The shader pack's picture is shown at Paper White.",
+        ),
+    ] {
+        s.running_pack = name.map(str::to_owned);
+        let request = crate::gfx::FrameRequest {
+            shaders_pack,
+            ..Default::default()
+        };
+        let running = snapshot(&s.horizon, request, caps, reading).with_pack(true);
+        assert_eq!(running.frame.hud_layer, !shaders_pack);
+        ui.open(true);
+        ui.draw_test_frame(
+            &s,
+            running,
+            &mut HudBatch::scratch([480, 480]),
+            &atlas,
+            (0.0, 0.0),
+            &mut |_, _| {},
+        );
+        let label = format!("Look: {}", name.unwrap_or("Sunny"));
+        assert_eq!(look.label(&s, &ui.output).plain(), label);
+        assert_eq!(look.blocked(&s, &ui.output), Some(reason));
+        ui.open(false);
+        ui.draw_test_frame(
+            &s,
+            running,
+            &mut HudBatch::scratch([480, 480]),
+            &atlas,
+            (0.0, 0.0),
+            &mut |_, _| {},
+        );
+        assert_eq!(look.label(&s, &ui.output).plain(), "Look: Horizon");
+        assert_eq!(look.blocked(&s, &ui.output), None, "{reason}");
+    }
+}
+
 /// Opening the graphics screen keeps the offer and report of the renderer the options are
 /// drawn for: the screen opens afresh, the output doesn't go with it.
 #[test]
@@ -38,13 +97,14 @@ fn opening_the_graphics_screen_keeps_the_offer_and_report() {
         size: (427.0, 240.0),
         ..Default::default()
     };
-    let batch = || HudBatch::new([427, 240]);
-    ui.draw(
+    let batch = || HudBatch::scratch([427, 240]);
+    ui.draw_test_frame(
         &s,
         auto_window(Some(true)),
         &mut batch(),
         &atlas,
         (-1.0, -1.0),
+        &mut |_, _| {},
     );
     ui.show(Page::Graphics);
     assert!(calibrates(&mut ui, &mut s, &atlas));
@@ -66,22 +126,24 @@ fn a_changed_report_shows_without_an_apply() {
         size: (427.0, 240.0),
         ..Default::default()
     };
-    let batch = || HudBatch::new([427, 240]);
+    let batch = || HudBatch::scratch([427, 240]);
     ui.show(Page::Graphics);
-    ui.draw(
+    ui.draw_test_frame(
         &s,
         auto_window(Some(false)),
         &mut batch(),
         &atlas,
         (-1.0, -1.0),
+        &mut |_, _| {},
     );
     assert!(!calibrates(&mut ui, &mut s, &atlas));
-    ui.draw(
+    ui.draw_test_frame(
         &s,
         auto_window(Some(true)),
         &mut batch(),
         &atlas,
         (-1.0, -1.0),
+        &mut |_, _| {},
     );
     assert!(calibrates(&mut ui, &mut s, &atlas));
 }
@@ -162,12 +224,19 @@ fn a_held_hdr_start_shows_as_the_graphics_screen_opens() {
             ..Default::default()
         };
         let output = snapshot(&s.horizon, Default::default(), caps, reading);
-        ui.draw(
+        ui.draw_test_frame(
             &s,
             output,
-            &mut HudBatch::new([427, 240]),
+            &mut HudBatch::new(
+                [427, 240],
+                crate::hud::GuiScale {
+                    requested: 1,
+                    unicode: false,
+                },
+            ),
             &atlas,
             (-1.0, -1.0),
+            &mut |_, _| {},
         );
         ui.show(Page::Graphics);
         assert!(calibrates(&mut ui, &mut s, &atlas) != held, "held {held}");
@@ -212,4 +281,110 @@ fn the_chat_delay_slider_says_its_delay() {
     assert_eq!(chat_delay_label(&s).plain(), "Chat Delay: 6.0 second(s)");
     s.file.set("chatDelay", crate::options_file::V::Double(0.0));
     assert_eq!(chat_delay_label(&s).plain(), "options.chat.delay_none");
+}
+
+/// Spec #16011 item 5: the picked pack with `[ray_tracing]` says why it draws without it, as the
+/// renderer the options are drawn for has it, above its row's and the pack list's descriptions;
+/// nothing while it traces or before a renderer, and nothing for a pack without `[ray_tracing]`.
+#[test]
+fn a_tracing_pack_says_why_it_draws_without_ray_tracing() {
+    use crate::gfx::output::RayStatus::{Off, Ready, Restart, Unsupported};
+    use crate::settings_shell::Screen;
+    use crate::shader_pack_list::{Entry, Kind};
+    let atlas = atlas();
+    let pack = |key: &str, traces| Entry {
+        file: key.into(),
+        key: key.into(),
+        title: key.into(),
+        kind: Kind::Horizon,
+        options: Vec::new(),
+        values: Vec::new(),
+        pages: Vec::new(),
+        traces,
+    };
+    let mut s = Settings {
+        shader_packs: vec![pack("horizon:rt", true), pack("horizon:plain", false)],
+        ..Settings::default()
+    };
+    let mut ui = OptionsUi {
+        size: (427.0, 240.0),
+        ..Default::default()
+    };
+    ui.show(Page::ShaderPacks);
+    // The pack list's description, and the picked pack's (`i`) row's.
+    let mut shown = |s: &Settings, rays, i| {
+        let output = EffectiveOutput {
+            rays,
+            ..EffectiveOutput::NONE
+        };
+        ui.draw_test_frame(
+            s,
+            output,
+            &mut HudBatch::scratch([427, 240]),
+            &atlas,
+            (-1.0, -1.0),
+            &mut |_, _| {},
+        );
+        let sheets = ui.shader.screen.sheets(s);
+        let row = (sheets[0].groups[0].rows.iter())
+            .find(|r| r.id == crate::shader_ui::Item::Pack(i))
+            .unwrap();
+        (
+            sheets[0].about.clone(),
+            sheets[0].warning.clone(),
+            row.about.clone(),
+            row.warning.clone(),
+            row.tag.clone(),
+        )
+    };
+    s.horizon.shader_pack = "horizon:rt".into();
+    let (list, warning, row, row_warning, tag) = shown(&s, Some(Ready), 0);
+    assert_eq!((warning, row_warning, tag), (None, None, None));
+    assert_eq!(
+        shown(&s, None, 0),
+        (list.clone(), None, row.clone(), None, None)
+    );
+    let restart = lang::tr(
+        "Ray tracing: %s Until then the pack draws without it.",
+        &[&lang::get("options.needsRestart")],
+    );
+    for (rays, note) in [
+        (Restart, restart),
+        (
+            Unsupported,
+            lang::get("This GPU or graphics API has no ray tracing: the pack draws without it."),
+        ),
+        (
+            Off,
+            lang::get("Ray tracing is off: HORIZON_RAY_TRACING is set to something other than 1."),
+        ),
+    ] {
+        let noted = shown(&s, Some(rays), 0);
+        // The descriptions keep their own text; the note is a separate line above them.
+        assert_eq!((&noted.0, &noted.2), (&list, &row));
+        assert_eq!(noted.1.as_deref(), Some(note.as_str()));
+        assert_eq!(noted.3.as_deref(), Some(note.as_str()));
+        let tag = matches!(rays, Restart).then(|| "Restart needed".to_owned());
+        assert_eq!(noted.4, tag);
+    }
+    s.horizon.shader_pack = "horizon:plain".into();
+    let plain = shown(&s, Some(Ready), 1);
+    assert_eq!(shown(&s, Some(Restart), 1), plain);
+}
+
+#[test]
+fn the_graphics_preset_slider_uses_floor_stops() {
+    assert_eq!(preset_from_slider(0.0), 0);
+    assert_eq!(preset_from_slider(0.24), 0);
+    assert_eq!(preset_from_slider(0.25), 1);
+    assert_eq!(preset_from_slider(0.49), 1);
+    assert_eq!(preset_from_slider(0.5), 2);
+    assert_eq!(preset_from_slider(0.74), 2);
+    assert_eq!(preset_from_slider(0.75), 3);
+    assert_eq!(preset_from_slider(1.0), 3);
+    let mut s = Settings::default();
+    set_slider(Opt::Preset, &mut s, 0.2);
+    assert_eq!(s.graphics_preset, "fast");
+    set_slider(Opt::Preset, &mut s, 0.8);
+    assert_eq!(s.graphics_preset, "custom");
 }

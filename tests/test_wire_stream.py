@@ -38,6 +38,21 @@ TICK_END = c2s('client_tick_end')
 
 
 class WireStreamTest(unittest.TestCase):
+    def test_varint_rejects_overlong_encodings_as_java_does(self):
+        # Java's VarInt.read allows at most five 7-bit groups; a sixth byte is malformed.
+        self.assertEqual(wire_stream.Reader(b'\x00').varint(), 0)          # canonical zero
+        self.assertEqual(wire_stream.Reader(bytes.fromhex('ffffffff07')).varint(), 2147483647)
+        for overlong in ('808080808000', 'ffffffff8f00', '8080808080808000'):
+            with self.subTest(overlong=overlong):
+                with self.assertRaisesRegex(ValueError, 'VarInt too big'):
+                    wire_stream.Reader(bytes.fromhex(overlong)).varint()
+        # One-to-five-byte encodings still decode to exactly the same values, signed and unsigned.
+        for v in (0, 1, 127, 128, 300, 1 << 28, (1 << 31) - 1, -(1 << 31), -1):
+            with self.subTest(v=v):
+                encoded = varint(v)
+                self.assertLessEqual(len(encoded), 5)
+                self.assertEqual(wire_stream.Reader(encoded).varint(), v)
+
     def test_ticks_end_at_tick_end_and_start_at_the_mark(self):
         entries = [LOGIN, c2s('move_player_rot', struct.pack('>ffB', 1, 2, 1)), TICK_END, mark(),
                    c2s('player_input', b'\x41'), c2s('move_player_pos', struct.pack('>dddB', 0.5, -60, 1.5, 1)),
@@ -121,6 +136,21 @@ class WireStreamTest(unittest.TestCase):
         self.assertEqual(wire_stream.field_diff(diffs[0][1], diffs[0][2]),
                          ['    #0 move_player_pos.y: vanilla -60.0, Horizon -60.0000001'])
         self.assertEqual(wire_stream.compare([tick(-60.0)], [tick(-60.0)], 0), [])
+
+    def test_field_diff_explains_packets_present_on_only_one_side(self):
+        # compare() flags a longer packet list; the explanation must name the extra packet, not be empty.
+        v = [('move_player_pos', {'x': 1.0}), ('client_tick_end', {})]
+        h = v + [('chat_command', {'command': 'hi'})]
+        self.assertEqual([d[0] for d in wire_stream.compare([{'packets': v}], [{'packets': h}], 0)], [0])
+        self.assertEqual(wire_stream.field_diff(v, h),
+                         ["    #2: vanilla (no packet), Horizon chat_command {'command': 'hi'}"])
+        # The mirror case: the extra packet is on the vanilla side.
+        self.assertEqual(wire_stream.field_diff(h, v),
+                         ["    #2: vanilla chat_command {'command': 'hi'}, Horizon (no packet)"])
+        # A whole missing tick (None, as compare() can yield) still explains the surviving side's packets.
+        self.assertEqual(wire_stream.field_diff(None, v),
+                         ["    #0: vanilla (no packet), Horizon move_player_pos {'x': 1.0}",
+                          "    #1: vanilla (no packet), Horizon client_tick_end {}"])
 
 
 if __name__ == '__main__':

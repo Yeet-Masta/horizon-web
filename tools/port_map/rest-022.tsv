@@ -6,18 +6,18 @@ GsonHelper.isObjectNode	skip:java		Gson presence and type predicate; Horizon che
 GsonHelper.isValidPrimitive	skip:java		Gson presence and type predicate; Horizon checks the JSON type where it reads the field (item_model.rs)
 GsonHelper.isValidNode	skip:java		Gson presence and type predicate; Horizon checks the JSON type where it reads the field (item_model.rs)
 GsonHelper.getNonNull	port	crates/horizon-assets/src/item_model.rs::required	missing field is an error; JSON null counts as absent
-GsonHelper.convertToString	port	crates/horizon-assets/src/item_model.rs::string	
+GsonHelper.convertToString	port	crates/horizon-assets/src/item_model.rs::string
 GsonHelper.getAsString	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the string type check is in string(), not here
 GsonHelper.convertToItem	skip:data		datapack item id lookup in recipe and loot JSON; Horizon reads items from its registry tables
 GsonHelper.getAsItem	skip:data		datapack item id lookup in recipe and loot JSON; Horizon reads items from its registry tables
-GsonHelper.convertToBoolean	port	crates/horizon-assets/src/item_model.rs::boolean	
+GsonHelper.convertToBoolean	port	crates/horizon-assets/src/item_model.rs::boolean
 GsonHelper.getAsBoolean	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the boolean type check is in boolean(), not here
 GsonHelper.convertToDouble	port	crates/horizon-assets/src/item_model.rs::float	gap: minor: reads f32, not f64
 GsonHelper.getAsDouble	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the number check is in float(), not here
-GsonHelper.convertToFloat	port	crates/horizon-assets/src/item_model.rs::float	
+GsonHelper.convertToFloat	port	crates/horizon-assets/src/item_model.rs::float
 GsonHelper.convertToLong	skip:java		Java long width accessor; Horizon reads JSON integers with the int reader
 GsonHelper.getAsLong	skip:java		Java long width accessor; Horizon reads JSON integers with the int reader
-GsonHelper.convertToInt	port	crates/horizon-assets/src/item_model.rs::int	
+GsonHelper.convertToInt	port	crates/horizon-assets/src/item_model.rs::int
 GsonHelper.getAsInt	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the integer type check is in int(), not here
 GsonHelper.convertToByte	skip:java		Java numeric width accessor; Horizon has no byte, char, short or big-number JSON fields
 GsonHelper.getAsByte	skip:java		Java numeric width accessor; Horizon has no byte, char, short or big-number JSON fields
@@ -29,9 +29,9 @@ GsonHelper.convertToBigInteger	skip:java		Java numeric width accessor; Horizon h
 GsonHelper.getAsBigInteger	skip:java		Java numeric width accessor; Horizon has no byte, char, short or big-number JSON fields
 GsonHelper.convertToShort	skip:java		Java numeric width accessor; Horizon has no byte, char, short or big-number JSON fields
 GsonHelper.getAsShort	skip:java		Java numeric width accessor; Horizon has no byte, char, short or big-number JSON fields
-GsonHelper.convertToJsonObject	port	crates/horizon-assets/src/item_model.rs::object	
+GsonHelper.convertToJsonObject	port	crates/horizon-assets/src/item_model.rs::object
 GsonHelper.getAsJsonObject	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the object type check is in object(), not here
-GsonHelper.convertToJsonArray	port	crates/horizon-assets/src/item_model.rs::list	
+GsonHelper.convertToJsonArray	port	crates/horizon-assets/src/item_model.rs::list
 GsonHelper.getAsJsonArray	port	crates/horizon-assets/src/item_model.rs::required	gap: minor: the array type check is in list(), not here
 GsonHelper.convertToObject	skip:java		Gson codec deserialisation through a context; Horizon decodes typed records field by field
 GsonHelper.getAsObject	skip:java		Gson codec deserialisation through a context; Horizon decodes typed records field by field
@@ -55,38 +55,38 @@ HashOps.mergeToList	skip:java		DynamicOps merge into a hashed list; Horizon buil
 HashOps.mergeToMap	skip:java		DynamicOps merge into a hashed map; Horizon builds no hashed data incrementally
 HashOps.ListHashBuilder.build	skip:java		DynamicOps builder for hashed lists; not needed without component hashing
 HashOps.MapHashBuilder.build	skip:java		DynamicOps builder for hashed maps; not needed without component hashing
-HttpUtil.updateModificationTime	port	crates/horizon-client/src/server_packs/download.rs::touch	
-HttpUtil.hashFile	port	crates/horizon-client/src/server_packs/download.rs::sha1_of	
-HttpUtil.checkExistingFile	port	crates/horizon-client/src/server_packs/download.rs::matches	
-HttpUtil.downloadAndHash	port	crates/horizon-client/src/server_packs/download.rs::download_file	
+HttpUtil.updateModificationTime	port	crates/horizon-client/src/server_packs/download.rs::touch
+HttpUtil.hashFile	port	crates/horizon-client/src/server_packs/download.rs::sha1_of
+HttpUtil.checkExistingFile	port	crates/horizon-client/src/server_packs/download.rs::matches
+HttpUtil.downloadAndHash	port	crates/horizon-client/src/server_packs/download.rs::download_file
 HttpUtil.isPortAvailable	port	crates/horizon-client/src/lan/mod.rs::Lan::bind	gap: minor: returns the bind error, not a bool; no 0..65535 range check
 InclusiveRange.codec	port	crates/horizon-client/src/mobs/spawner.rs::light_limit	gap: minor: only 0..15 light limits in integer, two-element or min/max form; no generic range codec
 InclusiveRange.create	inline	crates/horizon-client/src/mobs/spawner.rs::light_limit	the min <= max check
 InclusiveRange.map	skip:java		Java generic element mapper; Horizon ranges are concrete integers
 InclusiveRange.isValueInRange	inline	crates/horizon-client/src/mobs/spawner.rs::SpawnData::valid_position	the light test is written inline
 InclusiveRange.contains	missing		minor: no subrange check; Horizon reads only single light ranges (spawner.rs light_limit)
-Interval.sub	port	crates/horizon-core/src/density/interval.rs::Interval::subtract_range	
-Interval.mul	port	crates/horizon-core/src/density/interval.rs::Interval::multiply_range	
-Interval.abs	port	crates/horizon-core/src/density/interval.rs::Interval::abs	
-Interval.pow	port	crates/horizon-core/src/density/interval.rs::Interval::power	
+Interval.sub	port	crates/horizon-core/src/density/interval.rs::Interval::subtract_range
+Interval.mul	port	crates/horizon-core/src/density/interval.rs::Interval::multiply_range
+Interval.abs	port	crates/horizon-core/src/density/interval.rs::Interval::abs
+Interval.pow	port	crates/horizon-core/src/density/interval.rs::Interval::power
 Interval.powPositiveBase	inline	crates/horizon-core/src/density/interval.rs::Interval::power_base	the exponent-case branch is folded into power_base
 Interval.powZeroBase	inline	crates/horizon-core/src/density/interval.rs::Interval::power_base	the exponent-case branch is folded into power_base
 Interval.powInfiniteExponent	inline	crates/horizon-core/src/density/interval.rs::Interval::power_base	the exponent-case branch is folded into power_base
 Interval.powNegativeBase	inline	crates/horizon-core/src/density/interval.rs::Interval::power_base	the exponent-case branch is folded into power_base
-Interval.lerpFiniteBounds	port	crates/horizon-core/src/density/interval.rs::Interval::lerp_values	
+Interval.lerpFiniteBounds	port	crates/horizon-core/src/density/interval.rs::Interval::lerp_values
 Interval.lerpInfiniteBounds	inline	crates/horizon-core/src/density/interval.rs::Interval::lerp_values	the infinite-bound branch is folded into lerp_values
 Interval.equals	port	crates/horizon-core/src/density/interval.rs::Interval::eq	gap: minor: two NaI intervals compare equal here; vanilla compares NaN bounds, so they differ unless same object
 Interval.toString	skip:debug		debug text of a range; Horizon has no Display for Interval
-net/minecraft/util/Keyframe#codec	port	crates/horizon-client/src/patrol.rs::GameplayAttributes::load	gap: minor: only boolean keyframe values are read
-KeyframeTrack.mapCodec	port	crates/horizon-client/src/patrol.rs::GameplayAttributes::load	gap: minor: the ease field is not read; boolean tracks are never eased
-KeyframeTrack.validateKeyframes	missing		minor: no check that keyframes are ordered or that more than two share a tick; load only skips an empty track
-KeyframeTrack.validatePeriod	missing		minor: no check that keyframe ticks lie in 0..period on load
+net/minecraft/util/Keyframe#codec	port	crates/horizon-world/src/environment_timeline.rs::Track::parse	each keyframe's ticks and value, the value typed by the track's attribute; patrol.rs reads its own boolean tracks
+KeyframeTrack.mapCodec	port	crates/horizon-world/src/environment_timeline.rs::Track::parse	ease is read as the track's easing (Easing::parse), linear by default; the modifier is override by default
+KeyframeTrack.validateKeyframes	port	crates/horizon-world/src/environment_timeline.rs::Track::parse	tracks must be ordered by ticks and hold at most two keyframes on one tick; an empty track is refused
+KeyframeTrack.validatePeriod	port	crates/horizon-world/src/environment_timeline.rs::Track::validate_period	every keyframe tick must lie in [0; period]; Timeline::parse calls it for each track
 KeyframeTrack.Builder.addKeyframe	skip:java		builder; Horizon builds keyframe lists from JSON
 KeyframeTrack.Builder.build	skip:java		builder; Horizon builds keyframe lists from JSON
-KeyframeTrackSampler.bakeSegments	inline	crates/horizon-client/src/patrol.rs::BoolTrack::sample	gap: minor: no periodic wrap segment; with a period and a first keyframe after tick 0, ticks before it read keyframes[0] instead of the last keyframe
-KeyframeTrackSampler.addSegmentsFromKeyframes	inline	crates/horizon-client/src/patrol.rs::BoolTrack::sample	segments are not built; sample reads the keyframes directly
-KeyframeTrackSampler.getSegmentAt	inline	crates/horizon-client/src/patrol.rs::BoolTrack::sample	the keyframe lookup is a scan in sample
-KeyframeTrackSampler.loopTicks	inline	crates/horizon-client/src/patrol.rs::BoolTrack::sample	the period wrap (rem_euclid) inside sample
+KeyframeTrackSampler.bakeSegments	port	crates/horizon-world/src/environment_timeline.rs::Track::sampler	one segment per keyframe pair; with a period, a wrap segment from the last keyframe back to the first is added on each side of the loop
+KeyframeTrackSampler.addSegmentsFromKeyframes	inline	crates/horizon-world/src/environment_timeline.rs::Track::add_segments_from_keyframes	one segment per consecutive pair, each carrying the track's easing
+KeyframeTrackSampler.getSegmentAt	inline	crates/horizon-world/src/environment_timeline.rs::TrackSampler::sample	the first segment whose end tick is after the sampled tick, else the last; the ends clamp and the middle lerps
+KeyframeTrackSampler.loopTicks	inline	crates/horizon-world/src/environment_timeline.rs::TrackSampler::sample	the period wrap is rem_euclid against the track's period, Java's floor modulo
 LightCoordsUtil.addSmoothBlockEmission	port	crates/horizon-client-render/src/particles.rs::Particle::light_coords	the age-emission arms add the emitted block light capped at 240
 LinearCongruentialGenerator.next	inline	crates/horizon-core/src/biome.rs::BiomeZoom::quart_at_block	the g closure is the LCG step; the coordinate is added separately
 MemoryReserve.release	skip:other		frees a JVM heap reserve for OutOfMemoryError; Horizon is native code
@@ -130,12 +130,12 @@ ProblemReporter.Collector.ProblemTreeNode.getLines	skip:other		log text for load
 ProblemReporter.ScopedCollector.close	skip:other		log text for load problems; Horizon's loaders report errors through their own results
 RandomSource.createThreadLocalInstance	port	crates/horizon-client-render/src/random_source.rs::entity	gap: minor: seeds from a uniquifier and the clock, not ThreadLocalRandom
 SegmentedAnglePrecision.isSameAxis	skip:other		minor: no caller in 26.3 (dead helper)
-SegmentedAnglePrecision.fromDirection	port	crates/horizon-world/src/level/place.rs::rotation_segment_of	
+SegmentedAnglePrecision.fromDirection	port	crates/horizon-world/src/level/place.rs::rotation_segment_of
 SegmentedAnglePrecision.toDegrees	inline	crates/horizon-client-render/src/block_entity_render.rs::classify	the segment-to-angle step (segment * 22.5); minor: no wrap to -180..180, same rotation
 SequencedPriorityIterator.add	inline	crates/horizon-world/src/worldgen/structure/jigsaw.rs::Placer::children	the priority queue insert is inside children
 SequencedPriorityIterator.computeNext	port	crates/horizon-world/src/worldgen/structure/jigsaw.rs::Placer::next	gap: minor: the queue is a BTreeMap, not a cache that switches queues
 SequencedPriorityIterator.switchCacheToNextHighestPrioQueue	inline	crates/horizon-world/src/worldgen/structure/jigsaw.rs::Placer::next	BTreeMap last_entry finds the highest priority queue
-SignatureValidator.verifySignature	port	crates/horizon-protocol/src/rsa.rs::RsaPublicKey::verify	
+SignatureValidator.verifySignature	port	crates/horizon-protocol/src/rsa.rs::RsaPublicKey::verify
 Signer.from	port	crates/horizon-protocol/src/rsa.rs::RsaPrivateKey::sign	SHA256withRSA, checked with the public key before it is sent
 SimpleBitStorage.<init>	port	crates/horizon-core/src/paletted.rs::pack_words	packs palette ids into longs, values never spanning a long
 SimpleBitStorage.cellIndex	port	crates/horizon-core/src/storage.rs::locate	the word and bit shift of an entry

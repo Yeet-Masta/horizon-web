@@ -1,7 +1,10 @@
 //! Late trident pairing and subsequent updates through the production tracker.
 use horizon_client::{
     Result,
-    lan::entity::{Entities, EntityState, Riding, Tracker, Viewer},
+    lan::{
+        Body,
+        entity::{Entities, EntityState, Riding, Tracker, Viewer},
+    },
 };
 use horizon_protocol::{
     buf::Reader,
@@ -10,7 +13,7 @@ use horizon_protocol::{
 };
 use std::io::Write;
 
-fn dump(out: &mut impl Write, index: usize, phase: &str, packets: &mut Vec<Vec<u8>>) -> Result<()> {
+fn dump(out: &mut impl Write, index: usize, phase: &str, packets: &mut Vec<Body>) -> Result<()> {
     let mut encoded = Vec::new();
     for bytes in packets.drain(..) {
         let mut r = Reader::new(&bytes);
@@ -45,12 +48,14 @@ pub fn main() -> Result<()> {
                 let chunks = [(0, 0), (-1, -1), (0, -1), (-1, 0)].into_iter().collect();
                 let mut viewers = [Viewer {
                     entity_id: 1,
+                    horizon: true,
                     spectator: false,
                     permission: 0,
                     moved: false,
                     position: [0.5, 64.0, 0.5],
                     view_distance: 10,
                     chunks: &chunks,
+                    sources: None,
                     tracker: &mut tracker,
                     out: &mut packets,
                     gone: None,

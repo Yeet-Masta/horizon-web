@@ -10,7 +10,7 @@ are taken. A bot that sends it moves at once.
 
 horizon-bots stand in for the clients (`--no-loaded`). The server runs in a fresh folder with fresh
 HORIZON_HOME and XDG folders (lab.game_env), on a free port. Build first:
-    cargo build --profile fast -p horizon-client --bin horizon-client
+    cargo build --profile fast -p horizon-game --bin horizon-client
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -20,7 +20,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -97,7 +96,7 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     os.environ.update(lab.game_env())
-    with tempfile.TemporaryDirectory(prefix='server-client-loaded-e2e-') as scratch:
+    with lab.temp_folder('server-client-loaded-e2e-') as scratch:
         try:
             check(bins, Path(scratch), out)
         except (Failed, RuntimeError) as e:

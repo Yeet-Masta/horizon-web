@@ -11,7 +11,11 @@ client processes the server's packets at the start of a frame (Minecraft.runTick
 the ticks), so none of them lands between two packets of one tick. Keep-alive answers are the exception: the
 network thread sends them (ClientCommonPacketListenerImpl.handleKeepAlive).
 """
+import itertools
 import struct
+
+# Sentinel for a packet missing from one side of a field_diff comparison.
+_MISSING = object()
 
 # Sent from the frame (the server's packets), not from a tick.
 FRAME = {'keep_alive', 'pong', 'chunk_batch_received', 'accept_teleportation', 'chat_ack'}
@@ -34,6 +38,11 @@ class Reader:
         value = shift = 0
         while True:
             b = self.take(1)[0]
+            # Java's VarInt.read caps a VarInt at five 7-bit groups: a continuation bit on the fifth group
+            # (shift 28) would need a sixth byte and is malformed. Reject it instead of silently desynchronising
+            # the compared stream. Every valid one-to-five-byte encoding keeps decoding identically.
+            if shift == 28 and b & 0x80:
+                raise ValueError('VarInt too big')
             value |= (b & 0x7F) << shift
             if not b & 0x80:
                 return value - (1 << 32) if value >= 1 << 31 else value
@@ -248,10 +257,23 @@ def describe(packets):
 
 
 def field_diff(v, h, names=('vanilla', 'Horizon')):
-    """One line per differing field of packets paired by position, with the exact values."""
+    """One line per differing field of packets paired by position, with the exact values.
+
+    A packet present on only one side is itself a difference (compare() already flagged it), so it is
+    reported too instead of being silently dropped by a plain zip() over the shorter list."""
     a, b = names
     lines = []
-    for i, ((vn, vf), (hn, hf)) in enumerate(zip(v or [], h or [])):
+    for i, (vp, hp) in enumerate(itertools.zip_longest(v or [], h or [], fillvalue=_MISSING)):
+        if vp is _MISSING:
+            hn, hf = hp
+            lines.append(f'    #{i}: {a} (no packet), {b} {hn} {hf!r}')
+            continue
+        if hp is _MISSING:
+            vn, vf = vp
+            lines.append(f'    #{i}: {a} {vn} {vf!r}, {b} (no packet)')
+            continue
+        vn, vf = vp
+        hn, hf = hp
         if vn != hn:
             lines.append(f'    #{i}: {a} {vn}, {b} {hn}')
             continue

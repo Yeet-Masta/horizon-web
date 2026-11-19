@@ -60,8 +60,6 @@ def vscreen_env():
             env[k] = v
     env.pop("DISPLAY", None)
     # lab.game_env: no sound on the machine's speakers, and scratch folders instead of the player's.
-    # Benchmark games do not reach the telemetry server (docs/telemetry.md).
-    env["HORIZON_TELEMETRY_URL"] = "off"
     return env
 
 
@@ -140,8 +138,15 @@ def compare(before, after):
     cell = lambda x, y, f: f"{f(x)} → {f(y)}"
     for rd, scenes in a["distances"].items():
         for name, old in scenes.items():
+            if name == "renderer":
+                continue
             new = b["distances"].get(rd, {}).get(name)
-            if name == "renderer" or not new:
+            if new is None:
+                # Measured in the baseline but absent from the new run: the
+                # benchmark stopped covering this scene. Show it instead of
+                # silently dropping the row and presenting a complete-looking
+                # table.
+                print(f"| {rd} | {name} | missing in {after} | | | | |")
                 continue
             ms = lambda v, k: (v.get(k) or {}).get("avg_ms") or 0
             print(f"| {rd} | {name} | {cell(old['avg_fps'], new['avg_fps'], lambda v: f'{v:.0f}')} "
@@ -168,9 +173,9 @@ def main():
     if args.compare:
         compare(*args.compare)
         return
-    ctl = Path(args.build).resolve() / "horizon-ctl"
+    ctl = lab.binary(Path(args.build).resolve(), "horizon-ctl")
     if not ctl.exists():
-        sys.exit(f"{ctl} missing: cargo build --release -p horizon-client -p horizon-client-lib --bins")
+        sys.exit(f"{ctl} missing: cargo build --release -p horizon-game -p horizon-client-lib --bins")
     cwd = ROOT / ".local/graphics-bench"
     shutil.rmtree(cwd / "saves" / WORLD, ignore_errors=True)
     cwd.mkdir(parents=True, exist_ok=True)

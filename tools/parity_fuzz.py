@@ -31,11 +31,26 @@ ROOT = Path(__file__).resolve().parents[1]
 AREA_X, AREA_Z, FLOOR_Y = 4096, 4096, 300
 RELOAD_TICKS = 60  # enough for both engines to save and drop a chunk whose forced ticket went (a guard checks it)
 
-# Differences that are not parity bugs, by field path (a regular expression on the normalised path).
+# What a reload's witnesses expect from vanilla: `/execute unless loaded` succeeds once the chunk went, and
+# `/execute if entity` reports 0 entities once the entity is unloaded. Vanilla can keep a chunk's entities loaded
+# after the chunk reads as unloaded (#16772), so any other vanilla result makes the scenario invalid: nothing was
+# saved and loaded to compare. A Horizon result that differs from vanilla's is a divergence.
+GUARDS = {'chunk': [[True, 1]], 'entity': [[False, 0]]}
+
+
+def set_alike(vanilla, horizon):
+    """Absolute game times differ by the engines' clocks: only whether each is set (not 0 or -1) is compared."""
+    unset = lambda v: v is None or str(v).rstrip('L') in ('0', '-1')  # noqa: E731
+    return vanilla is not None and horizon is not None and unset(vanilla) == unset(horizon)
+
+
+# Differences that are not parity bugs: (regular expression on the normalised path, reason, test on the two values).
+# The two engines' worlds start the script at different game times (they settle in a different number of ticks).
 ALLOWED = [
-    # CopperGolem.nextWeatheringTick is an absolute game time, and the two engines' worlds start the script at
-    # different game times (they settle in a different number of ticks).
-    (r'next_weather_age', 'absolute game time'),
+    (r'next_weather_age', 'absolute game time (CopperGolem.nextWeatheringTick)', set_alike),
+    (r'server_data\.state_updating_resumes_at', 'absolute game time (VaultServerData.pauseStateUpdatingUntil)',
+     set_alike),
+    (r'LastGossipDecay', 'absolute game time (Villager.maybeDecayGossip)', set_alike),
 ]
 
 
@@ -123,8 +138,8 @@ def normalise(path):
     return re.sub(r'\[\d+\]', '[]', path)
 
 
-def allowed(path):
-    return any(re.fullmatch(pattern, normalise(path)) for pattern, _ in ALLOWED)
+def allowed(path, vanilla, horizon):
+    return any(re.fullmatch(pattern, normalise(path)) and test(vanilla, horizon) for pattern, _, test in ALLOWED)
 
 
 def compare(vanilla, rust):
@@ -136,7 +151,7 @@ def compare(vanilla, rust):
                 return [('<result>', harness.render(vanilla)[:300], harness.render(rust)[:300])]
             return []
         found = ([('<name>', left[0], right[0])] if left[0] != right[0] else []) + diff(left[1], right[1])
-        return [d for d in found if not allowed(d[0])]
+        return [d for d in found if not allowed(*d)]
     kind = harness.compare(vanilla, rust)
     return [(f'<{kind}>', harness.render(vanilla)[:300], harness.render(rust)[:300])] if kind else []
 
@@ -161,6 +176,11 @@ def uuid_text(words):
                      f'{words[2] >> 16:04x}', f'{words[2] & 0xffff:04x}{words[3]:08x}'])
 
 
+def sync_op(seed, slot):
+    """Both engines' randoms from one state; entity ids are unique in a batch, the same modulo 4 in every slot."""
+    return {'op': 'sync_randoms', 'uniquifier': seed, 'entity_id': 10_000_000 + 10_000 * slot, 'level_seed': seed}
+
+
 def render(scenario, slot):
     """The scenario's harness operations in this slot, each command op tagged with its step index."""
     x0, y0, z0 = area(slot)
@@ -178,9 +198,7 @@ def render(scenario, slot):
     seed = scenario['seed']
     ops = [cmd(f'/forceload add {x0} {z0}', -1, False), {'op': 'wait_chunks', 'chunks': chunk},
            cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} minecraft:stone', -1, False),
-           # Entity ids: unique in a batch, the same modulo 4 in every slot (an item's resting tick depends on it).
-           {'op': 'sync_randoms', 'uniquifier': seed, 'entity_id': 10_000_000 + 10_000 * slot,
-            'level_seed': seed}]
+           sync_op(seed, slot)]
     for i, step in enumerate(scenario['steps']):
         kind = step['k']
         if kind == 'summon':
@@ -194,9 +212,18 @@ def render(scenario, slot):
             ops.append({'op': 'tick', 'n': step['n']})
         elif kind == 'dispense':
             ops.append({'op': 'crafter_tick', 'pos': [x0 + step['at'][0], y0 + step['at'][1], z0 + step['at'][2]]})
+        elif kind == 'sync':
+            # A second sync at the tick a redstone dispenser fires: the ticks since the scenario's own sync leave
+            # the engines' randoms apart, so the fire would draw different values (#16834).
+            ops.append(sync_op(seed, slot))
         elif kind == 'reload':
-            ops += [cmd(f'/forceload remove {x0} {z0}', i, False), {'op': 'tick', 'n': RELOAD_TICKS},
-                    {**cmd(f'/execute unless loaded {x0} {y0} {z0}', i), 'guard': True},
+            summoned = [uuid_text(uuid_words(slot, s['n'])) for s in scenario['steps'][:i] if s['k'] == 'summon']
+            # `allow_chunk_io`: the oracle's ticks have no spare time by default, so `ChunkMap.processUnloads` would
+            # leave the chunk in memory, unsaved, with its scheduled ticks still counting.
+            ops += [cmd(f'/forceload remove {x0} {z0}', i, False),
+                    {'op': 'tick', 'n': RELOAD_TICKS, 'allow_chunk_io': True},
+                    {**cmd(f'/execute unless loaded {x0} {y0} {z0}', i), 'guard': 'chunk'},
+                    *({**cmd(f'/execute if entity {uuid}', i), 'guard': 'entity'} for uuid in summoned),
                     cmd(f'/forceload add {x0} {z0}', i, False), {'op': 'wait_chunks', 'chunks': chunk}]
         elif kind == 'read_entity':
             ops.append({**cmd(f'/data get entity {uuid_text(uuid_words(slot, step["n"]))}', i), 'read': True})
@@ -230,6 +257,19 @@ def subject(scenario, step):
 
 # ---------------------------------------------------------------------------------------------------------------
 # Running batches through the command-exec harness.
+
+def witness(family, op, vanilla, rust):
+    """A reload witness's outcome: (why the scenario is invalid, the divergence), either or both None.
+
+    Vanilla keeping what a reload should have unloaded means the scenario saved nothing and loaded it back, so
+    it is invalid rather than a divergence; a Horizon result that differs from vanilla's is a divergence (#16772).
+    """
+    invalid = (f'vanilla kept the {op["guard"]} loaded: {vanilla["results"]}'
+               if vanilla['results'] != GUARDS[op['guard']] else None)
+    failure = ((f'{family}|{op["guard"]}|<unload>', op['cmd'], [('<unload>', vanilla['results'], rust['results'])])
+               if rust['results'] != vanilla['results'] else None)
+    return invalid, failure
+
 
 class Runner:
     def __init__(self, work, binary, size):
@@ -276,11 +316,11 @@ class Runner:
                 position += 1
                 step = scenario['steps'][op['step']]
                 if op.get('guard'):
-                    if vanilla['results'] != [[True, 1]]:
-                        entry['invalid'] = f'vanilla kept the chunk loaded: {vanilla["results"]}'
-                    if rust['results'] != vanilla['results']:
-                        entry['failures'].append((f'{scenario["family"]}|chunk|<unload>', op['cmd'],
-                                                  [('<unload>', vanilla['results'], rust['results'])]))
+                    invalid, failure = witness(scenario['family'], op, vanilla, rust)
+                    if invalid:
+                        entry['invalid'] = invalid
+                    if failure:
+                        entry['failures'].append(failure)
                     continue
                 if op.get('read'):
                     entry['reads'].append((op['cmd'], vanilla, rust))
@@ -323,6 +363,8 @@ def reduce(scenario, edits):
 
 def edits(scenario):
     for i, step in enumerate(scenario['steps']):
+        if step['k'] == 'sync':  # a control for the comparison, not part of the scenario: shrinking keeps it
+            continue
         if step['k'] == 'tick' and step['n'] > 1:
             yield ('half', i)
         yield ('drop', i)
@@ -416,7 +458,9 @@ def main():
     # One bug, one shrink: each group's smallest scenario stands for it.
     shrunk = shrink(runner, {sig: min(members, key=lambda m: len(json.dumps(m[0]))) for sig, members in groups.items()},
                     args.shrink_rounds)
-    report = {'scenarios': len(scenarios), 'invalid': invalid, 'diverging': len(failing), 'groups': []}
+    report = {'scenarios': len(scenarios), 'invalid': invalid, 'diverging': len(failing), 'groups': [],
+              # Each diverging seed's signatures, to compare runs of the same seeds before and after a change.
+              'by_seed': {s['seed']: signatures(r) for s, r in failing}}
     for sig, members in sorted(groups.items(), key=lambda g: -len(g[1])):
         scenario, result = shrunk[sig]
         report['groups'].append({

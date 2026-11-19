@@ -22,10 +22,17 @@ concurrency:
 jobs:
   check:
     # One of our small runners (label horizon-light, docs/ci-runners.md): main's script, Mojang's public manifest.
-    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Sparse like the other bots on these runners: their checkout stays in the work folder, and a full
+          # checkout after a sparse one keeps only the sparse one's paths (#17524).
+          sparse-checkout: |
+            tools/ci/mojang_republish.py
+            research-lock.json
+          sparse-checkout-cone-mode: false
       - name: Check the manifest
         env:
           GH_TOKEN: ${{ github.token }}

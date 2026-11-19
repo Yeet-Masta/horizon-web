@@ -11,14 +11,13 @@ A real Horizon client (horizon-ctl, offscreen) with LOD Distance 32 joins a dedi
 
 Each server and game runs in fresh folders with fresh HORIZON_HOME and XDG folders (lab.game_env), on a free
 port. Build first:
-    cargo build --profile fast -p horizon-client -p horizon-client-lib --bin horizon-client --bin horizon-ctl
+    cargo build --profile fast -p horizon-game -p horizon-client-lib --bin horizon-client --bin horizon-ctl
 """
 import argparse
 import os
 from pathlib import Path
 import shutil
 import sys
-import tempfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -108,7 +107,7 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     os.environ.update(lab.game_env())
-    with tempfile.TemporaryDirectory(prefix='server-lod-e2e-') as scratch:
+    with lab.temp_folder('server-lod-e2e-') as scratch:
         try:
             check(bins, Path(scratch), out)
         except (Failed, RuntimeError, AssertionError) as e:

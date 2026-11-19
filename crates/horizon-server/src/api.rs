@@ -6,12 +6,13 @@
 
 use crate::{
     admin::{self, Action},
-    backup,
-    config::Config,
-    engine,
+    backup, engine,
     http::{self, Request, Response},
-    panel, settings,
-    update::{self, Install},
+    panel, settings, update,
+};
+use horizon_server_launch::{
+    Install,
+    config::{self, Config},
 };
 use serde_json::{Value, json};
 use std::{
@@ -179,8 +180,8 @@ pub const ROUTES: [Route; 32] = [
         method: "GET",
         path: "/api/v1/mods",
         takes: "",
-        answers: "`engine` (`found`, `target`, `base`, `horizon`, `hooks`) and `native` (id, version, sha256), from the `native-mods.json` the launcher wrote beside the game program",
-        what: "The native mods the server's game program was built with",
+        answers: "`mods` (id, version) from the running engine's LoadedMods inventory; `provenance` contains `engine` (found, target, base, horizon, hooks) and `native` (id, version, sha256) from the configured program's native-mods.json. 409 when the runtime inventory is unavailable",
+        what: "The packages loaded by the running server, with build provenance separate",
     },
     Route {
         method: "POST",
@@ -632,7 +633,7 @@ pub fn start(shared: Arc<Shared>) -> Result<Endpoint, String> {
         "" => random_token(),
         token => token.to_owned(),
     };
-    let public = !crate::config::private(address.ip());
+    let public = !config::private(address.ip());
     if public {
         crate::supervisor::note(
             &shared,
@@ -934,6 +935,22 @@ fn patch_config(shared: &Shared, body: &[u8]) -> Response {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A shorter wait for the endpoint file in tests that expect it never to appear.
+    pub(crate) static ENDPOINT_WAIT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// How long `Client::open` waits for the endpoint file of a server that holds the lock.
+fn endpoint_wait() -> Duration {
+    #[cfg(test)]
+    if let Some(wait) = ENDPOINT_WAIT.with(|w| w.get()) {
+        return wait;
+    }
+    Duration::from_secs(5)
+}
+
 /// The API of the server running in a folder, for the CLI.
 pub struct Client {
     address: SocketAddr,
@@ -948,7 +965,7 @@ impl Client {
         }
         // The supervisor writes the endpoint just after taking the lock: give it a moment.
         let path = dir.join(ENDPOINT);
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + endpoint_wait();
         let text = loop {
             match std::fs::read_to_string(&path) {
                 Ok(text) => break text,
@@ -1080,6 +1097,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn auth_and_command_replies_match_api_v1_goldens() {
         let golden: Value =
             serde_json::from_str(include_str!("../testdata/api-v1-auth-command.json")).unwrap();
@@ -1369,6 +1387,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_backup_whose_flush_fails_turns_saving_back_on() {
         let dir = std::env::temp_dir().join(format!("horizon-server-flush-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1379,7 +1398,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::fs::write(
-            engine::control_path(&dir),
+            horizon_server_launch::control_path(&dir),
             json!({"port": port, "token": "t"}).to_string(),
         )
         .unwrap();
@@ -1424,10 +1443,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn the_api_wants_its_token() {
         let dir = std::env::temp_dir().join(format!("horizon-server-api-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".horizon")).unwrap();
-        std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
+        std::fs::write(dir.join(config::FILE), config::TEMPLATE).unwrap();
         let shared = Shared::new(&dir);
         let _endpoint = start(shared.clone()).unwrap();
         let v: Value =
@@ -1476,6 +1496,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_token_and_a_port_from_server_toml() {
         let dir =
             std::env::temp_dir().join(format!("horizon-server-api-fixed-{}", std::process::id()));
@@ -1486,13 +1507,13 @@ mod tests {
             .unwrap()
             .port();
         let token = "a-token-for-the-discord-bot";
-        let toml = crate::config::TEMPLATE
+        let toml = config::TEMPLATE
             .replace(
                 "[api]\nbind = \"\"",
                 &format!("[api]\nbind = \"127.0.0.1:{port}\""),
             )
             .replace("token = \"\"", &format!("token = \"{token}\""));
-        std::fs::write(dir.join(crate::config::FILE), toml).unwrap();
+        std::fs::write(dir.join(config::FILE), toml).unwrap();
         let _endpoint = start(Shared::new(&dir)).unwrap();
         let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let get = |token: &str| {
@@ -1576,9 +1597,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("horizon-server-api-admin-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("backups")).unwrap();
-        let toml = crate::config::TEMPLATE
-            .replace("token = \"\"", "token = \"a-token-for-the-discord-bot\"");
-        std::fs::write(dir.join(crate::config::FILE), toml).unwrap();
+        let toml =
+            config::TEMPLATE.replace("token = \"\"", "token = \"a-token-for-the-discord-bot\"");
+        std::fs::write(dir.join(config::FILE), toml).unwrap();
         std::fs::write(
             dir.join("backups/2026-10-31T12-00-00Z-manual.zip"),
             b"PK\x05\x06zip",
@@ -1620,7 +1641,7 @@ mod tests {
             outcome["restart"],
             json!(["server.max_players", "world.difficulty"])
         );
-        let saved = crate::config::Config::load(&dir).unwrap();
+        let saved = config::Config::load(&dir).unwrap();
         assert_eq!(
             (saved.world.difficulty.as_str(), saved.server.max_players),
             ("hard", 50)
@@ -1646,10 +1667,7 @@ mod tests {
             json!({ "changes": { "world.difficulty": "brutal" } }),
         );
         assert_eq!(status, 400);
-        assert_eq!(
-            crate::config::Config::load(&dir).unwrap().world.difficulty,
-            "hard"
-        );
+        assert_eq!(config::Config::load(&dir).unwrap().world.difficulty, "hard");
 
         let name = "2026-10-31T12-00-00Z-manual.zip";
         let response = route(
@@ -1713,6 +1731,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn backup_replies_match_api_v1_goldens() {
         let golden: Value =
             serde_json::from_str(include_str!("../testdata/api-v1-backups.json")).unwrap();
@@ -1816,8 +1835,8 @@ mod tests {
             std::env::temp_dir().join(format!("horizon-server-api-stopped-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
-        crate::config::update(&dir, "server", "online_mode", toml::Value::Boolean(false)).unwrap();
+        std::fs::write(dir.join(config::FILE), config::TEMPLATE).unwrap();
+        config::update(&dir, "server", "online_mode", toml::Value::Boolean(false)).unwrap();
         let shared = Shared::with_install(&dir, None);
         shared.set_phase(Phase::Stopped);
         let request = |method: &str, path: &str, body: &[u8]| {

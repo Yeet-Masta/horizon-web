@@ -5,7 +5,7 @@
     python3 tools/build_times.py run --profiles dev --only incremental --crates horizon-items
     python3 tools/build_times.py compare before.json after.json
 
-`run` builds the game (`cargo build --locked -p horizon-client --profile P --timings`) and writes a JSON
+`run` builds the game (`cargo build --locked -p horizon-game --profile P --timings`) and writes a JSON
 report and a Markdown table under .local/build-times/reports/:
 
 - cold: a build from an empty target folder of its own (never target/), per profile. The timings page of
@@ -30,6 +30,7 @@ import base64
 import contextlib
 import datetime
 import json
+import math
 import os
 import platform
 import re
@@ -51,10 +52,10 @@ ROOT = lab.ROOT
 REPORT_FORMAT, REPORT_VERSION = "horizon-build-times", 1
 WORK = Path(".local") / "build-times"
 MARKER = ".horizon-build-times"
-PACKAGE = "horizon-client"
+PACKAGE = "horizon-game"
 PROFILES = ["dev", "fast"]
 # The files an edit goes to by default: large, often changed, and each in a different layer. horizon-client's
-# game.rs belongs to the game binary, the others to libraries the binary links. Any other crate in the
+# game.rs belongs to the gameplay library, which the platform binary links. Any other crate in the
 # workspace gets its lib.rs; --file crate=path picks another file.
 EDIT_FILES = {
     "horizon-world": "crates/horizon-world/src/level/mod.rs",
@@ -86,9 +87,10 @@ def parse_timings(html):
     except ValueError:
         return None
     if not isinstance(units, list) or not all(isinstance(u, dict) and isinstance(u.get("name"), str) and
-                                              all(isinstance(u.get(k), (int, float)) for k in ("i", "start", "duration"))
+                                              all(isinstance(u.get(k), (int, float)) and math.isfinite(u[k])
+                                                  for k in ("i", "start", "duration"))
                                               for u in units):
-        return None
+        return None  # NaN and Infinity are not numbers a report can hold: JSON has no spelling for them
     return units
 
 

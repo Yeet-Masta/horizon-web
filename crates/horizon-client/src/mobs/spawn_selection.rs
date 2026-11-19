@@ -21,6 +21,7 @@ use horizon_core::{
     random::RandomSource,
 };
 use horizon_std::fs;
+use mod_api::{SpawnCheck, SpawnFlags, SpawnLimits};
 use serde_json::Value;
 use std::{
     borrow::{Borrow, Cow},
@@ -29,6 +30,9 @@ use std::{
 };
 
 pub use crate::biome::{SpawnCost, parse_costs, parse_entries};
+
+mod parallel;
+pub use parallel::{Lane, Member, Pack, commit};
 
 thread_local! {
     static ATTEMPT_COUNTS: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
@@ -42,6 +46,21 @@ pub fn attempt_counters(publish: bool) {
     if publish {
         horizon_perf_format::counter("natural_spawning.attempts", &[]).add(counts[0]);
         horizon_perf_format::counter("natural_spawning.spawns", &[]).add(counts[1]);
+    }
+}
+/// Takes the attempts this thread counted (a lane's, to hand to the pass's thread) and drops
+/// its spawns: the pass counts those when it commits them.
+pub fn take_attempts() -> u64 {
+    ATTEMPT_COUNTS.with(|c| c.replace([0; 2]))[0]
+}
+/// Adds the attempts a lane counted to this thread's.
+pub fn add_attempts(n: u64) {
+    if crate::spans::enabled() {
+        ATTEMPT_COUNTS.with(|c| {
+            let mut counts = c.get();
+            counts[0] += n;
+            c.set(counts);
+        });
     }
 }
 fn attempt_count(index: usize) {
@@ -108,16 +127,19 @@ impl Category {
     fn index(self) -> usize {
         self as usize
     }
-    /// `getMaxInstancesPerChunk`.
-    pub fn max(self) -> i32 {
-        match self {
-            Self::Monster => 70,
-            Self::Creature => 10,
-            Self::Ambient => 15,
-            Self::Axolotls | Self::UndergroundWaterCreature | Self::WaterCreature => 5,
-            Self::WaterAmbient => 20,
-            Self::Misc => -1,
-        }
+    /// `getMaxInstancesPerChunk` under a level's `limits` (vanilla's are
+    /// [`SpawnLimits::VANILLA`]); MISC's is -1, as it never spawns.
+    pub fn max(self, limits: &SpawnLimits) -> i64 {
+        i64::from(match self {
+            Self::Monster => limits.monster,
+            Self::Creature => limits.creature,
+            Self::Ambient => limits.ambient,
+            Self::Axolotls => limits.axolotls,
+            Self::UndergroundWaterCreature => limits.underground_water_creature,
+            Self::WaterCreature => limits.water_creature,
+            Self::WaterAmbient => limits.water_ambient,
+            Self::Misc => return -1,
+        })
     }
     pub fn friendly(self) -> bool {
         self != Self::Monster
@@ -319,6 +341,11 @@ pub fn max_cluster_size(s: Species) -> u32 {
         _ => 4,
     }
 }
+/// Whether a group of `size` mobs has reached its limit: `parts`, the limit the new mob's
+/// entity parts answered, else `Mob.getMaxSpawnClusterSize` of its species.
+fn cluster_full(size: u32, parts: Option<u32>, species: Species) -> bool {
+    size >= parts.unwrap_or_else(|| max_cluster_size(species))
+}
 /// `EntityType.canSpawnFarFromPlayer`: creatures, misc, pillagers, shulkers.
 fn spawns_far_from_player(s: Species, category: Category) -> bool {
     matches!(category, Category::Creature | Category::Misc)
@@ -330,6 +357,21 @@ fn spawns_far_from_player(s: Species, category: Category) -> bool {
 pub type MobType = (Species, f32, f32, Category);
 
 pub trait NaturalLevel: SpawnLevel {
+    /// `MobSpawnEvent.PositionCheck`: what server mods answer for the new mob
+    /// of type `entity` at `at`, described by `pending`; `Default` leaves the
+    /// checks to vanilla.
+    fn position_check(
+        &self,
+        _entity: &str,
+        _reason: Reason,
+        _at: [f64; 3],
+        _pending: Pending,
+    ) -> SpawnCheck {
+        SpawnCheck::Default
+    }
+    /// The position check just asked refused the mob: what the level made
+    /// for it is dropped.
+    fn position_refused(&self) {}
     /// Whether server mods hear `potential_spawns`.
     fn spawn_hooks(&self) -> bool {
         false
@@ -588,6 +630,39 @@ pub fn spawn_aabb(s: Species, x: f64, y: f64, z: f64, width: f32, height: f32) -
         Vec3::new(x + half, y + f64::from(scale * height), z + half),
     )
 }
+/// The mob a position check is about, which the site has not created yet
+/// (vanilla creates it before the check).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pending {
+    /// The yaw the site creates it with, drawn before the check.
+    pub yaw: f32,
+    /// Whether the site creates it fresh from its type (`EntityType.create`):
+    /// natural spawning, and a spawner whose spawn data is the type alone. A
+    /// spawner with entity data loads it, and chunk generation's packs come
+    /// from the generator.
+    pub fresh: bool,
+}
+/// `Mob.checkSpawnRules` and `checkSpawnObstruction` of a freshly created
+/// mob, unless a mod forces the answer (`MobSpawnEvent.PositionCheck`); then
+/// `vanilla` does not run.
+pub fn position_ok<L: NaturalLevel>(
+    l: &L,
+    entity: &str,
+    reason: Reason,
+    at: [f64; 3],
+    pending: Pending,
+    vanilla: impl FnOnce() -> bool,
+) -> bool {
+    let ok = match l.position_check(entity, reason, at, pending) {
+        SpawnCheck::Succeed => true,
+        SpawnCheck::Fail => false,
+        _ => vanilla(),
+    };
+    if !ok {
+        l.position_refused();
+    }
+    ok
+}
 /// `checkSpawnObstruction` of a freshly created mob with the given box, with
 /// the mobs already `spawned` in the way; None in a generation region, which
 /// has no entities (`WorldGenRegion.getEntities`).
@@ -637,25 +712,13 @@ pub struct StructureSpawns {
     pub overrides: FxHashMap<String, FxHashMap<String, Override>>,
 }
 impl StructureSpawns {
-    /// The overrides of the resource root first asked for, loaded once.
-    pub fn shared(root: &Path) -> &'static Self {
-        static SHARED: std::sync::OnceLock<StructureSpawns> = std::sync::OnceLock::new();
-        SHARED.get_or_init(|| Self::load(root))
-    }
+    /// Read a fresh generation, including mod namespaces and nested structure ids.
     pub fn load(root: &Path) -> Self {
-        let mut overrides = FxHashMap::default();
-        let dir = root.join("data/minecraft/worldgen/structure");
-        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-            let path = entry.path();
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            let Some(v) = fs::read(&path)
-                .ok()
-                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-            else {
-                continue;
-            };
+        fn insert(
+            overrides: &mut FxHashMap<String, FxHashMap<String, Override>>,
+            id: String,
+            v: &Value,
+        ) {
             let map: FxHashMap<String, Override> = v["spawn_overrides"]
                 .as_object()
                 .into_iter()
@@ -670,8 +733,43 @@ impl StructureSpawns {
                     )
                 })
                 .collect();
-            if !map.is_empty() {
-                overrides.insert(format!("minecraft:{stem}"), map);
+            overrides.insert(id, map);
+        }
+        let mut overrides = FxHashMap::default();
+        if let Some(Value::Object(entries)) = fs::read(root.join("worldgen/structures.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        {
+            for (id, value) in entries {
+                if let Some(value) = value
+                    .as_str()
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                {
+                    insert(&mut overrides, id, &value);
+                }
+            }
+        }
+        for ns in fs::read_dir(root.join("data"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let dir = ns.path().join("worldgen/structure");
+            let Ok(files) = crate::json_folder::list(&dir) else {
+                continue;
+            };
+            for (name, path) in files {
+                let Some(v) = fs::read(path)
+                    .ok()
+                    .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                else {
+                    continue;
+                };
+                insert(
+                    &mut overrides,
+                    format!("{}:{}", ns.file_name().to_string_lossy(), name),
+                    &v,
+                );
             }
         }
         Self { overrides }
@@ -768,17 +866,34 @@ fn vanilla_mobs_at<L: NaturalLevel>(
         .map_or(&[], Vec::as_slice)
 }
 
+fn total_weight(list: &[SpawnEntry]) -> i64 {
+    list.iter().map(|e| i64::from(e.weight)).sum()
+}
+
+fn has_weight(list: &[SpawnEntry]) -> bool {
+    total_weight(list) > 0
+}
+
 /// `WeightedList.getRandom`.
-pub fn weighted_pick(list: &[SpawnEntry], random: &mut impl RandomSource) -> Option<SpawnEntry> {
-    let total: i64 = list.iter().map(|e| i64::from(e.weight)).sum();
+pub fn weighted_pick<'a>(
+    list: &'a [SpawnEntry],
+    random: &mut impl RandomSource,
+) -> Option<&'a SpawnEntry> {
+    let total = total_weight(list);
     if total <= 0 {
         return None;
     }
-    let mut selection = i64::from(random.next_int_bound(total as i32).ok()?);
+    // Keep vanilla's exact draw for representable totals. Larger modded lists use
+    // one unsigned long modulo the total, a bounded, slightly biased fallback.
+    let mut selection = if total <= i64::from(i32::MAX) {
+        i64::from(random.next_int_bound(total as i32).ok()?)
+    } else {
+        ((random.next_long() as u64) % total as u64) as i64
+    };
     for e in list {
         selection -= i64::from(e.weight);
         if selection < 0 {
-            return Some(e.clone());
+            return Some(e);
         }
     }
     None
@@ -865,6 +980,8 @@ pub struct SpawnPlayer {
 #[derive(Clone, Debug)]
 pub struct SpawnState {
     spawnable_chunks: i32,
+    /// The level's `getMaxInstancesPerChunk` values.
+    limits: SpawnLimits,
     counts: [i32; 8],
     charges: Vec<([i32; 3], f64)>,
     players: Vec<SpawnPlayer>,
@@ -874,7 +991,24 @@ pub struct SpawnState {
     near_list: Vec<usize>,
     /// The mobs counted near each player (`playerMobCounts`), by category.
     player_counts: Vec<[i32; 8]>,
-    last_checked: Option<([i32; 3], String, f64)>,
+    /// Scratch for [`Nearest`] and `players_near`, kept to be reused.
+    nearby: Vec<[f64; 3]>,
+    tracked: Vec<usize>,
+    /// The position and charge of the last `can_spawn`; `after_spawn` always
+    /// follows it for the same type and position.
+    last_checked: Option<([i32; 3], f64)>,
+}
+/// The allocations of a [`SpawnState`], handed on from one pass to the next
+/// (`SpawnState::new_in`, `SpawnState::into_parts`). Only looked up by key or
+/// indexed, never iterated, so what a pass left in them is not observable.
+#[derive(Debug, Default)]
+pub struct SpawnBuffers {
+    charges: Vec<([i32; 3], f64)>,
+    players_near: FxHashMap<(i32, i32), (u32, u32)>,
+    near_list: Vec<usize>,
+    player_counts: Vec<[i32; 8]>,
+    nearby: Vec<[f64; 3]>,
+    tracked: Vec<usize>,
 }
 impl SpawnState {
     /// `getSpawnableChunkCount` and `getMobCategoryCounts` (by
@@ -896,17 +1030,30 @@ impl SpawnState {
         I: IntoIterator,
         I::Item: std::borrow::Borrow<Counted<'a>>,
     {
-        let mut state = Self {
+        let buffers = SpawnBuffers::default();
+        Self::new_in(
+            l,
             spawnable_chunks,
-            counts: [0; 8],
-            charges: Vec::new(),
-            player_counts: vec![[0; 8]; players.len()],
-            cells: PlayerCells::new(players.iter().map(|p| (p.position[0], p.position[2]))),
             players,
-            players_near: FxHashMap::default(),
-            near_list: Vec::new(),
-            last_checked: None,
-        };
+            buffers,
+            entities,
+            chunk_loaded,
+        )
+    }
+    /// [`SpawnState::new`] over the allocations of an earlier pass.
+    pub fn new_in<'a, L: NaturalLevel, I>(
+        l: &L,
+        spawnable_chunks: i32,
+        players: Vec<SpawnPlayer>,
+        buffers: SpawnBuffers,
+        entities: I,
+        chunk_loaded: impl Fn(i32, i32) -> bool,
+    ) -> Self
+    where
+        I: IntoIterator,
+        I::Item: std::borrow::Borrow<Counted<'a>>,
+    {
+        let mut state = Self::uncounted_in(spawnable_chunks, players, buffers);
         for e in entities {
             let e = e.borrow();
             if e.is_mob && e.persistent || e.category == Category::Misc {
@@ -926,9 +1073,52 @@ impl SpawnState {
         }
         state
     }
-    /// Reclaims the player buffer for reuse across passes.
-    pub fn into_players(self) -> Vec<SpawnPlayer> {
-        self.players
+    /// The state before any entity is counted, over the allocations of an earlier pass.
+    fn uncounted_in(
+        spawnable_chunks: i32,
+        players: Vec<SpawnPlayer>,
+        mut buffers: SpawnBuffers,
+    ) -> Self {
+        buffers.charges.clear();
+        buffers.players_near.clear();
+        buffers.near_list.clear();
+        buffers.player_counts.clear();
+        buffers.player_counts.resize(players.len(), [0; 8]);
+        Self {
+            spawnable_chunks,
+            limits: SpawnLimits::VANILLA,
+            counts: [0; 8],
+            charges: buffers.charges,
+            player_counts: buffers.player_counts,
+            cells: PlayerCells::new(players.iter().map(|p| (p.position[0], p.position[2]))),
+            players,
+            players_near: buffers.players_near,
+            near_list: buffers.near_list,
+            nearby: buffers.nearby,
+            tracked: buffers.tracked,
+            last_checked: None,
+        }
+    }
+    #[cfg(test)]
+    fn uncounted(spawnable_chunks: i32, players: Vec<SpawnPlayer>) -> Self {
+        Self::uncounted_in(spawnable_chunks, players, SpawnBuffers::default())
+    }
+    /// The state with the level's own spawn limits in place of vanilla's.
+    pub fn with_limits(mut self, limits: SpawnLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+    /// Reclaims the player buffer and the allocations for the next pass.
+    pub fn into_parts(self) -> (Vec<SpawnPlayer>, SpawnBuffers) {
+        let buffers = SpawnBuffers {
+            charges: self.charges,
+            players_near: self.players_near,
+            near_list: self.near_list,
+            player_counts: self.player_counts,
+            nearby: self.nearby,
+            tracked: self.tracked,
+        };
+        (self.players, buffers)
     }
     fn add_charge(&mut self, pos: [i32; 3], charge: f64) {
         if charge != 0.0 {
@@ -940,15 +1130,15 @@ impl SpawnState {
     /// non-spectators within 128 blocks of the chunk's centre.
     fn players_near(&mut self, cx: i32, cz: i32) -> std::ops::Range<usize> {
         let (list, players, cells) = (&mut self.near_list, &self.players, &self.cells);
+        let tracked = &mut self.tracked;
         let (start, len) = *self.players_near.entry((cx, cz)).or_insert_with(|| {
             let start = list.len() as u32;
             // Every player within 128 blocks of the chunk's centre stands in
             // a chunk within 8 of it: those 8 chunks hold every answer.
-            let mut tracked = Vec::new();
-            cells.within_8(cx, cz, &mut tracked);
+            cells.within_8(cx, cz, tracked);
             if !tracked.is_empty() {
                 let (x, z) = (f64::from(cx * 16 + 8), f64::from(cz * 16 + 8));
-                list.extend(tracked.into_iter().filter(|&i| {
+                list.extend(tracked.iter().copied().filter(|&i| {
                     let p = &players[i];
                     let (dx, dz) = (x - p.position[0], z - p.position[2]);
                     !p.spectator && dx * dx + dz * dz < 16384.0
@@ -963,19 +1153,22 @@ impl SpawnState {
             self.player_counts[self.near_list[i]][category.index()] += 1;
         }
     }
-    /// `canSpawnForCategoryGlobal`.
+    /// `canSpawnForCategoryGlobal`, in wide arithmetic: a mod's limit times
+    /// the chunks may pass `i32`, which vanilla's limits never do, so they
+    /// divide as vanilla's `int`s.
     pub fn can_spawn_global(&self, category: Category) -> bool {
-        let max = category.max() * self.spawnable_chunks / 289;
-        self.counts[category.index()] < max
+        let max = category.max(&self.limits) * i64::from(self.spawnable_chunks) / 289;
+        i64::from(self.counts[category.index()]) < max
     }
     /// `canSpawnForCategoryLocal` (`LocalMobCapCalculator.canSpawn`).
     pub fn can_spawn_local(&mut self, category: Category, cx: i32, cz: i32) -> bool {
-        // A player with nothing counted yet can spawn: zero is under every
-        // spawning category's cap.
+        // A player with nothing counted yet can spawn while the cap is above
+        // zero, as vanilla's always are.
         let near = self.players_near(cx, cz);
+        let max = category.max(&self.limits);
         self.near_list[near]
             .iter()
-            .any(|&p| self.player_counts[p][category.index()] < category.max())
+            .any(|&p| i64::from(self.player_counts[p][category.index()]) < max)
     }
     /// `getFilteredSpawningCategories`.
     pub fn filtered_categories(
@@ -992,16 +1185,31 @@ impl SpawnState {
             })
             .collect()
     }
+    /// The categories a level's spawn pass tries: `filtered_categories` with
+    /// the `spawn_monsters` rule and the level's `flags` (Horizon's, set by
+    /// mods) both letting monsters through, and the other categories only
+    /// while `flags.friendlies` is on. Both flags on is vanilla's choice.
+    pub fn policy_categories(
+        &self,
+        flags: SpawnFlags,
+        spawn_monsters: bool,
+        spawn_persistent: bool,
+    ) -> Vec<Category> {
+        let mut categories =
+            self.filtered_categories(flags.monsters && spawn_monsters, spawn_persistent);
+        categories.retain(|c| flags.friendlies || !c.friendly());
+        categories
+    }
     /// `SpawnState.canSpawn`: the spawn potential's energy change must stay
     /// within the type's budget where it has a spawn cost.
     fn can_spawn<L: NaturalLevel>(&mut self, l: &L, entity: &str, pos: [i32; 3]) -> bool {
         match l.spawn_cost(entity, pos[0], pos[1], pos[2]) {
             None => {
-                self.last_checked = Some((pos, entity.to_owned(), 0.0));
+                self.last_checked = Some((pos, 0.0));
                 true
             }
             Some(cost) => {
-                self.last_checked = Some((pos, entity.to_owned(), cost.charge));
+                self.last_checked = Some((pos, cost.charge));
                 self.energy_change(pos, cost.charge) <= cost.energy_budget
             }
         }
@@ -1036,7 +1244,7 @@ impl SpawnState {
         pos: [i32; 3],
     ) {
         let charge = match &self.last_checked {
-            Some((p, t, c)) if *p == pos && t == entity => *c,
+            Some((p, c)) if *p == pos => *c,
             _ => l
                 .spawn_cost(entity, pos[0], pos[1], pos[2])
                 .map_or(0.0, |c| c.charge),
@@ -1049,7 +1257,7 @@ impl SpawnState {
 
 /// What a spawn pass did, in vanilla's order (for differential tests).
 #[derive(Clone, Debug, PartialEq)]
-pub enum Event {
+pub enum Event<'a> {
     /// `getFilteredSpawningCategories`.
     Categories(Vec<Category>),
     /// `canSpawnForCategoryLocal` for the chunk.
@@ -1060,9 +1268,9 @@ pub enum Event {
     Try(i32, i32),
     /// The type passed `isValidSpawnPostitionForType`; the spawn state's
     /// potential test answered.
-    Test(String, [i32; 3], bool),
+    Test(&'a str, [i32; 3], bool),
     /// A mob spawned.
-    Spawn(String, [f64; 3], f32),
+    Spawn(&'a str, [f64; 3], f32),
 }
 /// A mob the spawner is about to add: the level runs `finalizeSpawn` and
 /// adds it, returning its finalized box and whether a tropical fish schools.
@@ -1081,6 +1289,9 @@ pub struct Spawned {
     pub bounds: Aabb,
     /// `TropicalFish.isSchool`.
     pub school: bool,
+    /// The group's size limit the new mob's entity parts answered; `None` leaves
+    /// `Mob.getMaxSpawnClusterSize` of its species.
+    pub cluster_size: Option<u32>,
 }
 
 /// `NaturalSpawner.spawnForChunk` for the categories already filtered.
@@ -1091,8 +1302,8 @@ pub fn spawn_for_chunk<L: NaturalLevel, R: RandomSource>(
     state: &mut SpawnState,
     categories: &[Category],
     chunk: (i32, i32),
-    spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    spawn: &mut dyn FnMut(&L, &SpawnRequest, &mut R) -> Option<Spawned>,
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     for &category in categories {
         let local = state.can_spawn_local(category, chunk.0, chunk.1);
@@ -1110,8 +1321,8 @@ pub fn spawn_category_for_chunk<L: NaturalLevel, R: RandomSource>(
     state: &mut SpawnState,
     category: Category,
     chunk: (i32, i32),
-    spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    spawn: &mut dyn FnMut(&L, &SpawnRequest, &mut R) -> Option<Spawned>,
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     let x = chunk.0 * 16 + random.next_int_bound(16).unwrap_or(0);
     let z = chunk.1 * 16 + random.next_int_bound(16).unwrap_or(0);
@@ -1133,8 +1344,8 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     category: Category,
     chunk: (i32, i32),
     start: [i32; 3],
-    spawn: &mut dyn FnMut(&L, &SpawnRequest) -> Option<Spawned>,
-    trace: &mut dyn FnMut(Event),
+    spawn: &mut dyn FnMut(&L, &SpawnRequest, &mut R) -> Option<Spawned>,
+    trace: &mut dyn FnMut(Event<'_>),
 ) {
     let [x0, y, z0] = start;
     if l.mob_data().state(l.state(x0, y, z0)).flags & super::data::REDSTONE_CONDUCTOR != 0 {
@@ -1142,11 +1353,11 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
     }
     let mut spawned: Vec<Aabb> = Vec::new();
     let mut cluster = 0u32;
-    let mut nearest = Nearest::new(start);
-    for _ in 0..3 {
+    let mut nearest = Nearest::new(start, std::mem::take(&mut state.nearby));
+    'groups: for _ in 0..3 {
         let (mut x, mut z) = (x0, z0);
         // The group's entry, its type and where it was picked.
-        let mut current: Option<(SpawnEntry, Option<MobType>, [i32; 3])> = None;
+        let mut current: Option<(Cow<'_, SpawnEntry>, Option<MobType>, [i32; 3])> = None;
         let mut group_index = 0u32;
         let mut max = (random.next_float() * 4.0).ceil() as i32;
         let mut ll = 0;
@@ -1170,7 +1381,11 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 {
                     None
                 } else {
-                    weighted_pick(&mobs_at(l, category, x, y, z), random)
+                    // Borrowed from the level unless a mod's hook changed the list.
+                    match mobs_at(l, category, x, y, z) {
+                        Cow::Borrowed(list) => weighted_pick(list, random).map(Cow::Borrowed),
+                        Cow::Owned(list) => weighted_pick(&list, random).cloned().map(Cow::Owned),
+                    }
                 };
                 let Some(entry) = list else {
                     break;
@@ -1196,7 +1411,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 continue;
             };
             let passed = state.can_spawn(l, &entry.entity, [x, y, z]);
-            trace(Event::Test(entry.entity.clone(), [x, y, z], passed));
+            trace(Event::Test(&entry.entity, [x, y, z], passed));
             if !passed {
                 continue;
             }
@@ -1207,8 +1422,17 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             let despawn = f64::from(type_category.despawn_distance().pow(2));
             let far = distance > despawn && removed_when_far(species);
             if far
-                || !mob_spawn_rules(species, l, x, y, z)
-                || !spawn_obstruction(species, l, bounds, Some(&spawned), x, y, z)
+                || !position_ok(
+                    l,
+                    &entry.entity,
+                    Reason::Natural,
+                    [xx, f64::from(y), zz],
+                    Pending { yaw, fresh: true },
+                    || {
+                        mob_spawn_rules(species, l, x, y, z)
+                            && spawn_obstruction(species, l, bounds, Some(&spawned), x, y, z)
+                    },
+                )
             {
                 continue;
             }
@@ -1220,7 +1444,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
                 group_index,
                 reason: Reason::Natural,
             };
-            let Some(result) = spawn(l, &request) else {
+            let Some(result) = spawn(l, &request, random) else {
                 continue;
             };
             attempt_count(1);
@@ -1228,13 +1452,9 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             spawned.push(result.bounds);
             cluster += 1;
             state.after_spawn(l, &entry.entity, type_category, [x, y, z]);
-            trace(Event::Spawn(
-                entry.entity.clone(),
-                [xx, f64::from(y), zz],
-                yaw,
-            ));
-            if cluster >= max_cluster_size(species) {
-                return;
+            trace(Event::Spawn(&entry.entity, [xx, f64::from(y), zz], yaw));
+            if cluster_full(cluster, result.cluster_size, species) {
+                break 'groups;
             }
             // TropicalFish.isMaxGroupSizeReached.
             if species == Species::TropicalFish && !result.school {
@@ -1242,6 +1462,7 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
             }
         }
     }
+    state.nearby = nearest.nearby;
 }
 /// `getNearestPlayer(x, y, z, -1, false)`'s squared distance for the
 /// attempts of one start. The spawn checks only compare it with 24² and the
@@ -1252,15 +1473,19 @@ pub fn spawn_category_for_position<L: NaturalLevel, R: RandomSource>(
 /// `MARGIN` from the start measures every player.
 struct Nearest {
     /// The players that can be within 128 blocks, once an attempt asked.
-    nearby: Option<Vec<[f64; 3]>>,
+    nearby: Vec<[f64; 3]>,
+    /// Whether `nearby` holds the players for this start.
+    ready: bool,
     start: (f64, f64),
 }
 impl Nearest {
     const REACH: f64 = 128.0;
     const MARGIN: f64 = 64.0;
-    fn new(start: [i32; 3]) -> Self {
+    /// Over `buffer`'s allocation (the contents are dropped).
+    fn new(start: [i32; 3], buffer: Vec<[f64; 3]>) -> Self {
         Self {
-            nearby: None,
+            nearby: buffer,
+            ready: false,
             start: (f64::from(start[0]) + 0.5, f64::from(start[2]) + 0.5),
         }
     }
@@ -1278,17 +1503,22 @@ impl Nearest {
         // MARGIN of the start. Every one of them is within MARGIN + REACH of
         // the start on both axes: a level with many players hands over only
         // those (the nearest is the same in any order).
-        let nearby = self.nearby.get_or_insert_with(|| {
-            let mut near = Vec::new();
-            l.player_positions_near(sx, sz, Self::MARGIN + Self::REACH, &mut near);
-            near.retain(|p| {
+        if !self.ready {
+            self.ready = true;
+            self.nearby.clear();
+            l.player_positions_near(sx, sz, Self::MARGIN + Self::REACH, &mut self.nearby);
+            self.nearby.retain(|p| {
                 let dx = ((p[0] - sx).abs() - Self::MARGIN).max(0.0);
                 let dz = ((p[2] - sz).abs() - Self::MARGIN).max(0.0);
                 dx * dx + dz * dz <= Self::REACH * Self::REACH
             });
-            near
-        });
-        Some(nearby.iter().map(distance).fold(f64::INFINITY, f64::min))
+        }
+        Some(
+            self.nearby
+                .iter()
+                .map(distance)
+                .fold(f64::INFINITY, f64::min),
+        )
     }
 }
 /// Player positions by the 256-block square they stand in, for
@@ -1395,13 +1625,13 @@ fn valid_position_for_type<L: NaturalLevel, R: RandomSource>(
     if hooked && !in_list() {
         return false;
     }
-    if !spawn_rules::is_spawn_position_ok(species, l, x, y, z) {
+    if !spawn_rules::is_spawn_position_ok(&entry.entity, species, l, x, y, z) {
         return false;
     }
     if !hooked && !listed && !in_list() {
         return false;
     }
-    if !spawn_rules::check_spawn_rules(species, l, Reason::Natural, random, x, y, z) {
+    if !spawn_rules::check_spawn_rules(&entry.entity, species, l, Reason::Natural, random, pos) {
         return false;
     }
     l.no_collision(spawn_aabb(
@@ -1443,7 +1673,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
         .and_then(|b| b.get("creature"))
         .cloned()
         .unwrap_or_default();
-    if mobs.iter().map(|e| e.weight).sum::<u32>() == 0 {
+    if !has_weight(&mobs) {
         return;
     }
     let probability = l.creature_probability(sx, sy, sz);
@@ -1452,7 +1682,7 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
         let Some(entry) = weighted_pick(&mobs, random) else {
             continue;
         };
-        let count = sample_count(&entry, random);
+        let count = sample_count(entry, random);
         let mut group_index = 0u32;
         let mut x = xo + random.next_int_bound(16).unwrap_or(0);
         let mut z = zo + random.next_int_bound(16).unwrap_or(0);
@@ -1468,7 +1698,14 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
                 };
                 let pos = top_non_colliding(l, &entry.entity, x, z);
                 trace(GenEvent::Column(x, z));
-                if spawn_rules::is_spawn_position_ok(species, l, pos[0], pos[1], pos[2]) {
+                if spawn_rules::is_spawn_position_ok(
+                    &entry.entity,
+                    species,
+                    l,
+                    pos[0],
+                    pos[1],
+                    pos[2],
+                ) {
                     let fx = f64::from(x).clamp(
                         f64::from(xo) + f64::from(width),
                         f64::from(xo) + 16.0 - f64::from(width),
@@ -1481,22 +1718,29 @@ pub fn spawn_mobs_for_chunk_generation<L: NaturalLevel, R: RandomSource, Q: Rand
                     let (bx, bz) = (fx.floor() as i32, fz.floor() as i32);
                     if !l.no_collision(spawn_aabb(species, fx, fy, fz, width, height))
                         || !spawn_rules::check_spawn_rules(
+                            &entry.entity,
                             species,
                             l,
                             Reason::ChunkGeneration,
                             rules,
-                            bx,
-                            pos[1],
-                            bz,
+                            [bx, pos[1], bz],
                         )
                     {
                         continue;
                     }
                     let yaw = random.next_float() * 360.0;
                     let bounds = spawn_box(fx, fy, fz, width, height);
-                    if mob_spawn_rules(species, l, bx, pos[1], bz)
-                        && spawn_obstruction(species, l, bounds, None, bx, pos[1], bz)
-                    {
+                    if position_ok(
+                        l,
+                        &entry.entity,
+                        Reason::ChunkGeneration,
+                        [fx, fy, fz],
+                        Pending { yaw, fresh: false },
+                        || {
+                            mob_spawn_rules(species, l, bx, pos[1], bz)
+                                && spawn_obstruction(species, l, bounds, None, bx, pos[1], bz)
+                        },
+                    ) {
                         let request = SpawnRequest {
                             entity: &entry.entity,
                             species,
@@ -1554,6 +1798,219 @@ fn top_non_colliding<L: NaturalLevel>(l: &L, entity: &str, x: i32, z: i32) -> [i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_weights_do_not_overflow_u32() {
+        let entry = SpawnEntry {
+            entity: "minecraft:zombie".into(),
+            weight: i32::MAX as u32,
+            min: 1,
+            max: 1,
+            constant: true,
+        };
+        assert_eq!(
+            total_weight(&[entry.clone(), entry.clone(), entry]),
+            3 * i64::from(i32::MAX)
+        );
+        assert!(has_weight(&[
+            entry_for_test(),
+            entry_for_test(),
+            entry_for_test()
+        ]));
+        assert!(has_weight(&[entry_for_test(), entry_for_test()]));
+        assert!(!has_weight(&[]));
+        let mut zero = entry_for_test();
+        zero.weight = 0;
+        assert!(!has_weight(&[zero]));
+        let mut random = horizon_core::random::LegacyRandom::new(42);
+        assert!(
+            weighted_pick(
+                &[entry_for_test(), entry_for_test(), entry_for_test()],
+                &mut random
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn in_range_picks_match_old_draw() {
+        for weights in [[1, 1, 1], [1, 3, 7], [5, 0, 2]] {
+            let list: Vec<_> = weights
+                .into_iter()
+                .enumerate()
+                .map(|(i, weight)| {
+                    let mut entry = entry_for_test();
+                    entry.entity = i.to_string();
+                    entry.weight = weight;
+                    entry
+                })
+                .collect();
+            for seed in 0..16 {
+                let mut actual = horizon_core::random::LegacyRandom::new(seed);
+                let mut old = horizon_core::random::LegacyRandom::new(seed);
+                let total: i64 = list.iter().map(|e| i64::from(e.weight)).sum();
+                let mut selection = i64::from(old.next_int_bound(total as i32).unwrap());
+                let expected = list
+                    .iter()
+                    .find(|e| {
+                        selection -= i64::from(e.weight);
+                        selection < 0
+                    })
+                    .unwrap();
+                assert_eq!(
+                    weighted_pick(&list, &mut actual).unwrap().entity,
+                    expected.entity
+                );
+                assert_eq!(actual.next_long(), old.next_long());
+            }
+        }
+    }
+
+    fn entry_for_test() -> SpawnEntry {
+        SpawnEntry {
+            entity: "minecraft:zombie".into(),
+            weight: i32::MAX as u32,
+            min: 1,
+            max: 1,
+            constant: true,
+        }
+    }
+
+    /// Vanilla's limits stand until a part answers; an answer replaces them, higher or lower,
+    /// and a group stops growing at the size the answer names.
+    #[test]
+    fn a_parts_answer_moves_where_a_group_stops_growing() {
+        let stops_at = |parts: Option<u32>, species| {
+            (1..=64)
+                .find(|&size| cluster_full(size, parts, species))
+                .unwrap()
+        };
+        // `Mob.getMaxSpawnClusterSize`: 4 by default, 8 for wolves, 1 for ghasts.
+        assert_eq!(stops_at(None, Species::Zombie), 4);
+        assert_eq!(stops_at(None, Species::Wolf), 8);
+        assert_eq!(stops_at(None, Species::Ghast), 1);
+        assert_eq!(stops_at(Some(2), Species::Zombie), 2);
+        assert_eq!(stops_at(Some(7), Species::Zombie), 7);
+        assert_eq!(stops_at(Some(3), Species::Wolf), 3);
+        assert_eq!(stops_at(Some(5), Species::Ghast), 5);
+        // A limit of 0 ends the group with the mob just spawned, as vanilla's would.
+        assert!(cluster_full(1, Some(0), Species::Zombie));
+    }
+
+    /// A state over `chunks` spawnable chunks with one player standing in chunk (0, 0).
+    fn one_player(chunks: i32, limits: SpawnLimits) -> SpawnState {
+        let player = SpawnPlayer {
+            position: [8.0, 64.0, 8.0],
+            spectator: false,
+        };
+        SpawnState::uncounted(chunks, vec![player]).with_limits(limits)
+    }
+
+    /// Vanilla's limits: one player's 289 chunks hold 70 monsters, so a count of 69 still
+    /// spawns and 70 doesn't; 144 chunks hold 70 * 144 / 289 = 34 (34.88 rounded down); and a
+    /// player near the chunk with 70 monsters around refuses it locally.
+    #[test]
+    fn vanilla_limits_cap_as_vanilla_does() {
+        let mut state = one_player(289, SpawnLimits::VANILLA);
+        state.counts[Category::Monster.index()] = 69;
+        assert!(state.can_spawn_global(Category::Monster));
+        state.counts[Category::Monster.index()] = 70;
+        assert!(!state.can_spawn_global(Category::Monster));
+        let mut fewer = one_player(144, SpawnLimits::VANILLA);
+        fewer.counts[Category::Monster.index()] = 33;
+        assert!(fewer.can_spawn_global(Category::Monster));
+        fewer.counts[Category::Monster.index()] = 34;
+        assert!(!fewer.can_spawn_global(Category::Monster));
+        // Ten creatures, fifteen ambient mobs.
+        state.counts[Category::Creature.index()] = 10;
+        state.counts[Category::Ambient.index()] = 14;
+        assert!(!state.can_spawn_global(Category::Creature));
+        assert!(state.can_spawn_global(Category::Ambient));
+        state.player_counts[0][Category::Monster.index()] = 69;
+        assert!(state.can_spawn_local(Category::Monster, 0, 0));
+        state.player_counts[0][Category::Monster.index()] = 70;
+        assert!(!state.can_spawn_local(Category::Monster, 0, 0));
+    }
+
+    /// A level's own limit moves both caps: a limit of 0 stops the category with nothing
+    /// counted, and a raised one lets the 70th monster through. A mod's largest limit over the
+    /// most chunks is counted without overflowing.
+    #[test]
+    fn a_levels_limits_move_both_caps() {
+        let none = SpawnLimits {
+            monster: 0,
+            ..SpawnLimits::VANILLA
+        };
+        let mut state = one_player(289, none);
+        assert!(!state.can_spawn_global(Category::Monster));
+        assert!(!state.can_spawn_local(Category::Monster, 0, 0));
+        assert!(
+            state.can_spawn_global(Category::Creature),
+            "the others keep theirs"
+        );
+        let raised = SpawnLimits {
+            monster: 100,
+            ..SpawnLimits::VANILLA
+        };
+        let mut state = one_player(289, raised);
+        state.counts[Category::Monster.index()] = 99;
+        state.player_counts[0][Category::Monster.index()] = 99;
+        assert!(state.can_spawn_global(Category::Monster));
+        assert!(state.can_spawn_local(Category::Monster, 0, 0));
+        state.counts[Category::Monster.index()] = 100;
+        assert!(!state.can_spawn_global(Category::Monster));
+        let most = SpawnLimits {
+            monster: u32::MAX,
+            ..SpawnLimits::VANILLA
+        };
+        let mut state = one_player(i32::MAX, most);
+        state.counts[Category::Monster.index()] = i32::MAX;
+        state.player_counts[0][Category::Monster.index()] = i32::MAX;
+        assert!(state.can_spawn_global(Category::Monster));
+        assert!(state.can_spawn_local(Category::Monster, 0, 0));
+    }
+
+    /// The flags take categories away from vanilla's choice and never add one back: the
+    /// `spawn_monsters` rule off keeps monsters out whatever the flag says.
+    #[test]
+    fn a_levels_flags_take_categories_away() {
+        use Category as C;
+        let state = one_player(289, SpawnLimits::VANILLA);
+        let flags = |monsters, friendlies| SpawnFlags {
+            monsters,
+            friendlies,
+        };
+        let friendly = vec![
+            C::Creature,
+            C::Ambient,
+            C::Axolotls,
+            C::UndergroundWaterCreature,
+            C::WaterCreature,
+            C::WaterAmbient,
+        ];
+        let mut all = vec![C::Monster];
+        all.extend(friendly.iter().copied());
+        assert_eq!(state.policy_categories(flags(true, true), true, true), all);
+        assert_eq!(
+            state.policy_categories(flags(false, true), true, true),
+            friendly
+        );
+        assert_eq!(
+            state.policy_categories(flags(true, true), false, true),
+            friendly
+        );
+        assert_eq!(
+            state.policy_categories(flags(true, false), true, true),
+            [C::Monster]
+        );
+        assert_eq!(state.policy_categories(flags(false, false), true, true), []);
+        // Creatures still wait for the persistent pass.
+        let without_creatures: Vec<_> = all.into_iter().filter(|&c| c != C::Creature).collect();
+        assert_eq!(
+            state.policy_categories(flags(true, true), true, false),
+            without_creatures
+        );
+    }
 
     /// Attempts and spawns counted while spans are on reach the perf counters once published, and a reset publishes nothing.
     #[test]

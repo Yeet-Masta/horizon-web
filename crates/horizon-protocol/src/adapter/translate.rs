@@ -1216,7 +1216,8 @@ pub(crate) mod v1_21_11 {
         let kind = session.kinds.lock().unwrap().get(&data.id).copied();
         if kind.is_some_and(|k| AGEABLE.contains(&k)) {
             for (index, _, _) in &mut data.values {
-                if *index >= 17 {
+                // 0xFF is the end of the list: an index the shift would make it stays put.
+                if (17..0xFE).contains(index) {
                     *index += 1;
                 }
             }
@@ -1436,13 +1437,13 @@ pub(crate) mod v26_1 {
             let mut w = Writer::new();
             w.string("red");
             w.i8(0);
-            w.nbt(&horizon_world::nbt::Tag::String("Red".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("Red".into()));
             w.i8(3);
             w.varint(1);
             w.varint(2);
             w.varint(12); // RED
-            w.nbt(&horizon_world::nbt::Tag::String("[".into()));
-            w.nbt(&horizon_world::nbt::Tag::String("]".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("[".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("]".into()));
             w.varint(1);
             w.string("Steve");
             let body = team(&w.data).unwrap();
@@ -1456,7 +1457,7 @@ pub(crate) mod v26_1 {
             assert_eq!(params.color, Some(12));
             assert_eq!(params.options, 3);
             assert_eq!(params.name_tag_visibility, 1);
-            assert_eq!(params.prefix, horizon_world::nbt::Tag::String("[".into()));
+            assert_eq!(params.prefix, horizon_core::nbt::Tag::String("[".into()));
             assert_eq!(t.players, vec!["Steve".to_string()]);
         }
 
@@ -1465,13 +1466,13 @@ pub(crate) mod v26_1 {
             let mut w = Writer::new();
             w.string("t");
             w.i8(2);
-            w.nbt(&horizon_world::nbt::Tag::String("T".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("T".into()));
             w.i8(0);
             w.varint(0);
             w.varint(0);
             w.varint(21); // RESET
-            w.nbt(&horizon_world::nbt::Tag::String("".into()));
-            w.nbt(&horizon_world::nbt::Tag::String("".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("".into()));
+            w.nbt(&horizon_core::nbt::Tag::String("".into()));
             let body = team(&w.data).unwrap();
             let p =
                 play::Clientbound::decode(packet_ids::play::clientbound::SET_PLAYER_TEAM, &body)
@@ -1484,8 +1485,8 @@ pub(crate) mod v26_1 {
     }
 }
 
-/// 1.21.6 to 1.21.8. Clientbound nothing changes for a server: 1.21.6 sends set_equipment without the saddle
-/// slot (7), which 1.21.8 added, and entity data is laid out alike (the serializer ids differ only from 1.21.9,
+/// 1.21.6 to 1.21.8. Clientbound nothing changes for a server: set_equipment has the saddle slot (7) since 1.21.5,
+/// and entity data is laid out alike (the serializer ids differ only from 1.21.9,
 /// see adapter.rs). Serverbound, 1.21.8's `test_instance_block_action` names its test by identifier and 1.21.6
 /// by a VarInt id in a registry.
 pub(crate) mod v1_21_6 {
@@ -1917,17 +1918,17 @@ pub(crate) mod client_layout_v1_21_4 {
     /// a long array per heightmap. A name 1.21.5 has no id for is dropped.
     #[cfg(test)]
     fn heightmaps_up(r: &mut Reader, w: &mut Writer) -> Result<()> {
-        let horizon_world::nbt::Tag::Compound(map) = r.nbt()? else {
+        let horizon_core::nbt::Tag::Compound(map) = r.nbt()? else {
             return Err(crate::Error::new("heightmaps: not a compound"));
         };
         let known: Vec<(i32, Vec<i64>)> = HEIGHTMAPS
             .iter()
-            .filter_map(|&(kind, name)| {
-                match map.get(&horizon_world::nbt::JavaString::from(name)) {
-                    Some(horizon_world::nbt::Tag::LongArray(longs)) => Some((kind, longs.clone())),
+            .filter_map(
+                |&(kind, name)| match map.get(&horizon_core::nbt::JavaString::from(name)) {
+                    Some(horizon_core::nbt::Tag::LongArray(longs)) => Some((kind, longs.clone())),
                     _ => None,
-                }
-            })
+                },
+            )
             .collect();
         w.varint(known.len() as i32);
         for (kind, longs) in known {
@@ -2101,7 +2102,6 @@ pub(crate) mod client_layout_v1_21_8 {
 
 /// 1.20.6 to 1.21 (protocol 766 to 767): the mirror of `client_session::step_1_20_6`. Clientbound, from the two
 /// Packets pages:
-/// - `level_particles` sends the particle (a VarInt) first in 1.20.6 and after the count in 1.21.
 /// - `explode`'s sound is a sound event holder in 1.21 (a VarInt, 0 for an inline one, then the location and the
 ///   range); 1.20.6 sends the inline one alone.
 /// - `projectile_power` is one double, the power, in 1.21; 1.20.6 sends the vector.
@@ -2142,10 +2142,6 @@ pub(crate) mod client_layout_v1_20_6 {
         Ok(&tail[..len])
     }
 
-    /// The bytes of `LEVEL_PARTICLES` between the particle and its data in both layouts: the long-distance flag,
-    /// three doubles, four floats and the count.
-    pub(crate) const LEVEL_PARTICLES_HEAD: usize = 1 + 24 + 16 + 4;
-
     /// The clientbound packet `id` a 1.20.6 server sent (`payload` in 1.20.6's layout), in 1.21's layout; `None`
     /// when laid out alike.
     #[cfg(test)]
@@ -2160,25 +2156,11 @@ pub(crate) mod client_layout_v1_20_6 {
             return Ok(None);
         }
         Ok(match id {
-            cb::LEVEL_PARTICLES => Some(level_particles(payload)?),
             cb::EXPLODE => Some(explode(payload)?),
             cb::PROJECTILE_POWER => Some(projectile_power(payload)?),
             cb::MERCHANT_OFFERS => Some(merchant_offers(session, payload)?),
             _ => None,
         })
-    }
-
-    /// level_particles: the particle goes after the count, before its data.
-    #[cfg(test)]
-    fn level_particles(payload: &[u8]) -> Result<Vec<u8>> {
-        let mut r = Reader::new(payload);
-        let particle = r.varint()?;
-        let head = r.bytes(LEVEL_PARTICLES_HEAD)?;
-        let mut w = Writer::new();
-        w.bytes(head);
-        w.varint(particle);
-        w.bytes(r.rest());
-        Ok(w.data)
     }
 
     /// explode: the sound is a holder in 1.21, and an inline one (0) here; the two explosion particles have no
@@ -2668,7 +2650,7 @@ mod tests {
             let packet = play::Clientbound::BlockEntityData(play::BlockEntityData {
                 pos: [1, 2, 3],
                 kind,
-                tag: horizon_world::nbt::Tag::Compound(Default::default()),
+                tag: horizon_core::nbt::Tag::Compound(Default::default()),
             });
             let body = strip_id(packet.encode());
             let translated = clientbound(
@@ -2894,7 +2876,7 @@ mod legacy_registry_tests {
 
     #[test]
     fn vanilla_765_login_and_respawn_resolve_the_synced_dimension_type() {
-        use horizon_world::nbt::Tag;
+        use horizon_core::nbt::Tag;
         let session = Session::new(ServerVersion::V1_20_3);
         let mut handshake = Writer::new();
         handshake.varint(packet_ids::handshake::serverbound::INTENTION);

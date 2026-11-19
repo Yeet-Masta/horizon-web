@@ -175,8 +175,10 @@ def frames(phase, repeat, frame_ms, cpu_ms=(), gpu_ms=()):
         "p999_ms": rnd(pct(times, 0.999)), "max_ms": rnd(times[-1]),
     }
     for key, values in (("cpu_p50_ms", cpu_ms), ("gpu_p50_ms", gpu_ms)):
-        if values:
-            entry[key] = rnd(pct(sorted(values), 0.5))
+        # horizon_bench::Frames::of filters all three series; a non-finite sample would poison the report's JSON.
+        finite = sorted(value for value in values if math.isfinite(value))
+        if finite:
+            entry[key] = rnd(pct(finite, 0.5))
     entry["histogram"] = histogram
     return entry
 
@@ -438,7 +440,7 @@ def view_chunks(distance):
     return int(0.8 * math.pi * distance ** 2)
 
 
-def wait_loaded(control, near, limit, min_chunks=0):
+def wait_loaded(control, near, limit, min_chunks=0, observe=None):
     """Waits until the player is spawned (near(position)), nothing is queued, the
     resident and generated chunk counts have not changed for a second, as the
     vanilla driver does, and the last sections are drawn; returns when the last
@@ -448,7 +450,9 @@ def wait_loaded(control, near, limit, min_chunks=0):
     only remesh in short bursts. Older builds fall back to meshing going quiet
     (fewer than QUIET_MESHES_PER_S section meshes in a second), which also
     waits through that tail. (pending_chunks alone misses work the threads have
-    already taken, and sections waiting for their neighbours' light.)"""
+    already taken, and sections waiting for their neighbours' light.) If observe
+    is supplied, it receives each `(time, status)` sample without changing the
+    readiness decision."""
     deadline = time.time() + limit
     last, changed, previous, meshing = None, time.time(), None, time.time()
     # Right after a teleport (and at spawn) Horizon reports nothing queued and steady counts for over a second
@@ -467,6 +471,8 @@ def wait_loaded(control, near, limit, min_chunks=0):
                 out.write(json.dumps({"t": now, "chunks": s.get("chunks"), "generated": s.get("generated_chunks"),
                                       "pending": s.get("pending_chunks"), "meshed": s.get("meshed_sections"),
                                       "streaming": s.get("streaming"), "fps": s.get("fps")}) + "\n")
+        if observe:
+            observe(now, s)
         if not player or not near(player["position"]) or s.get("pending_chunks") != 0 or s.get("screen") == "title":
             last, changed, previous, meshing = None, now, None, now
         else:
@@ -495,6 +501,17 @@ def wait_loaded(control, near, limit, min_chunks=0):
                 return max(changed, meshing)
         time.sleep(0.05)
     raise TimeoutError(f"not loaded after {limit} s")
+
+
+def first_resident_chunk_observer():
+    """Return state and an observer that records the first resident chunk monotonically."""
+    first_chunk_at = [None]
+
+    def observe_first_chunk(_now, status):
+        if first_chunk_at[0] is None and (status.get("chunks") or 0) > 0:
+            first_chunk_at[0] = time.monotonic()
+
+    return first_chunk_at, observe_first_chunk
 
 
 BENCH_PLAYER = "Bench"
@@ -538,7 +555,7 @@ class LocalServer:
     def __enter__(self):
         self.log_path = self.dir / "server.log"
         self.log = self.log_path.open("w")
-        env = lab.game_env(HORIZON_TELEMETRY_URL="off") if self.kind == "horizon" else None
+        env = lab.game_env() if self.kind == "horizon" else None
         self.proc = subprocess.Popen(self.command, cwd=self.dir, env=env, stdin=subprocess.PIPE, text=True,
                                      stdout=self.log, stderr=subprocess.STDOUT)
         deadline = time.time() + 600
@@ -610,8 +627,7 @@ def run_horizon(args, distance):
         command.append("--offscreen")
     for carry in dev_mods(args):
         command += ["--dev-mod", str(carry)]
-    # Benchmark runs stay out of the live count and send nothing (docs/telemetry.md).
-    env = lab.game_env(HORIZON_TELEMETRY_URL="off")
+    env = lab.game_env()
     if args.warm:
         # A first start to the title screen builds what later starts reuse (the content-mod
         # root, the block behaviour snapshot). It is not measured: players see it once.
@@ -638,13 +654,18 @@ def run_horizon(args, distance):
         title, at = poll(control, lambda s: s.get("screen") == "title" and s.get("renderer"), 300)
         result["renderer"] = title["renderer"]
         result["startup"] = {"title_s": at - started}
+        world_started = time.monotonic()
         if args.server:
             joined = time.time()
             control(f"connect {args.server_address} {BENCH_PLAYER}")
         else:
             control(f"open {WORLD} {SEED} creative")
-        loaded = wait_loaded(control, lambda p: True, args.timeout, view_chunks(distance))
+        first_chunk_at, observe_first_chunk = first_resident_chunk_observer()
+
+        loaded = wait_loaded(control, lambda p: True, args.timeout, view_chunks(distance), observe_first_chunk)
         result["startup"]["world_s"] = loaded - started
+        result["startup"]["first_chunk_s"] = (first_chunk_at[0] - world_started
+                                                if first_chunk_at[0] is not None else None)
         if args.server:
             result["startup"]["join_s"] = loaded - joined
         for name, start, end, pitch in scene_list(args):
@@ -1065,6 +1086,8 @@ def report(args, distance, runs, app):
 
     metric("startup.title_ms", [r["startup"]["title_s"] * 1000 for r in runs])
     metric("startup.world_ms", [r["startup"]["world_s"] * 1000 for r in runs])
+    metric("startup.first_chunk_ms", [r["startup"]["first_chunk_s"] * 1000 for r in runs
+                                      if r["startup"].get("first_chunk_s") is not None])
     metric("startup.join_ms", [r["startup"]["join_s"] * 1000 for r in runs if "join_s" in r["startup"]])
     for name in first["scenes"]:
         scenes = [r["scenes"][name] for r in runs if name in r["scenes"]]

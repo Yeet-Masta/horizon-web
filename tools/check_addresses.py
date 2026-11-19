@@ -10,7 +10,9 @@ tools/addresses.json says where each host may be:
 - `vanilla`: the endpoints vanilla itself contacts; allowed anywhere;
 - `not_addresses`: strings that look like hosts but are not contacted (a suffix matcher, a translation key);
 - `allowed`: today's addresses outside a home, "path host". They only go away: with --base, a branch may move
-  an entry to another file but may not add a host nor grow the list.
+  an entry to another file but may not add a host nor grow the list. A changed sync-baseline declaration,
+  verified by merge_base.sync_provenance, may restore exact rows from that upstream commit's inventory;
+  only those newly restored rows are excluded from the growth comparison.
 
     python3 tools/check_addresses.py                     # the check
     python3 tools/check_addresses.py --base origin/main  # and nothing added since the base
@@ -36,11 +38,85 @@ TLDS = "com|net|org|dev|gg|io|ms|me|app|xyz|co|za|uk|de|fr|tv|eu|ch|nl|ru|jp|au|
 HOST = r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:" + TLDS + r")"
 URL = re.compile(r"\b(?:https?|wss?)://(?:[^/@\s\"]*@)?(\[[0-9a-f:]+\]|[a-z0-9.-]+)", re.I)
 WHOLE = re.compile(r"^(" + HOST + r"|(?:\d{1,3}\.){3}\d{1,3})(?::\d{1,5})?(?:/\S*)?$", re.I)
-# Files with neither a URL nor a whole-string host skip the tokenizer.
-MAYBE_HOST = re.compile(r"://|\"" + HOST + r"(?::\d+)?[\"/]|\"(?:\d{1,3}\.){3}\d{1,3}", re.I)
+# Files with neither a URL nor a whole-string host skip the tokenizer. Rust's hex/Unicode escapes and
+# line continuations can build or split an ASCII host while the raw source has no plain host and no
+# "://", so those escape signatures also send a file to the tokenizer (the simple escapes cannot form
+# a host character). This is a cheap hint, not a decode: raw strings, comments and #[cfg(test)] items
+# are still excluded downstream.
+_ESCAPE_HINT = r"\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F_]+\}|\\\r?\n"
+MAYBE_HOST = re.compile(r"://|\"" + HOST + r"(?::\d+)?[\"/]|\"(?:\d{1,3}\.){3}\d{1,3}|" + _ESCAPE_HINT, re.I)
 TEST_MOD = re.compile(r"#\[cfg\((?:all\()?test\b[^\]]*\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*;")
 PLACEHOLDER = re.compile(r"(^|\.)(example(\.(com|net|org))?|test|invalid|localhost|local)$")
 SKIP_DIRS = {"tests", "examples", "benches", "fixtures", "target"}
+
+# Rust's ordinary-string escapes. Raw strings are decoded nowhere (see tokenize); these apply only to `"..."`.
+_RUST_SIMPLE_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "0": "\0", "\\": "\\", '"': '"', "'": "'"}
+_RUST_HEX = "0123456789abcdefABCDEF"
+_RUST_WS = " \t\r\n\x0b\x0c"
+
+
+def _decode_rust_string(raw):
+    """Decoded value of an ordinary Rust string literal's contents.
+
+    Covers every escape valid in a shipped Rust string: \\n \\r \\t \\0 \\\\ \\" \\', ASCII \\xNN,
+    \\u{...} (a hex digit followed by hex digits/underscores) and backslash-newline whitespace continuation.
+    A sequence this decoder does not recognize is kept verbatim: invalid Rust cannot be in shipped
+    source, and leaving it visible is safer than silently rewriting what the scanner read.
+    """
+    out, i, n = [], 0, len(raw)
+    while i < n:
+        c = raw[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            out.append(c)
+            i += 1
+            continue
+        e = raw[i + 1]
+        if e in _RUST_SIMPLE_ESCAPES:
+            out.append(_RUST_SIMPLE_ESCAPES[e])
+            i += 2
+        elif e == "x" and i + 3 < n and raw[i + 2] in _RUST_HEX and raw[i + 3] in _RUST_HEX:
+            value = int(raw[i + 2:i + 4], 16)
+            if value < 0x80:  # Rust requires ASCII for \xNN in a string literal.
+                out.append(chr(value))
+            else:
+                out.append(raw[i:i + 4])
+            i += 4
+        elif raw.startswith("u{", i + 1):
+            close = raw.find("}", i + 3)
+            body = raw[i + 3:close] if close > 0 else ""
+            # rustc accepts a hex digit followed by any mix of hex digits and underscores: internal
+            # repeats and a trailing underscore are valid, a leading underscore is not (verified with
+            # rustc 1.99.1). Ignore underscores when counting the 1..6 actual hex digits to validate.
+            digits = None
+            if body and body[0] in _RUST_HEX and all(d == "_" or d in _RUST_HEX for d in body):
+                candidate = body.replace("_", "")
+                if 1 <= len(candidate) <= 6:
+                    digits = candidate
+            if digits:
+                value = int(digits, 16)
+                if value <= 0x10FFFF and not 0xD800 <= value <= 0xDFFF:
+                    out.append(chr(value))
+                    i = close + 1
+                    continue
+            end = close + 1 if close > 0 else n
+            out.append(raw[i:end])  # malformed or out-of-range: keep it visible
+            i = end
+        elif e in "\r\n":
+            # Line continuation: the backslash, its newline and the following ASCII whitespace vanish.
+            j = i + 2
+            if e == "\r" and j < n and raw[j] == "\n":
+                j += 1
+            while j < n and raw[j] in _RUST_WS:
+                j += 1
+            i = j
+        else:
+            out.append(raw[i:i + 2])
+            i += 2
+    return "".join(out)
 
 
 def tokenize(text):
@@ -85,7 +161,9 @@ def tokenize(text):
             j = i + 1
             while j < n and text[j] != '"':
                 j += 2 if text[j] == "\\" else 1
-            out.append((i + 1, text[i + 1:j]))
+            # Keep the source offset (for #[cfg(test)] ranges) and the masked span (for brace
+            # matching), but hand the scanner the literal's decoded value, not its spelling.
+            out.append((i + 1, _decode_rust_string(text[i + 1:j])))
             blank(i + 1, j)
             i = j + 1
         elif c == "'":
@@ -223,7 +301,7 @@ def scan(files=None):
     return found
 
 
-def check(config, found, base=None):
+def check(config, found, base=None, upstream_rows=frozenset()):
     """(problems, notes)."""
     homes = set(config.get("homes", []))
     vanilla = set(config.get("vanilla", []))
@@ -242,10 +320,12 @@ def check(config, found, base=None):
                         f"'vanilla', anything else in the Horizon layer's address home ({DOC})")
     if base is not None:
         before = {tuple(entry.split(" ", 1)) for entry in base.get("allowed", [])}
-        new_hosts = {host for _, host in allowed} - {host for _, host in before}
+        restored = (allowed - before) & upstream_rows
+        effective = allowed - restored
+        new_hosts = {host for _, host in effective} - {host for _, host in before}
         for host in sorted(new_hosts):
             problems.append(f"{host}: added to 'allowed' in {CONFIG_PATH}; new addresses go in a home ({DOC})")
-        if len(allowed) > len(before):
+        if len(effective) > len(before):
             problems.append(f"'allowed' in {CONFIG_PATH} grew from {len(before)} to {len(allowed)} entries; it only "
                             f"shrinks ({DOC})")
     notes = [f"{rel} {host}: no longer there; you can remove it from 'allowed' in {CONFIG_PATH}"
@@ -263,11 +343,32 @@ def base_config(base):
     return json.loads(shown.stdout) if shown.returncode == 0 else None
 
 
+def _merge_base():
+    if __package__:
+        from . import merge_base
+    else:
+        import merge_base
+    return merge_base
+
+
+def restored_upstream_rows(base):
+    """Allow exact upstream rows only for a changed, verified sync declaration."""
+    config, errors = _merge_base().verified_sync_config(base, CONFIG_PATH)
+    rows = {tuple(row.split(" ", 1)) for row in config.get("allowed", [])} if config is not None else set()
+    return rows, errors
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", help="refuse addresses added to 'allowed' since the branch left this git ref")
     parser.add_argument("--list", action="store_true", help="print every host found and its files")
+    parser.add_argument("--pull-request-merge", action="store_true", help=_merge_base().PULL_REQUEST_MERGE_HELP)
     args = parser.parse_args(argv)
+    if args.base:
+        args.base, error = _merge_base().pull_request_base(args.base, args.pull_request_merge)
+        if error:
+            print(f"Address check failed: {error}")
+            return 1
     config = json.loads((ROOT / CONFIG_PATH).read_text())
     found = scan()
     if args.list:
@@ -277,7 +378,15 @@ def main(argv=None):
         for host in sorted(by_host):
             print(f"{host}: {', '.join(sorted(by_host[host]))}")
         return 0
-    problems, notes = check(config, found, base_config(args.base) if args.base else None)
+    base = base_config(args.base) if args.base else None
+    problems, notes = check(config, found, base)
+    if args.base and (problems or config != base):
+        # Only a violation, or an inventory that differs from the base's, can need rows a verified sync restored:
+        # every other run stays off the network.
+        upstream_rows, provenance = restored_upstream_rows(args.base)
+        if upstream_rows or provenance:
+            problems, notes = check(config, found, base, upstream_rows)
+        problems = provenance + problems
     for note in notes:
         print(f"note: {note}")
     if problems:

@@ -127,6 +127,24 @@ impl Clone for LegacyRandom {
     }
 }
 
+/// The whole generator: its 48-bit state and the cached second gaussian, so a copy draws on
+/// exactly as the original would.
+impl From<&LegacyRandom> for (u64, Option<f64>) {
+    fn from(random: &LegacyRandom) -> Self {
+        (random.state, random.gaussian)
+    }
+}
+/// A generator from its state (masked to 48 bits) and cached gaussian.
+impl From<(u64, Option<f64>)> for LegacyRandom {
+    fn from((state, gaussian): (u64, Option<f64>)) -> Self {
+        Self {
+            state: state & Self::MASK,
+            gaussian,
+            gate: None,
+        }
+    }
+}
+
 impl LegacyRandom {
     const MULTIPLIER: u64 = 0x5_deec_e66d;
     const MASK: u64 = (1 << 48) - 1;
@@ -151,6 +169,11 @@ impl LegacyRandom {
     /// The 48-bit generator state (differential tests compare it).
     pub fn state(&self) -> u64 {
         self.state
+    }
+
+    /// The cached second `nextGaussian` value, if one is pending.
+    pub fn cached_gaussian(&self) -> Option<f64> {
+        self.gaussian
     }
 
     /// A gated lane's first draw of an item waits for its turn and takes the shared state.
@@ -236,7 +259,7 @@ impl RandomSource for LegacyRandom {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct XoroshiroRandom {
     lo: u64,
     hi: u64,

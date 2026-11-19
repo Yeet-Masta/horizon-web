@@ -16,7 +16,7 @@ REFS: the expected numbers are what the vanilla 26.3 server printed for the same
 y=99, powered rails under the minecart and behind the exit portal, a minecart pushed at 0.4 blocks per
 tick along 10 rails into the portal, ticks frozen and stepped one at a time, no player).
 LOGS: the server's output goes to --out (a temporary folder by default), one file per lane.
-READS-BY: tools/pr_ready.py does not run it; run it by hand after changing game/nether_portal.rs.
+READS-BY: tools/pr_ready.py does not run it; run it by hand after changing game/blocks/nether_portal.rs.
 ENDS-WHEN: each lane has checked its ticks, or the first mismatch is printed (exit status 1).
 """
 import argparse
@@ -194,7 +194,7 @@ def run_lane(bins, name, lane, out):
     (folder / 'eula.txt').write_text('eula=true\n')
     props = dict(PROPERTIES, **{'server-port': str(lab.free_port()), 'server-ip': '127.0.0.1'})
     (folder / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
-    command = [bins / 'horizon-client', '--resources', lab.RESOURCES, '--dedicated', '--nogui']
+    command = [lab.binary(bins, 'horizon-client'), '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     server = Server(command, folder, out / f'{name}.log')
     failed = []
     try:

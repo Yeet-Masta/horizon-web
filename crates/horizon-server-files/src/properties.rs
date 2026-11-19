@@ -2,14 +2,12 @@
 //! vanilla's default, parser and serializer. Reading a value writes its
 //! normalized form back, so storing afterwards rewrites the file the way the
 //! vanilla server does on start; the legacy keys are dropped.
-use super::{
-    java_properties::{Properties, date_string, now_millis},
-    json::{self, Json},
-};
+use super::json::{self, Json};
 use horizon_core::{
     random::java_string_hash,
     text::{parse_java_integer, parse_java_long},
 };
+use horizon_java_properties::{Properties, date_string, now_millis};
 use horizon_protocol::crypto::md5;
 
 /// MinecraftServer.ServerResourcePackInfo.
@@ -110,7 +108,7 @@ pub const GAME_MODES: [&str; 4] = ["survival", "creative", "adventure", "spectat
 pub trait Entropy {
     /// RandomSource.create().nextLong() (WorldOptions.randomSeed).
     fn next_long(&mut self) -> i64;
-    /// SecureRandom.nextInt(bound).
+    /// The JDK's bounded random int.
     fn next_int(&mut self, bound: u32) -> u32;
 }
 /// RandomSource.create(): a fast stream seeded once from the operating system (the clock only
@@ -183,7 +181,7 @@ pub fn generate_secret_key(entropy: &mut dyn Entropy) -> String {
         .collect()
 }
 
-/// UUID.nameUUIDFromBytes.
+/// The JDK's name-based UUIDv3.
 pub fn name_uuid(bytes: &[u8]) -> u128 {
     let mut h = md5(bytes);
     h[6] = (h[6] & 0x0f) | 0x30;
@@ -191,7 +189,7 @@ pub fn name_uuid(bytes: &[u8]) -> u128 {
     u128::from_be_bytes(h)
 }
 
-/// UUID.fromString (the lenient JDK parser: five dash-separated hex groups).
+/// The JDK's lenient UUID parser: five dash-separated hex groups.
 pub fn parse_uuid(s: &str) -> Option<u128> {
     let parts: Vec<&str> = s.split('-').collect();
     if parts.len() != 5 || s.len() > 36 {
@@ -209,7 +207,7 @@ pub fn parse_uuid(s: &str) -> Option<u128> {
     Some(u128::from(msb) << 64 | u128::from(lsb))
 }
 
-/// Boolean.valueOf.
+/// Java's `Boolean` parsing.
 fn java_bool(s: &str) -> bool {
     s.eq_ignore_ascii_case("true")
 }
@@ -670,7 +668,7 @@ mod tests {
         );
         let _ = horizon_std::fs::remove_dir_all(&dir);
     }
-    use crate::java_properties::line_separator;
+    use horizon_java_properties::line_separator;
     struct Fixed;
     impl Entropy for Fixed {
         fn next_long(&mut self) -> i64 {
@@ -733,7 +731,7 @@ mod tests {
     #[test]
     fn defaults_match_vanilla_init_settings() {
         let p = ServerProperties::new(Properties::default(), &mut Fixed).unwrap();
-        // Lines end in System.lineSeparator() (java_properties checks that): read them as "\n".
+        // Lines end in the platform line separator (java_properties checks that): read them as "\n".
         let stored = p.stored(0).replace(line_separator(), "\n");
         assert!(stored.starts_with(
             "#Minecraft server properties\n#Thu Jan 01 00:00:00 UTC 1970\naccepts-transfers=false\n"

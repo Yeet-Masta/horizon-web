@@ -2,6 +2,31 @@
 
 How parity work is run, checked and merged. What is ported and where it is checked: [Rust rewrite status](rust-parity.md).
 
+## Datafix downloads and author self-checks
+
+Datafix generation owns a private writable root, defaulting to checkout `.local/datafix`.
+`HORIZON_DATAFIX_ROOT` overrides it (relative values resolve from the invoking working directory).
+Minecraft input symlinks never select this output root. The tool refuses shared vanilla
+roots and their ancestors, escaping default symlinks, escaping descendant symlinks, file roots and unwritable
+ancestors before downloads, world generation or `generate.lock` creation. Choose a new private
+directory on refusal; never change permissions on shared fixtures to bypass the guard.
+
+Author `pr_ready` excludes datafix by default and prints one opt-in reminder. To explicitly
+allow it among the affected harnesses, use a private directory. Local opt-in preflights the
+root conservatively even when affected dependencies are unknown, and passes its validated
+absolute path into subprocesses so a working-directory change cannot reinterpret it:
+
+```sh
+HORIZON_DATAFIX_ROOT="$PWD/.local/datafix-private" python3 tools/pr_ready.py --datafix
+```
+
+Direct `tools/parity.py datafix` is also an explicit harness run and may download jars and
+runtimes, launch servers and generate worlds. Metadata for cold Linux 1.8.9 alone lists
+8,320,755 bytes for the server jar plus 235,129,362 bytes for the pinned legacy runtime:
+243,450,117 bytes before JSON metadata and generated worlds. Other versions/runtimes add
+more; cached payload can be zero. No runtime measurement is available for this repair.
+Fork issue arismoko/horizon#3027 tracks whether CI runs datafix.
+
 ## Running the vanilla harnesses
 
 Same-machine fixtures created with `lab.game_env` use `HORIZON_TEST_LOOPBACK=1`: Horizon
@@ -33,7 +58,7 @@ Each harness runs unmodified under a tracer that records the files it depended o
 
 Vanilla oracle runs are reused as well. `tools/parity_shim.py` stands in for `java` and `javac`: it records each oracle run's outputs and the content of every file under the paths its arguments name, and replays the run while those are unchanged. After a Rust-only change a harness pays only for its Rust side (`block_update`: 53 s to 5 s). Files an oracle writes outside its named paths aren't tracked, so a harness that fails while reusing oracle results is rerun fresh, and stops reusing them if it then passes. `--all` and `--fresh` never reuse them.
 
-Probes build into `.local/parity-target/` with release optimisation but no LTO and 16 codegen units. On ludodesktop that rebuilds every `horizon-world` probe in 3 seconds after a one-line change, against 122 seconds with the release profile. Rust gives these settings identical results (no fast-math; overflow checks as in release), and the full harness suite passes under them. Probes that harnesses build in the dev profile get `opt-level = 3` too, keeping their overflow checks and debug assertions. Harnesses must locate binaries through `cargo metadata` or `lab.cargo_target()`, never a hard-coded `target/`.
+Probes build into `.local/parity-target/` with release optimisation but no LTO and 16 codegen units. On a 24-thread Linux machine that rebuilds every `horizon-world` probe in 3 seconds after a one-line change, against 122 seconds with the release profile. Rust gives these settings identical results (no fast-math; overflow checks as in release), and the full harness suite passes under them. Probes that harnesses build in the dev profile get `opt-level = 3` too, keeping their overflow checks and debug assertions. Harnesses must locate binaries through `cargo metadata` or `lab.cargo_target()`, never a hard-coded `target/`.
 
 The probes of `horizon-world` and of `horizon-client` are one binary per crate, `world_probe` and `client_probe` (`cargo build --release -p horizon-world --example world_probe`): a harness runs `world_probe <name> [arguments]`, and `<name>` is a module in `crates/<crate>/examples/probe/` (add it to the `mod` list and the `probes!` list in its `main.rs`; read arguments with `crate::args()` or `crate::args_os()`, which drop the name). Code several probes share goes in `examples/probe/support/` or a module of its own. Linking one binary instead of ~250 examples is most of what a probe build used to cost. Each crate's probe has its own target name (set in its `Cargo.toml`, `protocol_probe` too): Cargo copies every crate's examples into one `<profile>/examples/` directory, and with one shared name a harness could run the binary another harness had just copied there. The runner counts only the probes a harness ran, the probes and support modules they name, their own subdirectories and `dispatch.rs` as its dependencies, not `main.rs`, which only lists the probes: editing one probe reruns only its harnesses, and adding one reruns none.
 
@@ -49,7 +74,7 @@ The game logs into `HORIZON_HOME` and falls back to the player's own game folder
 
 ### Other machines
 
-Harnesses can also run on the Mac mini, the desktop and playhorizon (`tools/parity_hosts.json` describes them; `desktop` and `playhorizon` use their CI runner's environment and vanilla data, the desktop's entry describes its 10-26 setup, retired, and refuses work: docs/release-flow.md, "The desktop's runner"; its `default` list is empty, so pass `--hosts macmini,playhorizon` or set `PARITY_HOSTS`, after copying `shared-local/` to `~/code/horizon-parity/shared-local` on each host). The runner mirrors the worktree there with rsync (not `.git`, `.local`, `target` or ignored files) into `~/code/horizon-parity/remote/<host><path>`, whose `.local` links to the vanilla data in `~/code/horizon-parity/shared-local`, and starts `tools/parity.py --worker` over ssh. The worker builds the probes (about 80 s the first time) and runs what it is sent under the same tracer, admitting harnesses against its own free memory. One queue, longest first, feeds every machine, remote ones first: the Mac takes up to 14 harnesses, the desktop 8, playhorizon 3 (on CPUs 0-3: its CI runner has 4-7). Each pass comes back with the content hash of every file it depended on, so it is keyed on exactly what ran, and logs come back to `.local/parity-runner/logs/`; state, sharing and `gate.py` work as before. If a host can't be reached, or drops out, its harnesses run here.
+Harnesses can also run on the Mac mini and playhorizon (`tools/parity_hosts.json` describes them; `playhorizon` uses its CI runner's environment and vanilla data; its `default` list is empty, so pass `--hosts macmini,playhorizon` or set `PARITY_HOSTS`, after copying `shared-local/` to `~/code/horizon-parity/shared-local` on each host). The runner mirrors the worktree there with rsync (not `.git`, `.local`, `target` or ignored files) into `~/code/horizon-parity/remote/<host><path>`, whose `.local` links to the vanilla data in `~/code/horizon-parity/shared-local`, and starts `tools/parity.py --worker` over ssh. The worker builds the probes (about 80 s the first time) and runs what it is sent under the same tracer, admitting harnesses against its own free memory. One queue, longest first, feeds every machine, remote ones first: the Mac takes up to 14 harnesses, playhorizon 3 (on CPUs 0-3: its CI runner has 4-7). Each pass comes back with the content hash of every file it depended on, so it is keyed on exactly what ran, and logs come back to `.local/parity-runner/logs/`; state, sharing and `gate.py` work as before. If a host can't be reached, or drops out, its harnesses run here.
 
 Harnesses a host can't run are listed in the file: `local_only` (`save_roundtrip` runs the game on a virtual screen) and each host's `exclude`. A host's `exclude` also holds when `parity.py` runs on that host itself, as its CI runner does: the harness is skipped there with its reason (playhorizon skips `remote_fireball` and `remote_fireworks`, which its CPU-starved CI slice fails even on bare main), unless named on the command line. The Mac mini's runner and the nightly audit still run them. The Mac excludes nothing: vanilla's `Math.sin`, `pow`, `log` and the like don't round the same on an Apple silicon Mac as on Linux (HotSpot uses fdlibm there, Intel's stubs on x86-64), and Rust's float functions round like neither (they call the platform libm), so code that mirrors a vanilla `Math` call uses `horizon_core::jmath`, which computes what HotSpot computes on the host architecture. The ThinkPad no longer runs harnesses (2026-10-26): playhorizon is the Linux host that is always on.
 
@@ -72,6 +97,7 @@ A harness can declare, at the top level of its script:
 
 - `PARITY_SHARDS = N`: it runs as `NAME#1` to `NAME#N`, in parallel, each told its share in `PARITY_SHARD=i/N` (`test_datafix_parity.py` upgrades every sixth world). `NAME` on the command line or in `--known-failures` means all of them.
 - `PARITY_RUST_SCOPE = [...]`: the Rust sources its probes can reach, as path prefixes. Cargo's dep-info names every file of every crate a probe links, so without it a probe of `horizon-world` depends on all 350 of its files. The runner keeps only the scope's files if the scope is closed: nothing in it names a module, crate-root re-export or macro outside it (`crate::`, `super::`, other workspace crates; comments and strings ignored), declares a module it doesn't cover, or includes source, and nothing outside it implements anything for a type it defines. Crate roots then count without their declarations of other modules, so adding a module elsewhere doesn't rerun the harness. If the scope isn't closed the runner says why and keeps every file. `datafix` depends on 41 files this way, not 354.
+- `PARITY_MANUAL = "<how to run it>"`: the script is a proof someone runs by hand with arguments (a Java side, then a native side against its reference), not a harness. `parity.py` leaves it out of every run, `--changed` and parity-main included, and names that text when it is asked for it by name.
 
 ### Which harnesses a change affects
 
@@ -100,7 +126,7 @@ An agent working an area merges the integration branch first, uses `tools/parity
 
 `check` and `integrate` start by trial-merging the candidates with `git merge-tree`, in the object database, without touching any worktree: each branch alone, every pair, then the largest set without conflicts, merged in turn. That takes about a second for ten branches and names the conflicting files. `integrate` merges that set, gates it once (formatting, lints and tests before the long harness run; the flake check covers everything the branches change) and pushes. If the gate fails it tries each half of the set in turn, so the branches that pass still land; `--no-bisect` turns that off.
 
-On ludodesktop, source `~/code/horizon-parity/env.sh` first: it sets the ALSA build path and the Cargo job cap. Debug builds carry line tables only (`[profile.dev]` in `Cargo.toml`), which keeps backtraces readable while keeping each worktree's build small; a fresh worktree builds `horizon-client` and its tests in under a minute.
+Debug builds carry line tables only (`[profile.dev]` in `Cargo.toml`), which keeps backtraces readable while keeping each worktree's build small; a fresh worktree builds `horizon-client` and its tests in under a minute.
 
 ## Server execution in game fixtures
 
@@ -130,6 +156,11 @@ The LAN checks open and fill machines through the guest's inventory packets, obs
 powered dispenser's projectile on both clients, and open a chest to activate a sculk sensor
 and shrieker. They supplement the deterministic component comparisons.
 
+A new `command_exec` group goes into a file of its own under `tools/command_exec_groups/`: a module
+with `GROUP` (its name) and `cases(cmd, setup)` (its ops). The corpus finds it by file name, so two
+pull requests that each add a group don't touch the same lines (#16833). Most existing groups are
+still functions in `tools/command_exec_corpus.py`.
+
 ### Randoms that repeat
 
 Vanilla seeds every unseeded random (`RandomSource.create()`: each entity's own, the level's, a raid's...) from `RandomSupport.generateUniqueSeed`, a shared uniquifier XORed with `System.nanoTime()`, and numbers entities from `ServerLevel.ENTITY_COUNTER`; Horizon ports both (`random_source::unique_seed`, `Game.next_entity`). A command script can make what they decide comparable exactly: a dropped item's position, primed TNT's kick, a dispensed item's motion, which tick of four a resting item moves on.
@@ -139,6 +170,16 @@ Vanilla seeds every unseeded random (`RandomSource.create()`: each entity's own,
 - `tools/seed_sync_corpus.py` is the example and the proof, a harness of its own (`python3 tools/parity.py seed_sync`): a script that syncs runs on fixed seeds to its end, so the groups after a sync would draw from them, and a group that passes on most seeds could fail on those every time. `--unsynced-randoms` leaves the steps out, and the same fields then differ run to run.
 
 One draw too many or too few shifts every later value, so read the first field that differs. Not covered: randoms on other threads (worldgen and chunk loading: keep scenarios in loaded chunks), the levels other than the player's, randoms created before the step (the server's, the level's sound seeds) except the level's own, `Level.randValue` (random-tick positions) and other `ThreadLocalRandom` or `Math.random` draws, and anything a tick draws from the level's random before what you read (each tick shuffles the chunks near players with it, even with `spawn_mobs` off).
+
+### State digest
+
+A build with `--features state-digest` and `HORIZON_STATE_DIGEST=<file>` appends one line per level tick: hashes of the entities (join order), their own randoms, the block entities (ticker order) and the scheduled ticks, plus the level random, `Level.randValue`, the entity-id counter and the join counter. Off by default and compiled out. `digest-sync U E S` is `sync_randoms` (needs `HORIZON_TEST_SEEDS=1`). It works on a dedicated server's console and, through `horizon-ctl command`, on an integrated server (a LAN host), where it syncs the owner's level on the server thread, and `HORIZON_STATE_DIGEST_DETAIL=1` adds a raw line per entity and block entity. The join numbers are hashed relative to the sync, and the join field under `counters` is the upcoming join number. After the integrated `digest-sync` they are ranks instead: each entity's place in the join-order walk, and the number of entities visited. The window's client world shares the process-wide join counter there, so ranked digests match although the raw counters differ.
+
+- `tools/state_digest_scene.py BINARY RESOURCES TEMPLATE OUT` runs a fixed dedicated-server scene (frozen before the first tick, `tick step N`) and writes `OUT/digest.txt`; `--generate` makes the forceloaded flat template once. Random ticks are off unless `--random-ticks`. `HORIZON_SCENE_GATE` names an optional script to wait on before each run.
+- `--extended` adds subjects to that scene without changing the default one, so old baselines stay valid. Before the window: breeding pairs, primed TNT, skeletons beside an iron golem, zombies beside a villager, a zombie villager, a zombie, a piglin and a hoglin with conversion countdowns, creepers, a slime, a minecart, a boat with a rider, jockeys and a dispenser. Inside the window the script steps the frozen server in pieces and runs commands between them (`extended_plan` in the script): `/data merge` and `/data modify`, `/effect`, `/attribute`, `/item replace`, `/tp`, `/ride`, `/fill`, `/setblock`, `/damage`, `/kill`, `/execute ... run`, summoned arrows, snowballs, eggs and a fireball, lightning on a pig and a villager, and more TNT and creepers. Passes at ticks 0 to 100 need the default 200 ticks or more, and a pass at or after `--ticks` is skipped. It needs step mode, not `--sprint`. The script writes the console output to `OUT/commands.log` and counts lines that look like command errors in `timings.txt` (`command_errors`), so check that count is 0 before trusting a baseline. `/give` needs a player, so it stays in the players scene.
+- `tools/state_digest_players.py ... --integrated` now syncs the host's randoms with `digest-sync`, so its digest can be compared run to run like the dedicated one. The run writes a digest even when the sync failed, so use it as a baseline only when `timings.txt` has `'digest_sync': 'ok'` (a failed sync records `'digest_sync': 'failed, ...'`). The integrated run also starts frozen (`HORIZON_STATE_DIGEST_FREEZE=1`) and makes the host a spectator.
+- `tools/state_digest_compare.py A/digest.txt B/digest.txt` names the first differing step per group. Compare runs from one toolchain: the hashes are not stable across Rust versions.
+- Keep the measured window free of chunk loading, generation and lighting, and of trial spawners, ominous item spawners and `/item modify` (clock-seeded UUIDs and loot random).
 
 ### Fuzzing scenarios
 
@@ -160,7 +201,7 @@ python3 tools/parity_fuzz.py --replay scenarios.json                            
 ## Reading vanilla
 
 Game jars, decompiled sources and reports live in the gitignored `.local/`, rebuilt from your own copy of the game;
-nothing of Mojang's is committed or downloaded by the tools ([README](../README.md#build-from-source)):
+nothing of Mojang's is committed or downloaded by the tools ([README](native-client.md#run-from-a-checkout)):
 
 ```sh
 python3 tools/lab.py prepare --server-jar ~/Downloads/server.jar   # checks the pinned jars (research-lock.json)
@@ -189,7 +230,7 @@ the same path as normal single player. `python3 tools/test_friends.py --client
 target/fast/horizon-client --relay target/fast/horizon-relay --baseline` covers
 plain LAN, direct invitations, a local relay and ended invitations in that mode.
 Run Linux games under `xvfb-run -a` when no display is available. Each
-process gets scratch game, launcher, XDG data and config homes; telemetry, audio
+process gets scratch game, launcher, XDG data and config homes; audio
 and launcher self-update are disabled.
 
 `lan_integration` and `friends_integration` register these suites with `parity.py`.
@@ -208,6 +249,20 @@ scratch, and a pass then counts. `parity.py` prints a `RETRIED` line for it
 in its summary and in the CI job's summary (PR parity and parity-main), so the
 flake stays visible. No other harness gets this retry. Fix the cause, then take
 the harness off the list.
+
+`known_failing` in `tools/parity_hosts.json` lists harnesses, or single shards
+(`datafix#2`), that fail on main until an open issue is fixed, each as `"#issue:
+what differs"`. They still run and report (a `KNOWN FAILING` line in the summary
+and the CI job's summary), but their failure doesn't fail the run, so
+parity-main, and the Nightly it gates, stop only for new failures, and
+parity-main's bisect leaves them out. Without the list, one regression kept
+every later parity-main red: each run rechecked every merge since the last green
+one, and no Nightly could ship (2026-11-15 to 11-17). An entry covers any
+failure of what it names, in pull requests' parity too, a new one included: list
+the failing shard rather than the whole harness, and take the entry off with the
+fix. A listed harness that passes gets a line saying so. Add a harness only with
+its issue and only when the difference doesn't harm players (crashes, saves,
+multiplayer): those block.
 
 The game-binary fixture audit keeps these complementary direct rule tests:
 

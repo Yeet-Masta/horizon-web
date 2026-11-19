@@ -7,7 +7,7 @@
 use super::*;
 use crate::buf::{Codec, Reader};
 use crate::item::{Profile, Template};
-use horizon_world::nbt::Tag;
+use horizon_core::nbt::Tag;
 
 /// `DyeColor` names by id.
 fn dye(id: i32) -> Option<HashCode> {
@@ -76,7 +76,7 @@ fn typed_data(registry: &str, names: &dyn Names, r: &mut Reader) -> Option<HashC
     tag.remove(&"id".into());
     Some(typed_with_id(id, &tag))
 }
-fn typed_with_id(id: HashCode, tag: &horizon_world::nbt::Compound) -> HashCode {
+fn typed_with_id(id: HashCode, tag: &horizon_core::nbt::Compound) -> HashCode {
     let mut entries: Vec<(HashCode, HashCode)> = tag
         .iter()
         .map(|(k, v)| {
@@ -246,7 +246,7 @@ fn holder_or(
 ) -> Option<HashCode> {
     match r.varint().ok()? {
         0 => direct(r),
-        id => entry(names, registry, id - 1),
+        id => entry(names, registry, id.wrapping_sub(1)),
     }
 }
 /// `TrimMaterial.DIRECT_CODEC`.

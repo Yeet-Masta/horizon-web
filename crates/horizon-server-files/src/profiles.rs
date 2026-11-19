@@ -14,7 +14,7 @@ use horizon_std::time::Duration;
 pub const DEFAULT_DISCOVERY: &str = "https://discovery.minecraftservices.com/minecraft/client";
 
 /// The discovery document's URL: `HORIZON_API_DISCOVERY` overrides it like
-/// authlib's `-Dminecraft.api.discovery.host`.
+/// authlib's discovery-host system property (the value after `-D`).
 pub fn discovery_url() -> String {
     horizon_std::env::var("HORIZON_API_DISCOVERY")
         .ok()
@@ -40,7 +40,7 @@ pub fn resolve(name: &str, online: bool) -> Option<NameAndId> {
     }
 }
 
-/// MinecraftServicesProfileRepository.findProfileByName: the account named
+/// The profile repository's find-by-name: the account named
 /// `name` (any case), or None when there is none or the services don't
 /// answer (vanilla logs both as "Couldn't find profile with name").
 #[cfg(not(target_family = "wasm"))]
@@ -54,7 +54,7 @@ pub fn find_by_name(discovery: &str, name: &str) -> Option<NameAndId> {
     found(&agent.get(&url).call().ok()?.into_string().ok()?, name)
 }
 
-/// YggdrasilMinecraftSessionService.fetchProfile(id, true), as the management protocol finds a player given by
+/// Finding a player by id on the session service, as the management protocol does for a player given by
 /// id that the user cache doesn't know: the `session` / `getProfileById` endpoint, or None.
 #[cfg(not(target_family = "wasm"))]
 pub fn find_by_id(discovery: &str, id: u128) -> Option<NameAndId> {
@@ -76,7 +76,7 @@ pub fn find_by_id(discovery: &str, id: u128) -> Option<NameAndId> {
     found(&answer, &name).filter(|user| user.id == id)
 }
 
-/// MinecraftServicesKeyInfo.get: the services' public keys from the
+/// The services' public keys, from the
 /// discovery document's `authentication` / `getPublicKeys` endpoint. The
 /// profile-key keys (`playerCertificateKeys`, ServicesKeyType.PROFILE_KEY)
 /// sign the players' chat keys; secure chat checks them. The error is the
@@ -143,7 +143,7 @@ pub fn profile_key_keys(answer: &str) -> Result<Vec<RsaPublicKey>, &'static str>
     list("playerCertificateKeys")
 }
 
-/// MinecraftServicesDiscoveryService.getUrl(service, endpoint).
+/// The discovery document's URL for a service and endpoint.
 #[cfg(not(target_family = "wasm"))]
 fn endpoint(doc: &Json, service: &str, name: &str) -> Option<String> {
     doc.get("discovery")?

@@ -1,16 +1,18 @@
 //! Desert pyramids and jungle temples (DesertPyramidPiece, JungleTemplePiece).
-use super::{
-    BoundingBox,
-    legacy::{HORIZONTAL, LegacyPiece, PieceContext, Result, random_horizontal},
-    simple::Scattered,
-};
-use crate::nbt::{Compound, Tag};
+use horizon_core::nbt::{Compound, Tag};
 use horizon_core::{
     geometry::Direction,
     position::BlockPos,
     random::{LegacyRandom, PositionalRandom, RandomSource},
 };
 use horizon_std::sync::Mutex;
+use {
+    super::{
+        legacy::{HORIZONTAL, LegacyPiece, PieceContext, PieceFrame, Result, random_horizontal},
+        simple::Scattered,
+    },
+    horizon_core::bounding_box::BoundingBox,
+};
 
 #[derive(Debug)]
 pub struct DesertPyramidPiece {
@@ -23,6 +25,15 @@ impl DesertPyramidPiece {
         Self {
             base: Scattered::new(west, 64, north, 21, 15, 21, direction),
             placed_chest: Mutex::new([false; 4]),
+        }
+    }
+    /// `DesertPyramidPiece(StructurePieceType, CompoundTag)`: the scattered
+    /// fields and the four chest flags.
+    pub(crate) fn from_saved(tag: &Tag, frame: PieceFrame) -> Self {
+        let flag = |i: usize| super::saved_legacy::flag(tag, &format!("hasPlacedChest{i}"));
+        Self {
+            base: Scattered::from_saved(tag, frame),
+            placed_chest: Mutex::new([flag(0), flag(1), flag(2), flag(3)]),
         }
     }
     /// getPotentialSuspiciousSandWorldPositions, in placement order.
@@ -82,12 +93,12 @@ impl LegacyPiece for DesertPyramidPiece {
     fn bounding_box(&self) -> BoundingBox {
         self.base.frame().bounding_box
     }
-    fn save(&self) -> Option<crate::nbt::Compound> {
+    fn save(&self) -> Option<horizon_core::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tedp");
         for (i, placed) in self.placed_chest.lock().unwrap().iter().enumerate() {
             tag.insert(
                 format!("hasPlacedChest{i}").as_str().into(),
-                crate::nbt::Tag::Byte(i8::from(*placed)),
+                horizon_core::nbt::Tag::Byte(i8::from(*placed)),
             );
         }
         Some(tag)
@@ -454,11 +465,27 @@ impl JungleTemplePiece {
         }
     }
 }
+impl JungleTemplePiece {
+    /// `JungleTemplePiece(CompoundTag)`: the scattered fields and the four
+    /// placed flags.
+    pub(crate) fn from_saved(tag: &Tag, frame: PieceFrame) -> Self {
+        let flag = |key: &str| super::saved_legacy::flag(tag, key);
+        Self {
+            base: Scattered::from_saved(tag, frame),
+            placed: Mutex::new([
+                flag("placedMainChest"),
+                flag("placedHiddenChest"),
+                flag("placedTrap1"),
+                flag("placedTrap2"),
+            ]),
+        }
+    }
+}
 impl LegacyPiece for JungleTemplePiece {
     fn bounding_box(&self) -> BoundingBox {
         self.base.frame().bounding_box
     }
-    fn save(&self) -> Option<crate::nbt::Compound> {
+    fn save(&self) -> Option<horizon_core::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tejp");
         let placed = *self.placed.lock().unwrap();
         for (key, value) in [
@@ -470,7 +497,7 @@ impl LegacyPiece for JungleTemplePiece {
         .into_iter()
         .zip(placed)
         {
-            tag.insert(key.into(), crate::nbt::Tag::Byte(i8::from(value)));
+            tag.insert(key.into(), horizon_core::nbt::Tag::Byte(i8::from(value)));
         }
         Some(tag)
     }

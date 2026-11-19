@@ -1150,6 +1150,11 @@ pub mod fs {
     pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
         copy(from, to).map(|_| ())
     }
+    /// `std::path::absolute`: against the file system's working directory, whether or not the
+    /// path exists (std's has no working directory to use on the web).
+    pub fn absolute<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
+        Ok(PathBuf::from(vfs().normalize(path.as_ref())))
+    }
     pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
         let (mut v, p) = norm(path.as_ref());
         match v.find(&p) {

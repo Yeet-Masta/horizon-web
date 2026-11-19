@@ -47,7 +47,6 @@ struct Uniform {
     clip_from_sky: [[f32; 4]; 4],
     color: [f32; 4],
     hdr_settings: [f32; 4],
-    hdr_gains: [f32; 4],
     hdr_light: [f32; 4],
 }
 
@@ -101,7 +100,7 @@ impl Stars {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Stars shader"),
             source: wgpu::ShaderSource::Wgsl(
-                (include_str!("../hdr_light.wgsl").to_owned() + include_str!("stars.wgsl")).into(),
+                (super::wgsl_prefix::HDR_LIGHT.to_owned() + include_str!("stars.wgsl")).into(),
             ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -145,7 +144,7 @@ impl Stars {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     // RenderPipelines.STARS: the celestial blend (src alpha, one), with the
-                    // colour premultiplied in fs_stars, so its alpha can carry HDR's mark.
+                    // colour premultiplied in fs_stars.
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::One,
@@ -184,12 +183,12 @@ impl Stars {
             clip_from_sky: clip_from_sky.to_cols_array_2d(),
             color: [b; 4],
             hdr_settings: globals.hdr_settings,
-            hdr_gains: globals.hdr_gains,
             hdr_light: globals.hdr_light,
         };
         uploads.buffer(encoder, &self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
 
+    #[horizon_mod_api_macros::replaceable]
     pub(super) fn draw(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.group, &[]);

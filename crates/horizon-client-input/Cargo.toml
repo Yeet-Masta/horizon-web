@@ -8,12 +8,16 @@ description = "The client's input layer: key bindings and their names, mouse, co
 
 [dependencies]
 horizon-std = { path = "../horizon-std" }
+horizon-mod-api-macros = { path = "../horizon-mod-api-macros" }
+horizon-engine-slots = { path = "../horizon-engine-slots" }
 horizon-client-core = { path = "../horizon-client-core" }
+horizon-hooks = { path = "../horizon-hooks" }
 winit = "0.30.13"
+log = "0.4"
 png = "0.18"
 
 # The system clipboard; the web build's stays in the game (clipboard.rs).
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
+[target.'cfg(not(any(target_os = "android", target_family = "wasm")))'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 # The web build (web/README.md): the page's canvas and its pointer lock (window.rs).

@@ -1,16 +1,19 @@
 //! Small piece-based structures: buried treasure, igloo, swamp hut, shipwreck.
-use super::{
-    BoundingBox, Mirror, Rotation, StructureResources, StructureTemplate,
-    legacy::{
-        LegacyPiece, PieceContext, PieceFrame, Result, TemplateHandler, TemplatePiece,
-        create_chest, make_bounding_box, offset, random_horizontal,
-    },
-    processor::ProcessorList,
-};
 use crate::heightmap::HeightmapType;
 use horizon_core::{geometry::Direction, random::RandomSource};
 use horizon_std::sync::Mutex;
 use std::sync::Arc;
+use {
+    super::{
+        Mirror, Rotation, StructureResources, StructureTemplate,
+        legacy::{
+            LegacyPiece, PieceContext, PieceFrame, Result, TemplateHandler, TemplatePiece,
+            create_chest, make_bounding_box, offset, random_horizontal,
+        },
+        processor::ProcessorList,
+    },
+    horizon_core::bounding_box::BoundingBox,
+};
 
 fn empty_processors() -> Arc<ProcessorList> {
     Arc::new(ProcessorList::default())
@@ -22,11 +25,22 @@ pub struct BuriedTreasurePiece {
     /// Where the chest went: the box vanilla saves once placed.
     pub found: Mutex<Option<[i32; 3]>>,
 }
+impl BuriedTreasurePiece {
+    /// `BuriedTreasurePiece(StructurePieceType, CompoundTag)`: only the box is
+    /// saved, at the chest post-process found; loading starts the piece there.
+    pub(crate) fn from_saved(frame: PieceFrame) -> Self {
+        let at = frame.bounding_box.min;
+        Self {
+            position: at,
+            found: Mutex::new(Some(at)),
+        }
+    }
+}
 impl LegacyPiece for BuriedTreasurePiece {
     fn bounding_box(&self) -> BoundingBox {
         BoundingBox::new(self.position, self.position)
     }
-    fn save(&self) -> Option<crate::nbt::Compound> {
+    fn save(&self) -> Option<horizon_core::nbt::Compound> {
         let at = self.found.lock().unwrap().unwrap_or(self.position);
         Some(super::legacy::piece_tag(
             "minecraft:btp",
@@ -209,8 +223,8 @@ pub fn shipwreck_too_big(template: &StructureTemplate) -> bool {
 impl TemplatePiece {
     /// `TemplateStructurePiece.addAdditionalSaveData` and its subclasses',
     /// with the height a shipwreck settled on once placed.
-    pub fn saved(&self) -> crate::nbt::Compound {
-        use crate::nbt::Tag;
+    pub fn saved(&self) -> horizon_core::nbt::Compound {
+        use horizon_core::nbt::Tag;
         let flag = |b: bool| Tag::Byte(i8::from(b));
         let adjusted = match self.handler {
             TemplateHandler::Shipwreck { .. }
@@ -284,7 +298,7 @@ impl LegacyPiece for TemplatePiece {
     fn bounding_box(&self) -> BoundingBox {
         self.bounding_box
     }
-    fn save(&self) -> Option<crate::nbt::Compound> {
+    fn save(&self) -> Option<horizon_core::nbt::Compound> {
         Some(self.saved())
     }
     fn after_place(&self, c: &mut PieceContext<'_>, pieces: &[BoundingBox]) -> Result<()> {
@@ -451,12 +465,24 @@ impl Scattered {
             height_position: Mutex::new(-1),
         }
     }
+    /// `ScatteredFeaturePiece(StructurePieceType, CompoundTag)`: the saved
+    /// box stays as saved; the dimensions and the settled height are read.
+    pub(crate) fn from_saved(tag: &horizon_core::nbt::Tag, frame: PieceFrame) -> Self {
+        let int = |key| super::saved_legacy::int(tag, key);
+        Self {
+            frame: Mutex::new(frame),
+            width: int("Width"),
+            height: int("Height"),
+            depth: int("Depth"),
+            height_position: Mutex::new(int("HPos")),
+        }
+    }
     pub fn frame(&self) -> PieceFrame {
         *self.frame.lock().unwrap()
     }
     /// `ScatteredFeaturePiece`'s tag: the box and the height it settled on.
-    pub fn saved(&self, id: &str) -> crate::nbt::Compound {
-        use crate::nbt::Tag;
+    pub fn saved(&self, id: &str) -> horizon_core::nbt::Compound {
+        use horizon_core::nbt::Tag;
         let f = self.frame();
         let mut tag = super::legacy::piece_tag(id, f.bounding_box, f.orientation, 0);
         for (key, value) in [
@@ -537,14 +563,46 @@ impl SwampHutPiece {
             spawned: Mutex::new(false),
         }
     }
+
+    /// `ScatteredFeaturePiece(StructurePieceType, CompoundTag)` and
+    /// `SwampHutPiece(CompoundTag)`: the saved box stays as saved (the tag
+    /// constructor never re-derives the box from the dimensions), and the
+    /// witch's and the cat's flags collapse onto this piece's one spawned
+    /// flag (vanilla sets both in the same post-process call).
+    pub(crate) fn from_saved(tag: &horizon_core::nbt::Tag, frame: PieceFrame) -> Self {
+        let flag = |key| super::saved_legacy::flag(tag, key);
+        Self {
+            base: Scattered::from_saved(tag, frame),
+            spawned: Mutex::new(flag("Witch") || flag("Cat")),
+        }
+    }
+
+    /// A hut with its height settled and its witch and cat already spawned,
+    /// for the saved-piece round trip.
+    #[cfg(test)]
+    pub(crate) fn saved_test_pieces() -> Vec<Box<dyn LegacyPiece>> {
+        vec![Box::new(Self {
+            base: Scattered {
+                frame: Mutex::new(PieceFrame::new(
+                    BoundingBox::new([1280, 63, 352], [1286, 69, 360]),
+                    Some(Direction::South),
+                )),
+                width: 7,
+                height: 7,
+                depth: 9,
+                height_position: Mutex::new(63),
+            },
+            spawned: Mutex::new(true),
+        })]
+    }
 }
 impl LegacyPiece for SwampHutPiece {
     fn bounding_box(&self) -> BoundingBox {
         self.base.frame().bounding_box
     }
-    fn save(&self) -> Option<crate::nbt::Compound> {
+    fn save(&self) -> Option<horizon_core::nbt::Compound> {
         let mut tag = self.base.saved("minecraft:tesh");
-        let spawned = crate::nbt::Tag::Byte(i8::from(*self.spawned.lock().unwrap()));
+        let spawned = horizon_core::nbt::Tag::Byte(i8::from(*self.spawned.lock().unwrap()));
         tag.insert("Witch".into(), spawned.clone());
         tag.insert("Cat".into(), spawned);
         Some(tag)

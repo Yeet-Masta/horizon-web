@@ -10,6 +10,7 @@
 use super::*;
 use crate::{blocks::BlockFacts, chunk::Chunk, collisions, world::World};
 use horizon_std::time::{Duration, Instant};
+use std::path::Path;
 use std::sync::Arc;
 
 const FLOOR_Y: i32 = 289;
@@ -123,7 +124,11 @@ fn with_scene(f: impl FnOnce(&ParticleLevel)) {
 }
 
 fn engine(parallel_min: usize, threads: usize) -> ParticleEngine {
-    let mut engine = ParticleEngine::new(Path::new(""), &HashMap::new(), &HashSet::new());
+    let mut engine = ParticleEngine::new(
+        &ResourceSource::directory(std::path::PathBuf::new()),
+        &HashMap::new(),
+        &HashSet::new(),
+    );
     engine.camera = [0.5, 298.0, 0.5];
     engine.parallel_min = parallel_min;
     engine.parallel_threads = threads;

@@ -22,18 +22,19 @@ jobs:
       startsWith(github.event.comment.body, '/label') ||
       startsWith(github.event.comment.body, '/unlabel'))
     # One of our small runners (label horizon-light, docs/ci-runners.md): main's script only, as above.
-    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.SELF_HOSTED_CI != 'off' && fromJSON('["self-hosted", "linux", "horizon-light"]') || 'blacksmith-2vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     permissions:
       contents: read
       issues: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           persist-credentials: false
           sparse-checkout: |
+            .github/council.txt
             .github/trusted-reviewers.txt
             tools/ci/nightly_set.py
             tools/ci/triage_command.py

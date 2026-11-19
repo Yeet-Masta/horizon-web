@@ -143,11 +143,15 @@ pub enum Screen {
     /// A page a crate registered at the title screen's Friends icon, as a form.
     Page(Form),
     Disconnected {
-        reason: String,
+        /// The server's or a mod's reason, rendered in the player's language when drawn.
+        reason: Text,
         /// Auto-reconnect's next attempt, until it is cancelled.
         retry: Option<crate::reconnect::Retry>,
         /// Wrapped reason lines, set by the last draw; the buttons sit below them.
         lines: std::cell::Cell<usize>,
+        /// Back leads to the title screen, not the server list: the world was single player
+        /// (`ClientCommonPacketListenerImpl.createDisconnectScreen` without `ServerData`).
+        to_title: bool,
     },
 }
 mod page;
@@ -169,7 +173,14 @@ pub fn has_title_entry() -> bool {
 pub enum Outcome {
     None,
     Back,
-    Connect { address: String, lan: bool },
+    Connect {
+        address: String,
+        lan: bool,
+    },
+    /// Another multiplayer screen (`Minecraft.setScreen`): the title opens it
+    /// through `Title::set_mode`, so a mod's `screen_opening` answer is heard
+    /// first.
+    Open(Box<Screen>),
 }
 
 /// The job of [`Screen::buttons`]'s button `id`, for the controller.
@@ -184,7 +195,7 @@ pub fn button_action(id: u8) -> Option<crate::widgets::Action> {
 }
 
 impl Screen {
-    /// The id native mods see for this screen (`NativeScreenView.id`, the
+    /// The id native mods see for this screen (`ScreenView.id`, the
     /// screen hooks): one per variant, a hook's contract, so it stays the
     /// same from release to release. A new variant must add one.
     pub fn id(&self) -> &'static str {
@@ -606,6 +617,7 @@ impl Screen {
         crate::ui::tooltip(batch, atlas, &lines, cursor);
     }
 
+    #[horizon_mod_api_macros::replaceable]
     pub fn list(saves: &Path) -> Self {
         let servers = servers::load(&servers_file(saves));
         let pings: Pings = Arc::default();
@@ -621,6 +633,7 @@ impl Screen {
             held: None,
         }
     }
+    #[horizon_mod_api_macros::replaceable]
     pub fn buttons(&self, w: f32, h: f32) -> Vec<ButtonSpec> {
         let b = |x: f32, y: f32, bw: f32, label: &str, enabled: bool, id: u8| {
             (x, y, bw, label.to_owned(), enabled, id)
@@ -710,7 +723,7 @@ impl Screen {
                     quarter(h) + 96.0 + 18.0,
                     200.0,
                     &crate::lang::get_or("gui.done", "Done"),
-                    servers::parse_address(address).is_some(),
+                    servers::is_valid_address(address),
                     50,
                 ),
                 b(
@@ -751,7 +764,7 @@ impl Screen {
                     quarter(h) + 96.0 + 12.0,
                     200.0,
                     &crate::lang::get_or("selectServer.select", "Join Server"),
-                    servers::parse_address(address).is_some(),
+                    servers::is_valid_address(address),
                     52,
                 ),
                 b(
@@ -892,7 +905,10 @@ impl Screen {
             // DisconnectedScreen: its title and the reason.
             Self::Disconnected { reason, .. } => ScreenInfo::new(
                 "multiplayer/disconnected",
-                join(&[&get("disconnect.lost", "Connection Lost"), reason]),
+                join(&[
+                    &get("disconnect.lost", "Connection Lost"),
+                    &reason_plain(reason),
+                ]),
             ),
         }
     }
@@ -956,6 +972,8 @@ impl Screen {
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
         crate::widgets::join_for_narration(&parts)
     }
+    #[allow(clippy::too_many_arguments)]
+    #[horizon_mod_api_macros::replaceable]
     pub fn draw(
         &self,
         atlas: &HudAtlas,
@@ -964,11 +982,13 @@ impl Screen {
         focused_at: Instant,
         cursor: (f32, f32),
         hide_address: bool,
+        phases: &mut dyn FnMut(crate::screen_draw::RenderPhase, &mut HudBatch),
     ) {
         let (w, h) = (batch.width, batch.height);
         let max = self.max_length();
         crate::widgets::begin_screen(|| self.narration());
         crate::ui::menu_background(batch, atlas, 0.0, 0.0, w, h, false);
+        phases(crate::screen_draw::RenderPhase::Background, batch);
         // GuiGraphicsExtractor.centeredText at width / 2: x - width(text) / 2.
         let centered = |batch: &mut HudBatch, text: &str, y: f32, color: u32| {
             let tw = HudBatch::text_width(atlas, text);
@@ -1101,7 +1121,7 @@ impl Screen {
                             batch.text(atlas, &server.name, cx + 35.0, cy + 1.0, u32::MAX, true);
                             // OnlineServerEntry: up to two lines of MOTD, the
                             // player count left of the status icon, all with
-                            // GuiGraphics.text's shadow.
+                            // GuiGraphicsExtractor.text's shadow.
                             let (motd, status, sprite) = match pings.get(&server.ip) {
                                 Some(Ping::Ok {
                                     motd, players, ms, ..
@@ -1378,9 +1398,12 @@ impl Screen {
                 reason,
                 retry,
                 lines,
+                ..
             } => {
-                // DisconnectedScreen: the reason wraps to width - 50.
-                let wrapped = wrap(reason, (w.ceil() - 50.0).max(1.0), atlas);
+                // DisconnectedScreen: the reason wraps to width - 50, rendered in the language
+                // the player has now, not the one it was resolved in.
+                let reason = reason_plain(reason);
+                let wrapped = wrap(&reason, (w.ceil() - 50.0).max(1.0), atlas);
                 lines.set(wrapped.len());
                 let l = disconnected_layout(h, wrapped.len(), retry.is_some());
                 centered(
@@ -1406,12 +1429,10 @@ impl Screen {
     pub fn confirm(&self) -> Outcome {
         match self {
             Self::Page(form) => form.confirm(),
-            Self::Direct { address } if servers::parse_address(address).is_some() => {
-                Outcome::Connect {
-                    address: direct_address(address),
-                    lan: false,
-                }
-            }
+            Self::Direct { address } if servers::is_valid_address(address) => Outcome::Connect {
+                address: direct_address(address),
+                lan: false,
+            },
             Self::List {
                 servers,
                 selected,
@@ -1445,6 +1466,7 @@ impl Screen {
         true
     }
 
+    #[horizon_mod_api_macros::replaceable]
     pub fn click(
         &mut self,
         id: Option<u8>,
@@ -1473,19 +1495,19 @@ impl Screen {
                 }
             }
             (Self::List { .. }, Some(41)) => {
-                *self = Self::Direct {
+                return Outcome::Open(Box::new(Self::Direct {
                     address: String::new(),
-                }
+                }));
             }
-            (Self::List { .. }, Some(47)) => *self = Self::friend(false),
+            (Self::List { .. }, Some(47)) => return Outcome::Open(Box::new(Self::friend(false))),
             (Self::List { .. }, Some(42)) => {
-                *self = Self::Edit {
+                return Outcome::Open(Box::new(Self::Edit {
                     index: None,
                     name: crate::lang::get_or("selectServer.defaultName", "Minecraft Server"),
                     address: String::new(),
                     focus: 1,
                     packs: None,
-                }
+                }));
             }
             (
                 Self::List {
@@ -1495,13 +1517,13 @@ impl Screen {
             ) => {
                 if let Some((i, s)) = selected.and_then(|i| servers.get(i).map(|s| (i, s.clone())))
                 {
-                    *self = Self::Edit {
+                    return Outcome::Open(Box::new(Self::Edit {
                         index: Some(i),
                         name: s.name,
                         address: s.ip,
                         focus: 0,
                         packs: s.accept_textures,
-                    };
+                    }));
                 }
             }
             (
@@ -1515,43 +1537,31 @@ impl Screen {
                     .and_then(|i| servers.get(i))
                     .map(|s| s.name.clone())
                 {
-                    let list = std::mem::replace(
-                        self,
-                        Self::Direct {
-                            address: String::new(),
-                        },
-                    );
-                    *self = Self::ConfirmDelete {
-                        list: Box::new(list),
+                    // The list stays shown until the confirmation opens.
+                    return Outcome::Open(Box::new(Self::ConfirmDelete {
+                        list: Box::new(self.clone()),
                         name,
                         lines: std::cell::Cell::new(1),
-                    };
+                    }));
                 }
             }
             // deleteCallback: yes removes the server and clears the
             // selection; either answer returns to the list as it was.
-            (Self::ConfirmDelete { .. }, Some(id @ (58 | 59))) => {
-                let Self::ConfirmDelete { list, .. } = std::mem::replace(
-                    self,
-                    Self::Direct {
-                        address: String::new(),
-                    },
-                ) else {
-                    unreachable!()
-                };
-                *self = *list;
+            (Self::ConfirmDelete { list, .. }, Some(id @ (58 | 59))) => {
+                let mut list = (**list).clone();
                 if id == 58
                     && let Self::List {
                         servers, selected, ..
-                    } = self
+                    } = &mut list
                     && let Some(i) = selected.take()
                     && i < servers.len()
                 {
                     servers.remove(i);
                     save_servers(&servers_file(saves), servers);
                 }
+                return Outcome::Open(Box::new(list));
             }
-            (Self::List { .. }, Some(45)) => *self = Self::list(saves),
+            (Self::List { .. }, Some(45)) => return Outcome::Open(Box::new(Self::list(saves))),
             (Self::List { .. }, Some(46)) => return Outcome::Back,
             (
                 Self::List {
@@ -1669,9 +1679,8 @@ impl Screen {
                     },
                 }
                 let _ = servers::save_all(&servers_file(saves), &list, &hidden);
-                // Before the list is shown again: loading it may save, which takes the lock.
                 drop(guard);
-                *self = Self::list(saves);
+                return Outcome::Open(Box::new(Self::list(saves)));
             }
             (
                 Self::Friend {
@@ -1679,13 +1688,14 @@ impl Screen {
                 },
                 Some(57),
             ) => return Outcome::Back,
+            (Self::Disconnected { to_title: true, .. }, Some(54)) => return Outcome::Back,
             (
                 Self::Edit { .. }
                 | Self::Direct { .. }
                 | Self::Friend { .. }
                 | Self::Disconnected { .. },
                 Some(51 | 53 | 54 | 57),
-            ) => *self = Self::list(saves),
+            ) => return Outcome::Open(Box::new(Self::list(saves))),
             (Self::Disconnected { retry, .. }, Some(55)) => *retry = None,
             (Self::Direct { address }, Some(52)) => {
                 let address = direct_address(address);
@@ -2000,29 +2010,18 @@ impl Screen {
             *button = Some(buttons[next - 2]);
         }
     }
-    /// Escape: back to the list, or out of it (true).
-    pub fn escape(&mut self, saves: &Path) -> bool {
+    /// Escape: out of the list (`Back`), or back to it (`Open`).
+    pub fn escape(&self, saves: &Path) -> Outcome {
         match self {
             Self::List { .. }
             | Self::Page(_)
             | Self::Friend {
                 from_title: true, ..
-            } => true,
+            }
+            | Self::Disconnected { to_title: true, .. } => Outcome::Back,
             // ConfirmScreen.keyPressed: Escape answers no.
-            Self::ConfirmDelete { list, .. } => {
-                let list = std::mem::replace(
-                    &mut **list,
-                    Self::Direct {
-                        address: String::new(),
-                    },
-                );
-                *self = list;
-                false
-            }
-            _ => {
-                *self = Self::list(saves);
-                false
-            }
+            Self::ConfirmDelete { list, .. } => Outcome::Open(list.clone()),
+            _ => Outcome::Open(Box::new(Self::list(saves))),
         }
     }
 }
@@ -2080,6 +2079,22 @@ fn disconnected_layout(h: f32, lines: usize, retry: bool) -> DisconnectedLayout 
     }
 }
 
+/// `Component.getString` of a disconnect reason, in the language active now.
+///
+/// A `Text` caches the spans of the language it was built under, so resolving it once — when the
+/// server turned the player away — and drawing those spans later would keep reading in that
+/// language. The screen keeps the component itself (`Screen::Disconnected::reason`), so it is
+/// decoded again here, at the moment it draws and narrates, as `DisconnectedScreen` renders its
+/// own component every frame.
+pub fn reason_plain(reason: &Text) -> String {
+    match reason.source_component() {
+        // The resolver `Text::from(Value)` uses: a selector reads as its own text.
+        Some(source) => crate::component::to_text(source, &mut |s| Text::literal(s)).plain(),
+        // Span-only text keeps no component to resolve again: nothing in it to translate.
+        None => reason.plain(),
+    }
+}
+
 /// Greedy word wrap to a pixel width.
 pub fn wrap(text: &str, width: f32, atlas: &HudAtlas) -> Vec<String> {
     let mut lines = Vec::new();
@@ -2130,6 +2145,24 @@ pub fn wrap(text: &str, width: f32, atlas: &HudAtlas) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Screen::click` as the title applies it: an `Open` replaces the screen.
+    fn click(
+        screen: &mut Screen,
+        id: Option<u8>,
+        x: f32,
+        y: f32,
+        size: (f32, f32),
+        saves: &Path,
+    ) -> Outcome {
+        match screen.click(id, x, y, size, saves) {
+            Outcome::Open(next) => {
+                *screen = *next;
+                Outcome::None
+            }
+            outcome => outcome,
+        }
+    }
 
     #[test]
     fn servers_dat_is_beside_saves_or_in_the_player_dir() {
@@ -2217,7 +2250,14 @@ mod tests {
             let Outcome::Connect {
                 address: actual,
                 lan,
-            } = screen.click(Some(40), 0.0, 0.0, (640.0, 480.0), Path::new(""))
+            } = click(
+                &mut screen,
+                Some(40),
+                0.0,
+                0.0,
+                (640.0, 480.0),
+                Path::new(""),
+            )
             else {
                 panic!("join did not connect")
             };
@@ -2231,6 +2271,39 @@ mod tests {
             direct.confirm(),
             Outcome::Connect { lan: false, .. }
         ));
+    }
+
+    #[test]
+    fn done_and_join_server_follow_server_address_is_valid_address() {
+        let enabled = |screen: &Screen, id: u8| {
+            screen
+                .buttons(427.0, 240.0)
+                .iter()
+                .find(|b| b.5 == id)
+                .map(|b| b.4)
+        };
+        for (address, valid) in [
+            ("play.example.org:25570", true),
+            ("play..example.org", false),
+        ] {
+            let edit = Screen::Edit {
+                index: None,
+                name: "Server".into(),
+                address: address.into(),
+                focus: 1,
+                packs: None,
+            };
+            assert_eq!(enabled(&edit, 50), Some(valid), "Done: {address}");
+            let direct = Screen::Direct {
+                address: address.into(),
+            };
+            assert_eq!(enabled(&direct, 52), Some(valid), "Join Server: {address}");
+            assert_eq!(
+                matches!(direct.confirm(), Outcome::Connect { .. }),
+                valid,
+                "confirm: {address}"
+            );
+        }
     }
 
     #[test]
@@ -2318,9 +2391,10 @@ mod tests {
         };
         assert_eq!(at(&friend, 427.0, 253.0), [(113.0, 177.0), (113.0, 201.0)]);
         let lost = Screen::Disconnected {
-            reason: String::new(),
+            reason: Text::empty(),
             retry: None,
             lines: std::cell::Cell::new(1),
+            to_title: false,
         };
         assert_eq!(at(&lost, 427.0, 253.0), [(113.0, 145.0)]);
         // Taller messages push the button down instead of under the text.
@@ -2459,6 +2533,7 @@ mod tests {
     /// `ServerData.validateIcon`: a PNG up to 1024x1024 is kept for
     /// servers.dat, though only a 64x64 one is drawn.
     #[test]
+    #[ignore = "daily"]
     fn an_icon_up_to_1024_square_is_kept() {
         assert!(valid_icon(&png(64)));
         assert!(valid_icon(&png(128)));
@@ -2481,6 +2556,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn arrow_keys_select_servers_and_shift_moves_them() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-keys-{}", std::process::id()));
@@ -2531,6 +2607,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn enter_joins_the_selected_server() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-enter-{}", std::process::id()));
@@ -2567,6 +2644,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_server_dragged_by_its_row_moves_and_is_saved_on_release() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-drag-{}", std::process::id()));
@@ -2632,6 +2710,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn icon_arrows_join_and_move_servers() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-arrows-{}", std::process::id()));
@@ -2659,7 +2738,7 @@ mod tests {
         let (ix, iy) = (63.0, 37.0);
         // The first server has no up arrow: its top-left quarter selects it.
         assert!(matches!(
-            screen.click(None, ix + 4.0, iy + 4.0, size, &saves),
+            click(&mut screen, None, ix + 4.0, iy + 4.0, size, &saves),
             Outcome::None
         ));
         assert_eq!(
@@ -2667,7 +2746,7 @@ mod tests {
             (vec!["a".into(), "b".into(), "c".into()], Some(0))
         );
         // Bottom-left quarter: down, saved, and still selected.
-        screen.click(None, ix + 4.0, iy + 20.0, size, &saves);
+        click(&mut screen, None, ix + 4.0, iy + 20.0, size, &saves);
         assert_eq!(
             order(&screen),
             (vec!["b".into(), "a".into(), "c".into()], Some(1))
@@ -2675,13 +2754,27 @@ mod tests {
         let saved: Vec<String> = servers::load(&file).into_iter().map(|s| s.name).collect();
         assert_eq!(saved, ["b", "a", "c"]);
         // Top-left quarter of the second row: back up.
-        screen.click(None, ix + 4.0, iy + ROW_HEIGHT + 4.0, size, &saves);
+        click(
+            &mut screen,
+            None,
+            ix + 4.0,
+            iy + ROW_HEIGHT + 4.0,
+            size,
+            &saves,
+        );
         assert_eq!(
             order(&screen),
             (vec!["a".into(), "b".into(), "c".into()], Some(0))
         );
         // The right half joins at once.
-        match screen.click(None, ix + 20.0, iy + 2.0 * ROW_HEIGHT + 10.0, size, &saves) {
+        match click(
+            &mut screen,
+            None,
+            ix + 20.0,
+            iy + 2.0 * ROW_HEIGHT + 10.0,
+            size,
+            &saves,
+        ) {
             Outcome::Connect { address, lan } => {
                 assert_eq!(address, list[2].ip);
                 assert!(!lan);
@@ -2692,6 +2785,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn delete_asks_before_removing_the_server() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-delete-{}", std::process::id()));
@@ -2714,7 +2808,7 @@ mod tests {
         };
         select(&mut screen);
         // Delete opens the ConfirmScreen: nothing is removed yet.
-        screen.click(Some(44), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(44), 0.0, 0.0, size, &saves);
         assert!(matches!(&screen, Screen::ConfirmDelete { name, .. } if name == "Gone"));
         let labels: Vec<(f32, f32, String, u8)> = screen
             .buttons(size.0, size.1)
@@ -2730,7 +2824,7 @@ mod tests {
         );
         assert_eq!(names(), ["Keep", "Gone"]);
         // Cancel and Escape return to the list with the selection kept.
-        screen.click(Some(59), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(59), 0.0, 0.0, size, &saves);
         assert!(matches!(
             &screen,
             Screen::List {
@@ -2738,8 +2832,11 @@ mod tests {
                 ..
             }
         ));
-        screen.click(Some(44), 0.0, 0.0, size, &saves);
-        assert!(!screen.escape(&saves));
+        click(&mut screen, Some(44), 0.0, 0.0, size, &saves);
+        let Outcome::Open(back) = screen.escape(&saves) else {
+            panic!("escape left the multiplayer screens")
+        };
+        screen = *back;
         assert!(matches!(
             &screen,
             Screen::List {
@@ -2749,8 +2846,8 @@ mod tests {
         ));
         assert_eq!(names(), ["Keep", "Gone"]);
         // Delete removes it, saves, and clears the selection.
-        screen.click(Some(44), 0.0, 0.0, size, &saves);
-        screen.click(Some(58), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(44), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(58), 0.0, 0.0, size, &saves);
         assert!(
             matches!(&screen, Screen::List { selected: None, servers, .. } if servers.len() == 1)
         );
@@ -2759,6 +2856,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn edit_cycles_and_saves_the_server_resource_pack_setting() {
         let dir =
             horizon_std::env::temp_dir().join(format!("horizon-mp-packs-{}", std::process::id()));
@@ -2773,7 +2871,7 @@ mod tests {
         if let Screen::List { selected, .. } = &mut screen {
             *selected = Some(0);
         }
-        screen.click(Some(43), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(43), 0.0, 0.0, size, &saves);
         let cycle = |screen: &Screen| {
             screen
                 .buttons(size.0, size.1)
@@ -2793,23 +2891,123 @@ mod tests {
             ))
         );
         // Disabled, Prompt, Enabled: Cancel keeps what was saved.
-        screen.click(Some(60), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(60), 0.0, 0.0, size, &saves);
         assert_eq!(cycle(&screen).unwrap().3, "Server Resource Packs: Prompt");
-        screen.click(Some(51), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(51), 0.0, 0.0, size, &saves);
         assert_eq!(servers::load(&file)[0].accept_textures, Some(false));
         // Done saves it.
         if let Screen::List { selected, .. } = &mut screen {
             *selected = Some(0);
         }
-        screen.click(Some(43), 0.0, 0.0, size, &saves);
-        screen.click(Some(60), 0.0, 0.0, size, &saves);
-        screen.click(Some(60), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(43), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(60), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(60), 0.0, 0.0, size, &saves);
         assert_eq!(cycle(&screen).unwrap().3, "Server Resource Packs: Enabled");
-        screen.click(Some(50), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(50), 0.0, 0.0, size, &saves);
         assert_eq!(servers::load(&file)[0].accept_textures, Some(true));
         // A new server asks.
-        screen.click(Some(42), 0.0, 0.0, size, &saves);
+        click(&mut screen, Some(42), 0.0, 0.0, size, &saves);
         assert_eq!(cycle(&screen).unwrap().3, "Server Resource Packs: Prompt");
         let _ = horizon_std::fs::remove_dir_all(&dir);
+    }
+
+    /// DisconnectedScreen.getNarrationMessage: the reason reads as the player's language
+    /// renders it, and a plain-text reason is unchanged.
+    /// #18380: `createDisconnectScreen` without `ServerData` (single player) returns to the
+    /// title screen, so Back never opens the server list and its LAN discovery.
+    #[test]
+    fn back_from_a_single_player_disconnect_goes_to_the_title() {
+        let saves = horizon_std::env::temp_dir()
+            .join(format!("horizon-mp-disconnect-back-{}", std::process::id()));
+        let lost = |to_title| Screen::Disconnected {
+            reason: Text::literal("Disconnected"),
+            retry: None,
+            lines: std::cell::Cell::new(1),
+            to_title,
+        };
+        let size = (427.0, 240.0);
+        assert!(matches!(
+            lost(true).click(Some(54), 0.0, 0.0, size, &saves),
+            Outcome::Back
+        ));
+        assert!(matches!(lost(true).escape(&saves), Outcome::Back));
+        assert!(matches!(
+            lost(false).click(Some(54), 0.0, 0.0, size, &saves),
+            Outcome::Open(list) if matches!(*list, Screen::List { .. })
+        ));
+    }
+
+    #[test]
+    fn disconnect_screen_narrates_a_translated_reason() {
+        let language = crate::lang::Language::of(
+            "fr_fr",
+            [
+                ("disconnect.lost".into(), "Connexion perdue".into()),
+                ("mymod.kicked".into(), "Expulsé par le mod".into()),
+            ],
+        );
+        let ((), _missed) = crate::lang::scoped(language, || {
+            let translated = Screen::Disconnected {
+                reason: Text::translate("mymod.kicked", &[]),
+                retry: None,
+                lines: std::cell::Cell::new(1),
+                to_title: false,
+            };
+            assert_eq!(
+                translated.narration().title,
+                "Connexion perdue. Expulsé par le mod"
+            );
+            let plain = Screen::Disconnected {
+                reason: Text::literal("You were kicked"),
+                retry: None,
+                lines: std::cell::Cell::new(1),
+                to_title: false,
+            };
+            assert_eq!(plain.narration().title, "Connexion perdue. You were kicked");
+        });
+    }
+
+    /// The reason is rendered where the screen draws and narrates, not where it was built: a
+    /// `Text` caches the spans of the language it was resolved in, so a reason built under one
+    /// language must read in the one active when it is drawn or narrated.
+    #[test]
+    fn a_reason_built_in_one_language_is_narrated_in_another() {
+        let french = crate::lang::Language::of(
+            "fr_fr",
+            [
+                ("disconnect.lost".into(), "Connexion perdue".into()),
+                ("mymod.kicked".into(), "Expulsé par le mod".into()),
+            ],
+        );
+        let english = crate::lang::Language::of(
+            "en_us",
+            [
+                ("disconnect.lost".into(), "Connection Lost".into()),
+                ("mymod.kicked".into(), "Kicked by the mod".into()),
+            ],
+        );
+        // Built while the game speaks French, as a server turning a French player away does.
+        let (screen, _missed) = crate::lang::scoped(french, || {
+            let reason = Text::translate("mymod.kicked", &[]);
+            assert_eq!(reason.plain(), "Expulsé par le mod");
+            Screen::Disconnected {
+                reason,
+                retry: None,
+                lines: std::cell::Cell::new(1),
+                to_title: false,
+            }
+        });
+        let ((), _missed) = crate::lang::scoped(english, || {
+            let Screen::Disconnected { reason, .. } = &screen else {
+                unreachable!("a disconnected screen was just built")
+            };
+            // The player switches language while the screen is up: what it draws and
+            // narrates follows the language now, not the one the reason was resolved in.
+            assert_eq!(reason_plain(reason), "Kicked by the mod");
+            assert_eq!(
+                screen.narration().title,
+                "Connection Lost. Kicked by the mod"
+            );
+        });
     }
 }

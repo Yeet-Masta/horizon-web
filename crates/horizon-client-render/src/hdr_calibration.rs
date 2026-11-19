@@ -8,8 +8,9 @@
 //! - Peak Brightness: a patch of a tenth of the screen at 10 000 nits (the display clips
 //!   it at its brightest), the logo inside at the slider; raised until it disappears, it
 //!   sits on that brightest. Small, so the display doesn't dim a bright full screen; the
-//!   HDR metadata declares PQ's 10 000 nits meanwhile, so a compositor that clips at the
-//!   declared peak (KWin) lets the patch through.
+//!   HDR metadata declares PQ's 10 000 nits meanwhile. Skipped where a compositor reports
+//!   the peak (Wayland): it tone-maps above the display's peak instead of clipping, so the
+//!   logo never disappears, and the peak stays as it is.
 //! - Paper White: a white card at the slider, matched to a sheet of white paper held
 //!   beside the screen in the light the player plays in: white is where the eyes have
 //!   adapted to, lower in a dark room than by day (as ITU-R BT.2408's reference white).
@@ -33,6 +34,8 @@ pub enum Step {
     PaperWhite,
 }
 const STEPS: [Step; 3] = [Step::Black, Step::Peak, Step::PaperWhite];
+/// The steps where the compositor reports the peak (`Reported::peak_guessed` false).
+const WITHOUT_PEAK: [Step; 2] = [Step::Black, Step::PaperWhite];
 
 /// A step's test picture for HDR output: the step, its nits and where the controls start (a
 /// share of the height).
@@ -73,6 +76,8 @@ impl WindowState {
 }
 
 pub struct Calibration {
+    /// The steps shown, and which of them is current.
+    steps: &'static [Step],
     step: usize,
     /// Nits, in the order of `STEPS`.
     values: [f32; 3],
@@ -143,9 +148,13 @@ impl Step {
             Step::PaperWhite => 3,
         }
     }
+    /// Its place in `STEPS`, and in `Calibration::values`.
+    fn index(self) -> usize {
+        self.number() as usize - 1
+    }
 }
 
-struct Layout {
+pub(crate) struct Layout {
     top: f32,
     hint: Vec<Text>,
     slider: (f32, f32, f32),
@@ -183,7 +192,9 @@ impl Calibration {
             g.peak_nits(output.reported) as f32,
             g.paper_white_nits(output.reported) as f32,
         );
+        let reports_peak = output.reported.is_some_and(|r| !r.peak_guessed);
         Self {
+            steps: if reports_peak { &WITHOUT_PEAK } else { &STEPS },
             step: 0,
             values: [g.black_level_nits(), peak, paper_white],
             auto: [
@@ -195,7 +206,10 @@ impl Calibration {
         }
     }
     fn current(&self) -> Step {
-        STEPS[self.step]
+        self.steps[self.step]
+    }
+    fn value(&self) -> f32 {
+        self.values[self.current().index()]
     }
     fn layout(&self, font: &Font, size: (f32, f32)) -> Layout {
         layout(font, self.current(), size)
@@ -203,13 +217,14 @@ impl Calibration {
     /// The slider's position, 0..=1.
     fn position(&self) -> f32 {
         let step = self.current();
-        step.step_of(self.values[self.step]) / step.steps() as f32
+        step.step_of(self.value()) / step.steps() as f32
     }
     /// Puts the slider on its step nearest `position`.
     fn set(&mut self, position: f32) {
         let step = self.current();
         let steps = step.steps() as f32;
-        self.values[self.step] = step.nits_at((position * steps).round().clamp(0.0, steps) as u32);
+        self.values[step.index()] =
+            step.nits_at((position * steps).round().clamp(0.0, steps) as u32);
     }
     /// Moves the slider `by` steps from the one nearest its value.
     fn step_by(&mut self, by: f32) {
@@ -217,32 +232,46 @@ impl Calibration {
         self.set(((self.position() * steps).round() + by) / steps);
     }
     fn label(&self) -> Text {
-        let v = self.values[self.step];
+        let v = self.value();
         let step = self.current();
         let value = match step {
             Step::Black => format!("{v:.2}"),
             _ => format!("{v:.0}"),
         };
-        Text::literal(format!("{}: {}", step.name(), value))
+        Text::literal(format!(
+            "{}: {}",
+            step.name(),
+            lang::tr("%s nits", &[&value])
+        ))
     }
     /// The current step's test picture in a GUI of `size`.
     pub fn picture(&self, font: &Font, size: (f32, f32)) -> Picture {
         (
             self.current(),
-            self.values[self.step],
+            self.value(),
             self.layout(font, size).top / size.1.max(1.0),
         )
     }
-    pub fn draw(&self, batch: &mut HudBatch, atlas: &HudAtlas, cursor: (f32, f32)) {
+    pub(crate) fn draw_background(&self, batch: &mut HudBatch, atlas: &HudAtlas) -> Layout {
         let (w, h) = (batch.width, batch.height);
         let l = self.layout(&atlas.font, (w, h));
         // Above the band HDR output draws the test picture over whatever is here.
         batch.fill(atlas, 0.0, 0.0, w, h, rgba(0, 0, 0, 255));
         batch.fill(atlas, 0.0, l.top, w, h - l.top, rgba(24, 24, 24, 255));
+        l
+    }
+    pub(crate) fn draw_contents(
+        &self,
+        batch: &mut HudBatch,
+        atlas: &HudAtlas,
+        cursor: (f32, f32),
+        l: Layout,
+    ) {
+        let w = batch.width;
         let step = self.current();
         let title = Text::literal(lang::tr(
             "HDR Calibration %s/%s: %s",
-            &[&(self.step + 1), &STEPS.len(), &step.name()],
+            &[&(self.step + 1), &self.steps.len(), &step.name()],
         ));
         ui::centered_text(batch, atlas, &title, 0.0, l.top + 6.0, w, u32::MAX);
         for (i, line) in l.hint.iter().enumerate() {
@@ -262,7 +291,7 @@ impl Calibration {
             true,
             self.dragging,
         );
-        let last = self.step + 1 == STEPS.len();
+        let last = self.step + 1 == self.steps.len();
         let save = lang::get_or("selectWorld.edit.save", "Save");
         let next = lang::get("Next");
         for (rect, label, active) in [
@@ -329,7 +358,7 @@ impl Calibration {
         Outcome::Nothing
     }
     fn next(&mut self) -> Outcome {
-        if self.step + 1 == STEPS.len() {
+        if self.step + 1 == self.steps.len() {
             return Outcome::Save;
         }
         self.step += 1;
@@ -377,7 +406,7 @@ mod tests {
     const NONE: EffectiveOutput = EffectiveOutput::NONE;
 
     fn font() -> Font {
-        Font::metrics(std::path::Path::new("/nonexistent/horizon-test-assets"))
+        Font::metrics(&horizon_assets::resource_source::ResourceSource::default())
     }
     /// At the default GUI scale of the game's first window (854 x 480 at 2).
     fn picture(c: &Calibration) -> Picture {
@@ -413,7 +442,9 @@ mod tests {
     fn auto_starts_from_the_report_of_the_window_it_runs_in() {
         use crate::gfx::{HdrOutput, output::tests};
         let s = Settings::default();
-        let (caps, reading) = tests::window(Some(HdrOutput::Pq), Some(true));
+        let (caps, mut reading) = tests::window(Some(HdrOutput::Pq), Some(true));
+        // Windows' report: its peak is calibrated here.
+        reading.luminance.as_mut().unwrap().peak_guessed = true;
         let reporting = tests::snapshot(&s.horizon, Default::default(), caps, reading);
         for (output, peak, paper_white) in [(&reporting, 1000.0, 400.0), (&NONE, 1000.0, 203.0)] {
             let mut c = Calibration::new(&s, output);
@@ -423,6 +454,54 @@ mod tests {
             c.key(KeyCode::Enter);
             assert_eq!(picture(&c).1, paper_white);
         }
+    }
+
+    /// Where the compositor reports the peak (Wayland), calibration has no Peak step, counts
+    /// two steps, and saves the peak as it was; elsewhere it has all three.
+    #[test]
+    fn no_peak_step_where_the_compositor_reports_the_peak() {
+        use crate::gfx::{HdrOutput, output::tests};
+        let mut s = Settings::default();
+        let (caps, reading) = tests::window(Some(HdrOutput::Pq), Some(true));
+        assert_eq!(reading.luminance.map(|r| r.peak_guessed), Some(false));
+        let wayland = tests::snapshot(&s.horizon, Default::default(), caps, reading);
+        let mut c = Calibration::new(&s, &wayland);
+        assert_eq!(c.steps, [Step::Black, Step::PaperWhite]);
+        assert_eq!(picture(&c).0, Step::Black);
+        assert_eq!(c.key(KeyCode::Enter), Outcome::Click);
+        assert_eq!(picture(&c).0, Step::PaperWhite);
+        c.key(KeyCode::ArrowRight);
+        assert_eq!(c.key(KeyCode::Enter), Outcome::Save);
+        c.save(&mut s);
+        assert_eq!(s.horizon.hdr_peak, 0, "Auto stays Auto");
+        s.horizon.hdr_peak = 600;
+        let mut c = Calibration::new(&s, &wayland);
+        c.key(KeyCode::Enter);
+        c.save(&mut s);
+        assert_eq!(s.horizon.hdr_peak, 600);
+        // No report, or Windows' guessed peak: three steps.
+        let (caps, mut reading) = tests::window(Some(HdrOutput::Pq), Some(true));
+        reading.luminance.as_mut().unwrap().peak_guessed = true;
+        let windows = tests::snapshot(&s.horizon, Default::default(), caps, reading);
+        for output in [&NONE, &windows] {
+            let mut c = Calibration::new(&s, output);
+            assert_eq!(c.steps.len(), 3);
+            c.key(KeyCode::Enter);
+            assert_eq!(picture(&c).0, Step::Peak);
+        }
+    }
+
+    /// Each step's slider reads in nits, as the HDR page does.
+    #[test]
+    fn each_step_reads_in_nits() {
+        let mut s = Settings::default();
+        s.horizon.hdr_black_level = 5;
+        let mut c = Calibration::new(&s, &NONE);
+        assert_eq!(c.label().plain(), "Black Level: 0.05 nits");
+        c.key(KeyCode::Enter);
+        assert_eq!(c.label().plain(), "Peak Brightness: 1000 nits");
+        c.key(KeyCode::Enter);
+        assert_eq!(c.label().plain(), "Paper White: 203 nits");
     }
 
     #[test]

@@ -7,7 +7,7 @@ what stops them now, and what still needs Ludovic.
 ## Who does what
 
 - **Agents** (Claude sessions run by Ludovic) write most pull requests, review them, merge them and answer
-  reports. Everything an agent posts on GitHub says so ("Opened by Ludovic's AI agent").
+  reports. Everything an agent posts on GitHub says so ("🤖 Agent:").
 - **Contributors** send pull requests from their forks like on any open-source project.
 - **Players** report bugs on Discord and GitHub. Kira, the Discord bot, files their reports as issues.
 - **Releases** are automatic: every merged change that players run ships within the hour.
@@ -67,6 +67,14 @@ and some are waiting for Ludovic:
   a secret of GitHub's `release` environment, which only real releases from main can use. The job that signs runs
   nothing from the repository but a short script calling OpenSSL, so no pull request can read the key by changing
   the code that gets built. Nobody, Ludovic included, ever needs to see it.
+- **A test SDK key, developer builds only.** An SDK is checked against the release keys like a release is. The daily
+  run's `fn-replace-check` checks its own, unpublished SDK, signed with a throwaway key made for that run; it gives
+  the launcher the public key in `HORIZON_SDK_TRUSTED_KEY` (one base64 Ed25519 key, `ephemeral.pub` from
+  `EPHEMERAL=yes tools/ci/sign_release.sh`). `horizon_release_sign::sdk_keys_for` adds it for SDK checks only (the
+  launcher's SDK index and `cargo horizon-mod`'s fetch) and only in a build with `debug_assertions`: a release build
+  does not compile the lookup, so no environment adds trust to a shipped launcher, and game and launcher releases
+  are never checked with it. A test in both profiles proves the release profile ignores the variable. No release
+  key enters the daily job.
 - **Nightly signatures.** A Nightly carries two signatures over the same `SHA256SUMS`. `SHA256SUMS.sig` is signed
   for the channel (`horizon release nightly`), for launchers and servers from before this change, which read only
   that one. `SHA256SUMS.v2.sig` is signed for the Nightly's own version (`horizon release nightly-<date>-<commit>`),
@@ -86,6 +94,9 @@ and some are waiting for Ludovic:
 - **The release machinery needs the council.** The workflows, the release and signing tools, the update-checking code
   and the installers are listed in `.github/CODEOWNERS`. Once main's protection requires code owners' reviews, a
   change to any of them waits for a review from the `horizon-rust/council` team (council poll P35). Everything else still merges as soon as its checks pass.
+- **Workflows run actions by commit, not by tag.** Every outside action is pinned to a full commit SHA, so a moved
+  or hijacked tag can't change what runs on the runners that sign releases; Dependabot proposes the updates once a
+  month in one pull request (`tests/test_ci_pinned_actions.py`).
 - **Agents get their own, smaller identity** (prepared, switched on by Ludovic). The `horizon-agent` GitHub App
   can read and write code, pull requests and issues, and read the checks. It cannot change settings, workflows,
   secrets or members, and its tokens last an hour. Once agents use it, their pull requests are the app's, and
@@ -103,6 +114,9 @@ and some are waiting for Ludovic:
   refuse new versions until players download the launcher again.
 
 ## What this doesn't solve
+
+For version-pinned records of what a source review actually covered, see
+[Records of scoped source reviews](security-reviews.md). Hashes identify bytes; they do not certify safe code.
 
 - **Code that merges is code that ships.** Signing proves a build came from Horizon's pipeline, not that the code
   is good. Against a bad change, the safety nets are the checks and harnesses, review, the release smoke test and

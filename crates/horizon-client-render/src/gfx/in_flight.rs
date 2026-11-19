@@ -1,7 +1,7 @@
 //! Frames in flight: the readbacks a submission starts, landing frames the submit thread
 //! submitted, keeping offscreen frames at most two ahead of the GPU, and a screenshot's copy.
 
-use super::{Renderer, ScreenshotRequest, copy_frame, screenshot_save, submit};
+use super::{Renderer, ScreenshotRequest, copy_frame, submit};
 
 impl Renderer {
     /// The frame's readbacks to start right after its submission (on the submit thread when
@@ -48,9 +48,7 @@ impl Renderer {
             timer.submitted(&self.queue);
             timer.collect(&self.device, &mut self.gpu_times);
         }
-        if let Some(Some(timer)) = Self::pass_timer(&mut self.pack_post, &mut self.native) {
-            timer.submitted(&self.queue);
-        }
+        self.pack_timing_submitted();
         if let Some(timer) = &mut self.own_timing {
             timer.submitted(&self.queue);
         }
@@ -96,7 +94,7 @@ impl Renderer {
             let size = [self.config.width, self.config.height];
             let format = self.config.format.remove_srgb_suffix();
             // The layered float frame maps the world to SDR, then adds the HUD as drawn.
-            // Other 16-bit frames keep their clipped 8-bit copy.
+            // Other float frames keep their clipped 8-bit copy.
             let copy = self
                 .hdr
                 .as_mut()
@@ -117,15 +115,7 @@ impl Renderer {
                 "screenshots need a 32-bit surface format, not {:?}",
                 self.config.format
             );
-            if request.background {
-                self.saved_screenshots.push(screenshot_save::Saved {
-                    path: request.path,
-                    result: Err(error),
-                    hdr: None,
-                });
-            } else {
-                self.screenshot_result = Some(Err(error));
-            }
+            self.screenshot_result = Some(Err(error));
             None
         }
     }

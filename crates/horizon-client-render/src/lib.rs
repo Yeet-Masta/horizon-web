@@ -1,6 +1,8 @@
 //! The client's world data, rendering and screens: chunks, meshing, light, streaming, the renderer,
 //! the HUD, menus and settings. Gameplay (horizon-client) builds on it; nothing here reaches gameplay.
 #![forbid(unsafe_code)]
+// `NativePack: Send` (`gfx::external::PipelineSend`) walks wgpu's types deeper than the default 128.
+#![recursion_limit = "256"]
 pub mod android_gamepad;
 pub mod android_runtime;
 pub mod assets;
@@ -24,6 +26,7 @@ pub mod border_render;
 pub mod breaking;
 pub mod brewing;
 pub mod camera;
+pub mod carrier_fences;
 pub mod chat;
 pub mod chunk;
 pub mod chunk_map;
@@ -70,6 +73,8 @@ pub mod keypad;
 pub mod terrain_model;
 pub use horizon_polytone::creative_tabs as polytone_creative_tabs;
 pub use horizon_world::json_folder;
+pub mod dimension_transition;
+pub mod fluid_models;
 pub mod level_loading;
 pub mod light;
 pub mod lod;
@@ -80,10 +85,18 @@ pub mod menu_style;
 pub mod mesher;
 pub mod minimap;
 pub mod mipmap;
+pub mod mod_animations;
+pub mod mod_block_state_models;
 pub mod mod_browser;
+pub mod mod_chunk_tickets;
 pub mod mod_list;
+pub mod mod_model_loaders;
+pub mod mod_pipelines;
+pub mod mod_sprite_sources;
 pub mod model_library;
 pub mod models;
+pub mod mods_screen;
+pub mod monitor;
 pub mod multiline_edit;
 pub mod native_emissive;
 pub mod options_file;
@@ -115,6 +128,9 @@ pub mod preedit;
 pub mod providers;
 pub mod pvp;
 pub mod pvp_hud;
+pub mod spectator_shaders;
+pub use horizon_assets::resource_source;
+pub mod api_context;
 pub mod radial_editor;
 pub mod radial_overlay;
 pub mod random_source;
@@ -161,9 +177,10 @@ pub mod web_files;
 pub mod widgets;
 pub mod world;
 pub mod worldborder;
-pub mod zip;
+pub use horizon_assets::zip;
 pub use horizon_client_core::Result;
 pub use horizon_client_core::block_entity_nbt;
+pub use horizon_client_core::block_entity_types;
 pub use horizon_client_core::bossbar;
 pub use horizon_client_core::component;
 pub use horizon_client_core::fastutil_order;
@@ -191,3 +208,11 @@ pub use horizon_items::enchant;
 pub use horizon_items::item_data;
 pub use horizon_items::items;
 pub use horizon_items::random_sequences;
+
+pub mod render_geometry;
+pub mod render_slots;
+
+pub mod render_views;
+
+#[cfg(test)]
+mod test_log;

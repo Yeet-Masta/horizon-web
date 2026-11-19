@@ -2,7 +2,7 @@
 //! requests the trusted reviewers picked, published as the `nightly` pre-release a few times a day.
 //! Every launcher installs it as its update (`backend::horizon_update`), as its own version
 //! `nightly-<date>-<commit>`, beside the player's worlds, which it never touches. Its checksums must
-//! be signed for the nightly channel (`signed::nightly_digest`).
+//! be signed for the nightly channel (`signed::build_digest`).
 //!
 //! Before that it was opt-in and played in its own "Nightly" instance (`instances/nightly/`):
 //! that instance, and its worlds, stay, and keep following the Nightly.
@@ -37,9 +37,101 @@ pub fn date_of(version: &str) -> Option<&str> {
     is_date(date).then_some(date)
 }
 
+/// A day as players read it, "Nov 1", from `2026-11-01`; anything else as it is.
+pub fn day(date: &str) -> String {
+    use crate::i18n::trf;
+    let day = date
+        .get(8..10)
+        .map(|d| d.trim_start_matches('0').to_string())
+        .unwrap_or_default();
+    let args = [("day", day.as_str())];
+    match date.get(5..7) {
+        Some("01") => trf("Jan {day}", &args),
+        Some("02") => trf("Feb {day}", &args),
+        Some("03") => trf("Mar {day}", &args),
+        Some("04") => trf("Apr {day}", &args),
+        Some("05") => trf("May {day}", &args),
+        Some("06") => trf("Jun {day}", &args),
+        Some("07") => trf("Jul {day}", &args),
+        Some("08") => trf("Aug {day}", &args),
+        Some("09") => trf("Sep {day}", &args),
+        Some("10") => trf("Oct {day}", &args),
+        Some("11") => trf("Nov {day}", &args),
+        Some("12") => trf("Dec {day}", &args),
+        _ => date.to_string(),
+    }
+}
+
+/// The Nightlies of the last release list read that share their day with another, and the time
+/// (`HH:MM` UTC) each came out: [`same_day_time`] reads it for every screen that names a version.
+static SAME_DAY: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// Keeps, from the release list `releases`, when each Nightly that shares its day with another
+/// came out, so every name of it says its time. A Nightly the list no longer has (older than a
+/// week, say) keeps the time it was seen with, and still counts toward its day.
+pub fn note_published(releases: &[Release]) {
+    let mut kept = SAME_DAY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut known: Vec<(&str, &str, &str)> = releases
+        .iter()
+        .filter(|r| r.nightly.is_some())
+        .map(|r| (r.tag.as_str(), r.date.as_str(), r.time.as_str()))
+        .collect();
+    for (tag, time) in kept.iter() {
+        if let Some(date) = date_of(tag).filter(|_| known.iter().all(|(t, ..)| t != tag)) {
+            known.push((tag, date, time));
+        }
+    }
+    let same_day = known
+        .iter()
+        .filter(|(_, date, time)| {
+            !time.is_empty() && known.iter().filter(|(_, d, _)| d == date).count() > 1
+        })
+        .map(|(tag, _, time)| (tag.to_string(), time.to_string()))
+        .collect();
+    *kept = same_day;
+}
+
+/// When Nightly `version` came out, `HH:MM` UTC, if another came out the same day.
+pub fn same_day_time(version: &str) -> Option<String> {
+    SAME_DAY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(tag, _)| tag == version)
+        .map(|(_, time)| time.clone())
+}
+
+/// A Nightly as the Versions page names it, "the Nov 13 update" for `nightly-2026-11-13` (with
+/// or without its commit), with its time when another came out that day ("the Nov 13, 07:22 UTC
+/// update"); None for anything that is not one.
+pub fn update_name(version: &str) -> Option<String> {
+    let date = date_of(version)?;
+    Some(match same_day_time(version) {
+        Some(time) => crate::i18n::trf(
+            "the {day}, {time} UTC update",
+            &[("day", &day(date)), ("time", &time)],
+        ),
+        None => crate::i18n::trf("the {day} update", &[("day", &day(date))]),
+    })
+}
+
+/// A full 40-character commit as a player reads it, `b1ff51d9e…`; anything else as it is.
+pub fn short_commit(version: &str) -> String {
+    if version.len() == 40 && version.bytes().all(|b| b.is_ascii_hexdigit()) {
+        format!("{}…", &version[..9])
+    } else {
+        version.to_owned()
+    }
+}
+
 /// A Nightly's version as a player reads it: `Nightly · 4baa571` for `nightly-2026-10-29-4baa571`,
 /// or None for anything that is not one. The date is already on the row beside it.
 pub fn label(version: &str) -> Option<String> {
+    if let Some(label) = crate::developer_install::label(version) {
+        return Some(label);
+    }
     date_of(version)?;
     let commit = version.strip_prefix("nightly-")?.get(11..);
     Some(match commit {
@@ -81,10 +173,7 @@ pub fn after_update(version: &str) {
         &pinned,
         backend::auto_installed,
     ) {
-        // A removal stops at the first running program, with half the version already gone.
-        if !backend::in_use(&old) {
-            let _ = backend::remove(&old);
-        }
+        let _ = backend::remove(&old);
     }
 }
 
@@ -107,9 +196,331 @@ fn stale(
         .collect()
 }
 
+/// A build on the Stable channel; `week` is the Monday of its week when it stands for one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StableBuild {
+    pub tag: String,
+    pub week: Option<String>,
+}
+
+/// The last game release before Horizon shipped only Nightlies (docs/release-flow.md, "Nightly
+/// channel"). It and every older tag stay full releases on GitHub, so `releases/latest` keeps
+/// pointing at a game build for servers, but they are too old to be Stable.
+const LAST_BEFORE_NIGHTLIES: &str = "v0.2.97";
+
+/// The Stable channel's builds, newest first: the real (non-Nightly, non-pre-release) releases
+/// after [`LAST_BEFORE_NIGHTLIES`] when any exist; until then the newest Nightly of each Monday to
+/// Sunday week. `releases` is newest first, as GitHub lists them.
+pub fn stable_builds(releases: &[Release]) -> Vec<StableBuild> {
+    let real: Vec<_> = releases
+        .iter()
+        .filter(|r| {
+            r.nightly.is_none()
+                && r.asset.is_some()
+                && !r.prerelease
+                && backend::launcher_version(&r.tag).is_none()
+                && backend::compare_versions(&r.tag, LAST_BEFORE_NIGHTLIES).is_gt()
+        })
+        .map(|r| StableBuild {
+            tag: r.tag.clone(),
+            week: None,
+        })
+        .collect();
+    if !real.is_empty() {
+        return real;
+    }
+    use chrono::Datelike;
+    // (monday, date, tag): the newest date of a week wins; the first listed on a tie.
+    let mut weeks: Vec<(String, String, String)> = Vec::new();
+    for r in releases
+        .iter()
+        .filter(|r| r.nightly.is_some() && r.asset.is_some())
+    {
+        let Some(date) = date_of(&r.tag) else {
+            continue;
+        };
+        let Ok(day) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+            continue;
+        };
+        let monday =
+            (day - chrono::Duration::days(day.weekday().num_days_from_monday() as i64)).to_string();
+        match weeks.iter_mut().find(|w| w.0 == monday) {
+            Some(w) if w.1.as_str() < date => *w = (monday, date.into(), r.tag.clone()),
+            Some(_) => {}
+            None => weeks.push((monday, date.into(), r.tag.clone())),
+        }
+    }
+    weeks.sort_by(|a, b| b.0.cmp(&a.0));
+    weeks
+        .into_iter()
+        .map(|(monday, _, tag)| StableBuild {
+            tag,
+            week: Some(monday),
+        })
+        .collect()
+}
+
+/// The build Stable offers in `releases`: the newest of [`stable_builds`].
+pub fn stable_target(releases: &[Release]) -> Option<Release> {
+    let tag = stable_builds(releases).into_iter().next()?.tag;
+    releases.iter().find(|r| r.tag == tag).cloned()
+}
+
+/// Whether `a` and `b` are the same download: one tag, title and file.
+fn same_build(a: &Release, b: &Release) -> bool {
+    a.tag == b.tag && a.name == b.name && a.asset == b.asset
+}
+
+/// What Home offers a Stable instance set to Latest: [`stable_target`] when it isn't installed,
+/// and isn't `failed`, a download that failed and stays left out until the list is read again
+/// from GitHub.
+pub fn stable_offer(
+    releases: &[Release],
+    installed: &[String],
+    failed: Option<&Release>,
+) -> Option<Release> {
+    stable_target(releases)
+        .filter(|next| !installed.contains(&next.tag))
+        .filter(|next| !failed.is_some_and(|f| same_build(f, next)))
+}
+
+/// Installs `target`, Home's Stable update, in one press. GitHub's `nightly` may have moved on
+/// since the offer was read, so the download fails its check: then the list is read again from
+/// the network (`fresh`), given to `read` with the new target, and that one is installed once,
+/// unless it is `installed` already (by the command line, say): then nothing is downloaded or
+/// replaced. Returns the build tried last and how it went.
+pub fn install_stable(
+    target: Release,
+    fresh: impl FnOnce() -> Result<Vec<Release>, String>,
+    read: impl FnOnce(Vec<Release>, Option<&Release>),
+    installed: impl FnOnce(&str) -> bool,
+    install: impl Fn(&Release) -> Result<(), String>,
+) -> (Release, Result<(), String>) {
+    let Err(error) = install(&target) else {
+        return (target, Ok(()));
+    };
+    let Ok(list) = fresh() else {
+        return (target, Err(error));
+    };
+    let next = stable_target(&list).filter(|n| !same_build(n, &target));
+    read(list, next.as_ref());
+    match next {
+        Some(next) if installed(&next.tag) => (next, Ok(())),
+        Some(next) => {
+            let result = install(&next);
+            (next, result)
+        }
+        None => (target, Err(error)),
+    }
+}
+
+/// What a Stable instance set to Latest plays, from the installed builds alone (`selected`: the
+/// launcher's version): the newest release after [`LAST_BEFORE_NIGHTLIES`]; else the launcher's
+/// version, unless it is a release from before the Nightlies; else the newest Nightly. None when
+/// there is none of these: the caller falls back to the launcher's version.
+pub fn stable_latest(installed: &[String], selected: Option<&str>) -> Option<String> {
+    let newest = |keep: &dyn Fn(&str) -> bool| {
+        installed
+            .iter()
+            .filter(|t| keep(t))
+            // The first listed wins a tie (two builds of one day).
+            .reduce(|a, b| match backend::compare_versions(b, a).is_gt() {
+                true => b,
+                false => a,
+            })
+            .cloned()
+    };
+    let before_nightlies = |tag: &str| {
+        backend::is_game_tag(tag) && backend::compare_versions(tag, LAST_BEFORE_NIGHTLIES).is_le()
+    };
+    newest(&|t| backend::is_game_tag(t) && !t.contains('-') && !before_nightlies(t))
+        .or_else(|| {
+            selected
+                .filter(|s| installed.iter().any(|t| t == s) && !before_nightlies(s))
+                .map(str::to_owned)
+        })
+        .or_else(|| newest(&|t| date_of(t).is_some()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn build(tag: &str, nightly: bool, asset: bool) -> Release {
+        Release {
+            tag: tag.into(),
+            name: String::new(),
+            body: String::new(),
+            date: String::new(),
+            time: String::new(),
+            asset: asset.then(|| ("horizon.tar.gz".into(), 1)),
+            prerelease: false,
+            nightly: nightly.then(|| "nightly".into()),
+        }
+    }
+
+    #[test]
+    fn stable_is_a_build_a_week_until_real_releases_exist() {
+        // 2026-11-09 is a Monday, 2026-11-08 the Sunday before it.
+        let mut releases = vec![
+            build("nightly-2026-11-13-aaaaaaa", true, true),
+            build("nightly-2026-11-12-bbbbbbb", true, true),
+            build("nightly-2026-11-10-ccccccc", true, true),
+            build("nightly-2026-11-08-ddddddd", true, true),
+            build("nightly-2026-11-03-eeeeeee", true, true),
+            // No build for this platform: not a candidate.
+            build("nightly-2026-11-14-fffffff", true, false),
+            // The releases from before the Nightlies are full releases, but not Stable.
+            build("v0.2.97", false, true),
+            build("v0.2.97.1", false, true),
+            build("v0.2.96", false, true),
+            build("v2026.10.19.15", false, true),
+        ];
+        let weekly = |tag: &str, week: &str| StableBuild {
+            tag: tag.into(),
+            week: Some(week.into()),
+        };
+        assert_eq!(
+            stable_builds(&releases),
+            [
+                weekly("nightly-2026-11-13-aaaaaaa", "2026-11-09"),
+                weekly("nightly-2026-11-08-ddddddd", "2026-11-02"),
+            ]
+        );
+        releases.insert(0, build("v0.3.0", false, true));
+        assert_eq!(
+            stable_builds(&releases),
+            [StableBuild {
+                tag: "v0.3.0".into(),
+                week: None
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stable_install_that_fails_its_check_reads_the_list_again_and_retries_once() {
+        let old = build("nightly-2026-11-13-aaaaaaa", true, true);
+        let new = build("nightly-2026-11-13-bbbbbbb", true, true);
+        let tries = std::cell::RefCell::new(Vec::new());
+        let install = |fails: &'static [&'static str]| {
+            let tries = &tries;
+            move |r: &Release| {
+                tries.borrow_mut().push(r.tag.clone());
+                match fails.contains(&r.tag.as_str()) {
+                    true => Err(format!("{}: checksum mismatch", r.tag)),
+                    false => Ok(()),
+                }
+            }
+        };
+        // `nightly` moved on: the fresh list's target is installed, in the same press.
+        let mut read = None;
+        let (done, result) = install_stable(
+            old.clone(),
+            || Ok(vec![new.clone()]),
+            |_, next| read = next.map(|n| n.tag.clone()),
+            |_| false,
+            install(&["nightly-2026-11-13-aaaaaaa"]),
+        );
+        assert_eq!((done.tag.as_str(), result), (new.tag.as_str(), Ok(())));
+        assert_eq!(read.as_deref(), Some(new.tag.as_str()));
+        assert_eq!(*tries.borrow(), [old.tag.clone(), new.tag.clone()]);
+        // The new target already installed (by the command line, say): nothing downloaded.
+        tries.borrow_mut().clear();
+        let mut read = None;
+        let (done, result) = install_stable(
+            old.clone(),
+            || Ok(vec![new.clone()]),
+            |_, next| read = next.map(|n| n.tag.clone()),
+            |tag| tag == new.tag,
+            install(&["nightly-2026-11-13-aaaaaaa"]),
+        );
+        assert_eq!((done.tag.as_str(), result), (new.tag.as_str(), Ok(())));
+        assert_eq!(read.as_deref(), Some(new.tag.as_str()));
+        assert_eq!(*tries.borrow(), std::slice::from_ref(&old.tag));
+        // Only once: the retry failing too is the error shown.
+        tries.borrow_mut().clear();
+        let (done, result) = install_stable(
+            old.clone(),
+            || Ok(vec![new.clone()]),
+            |_, _| {},
+            |_| false,
+            install(&["nightly-2026-11-13-aaaaaaa", "nightly-2026-11-13-bbbbbbb"]),
+        );
+        assert_eq!(done.tag, new.tag);
+        assert!(result.is_err());
+        assert_eq!(tries.borrow().len(), 2);
+        // The list still offers the same build, or can't be read: no retry.
+        for fresh in [Ok(vec![old.clone()]), Err("offline".to_string())] {
+            tries.borrow_mut().clear();
+            let (done, result) = install_stable(
+                old.clone(),
+                || fresh,
+                |_, _| {},
+                |_| false,
+                install(&["nightly-2026-11-13-aaaaaaa"]),
+            );
+            assert_eq!(done.tag, old.tag);
+            assert!(result.is_err());
+            assert_eq!(tries.borrow().len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_failed_stable_download_is_not_offered_again() {
+        let target = build("nightly-2026-11-13-aaaaaaa", true, true);
+        let list = [target.clone(), build("v0.2.97", false, true)];
+        let offer = |installed: &[String], failed: Option<&Release>| {
+            stable_offer(&list, installed, failed).map(|r| r.tag)
+        };
+        assert_eq!(offer(&[], None), Some(target.tag.clone()));
+        assert_eq!(offer(&[], Some(&target)), None);
+        // Another build of the same tag (a new title or file) is offered.
+        let mut moved = target.clone();
+        moved.asset = Some(("other.tar.gz".into(), 2));
+        assert_eq!(offer(&[], Some(&moved)), Some(target.tag.clone()));
+        // Installed: nothing to offer.
+        assert_eq!(offer(std::slice::from_ref(&target.tag), None), None);
+    }
+
+    #[test]
+    fn stable_on_latest_plays_an_installed_build_never_a_pre_nightly_release() {
+        let installed = |tags: &[&str]| tags.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        let nightlies = [
+            "nightly-2026-11-13-aaaaaaa",
+            "nightly-2026-11-08-ddddddd",
+            "v0.2.97",
+            "v0.2.97.1",
+        ];
+        // The release from before the Nightlies, selected: the newest Nightly instead.
+        assert_eq!(
+            stable_latest(&installed(&nightlies), Some("v0.2.97")).as_deref(),
+            Some("nightly-2026-11-13-aaaaaaa")
+        );
+        assert_eq!(
+            stable_latest(&installed(&nightlies), Some("v0.2.97.1")).as_deref(),
+            Some("nightly-2026-11-13-aaaaaaa")
+        );
+        // A release after them wins.
+        let with_release = [&["v0.3.0"], &nightlies[..]].concat();
+        assert_eq!(
+            stable_latest(
+                &installed(&with_release),
+                Some("nightly-2026-11-13-aaaaaaa")
+            )
+            .as_deref(),
+            Some("v0.3.0")
+        );
+        // An older Nightly picked by hand stays picked.
+        assert_eq!(
+            stable_latest(&installed(&nightlies), Some("nightly-2026-11-08-ddddddd")).as_deref(),
+            Some("nightly-2026-11-08-ddddddd")
+        );
+        // Only the old release: none, so the caller's fallback (the launcher's version) plays.
+        assert_eq!(
+            stable_latest(&installed(&["v0.2.97"]), Some("v0.2.97")),
+            None
+        );
+    }
 
     fn release(name: &str, date: &str) -> Release {
         Release {
@@ -134,6 +545,62 @@ mod tests {
         assert_eq!(date_of("v0.2.95"), None);
         assert_eq!(date_of("nightly"), None);
         assert!(horizon_release_sign::is_nightly(&version_of(&r)));
+    }
+
+    #[test]
+    fn two_nightlies_of_one_day_are_named_with_their_times() {
+        let nightly = |version: &str, date: &str, time: &str| Release {
+            tag: version.into(),
+            time: time.into(),
+            nightly: Some(NIGHTLY.into()),
+            ..release("", date)
+        };
+        note_published(&[
+            nightly("nightly-2031-03-04-bbbbbbb", "2031-03-04", "18:05"),
+            nightly("nightly-2031-03-04-aaaaaaa", "2031-03-04", "07:22"),
+            nightly("nightly-2031-03-03-ccccccc", "2031-03-03", "09:00"),
+        ]);
+        let late = update_name("nightly-2031-03-04-bbbbbbb").unwrap();
+        let early = update_name("nightly-2031-03-04-aaaaaaa").unwrap();
+        assert_ne!(late, early);
+        assert!(
+            late.contains("18:05") && early.contains("07:22"),
+            "{late} / {early}"
+        );
+        // Alone on its day, a Nightly keeps its day's name.
+        assert_eq!(
+            update_name("nightly-2031-03-03-ccccccc"),
+            update_name("nightly-2031-03-03")
+        );
+    }
+
+    #[test]
+    fn a_nightly_the_list_no_longer_has_keeps_its_time() {
+        let nightly = |version: &str, time: &str| Release {
+            tag: version.into(),
+            time: time.into(),
+            nightly: Some(NIGHTLY.into()),
+            ..release("", "2032-05-06")
+        };
+        let late = nightly("nightly-2032-05-06-bbbbbbb", "18:05");
+        note_published(&[late.clone(), nightly("nightly-2032-05-06-aaaaaaa", "07:22")]);
+        // A later list without the earlier build: both still read apart.
+        note_published(&[late]);
+        assert_eq!(
+            same_day_time("nightly-2032-05-06-aaaaaaa").as_deref(),
+            Some("07:22")
+        );
+        assert_eq!(
+            same_day_time("nightly-2032-05-06-bbbbbbb").as_deref(),
+            Some("18:05")
+        );
+    }
+
+    #[test]
+    fn a_full_commit_reads_as_nine_characters() {
+        let full = "b1ff51d9e0123456789abcdef0123456789abcde";
+        assert_eq!(short_commit(full), "b1ff51d9e…");
+        assert_eq!(short_commit("v0.2.97"), "v0.2.97");
     }
 
     #[test]

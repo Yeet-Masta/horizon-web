@@ -25,7 +25,7 @@ than 10 % apart isn't a fair comparison of its tick times.
 
 The vanilla side runs the pinned server jar from tools/lab.py prepare (your own copy). It needs Java 25. The
 Horizon side runs target/release/horizon-server with the engine beside it; build both first:
-    cargo build --release -p horizon-client --bin horizon-client -p horizon-server -p horizon-bots
+    cargo build --release -p horizon-game --bin horizon-client -p horizon-server -p horizon-bots
 
 Two more Java servers, both dev-only downloads into .local/server-bench/jars (never committed or shipped):
 - `paper`: Paper's newest build for the pinned version, from PaperMC's download API, checked against the
@@ -130,14 +130,14 @@ def tree_usage(root):
 class Server:
     """A server with its console on stdin and its output collected."""
 
-    def __init__(self, command, directory, log_path):
+    def __init__(self, command, directory, log_path, env=None):
         self.lines = []
         self.lock = threading.Lock()
         self.log = log_path.open('w', encoding='utf-8')
         self.process = subprocess.Popen([str(c) for c in command], cwd=directory, stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                         encoding='utf-8', errors='replace',
-                                        env=lab.game_env())
+                                        env=lab.game_env(env))
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -276,7 +276,12 @@ def pumpkin_defaults(exe, out):
 
 def pumpkin_config(text, port, args):
     """Pumpkin's default configuration with the benchmark's settings (PROPERTIES), listening on 127.0.0.1 only,
-    with no Bedrock or LAN listener, query, plugins or telemetry."""
+    with no Bedrock or LAN listener, query, plugins or telemetry.
+
+    Every declared key is written with its declared value: a key the template already has is replaced in place,
+    a missing one is inserted, and a missing section is added. Keeping an absent key out of the output would
+    silently leave Pumpkin's upstream default in place instead of applying the benchmark's setting.
+    """
     top = {'seed': f'"{args.seed}"', 'default_difficulty': '"Easy"', 'default_gamemode': '"Creative"',
            'force_gamemode': 'true', 'spawn_protection': '0', 'white_list': 'false', 'use_tty': 'false'}
     sections = {
@@ -295,14 +300,25 @@ def pumpkin_config(text, port, args):
         'telemetry': {'enabled': 'false', 'endpoint': '""'},
     }
     def setting(body, key, value):
-        return re.sub(r'(?m)^' + re.escape(key) + r' = .*$', f'{key} = {value}', body)
-    head, _, _ = text.partition('\n[')
+        """Replace key in a TOML body; insert it (preserving trailing whitespace) when it is absent."""
+        pattern = r'(?m)^[ \t]*' + re.escape(key) + r'[ \t]*=[ \t]*.*$'
+        line = f'{key} = {value}'
+        if re.search(pattern, body):
+            return re.sub(pattern, line, body)
+        stripped = body.rstrip('\n')
+        trailing = body[len(stripped):] or '\n'
+        return stripped + ('\n' if stripped else '') + line + trailing
+    first_table = re.search(r'(?m)^[ \t]*\[', text)
+    head = text[:first_table.start()] if first_table else text
     rest = text[len(head):]
     for key, value in top.items():
         head = setting(head, key, value)
     for name, settings in sections.items():
-        m = re.search(r'(?ms)^\[' + re.escape(name) + r'\]\n(.*?)(?=^\[|\Z)', rest)
+        m = re.search(r'(?ms)^[ \t]*\[' + re.escape(name) + r'\][ \t]*(?:#[^\n]*)?(?:\n|\Z)'
+                      r'(.*?)(?=^[ \t]*\[|\Z)', rest)
         if not m:
+            # The template does not declare this section at all: add it with every declared key.
+            rest = rest.rstrip('\n') + '\n[' + name + ']\n' + ''.join(f'{k} = {v}\n' for k, v in settings.items())
             continue
         body = m.group(1)
         for key, value in settings.items():
@@ -346,9 +362,11 @@ def server_command(kind, directory, args):
         mojang = cache / f'mojang_{lock["minecraft"]["version"]}.jar'
         if not mojang.exists():
             shutil.copyfile(jars['server'].parent / 'server.jar', mojang)
-        for name in ('cache', 'libraries', 'versions'):
+        for name in ('libraries', 'versions'):
             (shared / name).mkdir(exist_ok=True)
-            (directory / name).symlink_to(shared / name, target_is_directory=True)
+        # Paperclip keeps cache/, libraries/ and versions/ under bundlerRepoDir: no folder links, which some
+        # network shares refuse.
+        java.append(f'-DbundlerRepoDir={shared}')
         # Paper refuses a second login from one address within 4 s (bukkit.yml's connection-throttle), and
         # every bot comes from the same one. Off, as on vanilla; Paper fills in the rest of the file.
         (directory / 'bukkit.yml').write_text('settings:\n  connection-throttle: -1\n')
@@ -386,6 +404,9 @@ def server_command(kind, directory, args):
     else:
         # The anticheat is on by default: off, to measure the server without it.
         toml.write_text(toml.read_text() + '\n[anticheat]\nenabled = false\n')
+    if args.dab:
+        # Mob AI far from players (docs/hosting.md): the defaults of Pufferfish's DAB.
+        toml.write_text(toml.read_text() + '\n[entities]\ndab = true\n')
     return [server, '--dir', directory, 'run']
 
 
@@ -441,6 +462,26 @@ def bots_command(args):
     return [args.bots_bin or BIN / f'horizon-bots{EXE}']
 
 
+def populate(server, spec, seed):
+    """Fills the level around the players with `spec` = "items,carts,mobs" (counts), as a busy server has it: the
+    entity tracker and the entity states cost by what is in the level, not only by how many players walk in it.
+    Each one goes at a random offset of up to 120 blocks from a random player: the offsets
+    come from the same seed on every run, but `execute at @r` picks the player with the server's own RNG, so the
+    placements still differ between runs."""
+    import random
+    rng = random.Random(seed)
+    counts = [int(n) for n in (spec.split(',') + ['0', '0'])[:3]]
+    things = [
+        ('item', '{Item:{id:"minecraft:cobblestone",count:1},Age:-32768s}'),
+        ('minecart', ''),
+        ('chicken', '{PersistenceRequired:1b}'),
+    ]
+    for count, (kind, data) in zip(counts, things):
+        for _ in range(count):
+            dx, dz = rng.randint(-120, 120), rng.randint(-120, 120)
+            server.console(f'execute at @r run summon {kind} ~{dx} ~3 ~{dz} {data}'.rstrip())
+
+
 def run_once(kind, bots, behaviour, args, out):
     name = f'{kind}-{behaviour}-{bots}'
     directory = out / name
@@ -465,6 +506,13 @@ def run_once(kind, bots, behaviour, args, out):
         server.console('gamerule respawn_radius 0')
         for rule in filter(None, args.gamerule.split(',')):
             server.console('gamerule ' + rule.replace('=', ' '))
+        if args.farm:
+            # A farm of mobs ~100 blocks east of the spawn, inside the simulation distance and far from
+            # the bots: the mobs a player is not near, which DAB slows. Cows and villagers (zombies would burn in daylight), two blocks apart so cramming leaves them be.
+            for i in range(args.farm):
+                x, z = 90 + i % 40 * 2, -80 + i // 40 * 2
+                kind = 'minecraft:villager' if i % 2 else 'minecraft:cow'
+                server.console(f'summon {kind} {x} 100 {z} {{PersistenceRequired:1b}}')
         time.sleep(5)
         report = out / f'{name}-bots.json'
         total = bots * args.join_every + args.warmup + args.seconds
@@ -481,7 +529,12 @@ def run_once(kind, bots, behaviour, args, out):
         bot_lines = []
         threading.Thread(target=lambda: bot_lines.extend(bot_process.stdout), daemon=True).start()
         # All bots in, then the warm-up.
-        time.sleep(bots * args.join_every + args.warmup)
+        if args.entities:
+            time.sleep(bots * args.join_every)
+            populate(server, args.entities, args.seed)
+            time.sleep(args.warmup)
+        else:
+            time.sleep(bots * args.join_every + args.warmup)
         profiling = start_profile(server, kind, args)
         measure_start = time.time()
         rss, cpu, ticks = [], [], []
@@ -618,9 +671,15 @@ def main():
     parser.add_argument('--gamerule', default='',
                         help="more game rules for both servers, 'name=value,...' (locator_bar=false: Horizon has "
                              "no locator bar yet)")
+    parser.add_argument('--entities', default='', metavar='ITEMS,CARTS,MOBS',
+                        help='fill the level with this many dropped items, minecarts and chickens once the bots are in')
     parser.add_argument('--heap', default='4g', help='the Java heap, -Xms and -Xmx (vanilla, Paper, Fabric)')
     parser.add_argument('--out', type=Path, default=None, help='the report (JSON)')
     parser.add_argument('--nice', type=int, default=0, help='run the servers under nice -n N')
+    parser.add_argument('--dab', action='store_true',
+                        help="turn Horizon's mob AI throttling on (server.toml [entities] dab); Horizon only")
+    parser.add_argument('--farm', type=int, default=0,
+                        help='summon this many mobs ~100 blocks from the spawn, away from the bots (the DAB fixture)')
     parser.add_argument('--anticheat', action='store_true',
                         help="turn Horizon's anticheat on (server.toml [anticheat]); its flags are counted")
     parser.add_argument('--ground', action='store_true',

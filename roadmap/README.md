@@ -60,7 +60,7 @@ Whoever moves the work (the orchestrator on each heartbeat, or anyone in their p
    contributors, with its pull requests. `build` puts it into roadmap/roadmap.json, which the website reads from main; the hub's Journal tab
    shows it among the releases, and `/data/journal.json` carries it to Kira's #updates and to X.
    In the same pass, `python3 tools/parity_gaps.py readme --write` refreshes the parity headline: the
-   player-visible gaps still open in the port ledger's ten lists (#3512 to #3521), on the README and the website.
+   player-visible gaps still open in the port ledger's ten lists (#3512 to #3521), on the status page (docs/status.md) and the website.
 6. Suggestions come only from #horizon-ideas posts on Discord: Kira sends each one to the maintainers' private
    channel. A good one becomes an item in a normal pull request; none is published automatically.
 
@@ -80,8 +80,8 @@ merged pull request, release, shipped item and weekly summary, newest first, the
 ```json
 { "format": "horizon-journal", "version": 2, "generated": "…", "url": "https://playhorizon.dev/hub#journal",
   "entries": [
-    { "id": "pr-1788", "kind": "merge", "date": "…", "title": "the pull request's title", "url": "…",
-      "number": 1788, "item": "discord-presence", "item_title": "Discord Rich Presence" },
+    { "id": "pr-1234", "kind": "merge", "date": "…", "title": "the pull request's title", "url": "…",
+      "number": 1234, "item": "example", "item_title": "Example" },
     { "id": "release-v0.2.57", "kind": "release", "date": "…", "title": "…", "plain": "one line", "url": "…",
       "tag": "v0.2.57" },
     { "id": "shipped-server-resource-packs", "kind": "shipped", "date": "the release's", "title": "…",
@@ -99,21 +99,6 @@ merged pull request, release, shipped item and weekly summary, newest first, the
 
 ## The intake: votes and bug reports
 
-The hub's forms and vote buttons talk to the telemetry server (`https://telemetry.playhorizon.dev`,
-`crates/horizon-telemetry-server`, `src/hub.rs` and `src/intake.rs`; its README lists the limits and settings).
-Kira uses the same endpoints, so a bug goes the same way from the site and from Discord.
-
-| Endpoint | Body | Answer |
-| --- | --- | --- |
-| `POST /hub/vote` | `{"item": "<roadmap id>", "voter": "<random id, 16 to 64 characters>", "up": true}` | `{"item", "votes"}`; `"up": false` takes the vote back |
-| `GET /hub/votes` | | `{"votes": {"<item>": n}}`, a minute old at most |
-| `POST /hub/report` | `{"title", "did", "happened", "expected", "version"?, "system", "name"?}` | 201 `{"id", "issue": "<GitHub URL>"}`; 202 `{"id", "issue": null}` when GitHub was down (opened later) |
-
-- A report becomes an issue at once, labels `bug` and `from-website`, in the `#horizon-bugs` template (What I did,
-  What happened, What I expected, Horizon version, OS, CPU, GPU) with "Reported on playhorizon.dev". Every field
-  but the version and the name is required; mentions, `#123` references and HTML in people's text are made inert.
-- Errors are `{"error": "…"}`: 400 names the field (`"did: 3 to 2000 characters"`), 429 means too many from that
-  address, 503 a full day or reports turned off (no GitHub token on the server).
-- The page shows the forms and the buttons only once `GET /hub/votes` answers. Until then it points to GitHub and
-  Discord. It keeps a random voter id and the items it voted for in `localStorage` (`hub:voter`, `hub:voted`).
+The telemetry server that took the hub's votes and bug reports is gone with all telemetry (docs/telemetry.md).
+The hub points to GitHub and Discord for bugs and votes.
 

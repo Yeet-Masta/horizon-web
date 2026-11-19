@@ -9,13 +9,13 @@ Optimizations are not extras; they are part of the game in every build.
 ## Building without Horizon's extras
 
 ```sh
-cargo build --release -p horizon-client --no-default-features --features audio,controllers
+cargo build --release -p horizon-game --no-default-features --features audio,controllers
 ```
 
 Best effort: CI builds and tests the default only. The server build (`--no-default-features`,
 docs/server.md) compiles the same gates, so the code keeps compiling, but nobody plays it as a
 client before a release. [horizon-rust/horizon-plain](https://github.com/horizon-rust/horizon-plain)
-builds it from each official release tag, unsigned.
+builds it, unsigned, from the newest dated Nightly that is at least a week old.
 
 What changes in that build:
 

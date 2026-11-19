@@ -4,7 +4,7 @@
 //! and each Java mod it ported into `horizon-mods/`: where it came from, its version and its
 //! checksum. Files the player put there themselves are never touched: the browser only replaces
 //! or removes what it lists.
-use super::{pick, safe_name, Kind, Project, Source, SourceId, Support, Version};
+use super::{pick, plain_name, Kind, Project, Source, SourceId, Support, Version};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -104,8 +104,10 @@ impl Installed {
             .unwrap_or_default()
     }
 
+    /// Atomically publishes the list. Mutating callers must hold `lock_home`
+    /// from before `load` through this save, not just while writing the file.
     pub fn save(&self, home: &Path) -> Result<(), String> {
-        let _lock = super::lock_home(home);
+        let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = home.join(MANIFEST);
@@ -216,7 +218,8 @@ pub fn install(
     home: &Path,
     progress: &dyn Fn(&str, f32),
 ) -> Result<Vec<Entry>, String> {
-    let _lock = super::lock_home(home);
+    let _game = crate::game_shader_api::for_home(home);
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     if project.source == SourceId::Horizon {
         return super::horizon::install(project, home, progress);
     }
@@ -242,7 +245,7 @@ pub(super) fn put(
     folder: &dyn Fn(Kind) -> &'static str,
     progress: &dyn Fn(&str, f32),
 ) -> Result<Vec<Entry>, String> {
-    let _lock = super::lock_home(home);
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     let mut installed = Installed::load(home);
     let mut done = Vec::new();
     for step in steps {
@@ -257,7 +260,8 @@ pub(super) fn put(
             .file()
             .expect("pick keeps versions with a file");
         let folder_name = folder(p.kind);
-        let name = safe_name(&file.name)
+        // The name the download is saved under (`download::save`).
+        let name = plain_name(&file.name)
             .ok_or_else(|| format!("{:?} isn't a plain file name.", file.name))?;
         let relative = format!("{folder_name}/{name}");
         let owner = installed.entries.iter().find(|e| e.file == relative);
@@ -312,7 +316,7 @@ pub(super) fn put(
 
 /// Removes what the browser installed for `name` (a project id or slug): its file and its entry.
 pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
-    let _lock = super::lock_home(home);
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
     let mut installed = Installed::load(home);
     let entry = installed
         .lookup(name)
@@ -328,10 +332,6 @@ pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
         }
     }
     if let Some(id) = super::horizon::mod_id(&entry).filter(|_| entry.source == SourceId::Horizon) {
-        // The `.hmod` a mod that turned native left behind (horizon::install_version).
-        if super::super::native_status::is_native_file(&entry.file) {
-            let _ = fs::remove_file(home.join(super::java::MODS_DIR).join(format!("{id}.hmod")));
-        }
         super::java::set_enabled(home, id, false)?;
     }
     installed
@@ -341,18 +341,34 @@ pub fn remove(home: &Path, name: &str) -> Result<Entry, String> {
     Ok(entry)
 }
 
-/// The newer version `entry`, installed in game folder `home`, can be updated to, if any. A
-/// registry native mod's is the newest that builds on the Horizon `home` plays.
-pub fn update_for(
-    source: &dyn Source,
-    entry: &Entry,
-    home: &Path,
-) -> Result<Option<Version>, String> {
-    if entry.source == SourceId::Horizon {
-        if let Some(update) = super::horizon::fitting_update(&entry.project, &entry.version, home) {
-            return Ok(update);
-        }
+/// Whether `entry`'s file is not found. Any other error reading it is not this.
+pub fn file_missing(home: &Path, entry: &Entry) -> bool {
+    entry.path(home).is_some_and(|path| {
+        matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+/// Drops `entry` from the list only while it is listed exactly so and its file is still not
+/// found, both checked under the lock. It never touches a file. False, with nothing changed,
+/// when the row no longer says what it said (the file is back, or can't be read for another
+/// reason).
+pub fn forget_missing(home: &Path, entry: &Entry) -> Result<bool, String> {
+    // The lock would create the folder: a game folder that is gone has nothing to forget.
+    if !home.is_dir() {
+        return Ok(false);
     }
+    let _lock = super::lock_home(home).map_err(|e| e.to_string())?;
+    let mut installed = Installed::load(home);
+    if !installed.entries.contains(entry) || !file_missing(home, entry) {
+        return Ok(false);
+    }
+    installed.entries.retain(|e| e != entry);
+    installed.save(home)?;
+    Ok(true)
+}
+
+/// The newer version `entry` can be updated to, if any.
+pub fn update_for(source: &dyn Source, entry: &Entry) -> Result<Option<Version>, String> {
     let project = source.project(&entry.project)?;
     let versions = source.versions(&project)?;
     Ok(pick(project.kind, &versions, true)

@@ -1,7 +1,8 @@
 //! 1.21.8's packets in 1.21.6's layout for a 1.21.6 client (and 1.21.5): the mirror of `translate`'s `mod v1_21_6`
 //! (1.21.6 to 1.21.8). Two packets differ, and entity data is laid out alike.
-//! - set_equipment: 1.21.8 added the saddle slot (7) to its equipment enum. A 1.21.6 client has no such slot, so
-//!   its entries are removed. A packet with nothing else in it is dropped.
+//! - set_equipment: the saddle slot (7) of the equipment enum is 1.21.5's (EquipmentSlot has SADDLE in the 1.21.5 and
+//!   1.21.6 client jars, and their packet reads the slot from that enum), not 1.21.8's. A 1.21.4 client has no such
+//!   slot, so for it the entries are removed, and a packet with nothing else in it is dropped.
 //! - serverbound test_instance_block_action: a test is an identifier in 1.21.8 and a VarInt id in 1.21.6. A
 //!   packet that names a test is dropped (see `translate::v1_21_6::names_test`); one that names none is laid
 //!   out alike and passes.
@@ -10,7 +11,7 @@
 use crate::{
     Result, State,
     adapter::translate,
-    buf::{Codec, Reader, Writer},
+    buf::{Codec, Reader},
     ids as packet_ids,
     packets::play,
 };
@@ -25,16 +26,19 @@ pub(super) enum Out {
     Dropped,
 }
 
-/// EquipmentSlot.SADDLE, new in 1.21.8.
+/// EquipmentSlot.SADDLE, new in 1.21.5.
 const SADDLE: u8 = 7;
 
 /// The pinned clientbound packet `id` (`payload` in 1.21.8's layout) in 1.21.6's layout.
-pub(super) fn clientbound(state: State, id: i32, payload: &[u8]) -> Result<Out> {
+/// `saddle_slot`: whether the client's equipment enum has the saddle (1.21.5 and later).
+pub(super) fn clientbound(state: State, id: i32, payload: &[u8], saddle_slot: bool) -> Result<Out> {
     use packet_ids::play::clientbound as cb;
-    if (state, id) != (State::Play, cb::SET_EQUIPMENT) {
+    if saddle_slot || (state, id) != (State::Play, cb::SET_EQUIPMENT) {
         return Ok(Out::Untouched);
     }
-    let mut e = play::SetEquipment::read(&mut Reader::new(payload))?;
+    // The stacks are already in the client's item and component ids: read and written back in those (reading
+    // them as the pinned ones misreads a component, an NBT error for every 1.21.6-and-older client).
+    let mut e = super::read_in_client_ids(|| play::SetEquipment::read(&mut Reader::new(payload)))?;
     let before = e.slots.len();
     e.slots.retain(|(slot, _)| *slot != SADDLE);
     if e.slots.len() == before {
@@ -43,9 +47,9 @@ pub(super) fn clientbound(state: State, id: i32, payload: &[u8]) -> Result<Out> 
     if e.slots.is_empty() {
         return Ok(Out::Dropped);
     }
-    let mut w = Writer::new();
-    play::SetEquipment::write(&e, &mut w);
-    Ok(Out::Rewritten(w.data))
+    Ok(Out::Rewritten(super::write_in_client_ids(|w| {
+        play::SetEquipment::write(&e, w)
+    })))
 }
 
 /// The pinned serverbound packet `id` as the 1.21.6 client sent it (`payload`) in 26.3's layout, for the server.
@@ -64,6 +68,7 @@ mod tests {
     //! Each packet written here is read back with `translate`'s 1.21.6 reader (the serverbound one, which
     //! takes the 1.21.8 layout the client sends) or the pinned codec for the clientbound one.
     use super::*;
+    use crate::buf::Writer;
     use crate::{
         adapter::{ServerVersion, session::Session},
         item::Stack,
@@ -86,6 +91,7 @@ mod tests {
             State::Play,
             packet_ids::play::clientbound::SET_EQUIPMENT,
             &w.data,
+            false,
         )
         .unwrap() else {
             panic!("the saddle should be removed");
@@ -113,10 +119,32 @@ mod tests {
             clientbound(
                 State::Play,
                 packet_ids::play::clientbound::SET_EQUIPMENT,
-                &w.data
+                &w.data,
+                false
             )
             .unwrap(),
             Out::Dropped
+        );
+    }
+
+    /// 1.21.5 and 1.21.6 clients have the saddle slot (their EquipmentSlot.SADDLE is 7): it passes.
+    #[test]
+    fn set_equipment_keeps_the_saddle_for_a_client_that_has_the_slot() {
+        let p = play::SetEquipment {
+            id: 4,
+            slots: vec![(SADDLE, Some(Stack::new(1, 1)))],
+        };
+        let mut w = Writer::new();
+        play::SetEquipment::write(&p, &mut w);
+        assert_eq!(
+            clientbound(
+                State::Play,
+                packet_ids::play::clientbound::SET_EQUIPMENT,
+                &w.data,
+                true
+            )
+            .unwrap(),
+            Out::Untouched
         );
     }
 
@@ -132,7 +160,8 @@ mod tests {
             clientbound(
                 State::Play,
                 packet_ids::play::clientbound::SET_EQUIPMENT,
-                &w.data
+                &w.data,
+                false
             )
             .unwrap(),
             Out::Untouched

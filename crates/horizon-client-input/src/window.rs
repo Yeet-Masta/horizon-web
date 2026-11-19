@@ -111,6 +111,24 @@ pub fn gui_scaled_size(framebuffer: [i32; 2], gui_scale: i32) -> [i32; 2] {
     [scaled(framebuffer[0]), scaled(framebuffer[1])]
 }
 
+/// The GUI dimensions shared by screen layout and resize notifications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuiSize {
+    pub scale: u32,
+    pub size: [u32; 2],
+}
+
+impl GuiSize {
+    pub fn new(framebuffer: [u32; 2], max_scale: u32, enforce_unicode: bool) -> Self {
+        let framebuffer = framebuffer.map(|v| v as i32);
+        let scale = calculate_scale(framebuffer, max_scale as i32, enforce_unicode);
+        Self {
+            scale: scale as u32,
+            size: gui_scaled_size(framebuffer, scale).map(|v| v as u32),
+        }
+    }
+}
+
 /// `MouseHandler.getScaledXPos`/`getScaledYPos`.
 pub fn scaled_pos(pos: f64, gui_scaled: i32, screen: i32) -> f64 {
     pos * f64::from(gui_scaled) / f64::from(screen)
@@ -759,9 +777,9 @@ fn decode_icon(png: &[u8]) -> Option<winit::window::Icon> {
     winit::window::Icon::from_rgba(bytes, info.width, info.height).ok()
 }
 
-/// Apply the icon given to [`set_icon_png`] to a window. Windows has a separate taskbar icon slot
-/// from the small window icon; requiring a given icon to decode there prevents a generic taskbar
-/// icon from appearing.
+/// Apply the icon given to [`set_icon_png`] and the vanilla minimum inner size (320x240) to a window.
+/// Windows has a separate taskbar icon slot from the small window icon; requiring a given icon to
+/// decode there prevents a generic taskbar icon from appearing.
 pub fn with_icon(attributes: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
     #[cfg(not(target_os = "windows"))]
     let icon = icon();
@@ -769,6 +787,9 @@ pub fn with_icon(attributes: winit::window::WindowAttributes) -> winit::window::
     let icon =
         icon_png().map(|png| decode_icon(png).expect("the window icon must decode on Windows"));
 
+    // Vanilla 26.3 Window.createWindow: SDL_SetWindowMinimumSize(windowHandle, 320, 240).
+    let attributes =
+        attributes.with_min_inner_size(winit::dpi::LogicalSize::new(320.0f64, 240.0f64));
     let attributes = attributes.with_window_icon(icon.clone());
     #[cfg(target_os = "windows")]
     let attributes =
@@ -812,6 +833,45 @@ pub fn display(window: &winit::window::Window) -> Option<Display> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_gui_size_applies_unicode_and_rounds_up() {
+        assert_eq!(
+            GuiSize::new([960, 720], 3, false),
+            GuiSize {
+                scale: 3,
+                size: [320, 240]
+            }
+        );
+        assert_eq!(
+            GuiSize::new([960, 720], 3, true),
+            GuiSize {
+                scale: 4,
+                size: [240, 180]
+            }
+        );
+        assert_eq!(
+            GuiSize::new([1921, 1081], 0, false),
+            GuiSize {
+                scale: 4,
+                size: [481, 271]
+            }
+        );
+        assert_eq!(
+            GuiSize::new([853, 479], 0, true),
+            GuiSize {
+                scale: 2,
+                size: [427, 240]
+            }
+        );
+        assert_eq!(
+            GuiSize::new([3840, 2160], 0, true),
+            GuiSize {
+                scale: 10,
+                size: [384, 216]
+            }
+        );
+    }
 
     #[test]
     fn video_mode_round_trips_the_options_json() {
@@ -1136,5 +1196,16 @@ mod tests {
         assert_eq!(list.refresh(None, &mut modes), Some(vec![]));
         assert_eq!(list.refresh(Some(2), &mut modes), Some(vec![mode(2)]));
         assert_eq!(listings, 3);
+    }
+
+    #[test]
+    fn with_icon_enforces_vanilla_minimum_inner_size() {
+        let attrs = with_icon(winit::window::Window::default_attributes());
+        assert_eq!(
+            attrs.min_inner_size,
+            Some(winit::dpi::Size::Logical(winit::dpi::LogicalSize::new(
+                320.0f64, 240.0f64
+            )))
+        );
     }
 }

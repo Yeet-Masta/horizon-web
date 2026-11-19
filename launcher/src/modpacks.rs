@@ -171,29 +171,91 @@ impl Imported {
 pub fn row_plain(row: &Row) -> String {
     use crate::i18n::{tr, trf};
     let plain = match row.plain.as_str() {
-        "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run." => tr("Its blocks and items came over and passed Horizon's checks; the mod's own code is not run."),
-        "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what." => tr("Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what."),
+        "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run." => {
+            tr(
+                "Its blocks and items came over and passed Horizon's checks; the mod's own code is not run.",
+            )
+        }
+        "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what." => {
+            tr(
+                "Part of it came over, but something is left out, differs from the original or has not been checked yet; the technical detail says what.",
+            )
+        }
         "It does not come over yet." => tr("It does not come over yet."),
-        "Nothing to port: Horizon has it built in or does not need it." => tr("Nothing to port: Horizon has it built in or does not need it."),
-        "Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over." => tr("Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over."),
-        "It joins other mods together, so it waits until those are ported." => tr("It joins other mods together, so it waits until those are ported."),
-        "Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet." => tr("Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet."),
-        "Content only (blocks, items, structures). It can come over once its jar is here." => tr("Content only (blocks, items, structures). It can come over once its jar is here."),
-        "Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over." => tr("Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over."),
-        "Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over." => tr("Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over."),
-        "Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over." => tr("Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over."),
-        "Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet." => tr("Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet."),
-        "Horizon has not worked out what this mod needs yet." => tr("Horizon has not worked out what this mod needs yet."),
-        "A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port." => tr("A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port."),
-        "It makes the game faster. Horizon's own engine does that, so there is nothing to port." => tr("It makes the game faster. Horizon's own engine does that, so there is nothing to port."),
-        "Pack tooling or a game feature that Horizon already has, so there is nothing to port." => tr("Pack tooling or a game feature that Horizon already has, so there is nothing to port."),
-        "Built into Horizon already, so there is nothing to port." => tr("Built into Horizon already, so there is nothing to port."),
+        "Nothing to port: Horizon has it built in or does not need it." => {
+            tr("Nothing to port: Horizon has it built in or does not need it.")
+        }
+        "Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over." => {
+            tr(
+                "Horizon cannot tell yet what this mod does (it needs its jar or a reviewed entry), so it cannot say whether it will come over.",
+            )
+        }
+        "It joins other mods together, so it waits until those are ported." => {
+            tr("It joins other mods together, so it waits until those are ported.")
+        }
+        "Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet." => {
+            tr(
+                "Content only (blocks, items, structures). Its jar is here, but it has not been carried over yet.",
+            )
+        }
+        "Content only (blocks, items, structures). It can come over once its jar is here." => {
+            tr("Content only (blocks, items, structures). It can come over once its jar is here.")
+        }
+        "Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over." => {
+            tr(
+                "Needs what blocks and items do when used, placed, broken or ticked, which Horizon's mod API cannot run from a mod yet, so it does not come over.",
+            )
+        }
+        "Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over." => {
+            tr(
+                "Needs machine-style features (block entities, menus, item, fluid and energy handling, networking) that Horizon's mod API does not have yet, so it does not come over.",
+            )
+        }
+        "Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over." => {
+            tr(
+                "Needs mobs, custom rendering and models, dimensions or new game hooks that Horizon's mod API does not have yet, so it does not come over.",
+            )
+        }
+        "Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet." => {
+            tr(
+                "Needs the game's client interfaces (keys, targeting, inventory reading, interface, rendering), so it does not come over yet.",
+            )
+        }
+        "Horizon has not worked out what this mod needs yet." => {
+            tr("Horizon has not worked out what this mod needs yet.")
+        }
+        "A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port." => {
+            tr(
+                "A library other mods build on. Horizon's mod API and SDK take its place, so there is nothing to port.",
+            )
+        }
+        "It makes the game faster. Horizon's own engine does that, so there is nothing to port." => {
+            tr(
+                "It makes the game faster. Horizon's own engine does that, so there is nothing to port.",
+            )
+        }
+        "Pack tooling or a game feature that Horizon already has, so there is nothing to port." => {
+            tr(
+                "Pack tooling or a game feature that Horizon already has, so there is nothing to port.",
+            )
+        }
+        "Built into Horizon already, so there is nothing to port." => {
+            tr("Built into Horizon already, so there is nothing to port.")
+        }
         "Nothing to port." => tr("Nothing to port."),
-        "Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later." => tr("Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later."),
+        "Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later." => {
+            tr("Made for Minecraft 1.20 or older: Horizon ports mods made for 1.21 and later.")
+        }
         "Shader packs are not converted yet." => tr("Shader packs are not converted yet."),
-        "Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen." => tr("Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen."),
+        "Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen." => {
+            tr(
+                "Copied as a resource pack; Horizon has not checked how it renders. Turn it on in the game's Resource Packs screen.",
+            )
+        }
         "Not downloaded yet; Port gets it." => tr("Not downloaded yet; Port gets it."),
-        "Horizon could not use this resource pack yet; the technical detail says why." => tr("Horizon could not use this resource pack yet; the technical detail says why."),
+        "Horizon could not use this resource pack yet; the technical detail says why." => {
+            tr("Horizon could not use this resource pack yet; the technical detail says why.")
+        }
         other => other,
     };
     let waiting = match row.waiting {
@@ -209,6 +271,8 @@ pub fn row_plain(row: &Row) -> String {
 
 /// Reads the pack in `work`.
 pub fn load(work: &Path) -> Result<Imported, String> {
+    #[cfg(test)]
+    tests::LOADS.with(|loads| loads.set(loads.get() + 1));
     let pack: Pack = pipeline::read_json(&work.join("pack.json"))?;
     let rows: Vec<Row> = pipeline::read_json(&work.join("coverage.json")).unwrap_or_default();
     let records: Vec<horizon_port_pack::inventory::Record> =
@@ -285,6 +349,36 @@ pub(crate) fn list_in(ports: &Path) -> Vec<Imported> {
     packs
 }
 
+/// An imported pack as a list of instances names it.
+pub(crate) struct Listed {
+    pub slug: String,
+    pub title: String,
+    pub work: PathBuf,
+}
+
+/// The packs [`list_in`] loads, by their `pack.json` alone: an instance list is read on the
+/// window's thread, and a pack's reports and carried mods can be tens of thousands of files
+/// (#18074).
+pub(crate) fn listed_in(ports: &Path) -> Vec<Listed> {
+    let mut packs: Vec<Listed> = fs::read_dir(ports)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let work = e.path();
+            let pack: Pack = pipeline::read_json(&work.join("pack.json")).ok()?;
+            let slug = e.file_name().to_string_lossy().into_owned();
+            let title = match pack.name.is_empty() {
+                true => slug.clone(),
+                false => pack.name,
+            };
+            Some(Listed { slug, title, work })
+        })
+        .collect();
+    packs.sort_by_key(|p| p.title.to_ascii_lowercase());
+    packs
+}
+
 /// The carried-over mods in a work folder (`mods/<id>/carry/` with its manifest).
 pub fn carried(work: &Path) -> Vec<PathBuf> {
     let mut mods: Vec<PathBuf> = fs::read_dir(work.join("mods"))
@@ -327,7 +421,13 @@ pub fn port(
     from: Option<&Path>,
     log: Log,
 ) -> Result<Imported, String> {
-    pipeline::port(work, resources, from, log)?;
+    pipeline::port(
+        work,
+        resources,
+        from,
+        horizon_addresses::MODPACK_DOWNLOAD_HOSTS,
+        log,
+    )?;
     prepare_resourcepacks(work);
     load(work)
 }
@@ -473,8 +573,13 @@ pub fn found_summary(found: &Found) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// How many packs [`load`] read on this thread.
+        pub(crate) static LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     #[test]
     fn found_packs_are_other_launchers_instances_with_mods() {

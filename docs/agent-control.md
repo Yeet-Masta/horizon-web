@@ -19,12 +19,12 @@ The command lists are generated, so they can't drift:
 
 | Surface | Where | Transport |
 | --- | --- | --- |
-| Game control socket | `horizon-client --control` / `--control-socket PATH`, or Agent Control on in Horizon Settings > AI Agent (`crates/horizon-client/src/control.rs`; commands in `src/game/control.rs`, `agent.rs`, `ui_control.rs`, `saves_control.rs` and friends) | text line in, one JSON line out; Unix socket, or localhost TCP and a token where there is none |
+| Game control socket | `horizon-client --control` / `--control-socket PATH`, or Agent Control on in Horizon Settings > AI Agent (`crates/horizon-client/src/control.rs`; commands in `src/game/runtime/control.rs`, `agent.rs`, `ui_control.rs`, `saves_control.rs` and friends) | text line in, one JSON line out; Unix socket, or localhost TCP and a token where there is none |
 | `horizon-ctl` | `crates/horizon-client/src/bin/horizon-ctl/` | CLI over the socket; one table of commands (`commands.rs`) gives the help, the argument checks, the MCP tools and the reference |
 | `horizon-ctl mcp` | same | MCP over stdio, one tool per command of the table |
 | Launcher CLI | `launcher/src/cli.rs` | `horizon-launcher <command> [--json]` |
 | Launcher MCP | `launcher/src/mcp.rs`, `cli_tools.rs`, `game_tools.rs` | `horizon-launcher mcp` (stdio): every CLI command as a tool, the session tools, and the game's tools as `game_*` |
-| Connecting | `launcher/src/agents.rs`, `agents_page.rs`; `src/game/agent_settings.rs` | `horizon-launcher agent-config`; Settings > AI in the launcher; Horizon Settings > AI Agent in the game |
+| Connecting | `launcher/src/agents.rs`, `agents_page.rs`; `src/game/runtime/agent_settings.rs` | `horizon-launcher agent-config`; Settings > AI in the launcher; Horizon Settings > AI Agent in the game |
 | No AI | `crates/horizon-core/src/no_ai.rs` | `noAi:true` in `<game home>/horizon-extras.txt`, read by every surface |
 
 ## One MCP server for everything
@@ -93,30 +93,30 @@ passes on without checking it).
 
 ### Launcher
 
-| Capability | Window | CLI | MCP | Notes |
-| --- | --- | --- | --- | --- |
-| Releases and installed versions | Play, version picker | yes | yes | `versions [--installed]` |
-| Install, remove a version | Play | yes | yes | `remove` needs `confirm` in MCP |
-| Pick the version that plays | Play | yes | yes | `settings selected-version TAG` |
-| Prepare resources | Play | yes | yes |  |
-| Start the game | Play | yes | yes | `play --world --creative --join --arg --account`; MCP `play` adds `offscreen` |
-| Join a friend by invite code | Play | yes | yes | `play --join CODE` |
-| Dedicated server here: start, console, log, stop | Servers | yes | yes | `server`; MCP `server`, `server_command`, `server_log`, `server_stop` |
-| Hosted servers: list, create, set up, run a command, forget | Servers | yes | yes | `servers ...`; `servers_forget` needs `confirm` |
-| Accounts: list, sign in, sign out, select, offline | Settings | yes | yes | names and UUIDs only; sign-in is a device code |
-| Game folder, server folder, install new versions, opening animation | Settings | yes | yes | `settings [KEY VALUE]` |
-| Extra game arguments | Settings | yes | yes | `game-args` |
-| Applications menu entry (Linux) | Settings | yes | yes | `desktop-entry` |
-| Updates: check and install | Settings | yes | yes | `update` |
-| Patch notes, links | Patch notes, footer | yes | yes |  |
-| Game log, crash reports | Settings | yes | yes | `logs [--crash]` |
-| Data collection: status, allow, deny, show, delete, send, bug, benchmark upload | Settings > Data | yes | yes | `data_delete` needs `confirm` |
-| Mod browser: search, check, install, update, remove, list (mods, resource packs, modpacks) | Mods | yes | yes | `mods ...`; `mods_remove` needs `confirm` |
-| Modpacks: import, port, play, remove, list | Modpacks | yes | yes | `modpack ...`; `modpack_remove` needs `confirm` |
-| Launcher benchmark | (none) | yes | yes |  |
-| The game it started | (the game) | (horizon-ctl) | yes | `game_*` |
-| Connect an AI agent | Settings > AI | yes | (none) | `agent-config [--client] [--test]`; the agent is already connected, so there is no tool |
-| No AI | Settings > AI | yes | (none) | `no-ai [on\|off]`; the player's switch, never an agent's |
+| Capability | Window | CLI before | MCP before | CLI after | MCP after | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Releases and installed versions | Play, version picker | yes | yes | yes | yes | `versions [--installed]` |
+| Install, remove a version | Play | yes | yes | yes | yes | `remove` needs `confirm` in MCP |
+| Pick the version that plays | Play | no | no | yes | yes | `settings selected-version TAG` |
+| Prepare resources | Play | yes | yes | yes | yes | |
+| Start the game | Play | yes | yes | yes | yes | `play --world --creative --join --arg --account`; MCP `play` adds `offscreen` |
+| Join a friend by invite code | Play | yes | no | yes | yes | `play --join CODE` |
+| Dedicated server here: start, console, log, stop | Servers | yes | yes | yes | yes | `server`; MCP `server`, `server_command`, `server_log`, `server_stop` |
+| Hosted servers: list, create, set up, run a command, forget | Servers | yes | no | yes | yes | `servers ...`; `servers_forget` needs `confirm` |
+| Accounts: list, sign in, sign out, select, offline | Settings | yes | part | yes | yes | names and UUIDs only; sign-in is a device code; `account_offline` was missing |
+| Game folder, server folder, install new versions, opening animation | Settings | no | no | yes | yes | `settings [KEY VALUE]` |
+| Extra game arguments | Settings | yes | no | yes | yes | `game-args` |
+| Applications menu entry (Linux) | Settings | yes | no | yes | yes | `desktop-entry` |
+| Updates: check and install | Settings | yes | part | yes | yes | MCP could only check |
+| Patch notes, links | Patch notes, footer | yes | yes | yes | yes | |
+| Game log, crash reports | Settings | yes | yes | yes | yes | `logs [--crash]` |
+| Local bug report | (none) | yes | yes | yes | yes | `bug-report` writes a file; nothing is sent |
+| Mod browser: search, check, install, update, remove, list (mods, resource packs, modpacks) | Mods | yes | no | yes | yes | `mods ...`; `mods_remove` needs `confirm` |
+| Modpacks: import, port, play, remove, list | Modpacks | yes | no | yes | yes | `modpack ...`; `modpack_remove` needs `confirm` |
+| Launcher benchmark | (none) | yes | no | yes | yes | |
+| The game it started | (the game) | (horizon-ctl) | yes | (horizon-ctl) | yes | `game_*` |
+| Connect an AI agent | Settings > AI | no | (none) | yes | (none) | `agent-config [--client] [--test]`; the agent is already connected, so there is no tool |
+| No AI | Settings > AI | no | (none) | yes | (none) | `no-ai [on\|off]`; the player's switch, never an agent's |
 
 ### Game
 
@@ -211,13 +211,16 @@ turn the switch off.
   under control. A game the player starts from the window is not, until they turn Agent Control
   on. An open socket lets any program of that user drive the game, so it opens only when an agent
   asked for the game, or when the player chose it.
-- **The window an agent opens** comes up without the focus (on Windows and macOS; X11 focuses it
-  anyway): the person keeps their keyboard, and the game keeps its pointer grab to itself, as
-  `--offscreen` does, so the system pointer is never taken, hidden or moved. Once the person
-  clicks into the window it is an ordinary one, and that click takes the pointer.
+- **The window an agent opens** asks for no focus, and belongs to the agent until a person
+  presses a mouse button inside it. Until then the game keeps its pointer grab to itself, as
+  `--offscreen` does, so the system pointer is never taken, hidden or moved, and the person's
+  keys, wheel and mouse motion don't reach the game, even if the system gives the window the
+  focus (X11 does, and Windows can): the focus alone claims nothing. Closing the window still
+  works. That first press makes it an ordinary window and takes the pointer; the agent's own
+  input plays before and after it.
 - **Headless:** `horizon-ctl launch --headless` (`horizon-client --headless --control`) starts a
   game with no display, no window and no GPU: it runs where no display server is (an SSH session,
-  a server) and runs its own loop instead of winit's (`game/headless.rs`), one frame a tick. It
+  a server) and runs its own loop instead of winit's (`game/runtime/headless.rs`), one frame a tick. It
   plays through these commands only; commands that need the screen's pixels (`screenshot`, clicks
   at GUI points) answer with an error ([#4951](https://github.com/horizon-rust/horizon/issues/4951)).
 
@@ -263,14 +266,14 @@ turn the switch off.
 - **Confirm what can't be undone.** A command that deletes the player's things requires
   `confirm` and carries the MCP `destructiveHint`. In the game these are `world-delete`, `fill`
   and `setblock` (the table's `DESTRUCTIVE`); in the launcher, `remove`, `modpack remove`,
-  `mods remove`, `servers forget`, `account sign-out` and `data delete` (`cli_tools::DESTRUCTIVE`).
+  `mods remove`, `servers forget` and `account sign-out` (`cli_tools::DESTRUCTIVE`).
   Without `confirm: true` the call is refused and the message says to ask the player. In the game
   CLI the flag is `--confirm`. The launcher CLI asks nothing: a person typing `remove` meant it.
 - **Ask before reaching out.** A command that sends data or reaches other people carries
   `openWorldHint`, and its description says "only when the player asks". In the game these are
-  `connect`, `lan`, `friends`, `chat` and `command`; in the launcher, `data allow`, `data send`,
-  `data bug`, `data benchmark` and `servers create`. `play`'s `join` argument says the same.
-  Telemetry stays opt-in, and only `data allow` turns it on.
+  `connect`, `lan`, `friends`, `chat` and `command`; in the launcher, `servers create` and
+  `share-log`. `play`'s `join` argument says the same. Bug and benchmark reports stay local;
+  there is no telemetry or data collection switch ([Horizon sends nothing](telemetry.md)).
 - **No secrets.** No surface returns tokens, session files, keychain entries or invite secrets
   the player didn't ask to share:
   - accounts are names and UUIDs;
@@ -330,9 +333,10 @@ who took over mid-test.
   recorded: a stray key or mouse move can't spoil the run. The run's own input (the socket, the
   replay) still plays. Clicking into the window or away from it takes effect when the run ends,
   and the game's pointer grab stays inside the game until then, so the system pointer is never
-  taken or moved; closing the window still ends the run. A key held as the run starts stays
-  down until it is pressed again. Outside these runs nothing is held back; a game no one at
-  the computer should touch runs `--offscreen` or `--headless`.
+  taken or moved; closing the window still ends the run. A click during the run doesn't claim
+  an agent's window no one has clicked yet: it takes one after the run. A key held as the run
+  starts stays down until it is pressed again. Outside these runs nothing is held back; a game
+  no one at the computer should touch runs `--offscreen` or `--headless`.
 - `state` and `status` have an `input` section: `last_origin`, per-origin `counts`,
   `user_since_agent` and `last_user_age_s`.
 - `input-log [--since SEQ] [--limit N] [--origin ORIGIN]` lists the newest 512 input events:
@@ -422,9 +426,10 @@ of the frame ([#8750](https://github.com/horizon-rust/horizon/issues/8750)).
 - The server's own randoms and entity ids are its own: a summoned mob's facing and variant, and
   mob AI during a step, can differ when other server work drew on them first, and ids follow the
   order the server loads and creates entities in, which loading changes from run to run. What an
-  id seeds can then differ: a minecart's offset against z-fighting, a mob's client random. Give
-  facings and variants in the command (`{Rotation:[0f,0f]}`) for a repeatable scene. An end
-  crystal's spin and bob start from its position instead, so they are the same in every run.
+  id seeds can then differ: a minecart's offset against z-fighting, a mob's client random, a
+  dropped item's model when its model picks one at random. Give facings and variants in the
+  command (`{Rotation:[0f,0f]}`) for a repeatable scene. An end crystal's and a dropped item's spin
+  and bob start from their position instead, so they are the same in every run.
 - A script should wait until the world has loaded before it changes it: a command that acts on
   what is loaded (`kill @e`, `fill`) finds more or less of it otherwise.
 - The player still ticks while frozen, as in vanilla: stand the player on a block (it falls
@@ -433,7 +438,7 @@ of the frame ([#8750](https://github.com/horizon-rust/horizon/issues/8750)).
   using an item, riding, running out of air.
 - A shader pack's own buffers, kept from frame to frame, take `horizon-ctl screenshot-sequence
   FRAMES STEP_MS PATH`: the pack starts over (its buffers, images, shadow maps, smoothed values and
-  custom uniforms, or a Horizon pack's `history` and eased values) and draws FRAMES frames on a set
+  custom uniforms, or a Horizon pack's kept resources and eased values) and draws FRAMES frames on a set
   clock, frame n at n frames and (n - 1) × STEP_MS milliseconds (0 since the frame before on frame
   1, STEP_MS after; a decimal, `16.666667` for 60 fps). The last is written as `screenshot PATH`
   writes it (with its `-hdr.png` under HDR output), and the reply, once it is, names the pack and

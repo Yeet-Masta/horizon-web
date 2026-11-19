@@ -1,9 +1,10 @@
-//! The registry source against the sample index of `horizon_mods::index`
-//! (`crates/horizon-mods/tests/index/`), its files served from disk.
+//! The registry source against the sample index of `horizon_platform::mod_package::index`
+//! (`crates/horizon-mod-package/tests/index/`), its files served from disk.
 use super::*;
+use crate::game_shader_api::tests::with_game;
 
 fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/horizon-mods/tests/index")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/horizon-mod-package/tests/index")
 }
 
 /// The sample index with its files on disk, as a local test registry lists them.
@@ -30,31 +31,13 @@ pub(super) fn scratch(name: &str) -> PathBuf {
 }
 
 fn hud(index: &Index) -> Project {
-    project_of(index.project("coords_hud").unwrap()).unwrap()
+    project_of(index, index.project("coords_hud").unwrap()).unwrap()
 }
 
-/// Installs the sample's WebAssembly mod as a modpack does: the browser won't, it needs a native
-/// port.
+/// Installs the sample's checked content mod, as a modpack does.
 fn put(index: &Index, local: bool, home: &Path) -> Result<Vec<installed::Entry>, String> {
     let p = index.project("coords_hud").unwrap();
     install_version(index, local, p, &p.versions[0], home, &|_, _| {}).map(|e| vec![e])
-}
-
-#[test]
-fn a_search_keeps_only_what_its_filter_takes() {
-    let mut index = sample();
-    index.projects[0].kind = index::Kind::NativeMod;
-    index.projects[0].versions[0].file.name = "coords_hud-0.1.0.hnmod".into();
-    let id = index.projects[0].id.clone();
-    let query = Query::new("", Kind::Mod);
-    let found = |keep: bool| -> Vec<String> {
-        search_where(&index, &query, |p| keep || p.id != id)
-            .into_iter()
-            .map(|p| p.id)
-            .collect()
-    };
-    assert!(found(true).contains(&id));
-    assert!(!found(false).contains(&id));
 }
 
 #[test]
@@ -62,7 +45,7 @@ fn native_registry_entries_are_mods_that_say_they_run_native_code() {
     assert_eq!(kind_of(&index::Kind::NativeMod), Some(Kind::Mod));
     let mut index = sample();
     index.projects[0].kind = index::Kind::NativeMod;
-    index.projects[0].versions[0].file.name = "coords_hud-0.1.0.hnmod".into();
+    index.projects[0].versions[0].file.name = "coords_hud-0.1.0.hmod".into();
     let found = search(&index, &Query::new("", Kind::Mod));
     assert!(found.iter().any(|p| p.id == index.projects[0].id));
     let entry = |file: &str| {
@@ -73,7 +56,7 @@ fn native_registry_entries_are_mods_that_say_they_run_native_code() {
         .unwrap()
     };
     assert_eq!(
-        mod_id(&entry("horizon-native-mods/veinminer.hnmod")),
+        mod_id(&entry("horizon-native-mods/veinminer.hmod")),
         Some("veinminer")
     );
     assert_eq!(mod_id(&entry("horizon-mods/zoom.hmod")), Some("zoom"));
@@ -114,9 +97,8 @@ fn searches_by_kind_and_words() {
             .map(|p| p.id)
             .collect()
     };
-    // The sample's only mod is a WebAssembly one: it stays in the index, not in the browser.
-    assert!(found("", Kind::Mod).is_empty());
-    assert!(found("coordinates HUD", Kind::Mod).is_empty());
+    assert_eq!(found("", Kind::Mod), ["coords_hud"]);
+    assert_eq!(found("coordinates HUD", Kind::Mod), ["coords_hud"]);
     assert!(found("zoom", Kind::Mod).is_empty());
     // Modpacks under Modpacks; a kind this launcher can't install yet (a world) never.
     assert_eq!(found("", Kind::Modpack), ["cozy"]);
@@ -125,7 +107,7 @@ fn searches_by_kind_and_words() {
     // The index's download counts, most downloaded first (of native mods: the browser lists them).
     let mut counted = index.clone();
     counted.projects[0].kind = index::Kind::NativeMod;
-    counted.projects[0].versions[0].file.name = "coords_hud-0.1.0.hnmod".into();
+    counted.projects[0].versions[0].file.name = "coords_hud-0.1.0.hmod".into();
     counted.projects.push(index::Project {
         id: "zoom".into(),
         name: "Zoom".into(),
@@ -140,6 +122,7 @@ fn searches_by_kind_and_words() {
     let mut dated = counted.clone();
     let base = dated.projects[0].versions[0].clone();
     let version_on = |day: &str| index::Version {
+        native_binaries: Vec::new(),
         published: day.into(),
         ..base.clone()
     };
@@ -166,6 +149,116 @@ fn searches_by_kind_and_words() {
     let p = hud(&index);
     assert_eq!(p.support(), super::super::Support::Works);
     assert_eq!(p.page, "https://playhorizon.dev/mods/coords_hud");
+}
+
+#[test]
+fn update_rejects_a_changed_kind_without_removing_the_installed_file() {
+    let mut index = sample();
+    let home = scratch("changed-kind");
+    put(&index, true, &home).unwrap();
+    let project = index
+        .projects
+        .iter_mut()
+        .find(|p| p.id == "coords_hud")
+        .unwrap();
+    project.kind = index::Kind::NativeMod;
+    let path = home.join("horizon-mods/coords_hud.hmod");
+    let before = fs::read(&path).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let p = index.project("coords_hud").unwrap();
+    let error = install_version(&index, true, p, &p.versions[0], &home, &|_, _| {}).unwrap_err();
+    assert!(error.contains("different installed kind"), "{error}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn installed_kind_comes_from_the_archive_not_its_folder() {
+    for native in [false, true] {
+        let mut index = sample();
+        let home = scratch(if native {
+            "native-in-content"
+        } else {
+            "content-in-native"
+        });
+        put(&index, true, &home).unwrap();
+        let mut list = installed::Installed::load(&home);
+        let old = home.join(&list.entries[0].file);
+        let folder = if native {
+            "horizon-mods"
+        } else {
+            "horizon-native-mods"
+        };
+        fs::create_dir_all(home.join(folder)).unwrap();
+        let file = format!("{folder}/misplaced.hmod");
+        let path = home.join(&file);
+        if native {
+            let manifest = format!(
+                "id='coords_hud'\nname='HUD'\nversion='0.1.0'\napi='0.2'\ncapabilities=['registries']\n[native]\ngame='26.3'\nhorizon='{}'\nmixins='{}'\n",
+                "a".repeat(40),
+                "b".repeat(40)
+            );
+            let files: &[(&str, &[u8])] = &[
+                ("Cargo.toml", b"[package]\nname='hud'\nversion='1'\n"),
+                ("src/lib.rs", b"pub fn hooks() {}"),
+            ];
+            fs::write(
+                &path,
+                horizon_platform::mod_package::Package::write_files(&manifest, files).unwrap(),
+            )
+            .unwrap();
+            index::native::Bundle::read(&path).unwrap();
+            index
+                .projects
+                .iter_mut()
+                .find(|p| p.id == "coords_hud")
+                .unwrap()
+                .kind = index::Kind::NativeMod;
+        } else {
+            fs::copy(&old, &path).unwrap();
+        }
+        list.entries[0].file = file;
+        list.save(&home).unwrap();
+        let p = index.project("coords_hud").unwrap();
+        let result = install_version(&index, true, p, &p.versions[0], &home, &|_, _| {});
+        assert!(result.is_ok(), "{result:?}");
+        assert!(path.is_file());
+        fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[test]
+fn corrupt_installed_archive_is_not_treated_as_content() {
+    let index = sample();
+    let home = scratch("corrupt-installed");
+    put(&index, true, &home).unwrap();
+    let path = home.join("horizon-mods/coords_hud.hmod");
+    fs::write(&path, b"not a zip").unwrap();
+    let before = fs::read(&path).unwrap();
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    let p = index.project("coords_hud").unwrap();
+    let error = install_version(&index, true, p, &p.versions[0], &home, &|_, _| {}).unwrap_err();
+    assert!(error.contains("Cannot inspect installed"), "{error}");
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn removing_native_mod_does_not_remove_a_separate_content_file() {
+    let index = sample();
+    let home = scratch("native-remove");
+    put(&index, true, &home).unwrap();
+    let mut list = installed::Installed::load(&home);
+    list.entries[0].file = "horizon-native-mods/coords_hud.hmod".into();
+    list.save(&home).unwrap();
+    fs::create_dir_all(home.join("horizon-native-mods")).unwrap();
+    fs::write(home.join("horizon-native-mods/coords_hud.hmod"), "").unwrap();
+    installed::remove(&home, "coords_hud").unwrap();
+    assert!(home.join("horizon-mods/coords_hud.hmod").is_file());
+    assert!(!home.join("horizon-native-mods/coords_hud.hmod").exists());
+    fs::remove_dir_all(&home).unwrap();
 }
 
 #[test]
@@ -251,8 +344,7 @@ fn data_pack(index: &mut Index, dir: &Path) -> Project {
     version.version = "1.0.0".into();
     version.api = "94".into();
     version.side = None;
-    version.capabilities.clear();
-    version.api_level = None;
+    version.capabilities = Default::default();
     version.requires.clear();
     version.file = index::File {
         name: "lanterns-1.0.0.zip".into(),
@@ -269,7 +361,7 @@ fn data_pack(index: &mut Index, dir: &Path) -> Project {
         versions: vec![version],
         ..base
     });
-    project_of(index.project("lanterns").unwrap()).unwrap()
+    project_of(index, index.project("lanterns").unwrap()).unwrap()
 }
 
 #[test]
@@ -285,7 +377,7 @@ fn a_registry_data_pack_is_checked_then_goes_into_a_world() {
         .collect();
     assert_eq!(found, ["lanterns"]);
     // Not into the game folder: into a world.
-    assert!(install_from(&index, true, None, &p, &dir.join("home"), &|_, _| {}).is_err());
+    assert!(install_from(&index, true, &p, &dir.join("home"), &|_, _| {}).is_err());
     let (zip, number) = fetch_datapack_from(&index, true, &p, &dir.join("dl"), &|_| {}).unwrap();
     assert_eq!(number, "1.0.0");
     let world = dir.join("world");
@@ -333,9 +425,9 @@ fn installs_combined_native_content_as_one_hmod() {
     let b = "b".repeat(40);
     let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
     for (name, text) in [
-        ("horizon-native.json", serde_json::json!({"schema":1,"id":"coords_hud","version":"0.1.0","game":GAME,"horizon":a,"mixins":b,"hooks":1}).to_string()),
-        ("mixins/coords_hud/horizon-mixin.toml", format!("[mod]\nid=\"coords_hud\"\nversion=\"0.1.0\"\n[compatibility]\nhorizon_revision=\"{a}\"\n")),
-        ("horizon-mod.toml", "id=\"coords_hud\"\nname=\"Sound proof\"\nversion=\"0.1.0\"\napi=\"0.2\"\ncapabilities=[\"registries\"]\n".into()),
+        ("Cargo.toml", "[package]\nname='coords_hud'\nversion='0.1.0'\n".into()),
+        ("src/lib.rs", "fn hook() {}".into()),
+        ("horizon-mod.toml", format!("id='coords_hud'\nname='Sound proof'\nversion='0.1.0'\napi='0.2'\ncapabilities=['registries']\n[native]\ngame='{GAME}'\nhorizon='{a}'\nmixins='{b}'\n")),
         ("assets/coords_hud/sounds.json", "{}".into()),
     ] {
         zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
@@ -353,9 +445,7 @@ fn installs_combined_native_content_as_one_hmod() {
     v.game = GAME.into();
     v.side = None;
     v.requires.clear();
-    v.capabilities.clear();
-    v.api_level = None;
-    v.hooks = Some(1);
+    v.capabilities = Default::default();
     v.file.name = "coords_hud.hmod".into();
     v.file.url = format!("file://{}", archive.display());
     v.file.size = bytes.len() as u64;
@@ -366,7 +456,7 @@ fn installs_combined_native_content_as_one_hmod() {
     assert_eq!(entry.file, "horizon-native-mods/coords_hud.hmod");
     assert_eq!(mod_id(&entry), Some("coords_hud"));
     let bundle = index::native::Bundle::read(&home.join(&entry.file)).unwrap();
-    assert_eq!(bundle.content["assets/coords_hud/sounds.json"], b"{}");
+    assert_eq!(bundle.files["assets/coords_hud/sounds.json"], b"{}");
     assert_eq!(crate::native_status::enabled(&home).len(), 1);
     installed::remove(&home, "coords_hud").unwrap();
     assert!(!home.join(entry.file).exists());
@@ -378,13 +468,14 @@ fn installs_checked_turns_on_and_removes() {
     let index = sample();
     let home = scratch("install");
     let p = hud(&index);
-    let e = install_from(&index, true, None, &p, &home, &|_, _| {}).unwrap_err();
-    assert_eq!(e, format!("Coordinates HUD {NEEDS_PORT}."));
-    let done = put(&index, true, &home).unwrap();
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
     assert_eq!(done[0].file, "horizon-mods/coords_hud.hmod");
-    assert_eq!(done[0].skipped, [format!("its code ({NEEDS_PORT})")]);
+    assert!(done[0].skipped.is_empty());
     assert_eq!(done[0].verdict.as_deref(), Some("Verified"));
-    assert!(done[0].checksum.starts_with("SHA-256:e1135345"));
+    assert_eq!(
+        done[0].checksum,
+        "SHA-256:f891bde88f4b841fd35c4f3305bc8904b671ebe9d5ad28d5aecc57e8b23fc3ce"
+    );
     assert!(home.join("horizon-mods/coords_hud.hmod").is_file());
     let list = fs::read_to_string(home.join("horizon-mods.txt")).unwrap();
     assert_eq!(list, "mod.coords_hud:true\n");
@@ -419,33 +510,43 @@ fn installs_checked_turns_on_and_removes() {
 }
 
 #[test]
-fn a_mod_that_turned_native_keeps_its_hmod_until_removed() {
-    assert!(stays(true, "horizon-mods/coords_hud.hmod"));
-    assert!(!stays(false, "horizon-mods/coords_hud.hmod"));
-    assert!(!stays(true, "horizon-native-mods/coords_hud.hnmod"));
-    assert!(!stays(true, "horizon-native-mods/coords_hud.hmod"));
-    let index = sample();
-    let home = scratch("turned-native");
-    put(&index, true, &home).unwrap();
-    // As install_version leaves it after the native update.
-    let mut list = installed::Installed::load(&home);
-    list.entries[0].file = "horizon-native-mods/coords_hud.hnmod".into();
-    list.save(&home).unwrap();
-    fs::create_dir_all(home.join("horizon-native-mods")).unwrap();
-    fs::write(home.join("horizon-native-mods/coords_hud.hnmod"), "").unwrap();
-    installed::remove(&home, "coords_hud").unwrap();
-    assert!(!home.join("horizon-native-mods/coords_hud.hnmod").exists());
+fn executable_content_is_refused_without_installing_or_skipping_code() {
+    use std::io::Write;
+    let home = scratch("executable");
+    let path = home.join("executable.hmod");
+    fs::copy(fixtures().join("coords_hud-0.1.0.hmod"), &path).unwrap();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let mut zip = zip::ZipWriter::new_append(file).unwrap();
+    zip.start_file("mod.wasm", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"\0asm").unwrap();
+    zip.finish().unwrap();
+    let mut index = sample();
+    let p = &mut index.projects[0];
+    p.key = None;
+    let v = &mut p.versions[0];
+    v.file.url = format!("file://{}", path.display());
+    v.file.size = fs::metadata(&path).unwrap().len();
+    v.file.sha256 = index::sha256_file(&path).unwrap();
+    v.file.signature = None;
+    let e = put(&index, true, &home).unwrap_err();
+    assert_eq!(e, "mod.wasm needs a [wasm] section");
     assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
-    fs::remove_dir_all(&home).unwrap();
+    assert!(installed::Installed::load(&home).entries.is_empty());
+    fs::remove_dir_all(home).unwrap();
 }
 
 #[test]
 fn installs_a_shader_pack_into_shaderpacks() {
     let index = sample();
     let home = scratch("shader");
-    let p = project_of(index.project("glow").unwrap()).unwrap();
+    let p = project_of(&index, index.project("glow").unwrap()).unwrap();
     assert_eq!(p.support(), super::super::Support::Works);
-    let done = install_from(&index, true, None, &p, &home, &|_, _| {}).unwrap();
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
     assert_eq!(done[0].file, "shaderpacks/glow-1.0.0.hshader");
     assert_eq!(done[0].kind, Kind::Shader);
     assert!(home.join("shaderpacks/glow-1.0.0.hshader").is_file());
@@ -466,12 +567,349 @@ fn installs_a_shader_pack_into_shaderpacks() {
     assert!(!home.join("shaderpacks/glow-1.0.0.hshader").exists());
     // A file of the same name the registry didn't put there is left alone.
     fs::write(home.join("shaderpacks/glow-1.0.0.hshader"), b"mine").unwrap();
-    let e = install_from(&index, true, None, &p, &home, &|_, _| {}).unwrap_err();
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
     assert_eq!(
         e,
         "shaderpacks/glow-1.0.0.hshader is already there: move it away first."
     );
     fs::remove_dir_all(&home).unwrap();
+}
+
+/// The browser's versions of `id`, as `Registry::versions` gives them.
+fn versions_of(index: &Index, id: &str) -> Vec<Version> {
+    let p = index.project(id).unwrap();
+    p.versions.iter().map(|v| version_of(index, p, v)).collect()
+}
+
+/// A shader pack whose every version is for a shader API the installed game doesn't serve is
+/// marked, and neither picked nor downloaded (#17245).
+#[test]
+fn shader_packs_for_another_shader_api_are_marked_and_not_installed() {
+    with_game(&["0.2"], marked_and_not_installed);
+}
+
+fn marked_and_not_installed() {
+    let mut index = sample();
+    let glow = index.projects.iter_mut().find(|p| p.id == "glow").unwrap();
+    glow.versions[0].api = "0.1".into();
+    let versions = versions_of(&index, "glow");
+    assert_eq!(
+        versions[0].blocked.as_deref(),
+        Some("needs shader API 0.1; this Horizon serves 0.2")
+    );
+    assert!(super::super::pick(Kind::Shader, &versions, true).is_none());
+    let p = index.project("glow").unwrap();
+    assert_eq!(
+        newest(&index, p).unwrap_err(),
+        "Soft Glow needs shader API 0.1; this Horizon serves 0.2."
+    );
+    assert!(installable(&index, p).is_none());
+    let home = scratch("shader-api");
+    let project = project_of(&index, p).unwrap();
+    // The card, the CLI and MCP give this answer. As everything that can't be installed here,
+    // it is left out of the list, and listed last with `everything`.
+    let marked =
+        super::super::Support::No("Made for shader API 0.1: this Horizon serves 0.2.".into());
+    assert_eq!(project.support(), marked);
+    assert!(search(&index, &Query::new("", Kind::Shader)).is_empty());
+    let everything = Query {
+        everything: true,
+        ..Query::new("", Kind::Shader)
+    };
+    let listed = search(&index, &everything);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].support(), marked);
+    // Not counted as a mod for the earlier mod system by the note above the list.
+    assert!(matches!(
+        blocked(&index, p),
+        Some(Blocked::OtherShaderApi(_))
+    ));
+    let e = install_from(&index, true, &project, &home, &|_, _| {}).unwrap_err();
+    assert_eq!(
+        e,
+        "Soft Glow needs shader API 0.1; this Horizon serves 0.2."
+    );
+    assert!(!home.join("mod-browser").exists(), "nothing was downloaded");
+    assert!(!home.join("shaderpacks").exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A newer version for a shader API the installed game doesn't serve above one for a line it
+/// does: the one that runs is picked, installed and updated to.
+#[test]
+fn a_shader_pack_offers_its_newest_version_for_this_shader_api() {
+    with_game(&["0.2"], offers_its_newest_version_for_the_games_shader_api);
+}
+
+fn offers_its_newest_version_for_the_games_shader_api() {
+    let mut index = sample();
+    let glow = index.projects.iter_mut().find(|p| p.id == "glow").unwrap();
+    let mut old_api = glow.versions[0].clone();
+    old_api.version = "1.1.0".into();
+    old_api.api = "0.1".into();
+    old_api.file.sha256 = "1".repeat(64);
+    glow.versions.insert(0, old_api);
+    let versions = versions_of(&index, "glow");
+    let picked = super::super::pick(Kind::Shader, &versions, true).unwrap();
+    assert_eq!(picked.number, "1.0.0");
+    let p = index.project("glow").unwrap();
+    assert_eq!(newest(&index, p).unwrap().version, "1.0.0");
+    assert_eq!(installable(&index, p).unwrap().version, "1.0.0");
+    let home = scratch("shader-api-mixed");
+    let project = project_of(&index, p).unwrap();
+    assert_eq!(project.support(), super::super::Support::Works);
+    let done = install_from(&index, true, &project, &home, &|_, _| {}).unwrap();
+    assert_eq!(done[0].version, "1.0.0");
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A registry shader pack made for shader API 0.1 on disk, as the registry's 13 packs are:
+/// `glow`'s only version, or its newest above the sample's 0.2 one.
+fn glow_for_0_1(index: &mut Index, dir: &Path, only: bool) {
+    use std::io::Write;
+    let path = dir.join("glow-0.9.0.hshader");
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    for (name, text) in [
+        (
+            horizon_shader_api::MANIFEST,
+            "schema = 1\nid = \"glow\"\nname = \"Soft Glow\"\nversion = \"0.9.0\"\napi = \"0.1\"\n\
+             [[post]]\nfile = \"post.wgsl\"\n",
+        ),
+        (
+            "post.wgsl",
+            "fn post(input: PostInput) -> vec4<f32> { return input.color; }\n",
+        ),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    let glow = index.projects.iter_mut().find(|p| p.id == "glow").unwrap();
+    let mut version = glow.versions[0].clone();
+    version.version = "0.9.0".into();
+    version.api = "0.1".into();
+    version.file = index::File {
+        name: "glow-0.9.0.hshader".into(),
+        url: format!("file://{}", path.display()),
+        size: fs::metadata(&path).unwrap().len(),
+        sha256: index::sha256_file(&path).unwrap(),
+        signature: None,
+    };
+    if only {
+        glow.versions.clear();
+    }
+    glow.versions.insert(0, version);
+}
+
+/// What the browser, an install and an automatic update make of `glow` in `index`: the version
+/// each takes (an install really downloads and checks it), or the reason the card gives.
+fn glow_taken(index: &Index, name: &str) -> Result<String, String> {
+    let p = index.project("glow").unwrap();
+    let project = project_of(index, p).unwrap();
+    let home = scratch(name);
+    let installed = install_from(index, true, &project, &home, &|_, _| {});
+    let versions = versions_of(index, "glow");
+    let picked = super::super::pick(Kind::Shader, &versions, true);
+    let listed = search(index, &Query::new("", Kind::Shader)).len() == 1;
+    let taken = match (installed, project.support()) {
+        (Ok(done), super::super::Support::Works) => {
+            let version = done[0].version.clone();
+            assert!(home.join(&done[0].file).is_file());
+            // The three places agree: the card, the picked version, the install, the update.
+            assert_eq!(picked.unwrap().number, version);
+            assert_eq!(newest(index, p).unwrap().version, version);
+            assert_eq!(installable(index, p).unwrap().version, version);
+            assert!(listed);
+            Ok(version)
+        }
+        (Err(refused), super::super::Support::No(why)) => {
+            assert!(picked.is_none() && installable(index, p).is_none() && !listed);
+            assert!(newest(index, p).is_err());
+            assert!(!home.join("mod-browser").exists(), "nothing was downloaded");
+            assert!(
+                refused.starts_with("Soft Glow needs shader API "),
+                "{refused}"
+            );
+            Err(why)
+        }
+        other => panic!("the card and the install disagree: {other:?}"),
+    };
+    fs::remove_dir_all(&home).unwrap();
+    taken
+}
+
+/// The launcher offers and installs a shader pack for the game it installed, not for the build
+/// it is itself (#17527): a game that serves 0.1 and 0.2, one that serves only 0.2 (main since
+/// #15886), and the Nightly of 2026-11-13, whose `--launch-api` says 0.1. The 0.1 file goes
+/// through the index's checks although this launcher's own checker can't read it.
+#[test]
+fn shader_packs_are_offered_for_the_shader_api_the_installed_game_serves() {
+    let dir = scratch("shader-api-game");
+    let only_0_2 = sample();
+    let (mut only_0_1, mut mixed) = (sample(), sample());
+    glow_for_0_1(&mut only_0_1, &dir, true);
+    glow_for_0_1(&mut mixed, &dir, false);
+    let taken = |game: &[&str], index: &Index| with_game(game, || glow_taken(index, "taken"));
+    let ok = |version: &str| Ok(version.to_owned());
+    let made_for = |api: &str, served: &str| {
+        Err(format!(
+            "Made for shader API {api}: this Horizon serves {served}."
+        ))
+    };
+
+    let both = ["0.1", "0.2"];
+    assert_eq!(taken(&both, &only_0_1), ok("0.9.0"));
+    assert_eq!(taken(&both, &only_0_2), ok("1.0.0"));
+    assert_eq!(taken(&both, &mixed), ok("0.9.0"));
+
+    assert_eq!(taken(&["0.2"], &only_0_1), made_for("0.1", "0.2"));
+    assert_eq!(taken(&["0.2"], &only_0_2), ok("1.0.0"));
+    assert_eq!(taken(&["0.2"], &mixed), ok("1.0.0"));
+
+    assert_eq!(taken(&["0.1"], &only_0_1), ok("0.9.0"));
+    assert_eq!(taken(&["0.1"], &only_0_2), made_for("0.2", "0.1"));
+    assert_eq!(taken(&["0.1"], &mixed), ok("0.9.0"));
+
+    // A game that gave no answer: the launcher's own line, as before.
+    assert_eq!(glow_taken(&only_0_1, "taken"), made_for("0.1", "0.2"));
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Two instances playing different games: what is installed into one, updated in it and marked
+/// in its pack list goes by the game that instance plays, not by the selected instance's
+/// (#17527). In its own launcher folders, since it installs versions and makes an instance.
+#[test]
+fn a_shader_pack_goes_by_the_game_of_the_instance_it_is_for() {
+    const CHILD: &str = "HORIZON_TEST_TWO_GAMES";
+    let Some(root) = std::env::var_os(CHILD).map(PathBuf::from) else {
+        let root = scratch("two-games");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "browser::horizon::tests::a_shader_pack_goes_by_the_game_of_the_instance_it_is_for",
+                "--nocapture",
+            ])
+            .env(CHILD, &root)
+            .env("HORIZON_LAUNCHER_HOME", root.join("launcher"))
+            .env("HORIZON_HOME", root.join("game"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{said}");
+        fs::remove_dir_all(&root).unwrap();
+        return;
+    };
+    use crate::game_shader_api::tests::answers;
+    // The selected instance plays the launcher's version, the newest: a game from main. The
+    // other one keeps the Nightly of 2026-11-13.
+    answers("nightly-2026-11-13-9f42064", &["0.1"]);
+    answers("nightly-2026-11-16-aaaaaaa", &["0.2"]);
+    let selected = crate::instances::selected();
+    crate::instances::create("Kept", None).unwrap();
+    let kept = crate::instances::edit("Kept", |meta| {
+        meta.version = Some("nightly-2026-11-13-9f42064".into());
+    })
+    .unwrap();
+    assert_ne!(kept.home, selected.home);
+    assert_eq!(crate::game_shader_api::served(), ["0.2"]);
+
+    let for_0_2 = sample();
+    let mut for_0_1 = sample();
+    glow_for_0_1(&mut for_0_1, &root, true);
+    let install = |index: &Index, home: &Path| {
+        let project = project_of(index, index.project("glow").unwrap()).unwrap();
+        let done = install_from(index, true, &project, home, &|_, _| {});
+        done.map(|done| done[0].version.clone())
+    };
+    assert_eq!(
+        install(&for_0_2, &kept.home).unwrap_err(),
+        "Soft Glow needs shader API 0.2; this Horizon serves 0.1."
+    );
+    {
+        // An operation on one folder that reaches into another (an instance's command that
+        // installs into another profile): each folder goes by its own game, and the outer
+        // one's comes back.
+        use crate::game_shader_api::{for_home, served};
+        let _outer = for_home(&selected.home);
+        assert_eq!(served(), ["0.2"]);
+        assert_eq!(install(&for_0_1, &kept.home).unwrap(), "0.9.0");
+        assert_eq!(served(), ["0.2"]);
+        let inner = for_home(&kept.home);
+        let same = for_home(&kept.home);
+        assert_eq!(served(), ["0.1"]);
+        drop(same);
+        assert_eq!(served(), ["0.1"]);
+        drop(inner);
+        assert_eq!(served(), ["0.2"]);
+    }
+    assert_eq!(
+        install(&for_0_1, &selected.home).unwrap_err(),
+        "Soft Glow needs shader API 0.1; this Horizon serves 0.2."
+    );
+    assert_eq!(install(&for_0_2, &selected.home).unwrap(), "1.0.0");
+
+    // An installed game that didn't say its lines (too slow at its first start, say): no shader
+    // pack goes in by the launcher's own line, not even one refused as made for another game,
+    // and the next install asks it again and goes by its answer.
+    let quiet = "nightly-2026-11-17-bbbbbbb";
+    fs::create_dir_all(crate::backend::version_dir(quiet)).unwrap();
+    fs::write(crate::backend::version_dir(quiet).join(".installed"), "").unwrap();
+    crate::instances::create("Quiet", None).unwrap();
+    let quiet_home = crate::instances::edit("Quiet", |meta| meta.version = Some(quiet.into()))
+        .unwrap()
+        .home;
+    assert_eq!(
+        install(&for_0_1, &quiet_home).unwrap_err(),
+        "Soft Glow: the installed game didn't say which shader API it serves. Try again."
+    );
+    assert!(
+        !quiet_home.join("mod-browser").exists(),
+        "nothing was downloaded"
+    );
+    crate::game_shader_api::tests::will_say(quiet, &["0.1"]);
+    assert_eq!(install(&for_0_1, &quiet_home).unwrap(), "0.9.0");
+
+    // A newer version for 0.2 comes out: the instance on the Nightly stays on its 0.1 version.
+    let mut newer = sample();
+    glow_for_0_1(&mut newer, &root, false);
+    newer
+        .projects
+        .iter_mut()
+        .find(|p| p.id == "glow")
+        .unwrap()
+        .versions
+        .swap(0, 1);
+    let play = auto::Context { in_pack: false };
+    let report = auto::run_with(&newer, true, &kept.home, &play, &|_, _| {});
+    assert_eq!(report, auto::Report::default());
+    assert!(kept.home.join("shaderpacks/glow-0.9.0.hshader").is_file());
+    // Its pack list doesn't mark the pack its game runs.
+    let listed = crate::packs::list(&kept.home, crate::packs::Kind::Shader);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].unsupported, None);
+}
+
+/// A shader pack for this build's shader API, and a shaders/-folder pack (which names none), are
+/// left as they were.
+#[test]
+fn shader_packs_for_this_shader_api_are_offered_as_before() {
+    let mut index = sample();
+    let versions = versions_of(&index, "glow");
+    assert_eq!(versions[0].blocked, None);
+    let support = |index: &Index| {
+        project_of(index, index.project("glow").unwrap())
+            .unwrap()
+            .support()
+    };
+    assert_eq!(support(&index), super::super::Support::Works);
+    let glow = index.projects.iter_mut().find(|p| p.id == "glow").unwrap();
+    glow.kind = index::Kind::ShaderPack;
+    glow.versions[0].api = String::new();
+    assert_eq!(versions_of(&index, "glow")[0].blocked, None);
+    assert_eq!(support(&index), super::super::Support::Works);
 }
 
 #[test]
@@ -517,7 +955,7 @@ fn registry_versions_run_when_made_for_this_game() {
         let p = index.project(id).unwrap();
         p.versions
             .iter()
-            .map(|x| version_of(&index, p, x, None))
+            .map(|x| version_of(&index, p, x))
             .collect()
     };
     assert_eq!(
@@ -526,10 +964,68 @@ fn registry_versions_run_when_made_for_this_game() {
             .number,
         "1.0.0"
     );
-    // A WebAssembly mod is never picked: it needs a native port.
     let hud = versions("coords_hud");
-    assert_eq!(hud[0].blocked.as_deref(), Some(NEEDS_PORT));
-    assert!(pick(Kind::Mod, &hud, false).is_none());
+    assert!(hud[0].blocked.is_none());
+    assert_eq!(pick(Kind::Mod, &hud, false).unwrap().number, "0.1.0");
+}
+
+#[test]
+fn a_project_made_for_the_earlier_mod_system_says_it_cant_be_installed() {
+    let mut index = sample();
+    let hud = index
+        .projects
+        .iter_mut()
+        .find(|p| p.id == "coords_hud")
+        .unwrap();
+    hud.versions[0].game = GAME.into();
+    hud.versions[0].capabilities = vec!["game-read".to_string()].into();
+    let p = project_of(&index, index.project("coords_hud").unwrap()).unwrap();
+    assert!(!p.support().installable());
+    assert!(p.support().reason().unwrap().contains("earlier mod system"));
+    // Beside a mod that installs, with fewer downloads:
+    let mut other = index.project("coords_hud").unwrap().clone();
+    other.id = "lanterns_plus".into();
+    other.versions[0].capabilities = Default::default();
+    other.downloads = 0;
+    index.projects.push(other);
+    index
+        .projects
+        .iter_mut()
+        .find(|p| p.id == "coords_hud")
+        .unwrap()
+        .downloads = 1_000_000;
+    let ids = |everything: bool| -> Vec<String> {
+        let mut q = Query::new("", Kind::Mod);
+        q.everything = everything;
+        search(&index, &q).into_iter().map(|p| p.id).collect()
+    };
+    // The list leaves it out, as the note above it says.
+    assert!(!ids(false).iter().any(|id| id == "coords_hud"));
+    // Asked for everything, it comes after what installs, despite its downloads.
+    let order = ids(true);
+    let at = |id: &str| order.iter().position(|o| o == id).unwrap();
+    assert!(at("lanterns_plus") < at("coords_hud"), "{order:?}");
+    // The same project with a version this Horizon can use installs as before.
+    let mut fine = sample();
+    fine.projects
+        .iter_mut()
+        .find(|p| p.id == "coords_hud")
+        .unwrap()
+        .versions[0]
+        .game = GAME.into();
+    let p = project_of(&fine, fine.project("coords_hud").unwrap()).unwrap();
+    assert!(p.blocked.is_none());
+}
+
+#[test]
+fn a_summary_the_registry_cut_mid_word_ends_on_a_whole_word() {
+    let cut = format!("{} and tools at the crafti", "x".repeat(SUMMARY_CUT - 24));
+    assert_eq!(cut.chars().count(), SUMMARY_CUT);
+    assert!(summary(&cut).ends_with(" at the…"), "{}", summary(&cut));
+    // Whole sentences, and short ones, stay as written.
+    let whole = format!("{}.", "x ".repeat(SUMMARY_CUT / 2));
+    assert_eq!(summary(&whole), whole);
+    assert_eq!(summary("A short one"), "A short one");
 }
 
 #[test]
@@ -549,24 +1045,6 @@ fn owner_links_only_take_github_logins() {
     ] {
         assert!(!github_login(bad), "{bad}");
     }
-}
-
-/// A version that calls mod API functions the game doesn't have is marked and skipped.
-#[test]
-fn versions_for_a_newer_horizon_are_not_installed() {
-    let mut index = sample();
-    index.projects[0].versions[0].api_level = Some(1);
-    let p = index.project("coords_hud").unwrap();
-    let e = newest(&index, p, Some(0)).unwrap_err();
-    assert_eq!(
-        e,
-        "Coordinates HUD needs a newer Horizon than the game you play: update it first."
-    );
-    assert!(newest(&index, p, Some(1)).is_ok());
-    assert!(newest(&index, p, None).is_ok());
-    // In the browser, a WebAssembly mod needs a native port first.
-    let v = version_of(&index, p, &p.versions[0], Some(0));
-    assert_eq!(v.blocked.as_deref(), Some(NEEDS_PORT));
 }
 
 #[test]
@@ -632,18 +1110,385 @@ fn a_project_is_starred_on_the_repository_its_source_is_in() {
     }
 }
 
+/// A zip in the native format this Horizon retired (`horizon-native.json`, as `zoom` 2.0.0 was).
+fn retired_native(path: &Path) {
+    use std::io::Write;
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    for name in [
+        "horizon-native.json",
+        "mixins/coords_hud/horizon-mixin.toml",
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"{}").unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+/// The browser's list holding `coords_hud` at `version` in `file`, turned on.
+fn old_entry(home: &Path, file: &str, version: &str) -> Vec<installed::Entry> {
+    let entry = serde_json::json!({
+        "source": "horizon", "project": "coords_hud", "slug": "coords_hud",
+        "title": "Coordinates HUD", "kind": "mod", "version": version, "number": version,
+        "file": file, "checksum": "SHA-256:00", "page": ""
+    });
+    let list = installed::Installed {
+        entries: vec![serde_json::from_value(entry).unwrap()],
+    };
+    list.save(home).unwrap();
+    java::set_enabled(home, "coords_hud", true).unwrap();
+    list.entries
+}
+
+/// An id that was a native mod and came back as a plain mod (`zoom` 3.0.0): the player's
+/// entry from then points into `horizon-native-mods/`, at a file that is gone or in the retired
+/// native format. Installing the mod replaces that entry, so its row reads the new file. So does
+/// an entry of the very version installed whose file is gone: it is downloaded again.
 #[test]
-fn a_picked_version_is_kept_until_it_is_cleared() {
-    let home = scratch("chosen-versions");
-    assert!(chosen(&home).is_empty());
-    set_chosen(&home, "skins_3d", Some("1.0.1")).unwrap();
-    set_chosen(&home, "flair", Some("1.0.0")).unwrap();
-    assert_eq!(
-        chosen(&home).get("skins_3d").map(String::as_str),
-        Some("1.0.1")
+fn a_stale_native_entry_is_replaced_by_the_mod_the_id_became() {
+    let index = sample();
+    let p = hud(&index);
+    let current = &index.project("coords_hud").unwrap().versions[0].version;
+    let native = "horizon-native-mods/coords_hud.hmod";
+    for (case, old, version, retired) in [
+        ("gone", native, "0.0.1", false),
+        ("retired", native, "0.0.1", true),
+        (
+            "same-version-gone",
+            "horizon-mods/coords_hud.hmod",
+            current.as_str(),
+            false,
+        ),
+    ] {
+        let home = scratch(&format!("stale-native-{case}"));
+        if retired {
+            retired_native(&home.join(old));
+        }
+        old_entry(&home, old, version);
+
+        let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+        assert_eq!(done[0].file, "horizon-mods/coords_hud.hmod");
+        let list = installed::Installed::load(&home).entries;
+        assert_eq!(list, done);
+        let package = horizon_platform::mod_package::Package::read(&home.join(&list[0].file));
+        assert_eq!(package.unwrap().manifest.id, "coords_hud");
+        assert!(!home.join(native).exists());
+        assert!(java::is_enabled(&home, "coords_hud"));
+        assert!(crate::native_status::enabled(&home).is_empty());
+        fs::remove_dir_all(&home).unwrap();
+    }
+}
+
+/// A zip at `path` holding `name` with `text`: an archive this Horizon can't read as a mod.
+fn outdated(path: &Path, name: &str, text: &str) -> Vec<u8> {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+    zip.start_file(name, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    assert!(horizon_platform::mod_package::Package::read(path).is_err());
+    fs::read(path).unwrap()
+}
+
+/// As `zoom` 1.0.0's manifest was, made for the earlier mod system.
+const EARLIER: &str = "id = \"coords_hud\"\nversion = \"0.0.1\"\ncapabilities = [\"render\"]\n";
+const HUD: &str = "horizon-mods/coords_hud.hmod";
+
+/// [`old_entry`] for [`HUD`], with the checksum of the file that is there.
+fn old_entry_checked(home: &Path) -> Vec<installed::Entry> {
+    let mut list = installed::Installed {
+        entries: old_entry(home, HUD, "0.0.1"),
+    };
+    let hash = index::sha256_file(&home.join(HUD)).unwrap();
+    list.entries[0].checksum = format!("SHA-256:{hash}");
+    list.save(home).unwrap();
+    list.entries
+}
+
+/// The files moved aside in `horizon-mods/`.
+fn backups(home: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(home.join("horizon-mods"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().contains(".hmod.replaced-"))
+        .collect();
+    found.sort();
+    found
+}
+
+/// An entry from the earlier mod system (as `zoom` 1.0.0 was) names a `.hmod` right where the new
+/// file goes, an archive this Horizon can't read as a mod. Installing the mod replaces it, and
+/// the old file is kept beside it, though the entry's checksum names it. A file there that is
+/// no archive at all is refused as before and stays.
+#[test]
+fn an_outdated_mod_file_is_replaced_by_the_new_version() {
+    let index = sample();
+    let p = hud(&index);
+
+    let home = scratch("stale-outdated");
+    let old = home.join(HUD);
+    let before = outdated(&old, "horizon-mod.toml", EARLIER);
+    old_entry_checked(&home);
+
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+    assert_eq!(done[0].file, HUD);
+    assert_eq!(installed::Installed::load(&home).entries, done);
+    let package = horizon_platform::mod_package::Package::read(&old).unwrap();
+    assert_eq!(package.manifest.version, done[0].version);
+    assert!(java::is_enabled(&home, "coords_hud"));
+    let kept = backups(&home);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), before);
+    fs::remove_dir_all(&home).unwrap();
+
+    let home = scratch("stale-not-an-archive");
+    let old = home.join(HUD);
+    fs::create_dir_all(old.parent().unwrap()).unwrap();
+    fs::write(&old, "not an archive").unwrap();
+    let list = old_entry(&home, HUD, "0.0.1");
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&old).unwrap(), b"not an archive");
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An archive at the entry's path that the entry's checksum doesn't name (a file the player put
+/// there) isn't lost: it is moved aside under a name the game doesn't load, and stays.
+#[test]
+fn an_unrelated_archive_where_the_mod_goes_is_kept_beside_it() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-unrelated");
+    let before = outdated(&home.join(HUD), "notes.txt", "mine");
+    old_entry(&home, HUD, "0.0.1");
+
+    let done = install_from(&index, true, &p, &home, &|_, _| {}).unwrap();
+    assert_eq!(installed::Installed::load(&home).entries, done);
+    assert!(horizon_platform::mod_package::Package::read(&home.join(HUD)).is_ok());
+    let kept = backups(&home);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(fs::read(&kept[0]).unwrap(), before);
+    let loaded = horizon_platform::mod_package::manifest::find(&home.join("horizon-mods"));
+    assert_eq!(loaded, [home.join(HUD)]);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// The list can't be saved once the new file is in: the old file comes back to its place, with
+/// its entry, and nothing of the install is left.
+#[test]
+fn a_failed_save_puts_the_outdated_file_back() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-save-fails");
+    let before = outdated(&home.join(HUD), "horizon-mod.toml", EARLIER);
+    let list = old_entry_checked(&home);
+    fs::create_dir_all(home.join("mod-browser/downloads")).unwrap();
+
+    // Read but not replaced: held without delete sharing on Windows, in a folder that takes no
+    // new file on Unix.
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(home.join("mod-browser.json"))
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::write(home.join("probe"), "").is_ok() {
+            eprintln!("skipped: permissions don't stop this user (root?)");
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::remove_dir_all(&home).unwrap();
+            return;
+        }
+    }
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    #[cfg(windows)]
+    drop(held);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert!(e.contains("mod-browser.json"), "{e}");
+    assert_eq!(fs::read(home.join(HUD)).unwrap(), before);
+    assert_eq!(backups(&home), Vec::<PathBuf>::new());
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// `horizon-mods` is a link (a junction on Windows) to a folder outside the game folder: the
+/// outdated file behind it is not replaced or moved.
+#[test]
+fn an_outdated_file_behind_a_linked_mod_folder_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-outdated-linked-folder");
+    let outside = scratch("stale-outdated-linked-folder-outside");
+    let before = outdated(
+        &outside.join("coords_hud.hmod"),
+        "horizon-mod.toml",
+        EARLIER,
     );
-    set_chosen(&home, "skins_3d", None).unwrap();
-    assert_eq!(chosen(&home).keys().collect::<Vec<_>>(), ["flair"]);
-    fs::write(home.join(CHOSEN), b"not json").unwrap();
-    assert!(chosen(&home).is_empty(), "an unreadable file picks nothing");
+    let link = home.join("horizon-mods");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+    #[cfg(windows)]
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .args([&link, &outside])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !made {
+        eprintln!("skipped: this account can't make folder links");
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+        return;
+    }
+    let list = old_entry_checked(&home);
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("leads outside the game folder"), "{e}");
+    assert_eq!(fs::read(outside.join("coords_hud.hmod")).unwrap(), before);
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    let downloads = home.join("mod-browser/downloads");
+    assert_eq!(fs::read_dir(downloads).map_or(0, |d| d.count()), 0);
+    // The link itself goes, never what it points at.
+    #[cfg(windows)]
+    fs::remove_dir(&link).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&link).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+    fs::remove_dir_all(&outside).unwrap();
+}
+
+/// Two files moved aside in the same second get two names, and an earlier one is never
+/// written over.
+#[test]
+fn a_backup_name_is_never_taken_twice() {
+    let home = scratch("backup-names");
+    let file = home.join("coords_hud.hmod");
+    let first = reserve_backup(&file, 7).unwrap();
+    fs::write(&first, "earlier").unwrap();
+    let second = reserve_backup(&file, 7).unwrap();
+    let third = reserve_backup(&file, 7).unwrap();
+    assert_eq!(first, home.join("coords_hud.hmod.replaced-7"));
+    assert_eq!(second, home.join("coords_hud.hmod.replaced-7-1"));
+    assert_eq!(third, home.join("coords_hud.hmod.replaced-7-2"));
+    assert_eq!(fs::read(&first).unwrap(), b"earlier");
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A retired native file the launcher can't read right now (another program holds it, or no
+/// permission) is not taken for gone or retired: the install refuses, as before, and leaves the
+/// file and the list as they were.
+#[test]
+fn an_old_native_file_that_cannot_be_read_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-unreadable");
+    let old = home.join("horizon-native-mods/coords_hud.hmod");
+    retired_native(&old);
+    let before = fs::read(&old).unwrap();
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    #[cfg(windows)]
+    let held = {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&old)
+            .unwrap()
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::File::open(&old).is_ok() {
+            eprintln!("skipped: permissions don't stop this user (root?)");
+            fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+            fs::remove_dir_all(&home).unwrap();
+            return;
+        }
+    }
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    #[cfg(windows)]
+    drop(held);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&old).unwrap(), before);
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An old entry whose path is a link to a retired native file elsewhere: the install refuses,
+/// and neither the link nor what it points at is removed.
+#[test]
+fn a_linked_old_native_file_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-link");
+    let real = home.join("elsewhere/coords_hud.hmod");
+    retired_native(&real);
+    let before = fs::read(&real).unwrap();
+    let link = home.join("horizon-native-mods/coords_hud.hmod");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&real, &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(&real, &link);
+    if let Err(e) = made {
+        eprintln!("skipped: this account can't make links: {e}");
+        fs::remove_dir_all(&home).unwrap();
+        return;
+    }
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(&real).unwrap(), before);
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    let downloads = home.join("mod-browser/downloads");
+    assert_eq!(fs::read_dir(downloads).map_or(0, |d| d.count()), 0);
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// An old entry whose path is not a regular file (here a folder; a pipe is never opened) isn't
+/// taken for a retired archive: the install refuses and the folder stays as it was.
+#[test]
+fn an_old_native_path_that_is_not_a_file_is_left_alone() {
+    let index = sample();
+    let p = hud(&index);
+    let home = scratch("stale-native-folder");
+    let old = home.join("horizon-native-mods/coords_hud.hmod");
+    fs::create_dir_all(&old).unwrap();
+    fs::write(old.join("horizon-native.json"), b"{}").unwrap();
+    let list = old_entry(&home, "horizon-native-mods/coords_hud.hmod", "0.0.1");
+
+    let e = install_from(&index, true, &p, &home, &|_, _| {}).unwrap_err();
+    assert!(e.contains("Cannot inspect installed"), "{e}");
+    assert_eq!(fs::read(old.join("horizon-native.json")).unwrap(), b"{}");
+    assert_eq!(installed::Installed::load(&home).entries, list);
+    assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
+    fs::remove_dir_all(&home).unwrap();
 }

@@ -68,6 +68,64 @@ fn player_home(home: &Path) {
 }
 
 #[test]
+fn build_choices_start_balanced_and_are_remembered_per_instance() {
+    use crate::native_mods::Profile;
+    let root = scratch("native-build-choices");
+    let game = root.join("game");
+    let data = root.join("launcher");
+    for id in ["first", "second"] {
+        fs::create_dir_all(game.join("instances").join(id)).unwrap();
+    }
+    for instance in list_in(&game, &data) {
+        assert_eq!(instance.native_profile, Profile::Optimized);
+    }
+    let choose = |id, profile| {
+        edit_in(&game, &data, id, |meta| meta.native_profile = Some(profile)).unwrap()
+    };
+    choose("first", Profile::Optimized);
+    choose("second", Profile::Optimized);
+    let before = fs::read(data.join("instances.json")).unwrap();
+    for unknown in [serde_json::json!("future"), serde_json::json!(42)] {
+        let mut stored: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        stored["instances"]["first"]["native_profile"] = unknown;
+        stored["instances"]["first"]["version"] = serde_json::json!("kept-version");
+        fs::write(
+            data.join("instances.json"),
+            serde_json::to_vec(&stored).unwrap(),
+        )
+        .unwrap();
+        edit_in(&game, &data, "second", |meta| {
+            meta.name = Some("Still here".into())
+        })
+        .unwrap();
+        let loaded = list_in(&game, &data);
+        assert_eq!(
+            find_in(&loaded, "first").unwrap().native_profile,
+            Profile::Optimized
+        );
+        assert_eq!(
+            find_in(&loaded, "first").unwrap().version.as_deref(),
+            Some("kept-version")
+        );
+        let neighbour = find_in(&loaded, "second").unwrap();
+        assert_eq!(neighbour.native_profile, Profile::Optimized);
+        assert_eq!(neighbour.name, "Still here");
+    }
+    fs::write(data.join("instances.json"), before).unwrap();
+    choose("second", Profile::Optimized);
+    let again = list_in(&game, &data);
+    assert_eq!(
+        find_in(&again, "first").unwrap().native_profile,
+        Profile::Optimized
+    );
+    assert_eq!(
+        find_in(&again, "second").unwrap().native_profile,
+        Profile::Optimized
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn existing_worlds_stay_where_they_are_and_every_folder_becomes_an_instance() {
     let root = scratch("migrate");
     let (home, data) = (root.join("horizon"), root.join("launcher"));
@@ -125,6 +183,47 @@ fn existing_worlds_stay_where_they_are_and_every_folder_becomes_an_instance() {
     let port = find_in(&all, "port:small-pack").unwrap();
     assert_eq!(port.group.as_deref(), Some("Modded"));
     assert_eq!(port.home, home.join("ports/small-pack/home"));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// An imported pack is listed as an instance from its `pack.json` alone: neither its reports nor
+/// its carried mods are read, however many files they hold (#18074). The Modpacks page reads them
+/// whole, on a thread.
+#[test]
+fn imported_packs_are_listed_without_reading_their_mods() {
+    let root = scratch("listed-ports");
+    let (home, data) = (root.join("horizon"), root.join("launcher"));
+    player_home(&home);
+    let carry = home.join("ports/small-pack/mods/chipped/carry");
+    put(
+        &carry.join("horizon-mod.toml"),
+        "id = \"chipped\"
+",
+    );
+    for i in 0..50 {
+        put(
+            &carry.join(format!("assets/chipped/models/block/b{i}.json")),
+            "{}",
+        );
+    }
+    // Not a pack: no `pack.json`.
+    put(&home.join("ports/half-imported/coverage.json"), "[]");
+    let loads = || crate::modpacks::tests::LOADS.with(std::cell::Cell::get);
+
+    let before = loads();
+    let all = list_in(&home, &data);
+    let ports: Vec<_> = all.iter().filter(|i| i.kind == Kind::Port).collect();
+    assert_eq!(ports.len(), 1);
+    assert_eq!(ports[0].id, "port:small-pack");
+    assert_eq!(ports[0].name, "Small Pack");
+    assert_eq!(ports[0].home, home.join("ports/small-pack/home"));
+    assert_eq!(loads(), before, "listing the instances read a pack whole");
+
+    // The page's read does read it whole, and lists the same packs.
+    let read = crate::modpacks::list_in(&home.join("ports"));
+    assert!(loads() > before);
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].slug, "small-pack");
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -417,7 +516,27 @@ fn switching_what_an_instance_plays_keeps_its_worlds_mods_and_settings() {
     let made = create_in(&home, &data, "Mine", None, None).unwrap();
     put(&made.home.join("saves/Base/level.dat"), "base");
     put(&made.home.join("saves/Base/region/r.0.0.mca"), "region");
-    put(&made.home.join("mods/minimap.hmod"), "hmod");
+    put(
+        &made
+            .home
+            .join(crate::browser::java::MODS_DIR)
+            .join("minimap.hmod"),
+        "content hmod",
+    );
+    put(
+        &made
+            .home
+            .join(crate::native_mods::INSTALLED)
+            .join("treefall.hmod"),
+        "native hmod",
+    );
+    put(
+        &made
+            .home
+            .join(crate::native_mods::INSTALLED)
+            .join("obsolete.hnmod"),
+        "not a supported package",
+    );
     put(&made.home.join("options.txt"), "fov:90");
     edit_in(&home, &data, &made.id, |m| {
         m.version = Some("nightly-2026-11-01-c9d474d".into())
@@ -432,13 +551,13 @@ fn switching_what_an_instance_plays_keeps_its_worlds_mods_and_settings() {
         }),
     };
 
-    // Horizon to Fabric: Horizon's mod stops loading; its world is opened by another version.
+    // Horizon to Fabric: both kinds of Horizon mod stop loading; its world changes version.
     let now = find_in(&list_in(&home, &data), &made.id).unwrap();
     assert_eq!(
         unkept(&now, &fabric("1.21.1"), "26.3"),
         [
             Unkept::Mods {
-                count: 1,
+                count: 2,
                 made_for: "Horizon".into()
             },
             Unkept::Worlds {
@@ -510,4 +629,14 @@ fn switching_what_an_instance_plays_keeps_its_worlds_mods_and_settings() {
     assert!(refused.contains("plays what it was made with"), "{refused}");
     assert_eq!(files(&home.join("saves")), home_files);
     fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_instance_without_a_channel_is_nightly_and_an_unknown_one_too() {
+    let meta: Meta = serde_json::from_str("{}").unwrap();
+    assert_eq!(meta.channel.unwrap_or_default(), Channel::Nightly);
+    let meta: Meta = serde_json::from_str(r#"{"channel":"stable","group":"g"}"#).unwrap();
+    assert_eq!(meta.channel, Some(Channel::Stable));
+    let meta: Meta = serde_json::from_str(r#"{"channel":"beta","group":"g"}"#).unwrap();
+    assert_eq!((meta.channel, meta.group.as_deref()), (None, Some("g")));
 }

@@ -31,10 +31,10 @@ EFFECTS = [
     ("horizon-light", "Small jobs (triage and claim commands, pull request labels, overlap notes, the Mojang "
                       "republish check, a pull request's parity scope) wait instead of running.",
      "An organisation owner sets the repository variable `SELF_HOSTED_CI` to `off`: they run on GitHub's runners."),
-    ("horizon-checks", "`verify` and `launcher` of the pull requests whose number ends in 0 or 1 wait, so those pull "
+    ("horizon-checks", "`verify` and `launcher` of the pull requests whose number ends in 0 wait, so those pull "
                        "requests can't merge.",
      "An organisation owner sets `SELF_HOSTED_CI` to `off` (or `light`), then the authors push again or a Team "
-     "member re-runs the checks."),
+     "member re-runs the checks. Forks' pull requests see no repository variable: they wait for the runners."),
     ("horizon-parity-main", "parity-main doesn't run, so no newer commit of main is green for the Nightly: Nightlies "
                             "keep shipping the last green commit or nothing.",
      "Nothing to do on GitHub: the harnesses need the maintainer's Minecraft. Merge on `verify` as usual; label "
@@ -112,10 +112,14 @@ def gh(*arguments):
 def all_jobs(repo, since):
     jobs = []
     for status in ("queued", "in_progress"):
-        runs = json.loads(gh("api", f"repos/{repo}/actions/runs?status={status}&per_page=100&created=%3E%3D{since}",
-                             "--jq", "[.workflow_runs[].id]") or "[]")
-        for run in runs:
-            jobs += json.loads(gh("api", f"repos/{repo}/actions/runs/{run}/jobs?per_page=100", "--jq", ".jobs") or "[]")
+        pages = json.loads(gh("api", "--paginate", "--slurp",
+                              f"repos/{repo}/actions/runs?status={status}&per_page=100&created=%3E%3D{since}"))
+        for page in pages:
+            for run in page["workflow_runs"]:
+                job_pages = json.loads(gh("api", "--paginate", "--slurp",
+                                          f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100"))
+                for job_page in job_pages:
+                    jobs += job_page["jobs"]
     return jobs
 
 

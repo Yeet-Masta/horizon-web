@@ -5,9 +5,9 @@ use super::{
     Renderer, check_layers, cull, describe_adapter, is_software, oit, pack_timing, startup_step,
     surface_format, timing,
 };
-// Ray tracing on request, which the device needs from its creation (gfx.rs may not grow).
-#[path = "ray_query.rs"]
-pub(super) mod ray_query;
+// Mesh shader capability negotiation on request (spec #17243 step 1).
+#[path = "mesh_shader.rs"]
+pub(super) mod mesh_shader;
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -106,6 +106,22 @@ pub(super) struct Adapted {
     pub(super) device_lost: Arc<std::sync::atomic::AtomicBool>,
     pub(super) configured: Option<(wgpu::SurfaceConfiguration, wgpu::SurfaceCapabilities)>,
 }
+/// What the device has to offer from its creation: the sprite arrays' `layers`, and ray queries
+/// when the pack picked at startup declares `[ray_tracing]` (`rays`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct DeviceNeeds {
+    pub(super) layers: u32,
+    pub(super) rays: bool,
+}
+impl super::output::FrameRequest {
+    /// What a device opened for this request and `layers` sprite layers needs.
+    pub(super) fn needs(self, layers: u32) -> DeviceNeeds {
+        DeviceNeeds {
+            layers,
+            rays: self.ray_tracing,
+        }
+    }
+}
 /// Opens a device on `adapter` and configures the window's `surface` on it (none
 /// offscreen). An adapter the surface offers no format on fails before its device opens.
 pub(super) async fn open_adapter(
@@ -113,7 +129,7 @@ pub(super) async fn open_adapter(
     window: &Arc<Window>,
     surface: Option<&wgpu::Surface<'static>>,
     adapter: &wgpu::Adapter,
-    layers: u32,
+    needs: DeviceNeeds,
 ) -> std::result::Result<Adapted, AdapterFailure> {
     let caps = surface.map(|surface| surface.get_capabilities(adapter));
     if caps.as_ref().is_some_and(|caps| caps.formats.is_empty()) {
@@ -124,7 +140,7 @@ pub(super) async fn open_adapter(
     describe_adapter(adapter);
     let info = adapter.get_info();
     let limits = adapter.limits();
-    if let Err(e) = check_layers(adapter, layers) {
+    if let Err(e) = check_layers(adapter, needs.layers) {
         return Err(AdapterFailure::Failed(format!("{name}: {e}")));
     }
     // Mappable primary buffers: section pages that no longer fit in
@@ -138,7 +154,8 @@ pub(super) async fn open_adapter(
         | pack_timing::PassTiming::features(adapter)
         | cull::Cull::features(adapter)
         | oit::features(adapter)
-        | ray_query::features(adapter)
+        | super::rt::query::features(adapter, needs.rays)
+        | mesh_shader::features(adapter)
         | (adapter.features()
             & (wgpu::Features::INDIRECT_FIRST_INSTANCE
                 | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
@@ -171,7 +188,7 @@ pub(super) async fn open_adapter(
         // with the larger blocks a few small buffers kept whole blocks the arena's pages had
         // left, and over half the video memory reserved was unused (1,344 MiB for 500).
         memory_hints: wgpu::MemoryHints::MemoryUsage,
-        experimental_features: ray_query::experimental(features),
+        experimental_features: mesh_shader::experimental(features),
         ..Default::default()
     };
     #[cfg(not(any(target_os = "macos", target_family = "wasm")))]

@@ -1,19 +1,18 @@
 //! The structure types whose pieces read their own tags rather than a
-//! template: `MineshaftPieces`, `NetherFortressPieces` and
-//! `StrongholdPieces`, registered as `StructurePieceType.ContextlessType`s.
+//! template: `MineshaftPieces`, `NetherFortressPieces`, `StrongholdPieces`
+//! and `SwampHutPieces`, all registered as
+//! `StructurePieceType.ContextlessType`s.
 use super::{
-    BoundingBox,
     fortress::FortressPiece,
     legacy::{LegacyPiece, PieceFrame},
     mineshaft::MineshaftPiece,
+    simple::{BuriedTreasurePiece, SwampHutPiece},
     start::{StructureDef, StructureKind},
     stronghold::StrongholdPiece,
+    temple::{DesertPyramidPiece, JungleTemplePiece},
 };
-use crate::{
-    datafix::dynamic::{Number, as_number},
-    nbt::Tag,
-};
-use horizon_core::geometry::Direction;
+use crate::datafix::dynamic::{Number, as_number};
+use horizon_core::{bounding_box::BoundingBox, geometry::Direction, nbt::Tag};
 use std::{collections::BTreeSet, sync::Arc};
 
 /// `CompoundTag.getIntOr`: `Mth.floor` of a float or double tag, the low 32
@@ -57,7 +56,7 @@ pub(crate) fn read_frame(tag: &Tag) -> Option<(PieceFrame, i32)> {
     Some((PieceFrame::new(bounding_box, orientation), int(tag, "GD")))
 }
 
-/// `StructurePieceType`'s id for these three families, read as their tag
+/// `StructurePieceType`'s id for these four families, read as their tag
 /// constructors do. `None` for another id and for a piece that does not
 /// decode, which leaves its start to regeneration.
 pub(crate) fn read(id: &str, tag: &Tag, def: &StructureDef) -> Option<Box<dyn LegacyPiece>> {
@@ -73,6 +72,15 @@ pub(crate) fn read(id: &str, tag: &Tag, def: &StructureDef) -> Option<Box<dyn Le
             MineshaftPiece::from_saved(id, tag, frame, depth, blocking)
                 .map(|p| Box::new(p) as Box<dyn LegacyPiece>)
         }
+        "tesh" => {
+            let piece = SwampHutPiece::from_saved(tag, frame);
+            Some(Box::new(piece) as Box<dyn LegacyPiece>)
+        }
+        "tedp" => {
+            Some(Box::new(DesertPyramidPiece::from_saved(tag, frame)) as Box<dyn LegacyPiece>)
+        }
+        "tejp" => Some(Box::new(JungleTemplePiece::from_saved(tag, frame)) as Box<dyn LegacyPiece>),
+        "btp" => Some(Box::new(BuriedTreasurePiece::from_saved(frame)) as Box<dyn LegacyPiece>),
         _ if id.starts_with("ne") => FortressPiece::from_saved(id, tag, frame, depth)
             .map(|p| Box::new(p) as Box<dyn LegacyPiece>),
         _ if id.starts_with("sh") => StrongholdPiece::from_saved(id, tag, frame, depth)
@@ -93,7 +101,7 @@ mod tests {
 
     /// The defs the pieces of each family belong to, with the mineshaft's
     /// unsaved #mineshaft_blocking biomes.
-    fn defs() -> [StructureDef; 3] {
+    fn defs() -> [StructureDef; 4] {
         let blocking = Arc::new(BTreeSet::from([BiomeId(3), BiomeId(7)]));
         [
             (
@@ -105,6 +113,7 @@ mod tests {
             ),
             ("minecraft:fortress", StructureKind::Fortress),
             ("minecraft:stronghold", StructureKind::Stronghold),
+            ("minecraft:swamp_hut", StructureKind::SwampHut),
         ]
         .map(|(name, kind)| StructureDef {
             name: name.into(),
@@ -126,6 +135,7 @@ mod tests {
             MineshaftPiece::saved_test_pieces(blocking.clone()),
             FortressPiece::saved_test_pieces(),
             StrongholdPiece::saved_test_pieces(),
+            SwampHutPiece::saved_test_pieces(),
         ];
         // A fortress start's first piece is built through the `BridgeCrossing`
         // constructor, so vanilla saves it as `nebcr` and reads that id back as
@@ -145,7 +155,7 @@ mod tests {
                 let id = id.strip_prefix("minecraft:").unwrap_or(&id);
                 let original = StructureStart::new(5, def, chunk, vec![Piece::Legacy(piece)]);
                 let saved = original.save().unwrap();
-                let loaded = read_saved_start(5, def, chunk, &saved, &resources, &bindings)
+                let loaded = read_saved_start(5, def, chunk, &saved, 1234, &resources, &bindings)
                     .unwrap_or_else(|| panic!("{id} decodes"));
                 let piece = &original.pieces[0];
                 assert_eq!(
@@ -158,8 +168,8 @@ mod tests {
             }
         }
         // Both woods and each kind of the mineshaft, every fortress and
-        // stronghold kind (the fortress Start writes nebcr too).
-        assert_eq!(pieces.len(), 8 + 15 + 13);
+        // stronghold kind (the fortress Start writes nebcr too), the hut.
+        assert_eq!(pieces.len(), 8 + 15 + 13 + 1);
         // The same pieces as vanilla's saved `Children`, through
         // `StructureStart.loadStaticStart`.
         let def = &defs[0];
@@ -168,7 +178,7 @@ mod tests {
         let mut original = StructureStart::new(5, def, chunk, pieces);
         original.references = 2;
         let tag = original.save().unwrap();
-        let loaded = read_saved_start(5, def, chunk, &tag, &resources, &bindings)
+        let loaded = read_saved_start(5, def, chunk, &tag, 1234, &resources, &bindings)
             .expect("every piece type decodes");
         assert_eq!(loaded.save(), Some(tag.clone()));
         assert_eq!(
@@ -193,10 +203,44 @@ mod tests {
             };
             child.insert(key.into(), value);
             assert!(
-                read_saved_start(5, def, chunk, &broken, &resources, &bindings).is_none(),
+                read_saved_start(5, def, chunk, &broken, 1234, &resources, &bindings).is_none(),
                 "child {index}: {key}"
             );
         }
+    }
+
+    /// An imported Java 1.21 save's swamp hut (issue #16530): the saved
+    /// `tesh` child keeps its own box, not the regenerated hut's. The
+    /// regenerated hut would sit at Y=64, one above the saved Y=63, and the
+    /// mismatched bounds would leave the start with no pieces at all, so its
+    /// witch override would fall back to the biome's spawns.
+    #[test]
+    fn the_saved_swamp_hut_keeps_its_saved_box() {
+        let defs = defs();
+        let def = &defs[3];
+        let (resources, bindings) = world();
+        let chunk = ChunkPos::new(80, 22);
+        let child = horizon_core::nbt::parse_snbt(
+            r#"{id:"minecraft:tesh",BB:[I;1280,63,352,1286,69,360],O:0,GD:0,Width:7,Height:7,Depth:9,HPos:63,Witch:1b,Cat:1b}"#,
+        )
+        .unwrap()
+        .0;
+        let tag = Tag::compound([
+            ("id", Tag::String(def.name.as_str().into())),
+            ("ChunkX", Tag::Int(80)),
+            ("ChunkZ", Tag::Int(22)),
+            ("references", Tag::Int(1)),
+            ("Children", Tag::List(vec![child])),
+        ]);
+        let loaded = read_saved_start(3, def, chunk, &tag, 1234, &resources, &bindings)
+            .unwrap_or_else(|| panic!("tesh decodes"));
+        assert_eq!(
+            loaded.pieces[0].bounding_box(),
+            BoundingBox::new([1280, 63, 352], [1286, 69, 360])
+        );
+        // The witch's and cat's flags share the one spawned flag this piece
+        // models, so the re-saved tag is exactly the tag it loaded.
+        assert_eq!(loaded.save(), Some(tag));
     }
 
     /// Saved NBT expectations from the vanilla tag constructors, including
@@ -255,7 +299,7 @@ mod tests {
             let def = &defs[family];
             // Codec.INT_STREAM accepts a numeric list as well as an int array,
             // and BoundingBox normalizes inverted corners.
-            let parse = |text: &str| crate::nbt::parse_snbt(text).unwrap().0;
+            let parse = |text: &str| horizon_core::nbt::parse_snbt(text).unwrap().0;
             let child = parse(&format!(
                 r#"{{id:"minecraft:{id}",BB:[4,5,6,1,2,3],O:-3,GD:-1.25f,{input}}}"#
             ));
@@ -269,7 +313,7 @@ mod tests {
                 ("references", Tag::Int(2)),
                 ("Children", Tag::List(vec![child])),
             ]);
-            let loaded = read_saved_start(5, def, chunk, &tag, &resources, &bindings)
+            let loaded = read_saved_start(5, def, chunk, &tag, 1234, &resources, &bindings)
                 .unwrap_or_else(|| panic!("{id}: {input}"));
             let saved = loaded.save().unwrap();
             assert_eq!(
@@ -287,7 +331,7 @@ mod tests {
         super::super::StructureResources,
         crate::worldgen::block_feature::FeatureBlockBindings<'static>,
     ) {
-        let (mut tag, _) = crate::nbt::parse_snbt(
+        let (mut tag, _) = horizon_core::nbt::parse_snbt(
             r#"{DataVersion:0,states:[
             {id:"minecraft:air"},{id:"minecraft:cave_air"},{id:"minecraft:void_air"}],defaults:{
             "minecraft:air":0,"minecraft:cave_air":1,"minecraft:void_air":2}}"#,

@@ -96,12 +96,13 @@ impl Launcher {
     }
 
     /// How many resource and shader packs the selected instance has.
-    pub(super) fn packs_count(&mut self) -> usize {
+    /// How many resource packs and shader packs the selected instance has.
+    pub(super) fn pack_counts(&mut self) -> (usize, usize) {
         let Some(home) = self.selected_instance().map(|i| i.home.clone()) else {
-            return 0;
+            return (0, 0);
         };
         self.load_packs_list(home);
-        self.game_packs.resource.len() + self.game_packs.shader.len()
+        (self.game_packs.resource.len(), self.game_packs.shader.len())
     }
 
     /// Home's Packs tab, for the selected instance: its buttons (beside the tabs) and its list.
@@ -296,6 +297,13 @@ impl Launcher {
             true => pack.file.clone(),
             false if pack.title == pack.file => pack.description.clone(),
             false => format!("{} · {}", pack.description, pack.file),
+        };
+        let facts = match &pack.unsupported {
+            Some(why) => {
+                let label = horizon_launcher::browser::Support::No(String::new()).label();
+                format!("{label} · {why} · {facts}")
+            }
+            None => facts,
         };
         plate(&t)
             .flex()

@@ -11,6 +11,7 @@ The measurement excludes full client startup, renderer and first frame.
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -18,26 +19,60 @@ import tempfile
 from pathlib import Path
 
 
+def _measurement(fields, field, binary, mode):
+    """Parse one child-reported numeric field, rejecting invalid measurements.
+
+    Elapsed times and RSS counters are durations/sizes: NaN, infinities,
+    negative values and non-numeric text are never valid samples. Reject them
+    with a diagnostic naming the binary, mode and field rather than letting a
+    bad value reach aggregation or a JSON report.
+    """
+    if field not in fields:
+        raise RuntimeError(f"{binary} {mode}: missing required measurement {field}")
+    raw = fields[field]
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{binary} {mode}: invalid {field}: {raw!r} is not numeric") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"{binary} {mode}: invalid {field}: {raw!r} is not finite")
+    if value < 0:
+        raise RuntimeError(f"{binary} {mode}: invalid {field}: {raw!r} is negative")
+    return value
+
+
+def _derived(value, field, binary, mode):
+    """Guard the wait4-derived measurements before they enter a report."""
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{binary} {mode}: invalid {field}: {value!r} is not finite and nonnegative")
+    return value
+
+
 def run(binary, resources, mode):
-    with tempfile.TemporaryFile(mode="w+t") as output:
+    # Drain both streams to seekable files, never to an undrained PIPE: a child
+    # that writes more than a pipe buffer to stderr would block forever while
+    # wait4 waits for it to exit. A temp file also keeps the stderr available
+    # for the failure diagnostic without a reader thread.
+    with tempfile.TemporaryFile(mode="w+t") as output, \
+            tempfile.TemporaryFile(mode="w+b") as errors:
         proc = subprocess.Popen([str(binary), str(resources), mode], stdout=output,
-                                stderr=subprocess.PIPE)
+                                stderr=errors)
         _, status, usage = os.wait4(proc.pid, 0)
         proc.returncode = os.waitstatus_to_exitcode(status)
-        _, stderr = proc.communicate()
         if proc.returncode:
-            raise RuntimeError(f"{binary} {mode}: {stderr.decode(errors='replace')}")
+            errors.seek(0)
+            raise RuntimeError(f"{binary} {mode}: " + errors.read().decode(errors="replace"))
         output.seek(0)
         fields = dict(line.rstrip().split("=", 1) for line in output if "=" in line)
     measurements = {
-        "phase_ms": float(fields["phase_ms"]),
-        "total_ms": float(fields["total_ms"]),
-        "cpu_ms": (usage.ru_utime + usage.ru_stime) * 1000.0,
-        "peak_rss_kib": usage.ru_maxrss,
+        "phase_ms": _measurement(fields, "phase_ms", binary, mode),
+        "total_ms": _measurement(fields, "total_ms", binary, mode),
+        "cpu_ms": _derived((usage.ru_utime + usage.ru_stime) * 1000.0, "cpu_ms", binary, mode),
+        "peak_rss_kib": _derived(usage.ru_maxrss, "peak_rss_kib", binary, mode),
     }
     for field in ("behaviour_json_ms", "facts_ms", "behaviours_ms", "post_rss_kib"):
         if field in fields:
-            measurements[field] = float(fields[field])
+            measurements[field] = _measurement(fields, field, binary, mode)
     return measurements
 
 
@@ -46,6 +81,11 @@ def percentile(values, percent):
     position = (len(ordered) - 1) * percent
     low = int(position)
     return ordered[low] + (ordered[min(low + 1, len(ordered) - 1)] - ordered[low]) * (position - low)
+
+
+def sha256_file(path):
+    """Hash a file's current bytes; used to pin executable identity."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main():
@@ -103,6 +143,24 @@ def main():
     for executable, _ in commands.values():
         if not executable.is_file():
             parser.error(f"release executable missing: {executable}")
+
+    # Pin each executable's identity before the first sample. Several modes can
+    # point at one resolved path (same-binary comparisons / alias paths), so pin
+    # every distinct path once and report that same identity for all its modes.
+    frozen_identity = {}
+    for executable, _ in commands.values():
+        if executable not in frozen_identity:
+            frozen_identity[executable] = sha256_file(executable)
+
+    def verify_identity(executable):
+        """Reject a persistent change to an executable's bytes mid-profile."""
+        current = sha256_file(executable)
+        expected = frozen_identity[executable]
+        if current != expected:
+            raise RuntimeError(
+                f"executable identity changed while profiling {executable}: "
+                f"frozen sha256={expected}, current sha256={current}")
+
     modes = list(commands)
     samples = {mode: [] for mode in modes}
     orders = []
@@ -112,7 +170,14 @@ def main():
         orders.append(list(order))
         for mode in order:
             executable, binary_mode = commands[mode]
+            verify_identity(executable)
             samples[mode].append(run(executable, resources, binary_mode))
+            verify_identity(executable)
+    # Final guard before emitting the report: every sampled path still matches
+    # the identity it was frozen with, so the report cannot pair timings with a
+    # replacement binary's hash.
+    for executable in frozen_identity:
+        verify_identity(executable)
     result = {
         "scope": "Assets + BlockFacts + Behaviours loader only; no full startup or first frame",
         "resources": str(resources),
@@ -122,7 +187,7 @@ def main():
         "load_average_after": os.getloadavg(),
         "executables": {
             mode: {"path": str(executable), "mode": binary_mode,
-                   "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+                   "sha256": frozen_identity[executable]}
             for mode, (executable, binary_mode) in commands.items()
         },
         "metrics": {
@@ -141,7 +206,10 @@ def main():
             for mode, rows in samples.items()
         },
     }
-    data = json.dumps(result, indent=2)
+    # Defense in depth: every value was validated at admission, but refuse to
+    # emit nonstandard NaN/Infinity tokens even if a future metric slips past.
+    # This raises before printing or writing, so an existing report is kept.
+    data = json.dumps(result, indent=2, allow_nan=False)
     print(data)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)

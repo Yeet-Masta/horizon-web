@@ -3,17 +3,14 @@
 //! chunkgen_bench <client resource dir> [--seed S] [--size N] [--threads T]
 //!     [--center CX CZ] [--verify <material-stage parity dir>] [--no-decorate]
 //!     [--dimension overworld|the_nether|the_end]
-//!     [--warmup] [--json] [--no-map] [--snapshot PATH]
+//!     [--warmup] [--json] [--no-map] [--snapshot PATH] [--datapack PATH]...
+//! --datapack: a world data pack, a folder or a `.zip` with `pack.mcmeta`
+//!     (repeatable, lowest first), over the bundles as a world's packs are.
+//!     Every biome a pack gives is kept: the game leaves a pack's new biomes
+//!     out of a world's generator, this keeps them so the pack's own worldgen
+//!     runs. The content mods' biome modifiers (`biome-modifiers.json`) are
+//!     the client's, so they are not applied, and a warning says so.
 use horizon_core::position::ChunkPos;
-use horizon_world::{
-    DATA_VERSION,
-    heightmap::HeightmapType,
-    nbt::Tag,
-    registry::BlockRegistry,
-    worldgen::generator::{
-        DecorateStats, GeneratorData, GeneratorWorker, OverworldGenerator, ProtoChunk, StageTimings,
-    },
-};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -26,6 +23,20 @@ use std::{
     },
     time::Instant,
 };
+use {
+    horizon_core::nbt::Tag,
+    horizon_world::{
+        DATA_VERSION,
+        heightmap::HeightmapType,
+        registry::BlockRegistry,
+        worldgen::generator::{
+            DecorateStats, GeneratorData, GeneratorWorker, OverworldGenerator, ProtoChunk,
+            StageTimings,
+        },
+    },
+};
+#[path = "datapacks/reader.rs"]
+mod pack_reader;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
@@ -277,6 +288,7 @@ fn main() -> Result<(), Error> {
     let mut parity = None;
     let mut snapshot_path = None;
     let mut decorate = true;
+    let mut datapacks = Vec::new();
     let (mut warmup, mut json, mut map) = (false, false, true);
     let mut dimension = String::from("minecraft:overworld");
     let mut starts: Option<(i32, i32, i32, i32, PathBuf)> = None;
@@ -289,6 +301,7 @@ fn main() -> Result<(), Error> {
             "--center" => center = (next().parse()?, next().parse()?),
             "--verify" => parity = Some(PathBuf::from(next())),
             "--snapshot" => snapshot_path = Some(PathBuf::from(next())),
+            "--datapack" => datapacks.push(PathBuf::from(next())),
             "--no-decorate" => decorate = false,
             "--warmup" => warmup = true,
             "--json" => json = true,
@@ -315,8 +328,45 @@ fn main() -> Result<(), Error> {
     }
     let start = Instant::now();
     let registry = registry(&resources)?;
-    let data = GeneratorData::load(&resources.join("worldgen"), registry)?;
-    println!("loaded resources in {:.2?}", start.elapsed());
+    let (data, pack_names) = if datapacks.is_empty() {
+        let data = GeneratorData::load(&resources.join("worldgen"), registry)?;
+        (data, Vec::new())
+    } else {
+        // `vanillagen::biome_modifiers_over_packs`, which the game applies over
+        // the packs' biomes, reads the content mods' overlay (client layer).
+        if resources.join("biome-modifiers.json").exists() {
+            eprintln!(
+                "content mod biome modifiers are not applied ({} exists): the game puts \
+                 them over the packs' biomes",
+                resources.join("biome-modifiers.json").display()
+            );
+        }
+        let ov =
+            pack_reader::overrides(&datapacks.iter().map(|p| p.as_path()).collect::<Vec<_>>())?;
+        let data = GeneratorData::load_with(&resources.join("worldgen"), registry, &ov)?;
+        for warning in data.warnings() {
+            eprintln!("data pack worldgen: {warning}");
+        }
+        let names = datapacks
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        (data, names)
+    };
+    if pack_names.is_empty() {
+        println!("loaded resources in {:.2?}", start.elapsed());
+    } else {
+        println!(
+            "loaded resources in {:.2?} (datapacks: {})",
+            start.elapsed(),
+            pack_names.join(", ")
+        );
+    }
     if let Some(parity) = parity {
         verify(&data, &parity)?;
     }
@@ -398,14 +448,15 @@ fn main() -> Result<(), Error> {
         per_chunk(|t| t.carvers)
     );
     if json {
-        println!(
-            "BENCH {}",
-            serde_json::json!({"phase": "proto", "chunks": count,
-            "threads": threads, "wall_s": elapsed.as_secs_f64(), "cpu_s": cpu_elapsed,
-            "biomes_ms_chunk": per_chunk(|t| t.biomes), "noise_ms_chunk": per_chunk(|t| t.noise),
-            "structures_ms_chunk": per_chunk(|t| t.structures),
-            "surface_ms_chunk": per_chunk(|t| t.surface), "carvers_ms_chunk": per_chunk(|t| t.carvers)})
-        );
+        let mut bench = serde_json::json!({"phase": "proto", "chunks": count,
+        "threads": threads, "wall_s": elapsed.as_secs_f64(), "cpu_s": cpu_elapsed,
+        "biomes_ms_chunk": per_chunk(|t| t.biomes), "noise_ms_chunk": per_chunk(|t| t.noise),
+        "structures_ms_chunk": per_chunk(|t| t.structures),
+        "surface_ms_chunk": per_chunk(|t| t.surface), "carvers_ms_chunk": per_chunk(|t| t.carvers)});
+        if !pack_names.is_empty() {
+            bench["packs"] = serde_json::json!(pack_names);
+        }
+        println!("BENCH {bench}");
     }
     let mut chunks: Vec<Option<ProtoChunk>> = slots
         .into_iter()
@@ -638,12 +689,12 @@ fn snapshot(chunks: &[Option<ProtoChunk>], path: &Path, phase: &str) -> Result<(
         for (position, tag) in &chunk.block_entities {
             writeln!(out, "blockentity {position:?}")?;
             let bytes =
-                horizon_world::nbt::write_network(&Tag::Compound(tag.clone()), Default::default())?;
+                horizon_core::nbt::write_network(&Tag::Compound(tag.clone()), Default::default())?;
             out.write_all(&(bytes.len() as u64).to_le_bytes())?;
             out.write_all(&bytes)?;
         }
         let entities = Tag::List(chunk.entities.iter().cloned().map(Tag::Compound).collect());
-        let bytes = horizon_world::nbt::write_network(&entities, Default::default())?;
+        let bytes = horizon_core::nbt::write_network(&entities, Default::default())?;
         out.write_all(&(bytes.len() as u64).to_le_bytes())?;
         out.write_all(&bytes)?;
     }

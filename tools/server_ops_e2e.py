@@ -16,7 +16,7 @@ ops.json); at level 2 the admins' commands must do nothing.
 
 The game and the server run with fresh HORIZON_HOME, launcher and XDG folders and without audio. Logs go to --out.
 Build first:
-    cargo build --profile fast -p horizon-client -p horizon-client-lib --bins
+    cargo build --profile fast -p horizon-game -p horizon-client-lib --bins
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -96,7 +96,7 @@ def run(bins, level, out):
                                                   'level': level, 'bypassesPlayerLimit': False}]))
     command = [bins / f'horizon-client{EXE}', '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     server = Server(command, folder, out / f'server-{level}.log')
-    game = Game(f'opal{level}', bins / 'horizon-ctl', lab.RESOURCES.resolve())
+    game = Game(f'opal{level}', lab.binary(bins, 'horizon-ctl'), lab.RESOURCES.resolve())
     for key in ('XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'HORIZON_LAUNCHER_HOME'):
         game.d.env[key] = str(game.work / key.lower())
     game.d.env['HORIZON_LAUNCHER_NO_SELF_UPDATE'] = '1'

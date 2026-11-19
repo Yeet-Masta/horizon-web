@@ -6,7 +6,7 @@ use crate::{
     adapter::ids,
     buf::{Codec, Reader, Writer, pack_block_pos, unpack_block_pos},
 };
-use horizon_world::nbt::Tag;
+use horizon_core::nbt::Tag;
 use std::sync::Arc;
 
 #[doc(hidden)]
@@ -89,6 +89,7 @@ pub mod component {
     /// `DeathProtection`: the `death_effects` a stack runs when it saves its holder.
     pub const DEATH_PROTECTION: i32 = 36;
     pub const BLOCKS_ATTACKS: i32 = 37;
+    pub const KINETIC_WEAPON: i32 = 39;
     pub const STORED_ENCHANTMENTS: i32 = 45;
     pub const PROFILE: i32 = 72;
     pub const BANNER_PATTERNS: i32 = 74;
@@ -121,12 +122,26 @@ pub mod component {
     /// `Tool`: rules, default mining speed, wear per block, creative breaking.
     pub const TOOL: i32 = 28;
     pub const CONTAINER: i32 = 77;
+    /// `BlockItemStateProperties`: the block state a block item places (a hive's honey level).
+    pub const BLOCK_STATE: i32 = 78;
+    /// `Bees`: a hive item's occupants.
+    pub const BEES: i32 = 79;
     pub const SULFUR_CUBE_CONTENT: i32 = 80;
     pub const PAINTING_VARIANT: i32 = 109;
     /// `SignText.STREAM_CODEC`: a sign item's text, front and back.
     pub const SIGN_TEXT_FRONT: i32 = 118;
     pub const SIGN_TEXT_BACK: i32 = 119;
 }
+
+/// `EquipmentSlotGroup`'s serialized names by network id (`EquipmentSlotGroup.BY_ID`): the slot
+/// group an [`component::ATTRIBUTE_MODIFIERS`] entry applies in.
+pub const EQUIPMENT_SLOT_GROUPS: [&str; 11] = [
+    "any", "mainhand", "offhand", "hand", "feet", "legs", "chest", "head", "armor", "body",
+    "saddle",
+];
+/// `AttributeModifier.Operation`'s serialized names by network id (`Operation.BY_ID`).
+pub const ATTRIBUTE_OPERATIONS: [&str; 3] =
+    ["add_value", "add_multiplied_base", "add_multiplied_total"];
 
 /// A written book's content (`WrittenBookContent.STREAM_CODEC`). The raw title
 /// and pages are what a book shows; the filtered variants (`Filterable.filtered`,
@@ -399,11 +414,15 @@ impl Component {
                         .collect::<Result<_>>()?,
                 )
             }
+            // An older client's enchantments in its own numbering are read as the pinned ones (ids::synced_up).
             ENCHANTMENTS | STORED_ENCHANTMENTS => {
                 let n = r.count(r.remaining())?;
                 Self::Enchantments(
                     (0..n)
-                        .map(|_| Ok((r.varint()?, r.varint()?)))
+                        .map(|_| {
+                            let e = ids::synced_up("minecraft:enchantment", r.varint()?);
+                            Ok((e, r.varint()?))
+                        })
                         .collect::<Result<_>>()?,
                 )
             }
@@ -529,9 +548,10 @@ impl Component {
                 let material = TrimHolder::read(r, TrimMaterial::read)?;
                 let pattern = TrimHolder::read(r, TrimPattern::read)?;
                 match (material, pattern) {
-                    (TrimHolder::Id(material), TrimHolder::Id(pattern)) => {
-                        Self::Trim { material, pattern }
-                    }
+                    (TrimHolder::Id(material), TrimHolder::Id(pattern)) => Self::Trim {
+                        material: ids::synced_up("minecraft:trim_material", material),
+                        pattern: ids::synced_up("minecraft:trim_pattern", pattern),
+                    },
                     (material, pattern) => Self::TrimDirect { material, pattern },
                 }
             }
@@ -555,7 +575,9 @@ impl Component {
                 let bytes = r.since(start);
                 let mut ids = Reader::new(bytes);
                 match ids.varint() {
-                    Ok(id @ 1..) if ids.remaining() == 0 => Self::PaintingVariant(id - 1),
+                    Ok(id @ 1..) if ids.remaining() == 0 => {
+                        Self::PaintingVariant(ids::synced_up("minecraft:painting_variant", id - 1))
+                    }
                     _ => Self::Raw(bytes.to_vec()),
                 }
             }
@@ -592,7 +614,10 @@ impl Component {
             if pattern < 1 {
                 return None;
             }
-            layers.push((pattern - 1, color));
+            layers.push((
+                ids::synced_up("minecraft:banner_pattern", pattern - 1),
+                color,
+            ));
         }
         (r.remaining() == 0).then_some(layers)
     }
@@ -608,23 +633,40 @@ impl Component {
                 };
                 w.bytes(legacy.as_deref().unwrap_or(bytes));
             }
-            Self::BannerPatterns(layers) => {
+            // Nothing renumbered (a 26.3 client): written as they are, as the enchantments below.
+            Self::BannerPatterns(layers) if !ids::synced_set() => {
                 w.varint(layers.len() as i32);
                 for (pattern, color) in layers {
                     w.varint(pattern + 1);
                     w.varint(*color);
                 }
             }
+            Self::BannerPatterns(layers) => {
+                // A pattern an older client lacks is left out (ids::synced_down).
+                let layers: Vec<(i32, i32)> = layers
+                    .iter()
+                    .filter_map(|(p, c)| {
+                        ids::synced_down("minecraft:banner_pattern", *p).map(|p| (p, *c))
+                    })
+                    .collect();
+                w.varint(layers.len() as i32);
+                for (pattern, color) in layers {
+                    w.varint(pattern + 1);
+                    w.varint(color);
+                }
+            }
             Self::Trim { material, pattern } => {
-                w.varint(material + 1);
-                w.varint(pattern + 1);
+                w.varint(ids::synced_down_or_first("minecraft:trim_material", *material) + 1);
+                w.varint(ids::synced_down_or_first("minecraft:trim_pattern", *pattern) + 1);
             }
             Self::TrimDirect { material, pattern } => {
                 material.write(w, TrimMaterial::write);
                 pattern.write(w, TrimPattern::write);
             }
             Self::Instrument(id) => w.varint(id + 1),
-            Self::PaintingVariant(id) => w.varint(id + 1),
+            Self::PaintingVariant(id) => {
+                w.varint(ids::synced_down_or_first("minecraft:painting_variant", *id) + 1)
+            }
             Self::Int(v) if kind == component::DYED_COLOR => w.i32(*v),
             Self::Int(v) => w.varint(*v),
             Self::Unit => {}
@@ -634,6 +676,26 @@ impl Component {
             Self::Lore(lines) => {
                 w.varint(lines.len() as i32);
                 lines.iter().for_each(|l| w.nbt(l));
+            }
+            Self::Enchantments(list)
+                if ids::synced_set()
+                    && matches!(
+                        kind,
+                        component::ENCHANTMENTS | component::STORED_ENCHANTMENTS
+                    ) =>
+            {
+                // An enchantment an older client lacks is left out (ids::synced_down).
+                let list: Vec<(i32, i32)> = list
+                    .iter()
+                    .filter_map(|(e, l)| {
+                        ids::synced_down("minecraft:enchantment", *e).map(|e| (e, *l))
+                    })
+                    .collect();
+                w.varint(list.len() as i32);
+                for (e, level) in list {
+                    w.varint(e);
+                    w.varint(level);
+                }
             }
             Self::Enchantments(list) | Self::StewEffects(list) => {
                 w.varint(list.len() as i32);
@@ -1155,6 +1217,21 @@ fn write_value(kind: i32, c: &Component, w: &mut Writer) {
         CONTAINER => !quirks.stacks_in_components,
         _ => false,
     };
+    // These are EitherHolders until 26.1 (the codecs go through EitherHolder.streamCodec in the 1.21.4, 1.21.5,
+    // 1.21.8, 1.21.10 and 1.21.11 client jars): a flag set for the holder, which is what the pinned value is.
+    // An instrument is a plain holder until 1.21.4 (its InstrumentComponent wrapper is 1.21.5's).
+    let either = match kind {
+        JUKEBOX_PLAYABLE
+        | PROVIDES_TRIM_MATERIAL
+        | DAMAGE_TYPE
+        | CHICKEN_VARIANT
+        | ZOMBIE_NAUTILUS_VARIANT => true,
+        INSTRUMENT => !quirks.components_before_1_21_5,
+        _ => false,
+    };
+    if renumbered && either && quirks.either_holders_and_tag_resistance {
+        w.bool(true);
+    }
     if !renumbered || !held {
         return c.write(kind, w);
     }
@@ -1329,12 +1406,15 @@ impl Codec<Option<Stack>> for DelimitedSlot {
             v1_21_4::write_stack(v.as_ref(), w);
             return;
         }
-        let Some(s) = v else {
+        // What the other side lacks (-1) is left out, as `write_slot` does: an item as an empty slot,
+        // a component dropped from the patch.
+        let item = v.as_ref().map_or(-1, |s| ids::item(s.item));
+        let Some(s) = v.as_ref().filter(|_| item >= 0) else {
             w.varint(0);
             return;
         };
         w.varint(s.count);
-        w.varint(ids::item(s.item));
+        w.varint(item);
         // The patch as read holds the pinned version's component ids: written again from the values when
         // they are being renumbered.
         if let Some(patch) = &s.wire.0
@@ -1343,15 +1423,18 @@ impl Codec<Option<Stack>> for DelimitedSlot {
             w.bytes(patch);
             return;
         }
-        w.varint(s.added.len() as i32);
-        w.varint(s.removed.len() as i32);
-        for (kind, c) in &s.added {
+        let has = |kind: i32| ids::component(kind) >= 0;
+        let added: Vec<_> = s.added.iter().filter(|(k, _)| has(*k)).collect();
+        let removed: Vec<_> = s.removed.iter().filter(|k| has(**k)).collect();
+        w.varint(added.len() as i32);
+        w.varint(removed.len() as i32);
+        for (kind, c) in added {
             w.varint(ids::component(*kind));
             let mut value = Writer::new();
             write_value(*kind, c, &mut value);
             w.byte_array(&value.data);
         }
-        for kind in &s.removed {
+        for kind in removed {
             w.varint(ids::component(*kind));
         }
     }
@@ -1417,14 +1500,17 @@ impl Codec<Option<Hashed>> for HashedSlot {
         if !r.bool()? {
             return Ok(None);
         }
-        let item = r.varint()?;
+        // An older client's own item and component ids, as every other stack reader maps them.
+        let item = ids::item(r.varint()?);
         let count = r.varint()?;
         let n = r.count(256)?;
         let added = (0..n)
-            .map(|_| Ok((r.varint()?, r.i32()?)))
+            .map(|_| Ok((ids::component(r.varint()?), r.i32()?)))
             .collect::<Result<_>>()?;
         let n = r.count(256)?;
-        let removed = (0..n).map(|_| r.varint()).collect::<Result<_>>()?;
+        let removed = (0..n)
+            .map(|_| r.varint().map(ids::component))
+            .collect::<Result<_>>()?;
         Ok(Some(Hashed {
             item,
             count,
@@ -1433,26 +1519,331 @@ impl Codec<Option<Hashed>> for HashedSlot {
         }))
     }
     fn write(v: &Option<Hashed>, w: &mut Writer) {
-        w.bool(v.is_some());
-        if let Some(h) = v {
-            w.varint(ids::item(h.item));
-            w.varint(h.count);
-            w.varint(h.added.len() as i32);
-            for (k, hash) in &h.added {
-                w.varint(ids::component(*k));
-                w.i32(*hash);
-            }
-            w.varint(h.removed.len() as i32);
-            for k in &h.removed {
-                w.varint(ids::component(*k));
-            }
+        // As in `DelimitedSlot::write`: an item the other side lacks as no stack, its components left out.
+        let item = v.as_ref().map_or(-1, |h| ids::item(h.item));
+        let Some(h) = v.as_ref().filter(|_| item >= 0) else {
+            w.bool(false);
+            return;
+        };
+        w.bool(true);
+        w.varint(item);
+        w.varint(h.count);
+        let added: Vec<(i32, i32)> = h
+            .added
+            .iter()
+            .map(|(k, hash)| (ids::component(*k), *hash))
+            .filter(|(k, _)| *k >= 0)
+            .collect();
+        w.varint(added.len() as i32);
+        for (k, hash) in added {
+            w.varint(k);
+            w.i32(hash);
+        }
+        let removed: Vec<i32> = h
+            .removed
+            .iter()
+            .map(|k| ids::component(*k))
+            .filter(|k| *k >= 0)
+            .collect();
+        w.varint(removed.len() as i32);
+        for k in removed {
+            w.varint(k);
         }
     }
 }
 
+// Generated retained-allocation traversals; regenerate with protocol-retained-gen.
+impl crate::retained::OwnedHeap for Nested {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+impl crate::retained::OwnedHeap for WrittenBook {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            title,
+            title_filtered,
+            author,
+            generation,
+            pages,
+            pages_filtered,
+            resolved,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(title))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(title_filtered))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(author))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(generation))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(pages))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(pages_filtered))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(resolved))
+    }
+}
+impl crate::retained::OwnedHeap for Component {
+    fn owned_heap_bytes(&self) -> usize {
+        match self {
+            Self::Int(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Unit => 0usize,
+            Self::Bool(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Text(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Nbt(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Ident(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Lore(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Enchantments(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::AttackRange(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Potion {
+                potion,
+                color,
+                rest,
+            } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(potion))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(color))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(rest)),
+            Self::Profile(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::CustomModelData {
+                floats,
+                flags,
+                strings,
+                colors,
+            } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(floats))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(flags))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(strings))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(colors)),
+            Self::TooltipDisplay { hide, hidden } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(hide))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(hidden)),
+            Self::WritableBook { pages, filtered } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(pages))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(filtered)),
+            Self::WrittenBook(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Stacks(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Fireworks { flight, explosions } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(flight))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(explosions)),
+            Self::FireworkExplosion(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::LodestoneTracker { target, tracked } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(target))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(tracked)),
+            Self::Trim { material, pattern } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(material))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(pattern)),
+            Self::TrimDirect { material, pattern } => 0usize
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(material))
+                .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(pattern)),
+            Self::StewEffects(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Instrument(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::BannerPatterns(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::PaintingVariant(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+            Self::Raw(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+        }
+    }
+}
+impl crate::retained::OwnedHeap for FireworkExplosion {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            shape,
+            colors,
+            fade,
+            trail,
+            twinkle,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(shape))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(colors))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(fade))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(trail))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(twinkle))
+    }
+}
+impl crate::retained::OwnedHeap for Profile {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            name,
+            id,
+            properties,
+            skin,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(name))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(id))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(properties))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(skin))
+    }
+}
+impl crate::retained::OwnedHeap for SkinPatch {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            body,
+            cape,
+            elytra,
+            slim,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(body))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(cape))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(elytra))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(slim))
+    }
+}
+impl crate::retained::OwnedHeap for WirePatch {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self(field_0) = self;
+        0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+    }
+}
+impl crate::retained::OwnedHeap for Older {
+    fn owned_heap_bytes(&self) -> usize {
+        match self {
+            Self::Pinned => 0usize,
+            Self::Dropped => 0usize,
+            Self::Rewritten(field_0) => {
+                0usize.saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(field_0))
+            }
+        }
+    }
+}
+impl crate::retained::OwnedHeap for Stack {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            item,
+            count,
+            added,
+            removed,
+            wire,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(item))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(count))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(added))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(removed))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(wire))
+    }
+}
+impl crate::retained::OwnedHeap for Slot {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+impl crate::retained::OwnedHeap for DelimitedSlot {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+impl crate::retained::OwnedHeap for Template {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+impl crate::retained::OwnedHeap for Hashed {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self {
+            item,
+            count,
+            added,
+            removed,
+        } = self;
+        0usize
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(item))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(count))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(added))
+            .saturating_add(crate::retained::OwnedHeap::owned_heap_bytes(removed))
+    }
+}
+impl crate::retained::OwnedHeap for HashedSlot {
+    fn owned_heap_bytes(&self) -> usize {
+        let Self = self;
+        0usize
+    }
+}
+// End generated retained traversals.
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hashed_stacks_go_to_an_older_side_and_back_in_its_ids() {
+        use crate::adapter::{ServerVersion, ids::Way};
+        let old = ServerVersion::V1_21_5.ids().unwrap();
+        // An item whose id moved since 1.21.5.
+        let moved = {
+            let _down = ids::renumbering(old, Way::Down);
+            (1..2000)
+                .find(|&id| ids::item(id) >= 0 && ids::item(id) != id)
+                .unwrap()
+        };
+        let hashed = Some(Hashed {
+            item: moved,
+            count: 3,
+            added: Vec::new(),
+            removed: Vec::new(),
+        });
+        let mut w = Writer::new();
+        {
+            let _down = ids::renumbering(old, Way::Down);
+            HashedSlot::write(&hashed, &mut w);
+        }
+        let _up = ids::renumbering(old, Way::Up);
+        assert_eq!(HashedSlot::read(&mut Reader::new(&w.data)).unwrap(), hashed);
+    }
+
+    #[test]
+    fn an_item_the_older_side_lacks_goes_as_no_stack_not_as_minus_one() {
+        use crate::adapter::{ServerVersion, ids::Way};
+        let old = ServerVersion::V1_21_5.ids().unwrap();
+        let _down = ids::renumbering(old, Way::Down);
+        let missing = (1..3000)
+            .find(|&id| ids::item(id) < 0)
+            .expect("an item 1.21.5 lacks");
+        let hashed = Some(Hashed {
+            item: missing,
+            count: 1,
+            added: Vec::new(),
+            removed: Vec::new(),
+        });
+        let mut w = Writer::new();
+        HashedSlot::write(&hashed, &mut w);
+        assert_eq!(w.data, [0]);
+    }
     use crate::text::literal;
 
     fn round<T: PartialEq + std::fmt::Debug, C: Codec<T>>(v: T) {
@@ -1947,5 +2338,57 @@ mod tests {
             Slot::write(&stack, &mut w);
             assert_eq!(w.data, bytes);
         }
+    }
+
+    /// Until 26.1 damage_type, instrument (from 1.21.5), provides_trim_material, chicken/variant and
+    /// zombie_nautilus/variant are EitherHolders: a flag set for the holder goes before the pinned holder.
+    #[test]
+    fn either_holder_components_are_written_with_their_flag_for_older_clients() {
+        use crate::adapter::{ServerVersion, ids::Way};
+        let written = |version: ServerVersion, added: Vec<(i32, Component)>| {
+            let mut stack = Stack::new(1012, 1);
+            stack.added = added;
+            let mut w = Writer::new();
+            let _down = ids::renumbering(version.ids().unwrap(), Way::Down);
+            Slot::write(&Some(stack), &mut w);
+            w.data
+        };
+        let raw = |v: u8| Component::Raw(vec![v]);
+        // diamond is 898 in 1.21.11 (0x82 0x07); damage_type 8 and zombie_nautilus/variant 94.
+        assert_eq!(
+            written(
+                ServerVersion::V1_21_11,
+                vec![
+                    (component::DAMAGE_TYPE, raw(5)),
+                    (component::ZOMBIE_NAUTILUS_VARIANT, raw(4)),
+                ]
+            ),
+            [1, 0x82, 0x07, 2, 0, 8, 1, 5, 94, 1, 4]
+        );
+        // 1.21.5: diamond 845 (0xcd 0x06); instrument 52, provides_trim_material 53, chicken/variant 86
+        assert_eq!(
+            written(
+                ServerVersion::V1_21_5,
+                vec![
+                    (component::INSTRUMENT, Component::Instrument(2)),
+                    (component::PROVIDES_TRIM_MATERIAL, raw(6)),
+                    (component::CHICKEN_VARIANT, raw(7)),
+                ]
+            ),
+            [1, 0xcd, 0x06, 3, 0, 52, 1, 3, 53, 1, 6, 86, 1, 7]
+        );
+        // 1.21.4's instrument is a plain holder: diamond 836 (0xc4 0x06), instrument 50
+        assert_eq!(
+            written(
+                ServerVersion::V1_21_4,
+                vec![(component::INSTRUMENT, Component::Instrument(2))]
+            ),
+            [1, 0xc4, 0x06, 1, 0, 50, 3]
+        );
+        // 26.2 reads the pinned holders as they are: diamond 926 (0x9e 0x07), damage_type 8
+        assert_eq!(
+            written(ServerVersion::V26_2, vec![(component::DAMAGE_TYPE, raw(5))]),
+            [1, 0x9e, 0x07, 1, 0, 8, 5]
+        );
     }
 }

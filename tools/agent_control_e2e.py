@@ -56,10 +56,10 @@ POSITIONAL = {
     'goto': ['x', 'y', 'z'], 'break': ['x', 'y', 'z'], 'place': ['x', 'y', 'z'], 'block': ['x', 'y', 'z'],
     'find_block': ['block', 'radius'], 'entities': ['radius', 'type'], 'click_slot': ['slot'],
     'click_button': ['label'], 'type': ['text'], 'wait': ['ticks'], 'wait_ready': ['seconds'],
-    'command': ['command'], 'look_at_block': ['x', 'y', 'z'], 'click': ['id'], 'set': ['id', 'value'],
+    'command': ['command'], 'look_at_block': ['x', 'y', 'z', 'face'], 'click': ['id'], 'set': ['id', 'value'],
     'give': ['item', 'count'], 'options_get': ['keys'], 'options_set': ['key', 'value'],
     'record_start': ['name'], 'record_replay': ['name'], 'repro_export': ['name', 'path'],
-    'turn': ['dyaw', 'dpitch'], 'interact': ['x', 'y', 'z'],
+    'turn': ['dyaw', 'dpitch'], 'interact': ['x', 'y', 'z', 'face'],
     'wait_for': ['condition', 'value'], 'open': ['world', 'seed', 'mode'], 'select': ['slot'],
     'summon': ['kind', 'x', 'y', 'z'], 'interact_entity': ['id'], 'effect': ['id', 'seconds', 'amplifier'],
     'xp': ['levels'], 'options': ['page'], 'lan': ['action'], 'world_backup': ['folder'],
@@ -74,9 +74,9 @@ class Failed(Exception):
 
 
 def game_env(screen, home=None):
-    """The environment of a game: lab.game_env with HORIZON_HOME `home` (a scratch folder when None), no live-count
-    ping, and on Linux the virtual screen `screen` (macOS and Windows have none)."""
-    extra = {'HORIZON_TELEMETRY_URL': 'off'}  # no live-count ping from test games
+    """The environment of a game: lab.game_env with HORIZON_HOME `home` (a scratch folder when None),
+    and on Linux the virtual screen `screen` (macOS and Windows have none)."""
+    extra = {}
     if home is not None:
         extra['HORIZON_HOME'] = home
     if sys.platform in ('darwin', 'win32'):
@@ -106,11 +106,14 @@ class Cli:
         cmd = tool.replace('_', '-')
         positional = [str(args.pop(k)) for k in POSITIONAL.get(tool, []) if k in args]
         options = []
+        # commands.rs declares flag names with hyphens (no-world, in-place, keep-world); Python
+        # kwargs use underscores, so translate them before building --flag words. A boolean flag
+        # is a bare `--flag`; the BARE names are positional bool opts and stay bare words.
         for k, v in args.items():
             if v is True:
-                options.append(k if k in BARE.get(tool, []) else '--' + k)
+                options.append(k if k in BARE.get(tool, []) else '--' + k.replace('_', '-'))
             elif v is not False and v is not None:
-                options += ['--' + k, str(v)]
+                options += ['--' + k.replace('_', '-'), str(v)]
         # Options first: free text (type, command) runs to the end of the line.
         words = [cmd] + (options + positional if tool in ('type', 'command') else positional + options)
         if tool == 'screenshot':
@@ -1024,7 +1027,7 @@ def no_ai_check(mode, ctl, resources):
                 reply = json.loads(r.stdout.strip().splitlines()[-1])
                 log(mode, words, reply)
                 assert r.returncode == 4 and reply == {'error': REFUSAL, 'kind': 'denied'}, (r.returncode, reply)
-            client = ctl.with_name('horizon-client')
+            client = lab.binary(ctl.parent, 'horizon-client')
             args = [str(client), '--control-socket', str(socket), '--world', 'NoAi', '--world-frames', '30']
             if sys.platform == 'darwin' or os.environ.get('HORIZON_E2E_HEADLESS'):
                 args.append('--offscreen')
@@ -1066,7 +1069,7 @@ def setting_check(mode, ctl, out, resources):
     socket = work / 'c.sock'
     env['HORIZON_CONTROL'] = str(socket)  # the default endpoint, this home's
     (work / 'horizon-extras.txt').write_text('agentControl:true\n')
-    args = [str(ctl.with_name('horizon-client'))]
+    args = [str(lab.binary(ctl.parent, 'horizon-client'))]
     if sys.platform == 'darwin':
         args.append('--offscreen')
     game = subprocess.Popen(args, cwd=work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1135,7 +1138,8 @@ def run(mode, ctl, out, resources, which='survival'):
         summary = SCENARIOS[which](driver, out)
         print(f'[{mode}] PASS in {time.time() - started:.0f} s: {summary}')
         return True
-    except (Failed, AssertionError, StopIteration) as e:
+    except (Failed, AssertionError, StopIteration, json.JSONDecodeError, IndexError,
+            subprocess.TimeoutExpired) as e:
         print(f'[{mode}] FAIL: {e!r}')
         log_file = socket.with_suffix('.log')
         if log_file.exists():
@@ -1143,12 +1147,19 @@ def run(mode, ctl, out, resources, which='survival'):
         return False
     finally:
         try:
-            driver('quit')
-        except Exception:
-            pass
-        driver.close()
-        time.sleep(2)
-        shutil.rmtree(work, ignore_errors=True)
+            try:
+                driver('quit')
+            except Exception:
+                pass
+            try:
+                driver.close()
+            except Exception:
+                pass
+        finally:
+            # Cleanup must run even if a shutdown call raises, and a shutdown failure must not
+            # replace the scenario's result (Mcp.close can raise TimeoutExpired on stdin EOF).
+            time.sleep(2)
+            shutil.rmtree(work, ignore_errors=True)
 
 
 def main():
@@ -1161,7 +1172,7 @@ def main():
     if args.bin_dir:
         bins = Path(args.bin_dir).resolve()
     else:
-        subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib', '--bins'],
+        subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib', '--bins'],
                        cwd=ROOT, check=True)
         meta = json.loads(subprocess.run(['cargo', 'metadata', '--format-version', '1', '--no-deps'], cwd=ROOT,
                                          capture_output=True, text=True, check=True).stdout)
@@ -1173,7 +1184,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     modes = ['cli', 'mcp'] if args.mode == 'both' else [args.mode]
     scenarios = [*SCENARIOS, 'no-ai', 'setting'] if args.scenario == 'all' else [args.scenario]
-    results = {f'{m}/{s}': run(m, bins / 'horizon-ctl', out, resources, s) for m in modes for s in scenarios}
+    results = {f'{m}/{s}': run(m, lab.binary(bins, 'horizon-ctl'), out, resources, s) for m in modes for s in scenarios}
     print(json.dumps(results))
     sys.exit(0 if all(results.values()) else 1)
 

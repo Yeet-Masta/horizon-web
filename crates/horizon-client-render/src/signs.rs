@@ -3,7 +3,7 @@
 //! `back_text` NBT layout.
 pub use crate::chunk::block_entity::{SavedLine, SignData, SignText};
 use crate::{scoreboard, text::Text};
-use horizon_world::nbt::Tag;
+use horizon_core::nbt::Tag;
 
 /// `getBooleanOr(key, false)` and `Codec.BOOL`: any numeric tag's nonzero byte.
 fn nbt_flag(tag: &Tag, key: &str) -> bool {
@@ -115,7 +115,7 @@ impl SignText {
     }
     /// The component a line is saved as (`SignText.CODEC`): the one it was
     /// read as while its text is unchanged. A line edited since is a literal in
-    /// the old line's root style, as `SignBlockEntity.setMessages` makes it
+    /// the old line's root style, as `SignBlockEntity.updateMessages` makes it
     /// (the style keeps its colour and click event, the siblings go).
     pub fn message(&self, i: usize) -> Tag {
         let line = &self.lines[i];
@@ -141,7 +141,7 @@ impl SignText {
         // Signs are drawn every frame: a line read as plain text (most of them) skips the
         // NBT -> JSON -> component round trip. Its click event does not change the drawing.
         if self.saved[i].is_none() {
-            return Text::literal(self.lines[i].as_str());
+            return Text::untrusted(self.lines[i].as_str());
         }
         scoreboard::comp_text(&scoreboard::tag_to_json(&self.message(i)))
     }
@@ -435,8 +435,8 @@ mod tests {
     fn run_colors(text: &SignText, line: usize) -> Vec<(String, Option<u32>)> {
         text.line_text(line)
             .spans
-            .into_iter()
-            .map(|s| (s.text, s.style.color))
+            .iter()
+            .map(|s| (s.text.clone(), s.style.color))
             .collect()
     }
     #[test]
@@ -494,7 +494,7 @@ mod tests {
     fn an_edited_line_keeps_only_the_old_lines_style() {
         let mut data = SignData::default();
         data.decode(&styled_sign());
-        // `SignBlockEntity.setMessages`: a new literal with the old line's style.
+        // `SignBlockEntity.updateMessages`: a new literal with the old line's style.
         data.front.lines[1] = "Full".into();
         let encoded = Tag::compound(data.encode());
         assert_eq!(
@@ -553,6 +553,14 @@ mod tests {
         assert_eq!(
             editor_sprite("hanging_signs", "ruby:elm"),
             "ruby:gui/hanging_signs/elm"
+        );
+        assert_eq!(
+            editor_sprite("signs", "farmersdelight:canvas"),
+            "farmersdelight:gui/signs/canvas"
+        );
+        assert_eq!(
+            editor_sprite("hanging_signs", "farmersdelight:canvas"),
+            "farmersdelight:gui/hanging_signs/canvas"
         );
         assert_eq!(SignText::default().dark_color(), 0);
         let red = SignText {

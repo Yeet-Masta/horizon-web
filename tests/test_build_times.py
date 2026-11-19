@@ -55,6 +55,10 @@ class TimingsTests(unittest.TestCase):
         self.assertIsNone(bt.parse_timings("const UNIT_DATA = [ {oops"))
         self.assertEqual(bt.parse_timings(page([])), [])
 
+    def test_non_finite_timings_are_rejected_instead_of_written_as_invalid_json(self):
+        self.assertIsNone(bt.parse_timings(page([{"i": 0, "name": "a", "start": 0, "duration": float("nan")}])))
+        self.assertIsNone(bt.parse_timings(page([{"i": 0, "name": "a", "start": float("inf"), "duration": 1.0}])))
+
     def test_critical_path_follows_what_each_unit_waited_for(self):
         path = bt.critical_path(REAL_UNITS)
         self.assertEqual([p["unit"] for p in path],
@@ -285,7 +289,7 @@ class RunTests(unittest.TestCase):
         self.report("--profiles", "dev,fast", "--crates", "horizon-items", "--jobs", "3")
         for call in self.builds():
             args = call["args"]
-            self.assertEqual(args[:5], ["build", "--locked", "-p", "horizon-client", "--profile"])
+            self.assertEqual(args[:5], ["build", "--locked", "-p", "horizon-game", "--profile"])
             self.assertIn(args[5], ["dev", "fast"])
             self.assertIn("--timings", args)
             self.assertEqual(args[args.index("--jobs") + 1], "3")

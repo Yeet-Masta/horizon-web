@@ -1,5 +1,8 @@
 //! Stable entity material grouping with renderer-owned, reusable CPU scratch.
 use super::Vertex;
+use super::native_entity::EntityRuns;
+use super::rt::scene::GEOMETRIES;
+use horizon_shader_api::stages::RAY_ENTITY_QUAD;
 
 /// Entity materials by a quad's overlay (`Vertex::layer`), in draw order:
 /// ordinary entities, world text drawn with a depth bias (35,
@@ -79,9 +82,45 @@ pub const WORLD_TEXT_OVERLAY: u32 = 39;
 /// The front of its eight-offset outlined text, using POLYGON_OFFSET.
 pub const WORLD_TEXT_POLYGON_OFFSET_OVERLAY: u32 = 40;
 
+/// Ordinary vertices before every prepared cut, in one walk of the pre-batch stream.
+///
+/// `EntityBatch::update` packs ordinary material first and draws the rest in later
+/// passes, so a cut recorded in the original stream skips what moved. A cut at or
+/// past the cursor continues that walk. A cut before the cursor restarts: staging
+/// does not promise non-decreasing cuts, and a backwards cut must still match a
+/// walk of that cut alone. Returns how many quads were read.
+pub(super) fn ordinary_vertices_at_cuts(
+    vertices: &[Vertex],
+    cuts: impl IntoIterator<Item = u32>,
+    oit: bool,
+    out: &mut Vec<u32>,
+) -> u64 {
+    out.clear();
+    let quads = vertices.as_chunks::<4>().0;
+    let mut cursor = 0usize;
+    let mut ordinary = 0u32;
+    let mut walked = 0u64;
+    for cut in cuts {
+        let target = (cut as usize).min(vertices.len()) / 4;
+        if target < cursor {
+            cursor = 0;
+            ordinary = 0;
+        }
+        while cursor < target {
+            if material(quads[cursor][0].layer, oit) == 0 {
+                ordinary += 4;
+            }
+            cursor += 1;
+            walked += 1;
+        }
+        out.push(ordinary);
+    }
+    walked
+}
+
 /// The material of a quad by its overlay (`MATERIALS` order): the overlay is the layer's low 16
 /// bits, as entity.wgsl reads it; HDR output's tier rides in the high ones.
-fn material(layer: u32, oit: bool) -> usize {
+pub(in crate::gfx) fn material(layer: u32, oit: bool) -> usize {
     match layer & 0xffff {
         TERRAIN_MODEL_SOLID_OVERLAY => return 13,
         TERRAIN_MODEL_CUTOUT_OVERLAY => return 14,
@@ -120,12 +159,49 @@ pub(super) struct EntityBatch {
     /// last material (improved transparency on): the dragon's eyes, which share
     /// the additive buffer with its rays.
     pub(super) moved_additive: u32,
+    /// For a native pack's `[entity]` stage (`native_entity.rs`) and the ray scene's entity
+    /// layer: the runs of the next `update`'s entities that they take.
+    pub(super) kinds: EntityRuns,
+    /// The ordinary quads, the improved transparency ones and the ray-only ones in `combined`,
+    /// as (first quad, quads): the entity layer's geometries (gfx/rt/scene.rs).
+    pub(super) ray_ranges: [(u32, u32); GEOMETRIES],
+    /// The entities the camera doesn't draw within the ray scene's reach, which the game moved
+    /// out of the stream (`Renderer::take_ray_only`), and their runs: what `ray_only_quads`
+    /// takes of them.
+    pub(super) ray_only: Vec<Vertex>,
+    pub(super) ray_kinds: EntityRuns,
+    /// The last `update`'s `oit`.
+    oit: bool,
 }
 
 impl EntityBatch {
-    /// After `update`: quads only a native pack's shadow pass draws, at the buffer's end.
+    /// After `update`: the ray-only quads, then the quads only a native pack's shadow pass draws,
+    /// at the buffer's end (it draws them from there).
     pub(super) fn append_shadow_only(&mut self, shadow_only: &[Vertex]) {
+        self.append_ray_only();
         self.combined.extend_from_slice(shadow_only);
+    }
+
+    /// Appends the quads of `ray_only` the entity layer takes, marked as `tag_kinds` marks the
+    /// stream's: those in a run, of the ordinary material or improved transparency's. No pass
+    /// draws them: they lie past every material, the hand and the see-through quads, and before
+    /// the shadow-only ones, which the native shadow pass counts back to from the end.
+    fn append_ray_only(&mut self) {
+        let first = self.combined.len() / 4;
+        let quads = self.ray_only.as_chunks::<4>().0;
+        let bits = self.ray_kinds.bits((0..quads.len() as u32).map(|q| q * 4));
+        for (quad, bits) in quads.iter().zip(bits) {
+            if bits != 0 && matches!(material(quad[0].layer, self.oit), 0 | 9) {
+                let layer = |v: &Vertex| v.layer | bits | RAY_ENTITY_QUAD;
+                self.combined.extend(quad.iter().map(|v| Vertex {
+                    layer: layer(v),
+                    ..*v
+                }));
+            }
+        }
+        self.ray_ranges[2] = (first as u32, (self.combined.len() / 4 - first) as u32);
+        self.ray_only.clear();
+        self.ray_kinds.clear();
     }
 
     pub(super) fn update(
@@ -179,7 +255,7 @@ impl EntityBatch {
                 }
             }
         }
-        // Fluid and RenderType.text sort their own alpha-blended quads far to
+        // Fluid and RenderTypes.text sort their own alpha-blended quads far to
         // near. Fluid precedes both world-canvas layers, after existing materials
         // (including eyes moved out of additive).
         for runs in &self.runs[10..13] {
@@ -218,8 +294,54 @@ impl EntityBatch {
         }
         self.combined.extend_from_slice(hand);
         self.combined.extend_from_slice(see_through);
+        let oit_first: usize = counts[..9].iter().sum();
+        let end = self.combined.len() / 4;
+        self.ray_ranges = [(0, counts[0]), (oit_first, counts[9]), (end, 0)]
+            .map(|(first, quads)| (first as u32, quads as u32));
+        self.oit = oit;
+        self.tag_kinds(oit_first);
         counts.map(|count| count as u32)
     }
+
+    /// Writes into each ordinary or improved transparency quad's layer the kind of the run of
+    /// `kinds` it is in, and that it is in the ray scene's entity layer (`RAY_ENTITY_QUAD`), and
+    /// forgets the runs: they are one frame's. The other materials' quads take none, in a run
+    /// or not: each has a pipeline of its own, the same with the stage as without (so a
+    /// translucent item an entity holds is Horizon's until items draw through the stage).
+    /// `oit_first` is the first improved transparency quad in `combined`.
+    fn tag_kinds(&mut self, oit_first: usize) {
+        if self.kinds.is_empty() {
+            return;
+        }
+        let combined = self.combined.as_chunks_mut::<4>().0;
+        // Each material's quads are together in `combined`, in the order the game drew them.
+        for (material, first) in [(0, 0), (9, oit_first)] {
+            let quads = self.runs[material]
+                .iter()
+                .flat_map(|&(first, count)| first..first + count);
+            let bits = self.kinds.bits(quads.map(|quad| quad as u32 * 4));
+            for (quad, bits) in combined[first..].iter_mut().zip(bits) {
+                let bits = if bits == 0 { 0 } else { bits | RAY_ENTITY_QUAD };
+                for vertex in quad {
+                    vertex.layer |= bits;
+                }
+            }
+        }
+        self.kinds.clear();
+    }
+}
+
+/// One cut, walked from the start of the stream. Tests compare the linear pass with this.
+#[cfg(test)]
+fn ordinary_vertices_before(vertices: &[Vertex], cut: u32, oit: bool) -> u32 {
+    let cut = (cut as usize).min(vertices.len()) / 4 * 4;
+    let mut ordinary = 0u32;
+    for quad in vertices[..cut].as_chunks::<4>().0 {
+        if material(quad[0].layer, oit) == 0 {
+            ordinary += 4;
+        }
+    }
+    ordinary
 }
 
 #[cfg(test)]
@@ -227,6 +349,141 @@ mod tests {
     use super::*;
     use horizon_std::time::Instant;
     use std::hint::black_box;
+
+    #[test]
+    fn ordinary_cuts_skip_shadows_and_text() {
+        let mut stream = Vec::new();
+        for (layer, x) in [(14, 1.0), (0, 2.0)] {
+            stream.extend(std::iter::repeat_n(
+                Vertex {
+                    layer,
+                    pos: [x, 0.0, 0.0],
+                    ..geometry(1, false)[0]
+                },
+                4,
+            ));
+        }
+        let cut = stream.len() as u32;
+        stream.extend(std::iter::repeat_n(
+            Vertex {
+                layer: 0,
+                pos: [3.0, 0.0, 0.0],
+                ..geometry(1, false)[0]
+            },
+            4,
+        ));
+        assert_eq!(ordinary_vertices_before(&stream, cut, false), 4);
+        assert_ne!(cut, 4, "the raw cut still counts the shadow");
+        let tagged = vec![
+            Vertex {
+                layer: OIT_ENTITY,
+                ..geometry(1, false)[0]
+            };
+            4
+        ];
+        assert_eq!(ordinary_vertices_before(&tagged, 4, true), 0);
+        assert_eq!(ordinary_vertices_before(&tagged, 4, false), 4);
+    }
+
+    #[test]
+    fn one_walk_matches_the_per_draw_cut_on_mixed_streams() {
+        let layers = [
+            0u32,
+            SHADOW_OVERLAY,
+            TEXT_POLYGON_OFFSET_OVERLAY,
+            11,
+            12,
+            OIT_ENTITY,
+            OIT_ENTITY | 11,
+            WORLD_TEXT_OVERLAY,
+            WORLD_TEXT_POLYGON_OFFSET_OVERLAY,
+            TRANSLUCENT_ITEM_OVERLAY,
+            TRANSLUCENT_GLINT_ITEM_OVERLAY,
+            ENERGY_SWIRL_OVERLAY,
+            WATER_MASK_OVERLAY,
+            TRANSLUCENT_PARTICLE_OVERLAY,
+            7,
+        ];
+        let mut state = 0x1234_5678u32;
+        let mut next = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            state
+        };
+        for oit in [false, true] {
+            for _trial in 0..24 {
+                let quads = (next() % 180) as usize;
+                let stream: Vec<_> = (0..quads)
+                    .flat_map(|_| {
+                        let layer = layers[(next() as usize) % layers.len()];
+                        std::iter::repeat_n(
+                            Vertex {
+                                layer,
+                                ..geometry(1, false)[0]
+                            },
+                            4,
+                        )
+                    })
+                    .collect();
+                let draws = (next() % 36) as usize;
+                let mut cuts: Vec<u32> = Vec::with_capacity(draws);
+                for index in 0..draws {
+                    let previous = cuts.last().copied().unwrap_or(0);
+                    let cut = if index > 0 && next() % 5 == 0 {
+                        next() % (stream.len() as u32 + 8)
+                    } else {
+                        previous.saturating_add(next() % 24)
+                    };
+                    cuts.push(cut);
+                }
+                let mut out = Vec::new();
+                ordinary_vertices_at_cuts(&stream, cuts.iter().copied(), oit, &mut out);
+                assert_eq!(out.len(), cuts.len());
+                for (index, cut) in cuts.iter().enumerate() {
+                    assert_eq!(
+                        out[index],
+                        ordinary_vertices_before(&stream, *cut, oit),
+                        "oit {oit} cut {cut}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_decreasing_cut_matches_the_per_draw_walk() {
+        let stream = geometry(8, true);
+        let cuts = [24u32, 4, 16, 0, 24, 7];
+        for oit in [false, true] {
+            let mut out = Vec::new();
+            ordinary_vertices_at_cuts(&stream, cuts, oit, &mut out);
+            let expected: Vec<_> = cuts
+                .iter()
+                .map(|cut| ordinary_vertices_before(&stream, *cut, oit))
+                .collect();
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn a_long_prefix_is_walked_once_for_every_copy() {
+        let stream_len = 10_000u32;
+        let draws = 1_000u32;
+        let stream = geometry(stream_len as usize, true);
+        let end = stream.len() as u32;
+        let cuts = vec![end; draws as usize];
+        let mut out = Vec::new();
+        let walked = ordinary_vertices_at_cuts(&stream, cuts.iter().copied(), true, &mut out);
+        let stream_len = u64::from(stream_len);
+        let draws = u64::from(draws);
+        assert!(
+            walked >= stream_len && walked <= stream_len + draws,
+            "walked {walked} quads, bound {stream_len}..={}",
+            stream_len + draws
+        );
+        let expected = ordinary_vertices_before(&stream, end, true);
+        assert!(out.iter().all(|cut| *cut == expected));
+        assert_eq!(out.len(), draws as usize);
+    }
     #[test]
     fn native_models_keep_opaque_order_and_do_not_move_existing_materials_or_tails() {
         let quad = |layer, x| {

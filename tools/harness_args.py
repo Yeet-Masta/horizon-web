@@ -4,16 +4,27 @@ The harnesses run `tools/test_command_exec_parity.py`, which reads `--work-dir`
 with argparse: a value may be separate (`--work-dir PATH`) or one argument
 (`--work-dir=PATH`), and the last one wins. A harness that appends its own
 default after the caller's therefore replaces the directory they asked for.
+Capture-preserving harnesses use a fresh automatic default on every run, so
+earlier oracle output stays intact without blocking the next run; a run that
+passes removes its automatic folder, one that fails keeps it as evidence.
 """
+import shutil
 import sys
+import tempfile
 from pathlib import Path
+
+# The folders ensure_fresh_work_dir made in this process (not the ones a caller named).
+_FRESH: set[Path] = set()
 
 
 def named_work_dir(argv) -> str | None:
     """The `--work-dir` the caller named, in either form (`--work-dir PATH` or `--work-dir=PATH`); the last
-    one given wins, like argparse's."""
+    one given wins, like argparse's. A bare `--` ends the options: after it a `--work-dir` is a positional, not
+    the directory."""
     chosen = None
     for index, argument in enumerate(argv[1:], start=1):
+        if argument == '--':
+            break
         if argument == '--work-dir' and index + 1 < len(argv):
             chosen = argv[index + 1]
         elif argument.startswith('--work-dir='):
@@ -22,14 +33,37 @@ def named_work_dir(argv) -> str | None:
 
 
 def ensure_work_dir(default: Path, argv=None) -> Path:
-    """Append `--work-dir default` unless the caller named one, either way, and return the directory the
-    run will use (argparse's: the last one given)."""
+    """Name `--work-dir default` unless the caller named one, either way, and return the directory the run
+    will use (argparse's: the last one given). The default goes before a bare `--`: argparse reads nothing after
+    it as an option."""
     argv = sys.argv if argv is None else argv
     chosen = named_work_dir(argv)
     if chosen is None:
-        argv += ['--work-dir', str(default)]
+        at = argv.index('--') if '--' in argv else len(argv)
+        argv[at:at] = ['--work-dir', str(default)]
         chosen = str(default)
     return Path(chosen)
+
+
+def ensure_fresh_work_dir(default: Path, argv=None) -> Path:
+    """Keep an explicit `--work-dir`; otherwise create a fresh sibling of `default` (see `finish`)."""
+    argv = sys.argv if argv is None else argv
+    if named_work_dir(argv) is not None:
+        return ensure_work_dir(default, argv)
+    default.parent.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=default.name + '-', dir=default.parent))
+    _FRESH.add(directory.resolve())
+    print(f'Capture directory: {directory.resolve()}', file=sys.stderr)
+    return ensure_work_dir(directory, argv)
+
+
+def finish(directory: Path, failed: bool):
+    """Exit a capture-preserving run: a passing run removes the folder ensure_fresh_work_dir made for it; a
+    failing run, or a folder the caller named with `--work-dir`, stays."""
+    directory = Path(directory).resolve()
+    if not failed and directory in _FRESH:
+        shutil.rmtree(directory, ignore_errors=True)
+    sys.exit(bool(failed))
 
 
 def require_work_dir(argv=None) -> Path:

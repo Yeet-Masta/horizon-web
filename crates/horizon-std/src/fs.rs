@@ -8,6 +8,9 @@ use std::{io, path::Path};
 pub use crate::web::vfs::fs::*;
 #[cfg(not(target_family = "wasm"))]
 pub use std::fs::*;
+/// `std::path::absolute`, which has no working directory to use on the web.
+#[cfg(not(target_family = "wasm"))]
+pub use std::path::absolute;
 
 /// `Path`'s file-system queries, on this module's file system.
 pub trait PathExt {

@@ -19,6 +19,7 @@ the trace wrapped as a JSON array: Perfetto (ui.perfetto.dev) opens it.
 """
 import argparse
 import json
+import math
 import pathlib
 import shutil
 import signal
@@ -82,7 +83,8 @@ def step_stats(runs):
     out = {}
     for name, values in sorted(durations.items()):
         ordered = sorted(values)
-        p95 = ordered[min(len(ordered) - 1, max(0, int(len(ordered) * 0.95)))]
+        # Nearest-rank percentile: for 20 samples the 95th is the 19th, not the maximum.
+        p95 = ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.95) - 1))]
         out[name] = {
             "n": len(values),
             "median_ms": statistics.median(values),
@@ -120,7 +122,6 @@ def scratch_env(home):
         XDG_DATA_HOME=home / "data",
         XDG_CONFIG_HOME=home / "config",
         HORIZON_LAUNCHER_TRASH=home / "trash",
-        HORIZON_TELEMETRY_URL="off",
     )
 
 
@@ -177,7 +178,7 @@ def print_timeline(steps, marks, floor_ms):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bin", default=str(ROOT / "target/release/horizon-client"))
+    ap.add_argument("--bin", default=str(lab.binary(ROOT / "target/release", "horizon-client")))
     ap.add_argument("--resources", default=str(ROOT / ".local/horizon-client/26.3"))
     ap.add_argument("--world", help="open (or create) this world from the command line")
     ap.add_argument("--seed", type=int, default=1234)

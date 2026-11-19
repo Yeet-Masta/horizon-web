@@ -8,7 +8,7 @@ hardness/tool rules, collect drops from the block loot tables, place blocks,
 craft in the 2x2 inventory grid or on a crafting table, and save and reload worlds
 in vanilla's Anvil format.
 
-**Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](../README.md#project-status)
+**Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](status.md#what-the-harnesses-compare)
 in the README scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
@@ -65,7 +65,7 @@ Use current stable Rust (1.90+) and JDK 25 (Python 3.11+ only for the developmen
 harnesses). A checkout never
 downloads the game: resource preparation imports **your own copy** (the 26.3
 client from your official launcher install, and the 26.3 server jar you
-downloaded yourself; see [Build from source](../README.md#build-from-source)),
+downloaded yourself; see [Build from source](#run-from-a-checkout)),
 verifies it against the pinned checksums, runs vanilla's data generator and small
 exporters against those jars, and extracts the jar's assets and data into ignored
 `.local/horizon-client/26.3/`. Sounds (about 380 MB) are copied from your
@@ -116,10 +116,10 @@ verified, it is reused and the named files aren't read. Two things no such launc
 ```sh
 cargo run --release -p horizon-prepare -- --prepare --server-jar ~/Downloads/server.jar
 cargo run --release -p horizon-prepare -- sounds
-cargo run --release -p horizon-client -- --render-distance 12
+cargo run --release -p horizon-game -- --render-distance 12
 ```
 
-Development builds that link quickly: `cargo build --profile fast -p horizon-client`.
+Development builds that link quickly: `cargo build --profile fast -p horizon-game`.
 
 `HORIZON_OCCLUSION_PROFILE=1` enables detailed entity-occlusion phase and bounds-scan timings
 in `horizon-ctl stats` and `bench`. The normal benchmark keeps these CPU-clock reads disabled;
@@ -174,7 +174,7 @@ The native Rust adapter recognizes 26.2, 26.1.x, 1.21.11, 1.21.9/1.21.10,
 the adapter. The client still needs its prepared **26.3** resources.
 
 ```sh
-HORIZON_OLDER_SERVERS=1 cargo run --profile fast -p horizon-client -- --server 127.0.0.1:25565
+HORIZON_OLDER_SERVERS=1 cargo run --profile fast -p horizon-game -- --server 127.0.0.1:25565
 ```
 
 In PowerShell, set `$env:HORIZON_OLDER_SERVERS = '1'`, then run the same Cargo
@@ -289,7 +289,7 @@ local socket; under control, losing window focus does not pause the game or
 release held keys, so a script can play while you use other windows.
 
 ```sh
-cargo build --release -p horizon-client -p horizon-client-lib --bins
+cargo build --release -p horizon-game -p horizon-client-lib --bins
 C=target/release/horizon-ctl
 $C launch --world Survival --seed 5 --wait   # start the game, open or create the world, wait for it
 $C state                                     # player, world, screen, crosshair target
@@ -431,7 +431,7 @@ in `horizon-extras.txt`; in splitscreen only the first player has it), and
 The crate `horizon-discord` (Horizon layer) speaks Discord's local IPC itself
 (the `discord-ipc-N` socket or named pipe, no SDK) from a thread of its own.
 The game hands it a status only when it changes, through the platform's
-`activity` hook (`game/activity.rs` says what the player does), and keeps the
+`activity` hook (`game/runtime/activity.rs` says what the player does), and keeps the
 switch itself: its settings store and its Extras row (the platform's settings
 and pages registries). Only the official executable (`horizon-official`)
 registers it: horizon-client's own executable shows no presence and no switch. It retries every 15 s
@@ -451,7 +451,7 @@ To play on another machine without Rust, JDK or prepared resources,
 package a release build where they exist:
 
 ```sh
-cargo build --release -p horizon-client
+cargo build --release -p horizon-game
 python3 tools/package_native_client.py --out ~/builds/horizon
 ```
 

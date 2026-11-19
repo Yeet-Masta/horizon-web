@@ -15,7 +15,8 @@ use horizon_core::{
 };
 
 // Happy ghast state: `head` the harness, `scratch[0]` 1 once set up as a
-// baby and 2 as an adult, `ai.home` the restriction, `counter`
+// baby, 2 as an adult and 3 awaiting the grown-up brain callback,
+// `ai.home` the restriction, `counter`
 // the end tick of the follow-an-adult range pick.
 // `scratch[1]` is `leashHolderTime` on the server and `IS_LEASH_HOLDER` (1 or 0) on a client.
 /// `HappyGhast.notifyLeashHolder` for a leashed mob that supports a quad lead.
@@ -29,19 +30,47 @@ pub fn notify_leash_holder(m: &mut Mob) {
 pub fn is_leash_holder(m: &Mob) -> bool {
     m.extra.scratch[1] > 0
 }
-/// `Attributes.FLYING_SPEED` and the speed `travel` uses (`* 5 / 3`).
+/// `createAttributes`' default `Attributes.FLYING_SPEED`, and the speed `travel` uses at it
+/// (`* 5 / 3`). A mob reads its own value through [`flying_speed`].
 pub const FLYING_SPEED: f64 = 0.05;
 pub const AIR_SPEED: f32 = 0.05 * 5.0 / 3.0;
 
+/// `getAttributeValue(FLYING_SPEED)`: the base and its modifiers (`/attribute`).
+pub fn flying_speed(m: &Mob) -> f64 {
+    super::finalize::value(m, super::finalize::Attr::FlyingSpeed)
+}
+/// `HappyGhast.travel`: `(float) getAttributeValue(FLYING_SPEED) * 5.0F / 3.0F`, in the
+/// air, in water and in lava.
+pub fn travel_speed(m: &Mob) -> f32 {
+    flying_speed(m) as f32 * 5.0 / 3.0
+}
+
 pub fn register(m: &mut Mob) {
-    setup(m, m.is_baby());
+    // No world at construction, and no ghastling to grow out of yet: the
+    // age crossing — the only grown_up — happens where the world is.
+    setup(m, m.is_baby(), None);
 }
 /// `adultGhastSetup` and `babyGhastSetup`: the ghastling flies with a
 /// `FlyingMoveControl` and has no goals (its brain drives it); the adult
 /// floats with `GhastMoveControl` and three goals, its brain stopped.
-fn setup(m: &mut Mob, baby: bool) {
+fn setup(m: &mut Mob, baby: bool, w: Option<&MobWorld<'_>>) {
     let was = m.extra.scratch[0];
-    m.extra.scratch[0] = if baby { 1 } else { 2 };
+    // Feeding crosses the age boundary without a world. Clear vanilla state
+    // immediately, but leave setup pending until behavior stop callbacks can run.
+    let pending = matches!(was, 1 | 3) && !baby && w.is_none();
+    m.extra.scratch[0] = if baby {
+        1
+    } else if pending {
+        3
+    } else {
+        2
+    };
+    if pending {
+        if let Some(b) = m.extra.animal_brain.as_deref_mut() {
+            b.mem = super::animal_brain::Memories::default();
+        }
+        m.nav_stop();
+    }
     m.ai.goals.clear();
     m.ai.nav.stop();
     // A new move and look control (nothing wanted) and navigation.
@@ -67,8 +96,10 @@ fn setup(m: &mut Mob, baby: bool) {
         m.set_required_path_length(48.0);
         return;
     }
-    if was == 1 {
-        super::animal_brain::grown_up(m);
+    if matches!(was, 1 | 3)
+        && let Some(w) = w
+    {
+        super::animal_brain::grown_up(m, w);
     }
     m.ai.mov.kind = MoveKind::Custom;
     m.ai.nav.kind = NavKind::Ground;
@@ -78,8 +109,8 @@ fn setup(m: &mut Mob, baby: bool) {
     g.add(4, GhastTempt::default());
     g.add(5, FloatAround { blocks: 16 });
 }
-fn wearing_harness(m: &Mob) -> bool {
-    m.extra.body.is_some()
+pub fn wearing_harness(m: &Mob) -> bool {
+    m.extra.body_id().is_some()
 }
 /// `getControllingPassenger`: a player on a harnessed adult.
 pub fn controlled(m: &Mob) -> bool {
@@ -91,7 +122,7 @@ pub fn harnessed_adult(m: &Mob) -> bool {
 }
 /// `getHappyGhastRestrictionRadius`.
 fn restriction_radius(m: &Mob) -> i32 {
-    if !m.is_baby() && m.extra.body.is_none() {
+    if !m.is_baby() && m.extra.body_id().is_none() {
         64
     } else {
         32
@@ -158,14 +189,14 @@ pub fn move_control(m: &mut Mob, w: &MobWorld) {
     let [wx, wy, wz] = m.ai.mov.wanted;
     let travel = Vec3::new(wx - m.position.x, wy - m.position.y, wz - m.position.z);
     if can_reach(m, w, travel) {
-        // travel.normalize().scale(FLYING_SPEED * 5 / 3)
+        // travel.normalize().scale(getAttributeValue(FLYING_SPEED) * 5 / 3)
         let len = (travel.x * travel.x + travel.y * travel.y + travel.z * travel.z).sqrt();
         let unit = if len < f64::from(1.0e-5_f32) {
             Vec3::ZERO
         } else {
             Vec3::new(travel.x / len, travel.y / len, travel.z / len)
         };
-        let speed = FLYING_SPEED * 5.0 / 3.0;
+        let speed = flying_speed(m) * 5.0 / 3.0;
         m.velocity =
             m.velocity
                 .add_vector(Vec3::new(unit.x * speed, unit.y * speed, unit.z * speed));
@@ -313,7 +344,7 @@ pub fn still_tick(m: &mut Mob, w: &MobWorld) {
 /// `scanPlayerAboveGhast`: a player (not one riding a happy ghast) within
 /// a block around the top, up to half the ghast's height above it.
 pub fn player_above(m: &Mob, w: &MobWorld) -> bool {
-    let Some(p) = w.player.as_ref().filter(|p| !p.spectator) else {
+    let Some(p) = w.selected_player().filter(|p| !p.spectator) else {
         return false;
     };
     if m.rider.is_some() {
@@ -379,15 +410,21 @@ impl Goal for GhastTempt {
             self.calm_down -= 1;
             return false;
         }
-        let Some(p) = &cx.w.player else { return false };
+        let Some(p) = cx.w.selected_player() else {
+            return false;
+        };
         // getNearestPlayer(TargetingConditions.forNonCombat()
         // .ignoreLineOfSight().range(TEMPT_RANGE 16)): creative players too.
-        let range =
-            (16.0_f64 * p.visibility_percent(Some(m.kind.id.as_str()), cx.w.items)).max(2.0);
-        p.alive
-            && !p.spectator
-            && (Self::wants(m, &p.main_hand) || Self::wants(m, &p.off_hand))
-            && m.distance_sqr(p.position) <= range * range
+        // The selector (the held items) comes before the range in
+        // `TargetingConditions.test`, and the range asks the visibility.
+        if !p.alive || p.spectator || !(Self::wants(m, &p.main_hand) || Self::wants(m, &p.off_hand))
+        {
+            return false;
+        }
+        let visibility =
+            cx.w.player_visibility(p, m.id, p.visibility_percent(m.species()));
+        let range = (16.0_f64 * visibility).max(2.0);
+        m.distance_sqr(p.position) <= range * range
     }
     fn stop(&mut self, m: &mut Mob, _: &mut Cx) {
         // stopNavigation: setWait; calmDown = reducedTickDelay(100).
@@ -395,7 +432,9 @@ impl Goal for GhastTempt {
         self.calm_down = super::goals::reduced(100);
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
-        let Some(p) = cx.w.player.clone() else { return };
+        let Some(p) = cx.w.selected_player().cloned() else {
+            return;
+        };
         m.look_at(p.eye);
         // stopDistance 7.
         if m.distance_sqr(p.position) < 49.0 {
@@ -524,23 +563,23 @@ pub fn ridden(m: &mut Mob) {
     if r.jumping {
         up += 0.5;
     }
-    let scale = 3.9 * FLYING_SPEED as f32;
+    let scale = 3.9 * flying_speed(m) as f32;
     m.ai.xxa = r.strafe * scale;
     m.ai.yya = up * scale;
     m.ai.zza = forward * scale;
     m.ai.mov.operation = Operation::Wait;
 }
 /// The adult or ghastling setup for its age (`ageBoundaryReached`).
-pub fn ensure_setup(m: &mut Mob) {
+pub fn ensure_setup(m: &mut Mob, w: Option<&MobWorld<'_>>) {
     let baby = m.is_baby();
     if m.extra.scratch[0] != if baby { 1 } else { 2 } {
-        setup(m, baby);
+        setup(m, baby, w);
     }
 }
 /// `HappyGhast.aiStep`, `tick` and `checkRestriction`: the adult/baby
 /// setup at the age boundary, the home, face-the-motion and slow healing.
 pub fn ai_step(m: &mut Mob, w: &MobWorld) {
-    ensure_setup(m);
+    ensure_setup(m, Some(w));
     // HappyGhast.tick: `leashHolderTime` runs down (the synced flag follows it).
     if m.extra.scratch[1] > 0 {
         m.extra.scratch[1] -= 1;
@@ -578,7 +617,7 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld) {
             || w.precipitation_at(x, y, z).is_some();
         let interval = if wet { 20 } else { 600 };
         if m.age.is_multiple_of(interval) {
-            m.heal(1.0);
+            m.heal(w.loop_context, 1.0);
         }
     }
     still_tick(m, w);
@@ -672,6 +711,44 @@ mod tests {
         assert!((f64::from(AIR_SPEED) - FLYING_SPEED * 5.0 / 3.0).abs() < 1e-7);
     }
 
+    /// `HappyGhast.getRiddenInput` scales by `3.9F * getAttributeValue(FLYING_SPEED)` and
+    /// `travel` flies at `(float) getAttributeValue(FLYING_SPEED) * 5.0F / 3.0F`, so
+    /// `/attribute ... minecraft:flying_speed base set` changes both; the default is 0.05.
+    #[test]
+    fn a_happy_ghast_rides_and_flies_at_its_flying_speed_attribute() {
+        use crate::mobs::{Species, finalize};
+        let mut t = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        t.species = Species::HappyGhast;
+        // `createAttributes`' value, as the registry's table carries it.
+        t.attributes = std::sync::Arc::new(
+            [("minecraft:flying_speed".to_owned(), 0.05)]
+                .into_iter()
+                .collect(),
+        );
+        let mut m = Mob::new(
+            1,
+            std::sync::Arc::new(t),
+            horizon_core::geometry::Vec3::ZERO,
+            0.0,
+        );
+        m.rider = Some(crate::mobs::equine::Rider {
+            forward: 1.0,
+            ..Default::default()
+        });
+
+        ridden(&mut m);
+        assert_eq!(m.ai.zza, 3.9 * 0.05_f32);
+        assert_eq!(travel_speed(&m), 0.05_f32 * 5.0 / 3.0);
+        assert_eq!(travel_speed(&m), AIR_SPEED);
+
+        finalize::set_base(&mut m, finalize::Attr::FlyingSpeed, 0.17);
+
+        ridden(&mut m);
+        assert_eq!(m.ai.zza, 3.9 * 0.17_f32);
+        assert_eq!(travel_speed(&m), 0.17_f32 * 5.0 / 3.0);
+        assert_eq!(flying_speed(&m), 0.17);
+    }
+
     /// `HappyGhast.ageBoundaryReached` runs the setup at the age crossing, not
     /// at the next tick: `DriedGhastBlock.spawnGhastling` makes its ghastling a
     /// baby before `addFreshEntity`, and `AgeableMob.setAge` calls
@@ -694,7 +771,7 @@ mod tests {
         assert_eq!(m.extra.scratch[0], 2, "an adult's setup at construction");
         assert!(m.ai.goals.has("HappyGhastFloatGoal"));
 
-        crate::mobs::finalize::set_age(&mut m, -24000);
+        crate::mobs::finalize::set_age(&mut m, -24000, None);
 
         assert!(m.is_baby());
         assert_eq!(m.extra.scratch[0], 1, "babyGhastSetup ran");
@@ -706,6 +783,23 @@ mod tests {
         );
         assert_eq!(m.ai.nav.kind, crate::mobs::nav::NavKind::Flying);
         assert!(m.ai.nav.can_float);
+        crate::mobs::animal_brain::init(&mut m, 0);
+        crate::mobs::mod_behaviors::set_walk_target(&mut m, [5, 65, 5], 1.0, 0);
+        assert!(
+            crate::mobs::animal_brain::mem_ref(&m)
+                .unwrap()
+                .walk_target
+                .present()
+        );
+        crate::mobs::ai::age_up(&mut m, 1200, true);
+        assert!(!m.is_baby());
+        assert!(
+            !crate::mobs::animal_brain::mem_ref(&m)
+                .unwrap()
+                .walk_target
+                .present(),
+            "adultGhastSetup must clear brain memories even on feeding"
+        );
     }
 }
 
@@ -718,6 +812,7 @@ mod still_float_tests {
     /// the still-timeout guard is re-checked on a running float goal too: a
     /// ghast a player stands on stops floating instead of hopping in water.
     #[test]
+    #[ignore = "daily"]
     fn a_happy_ghast_on_a_still_timeout_stops_floating() {
         let mut t = (*crate::mobs::sensor_scan_tests::kind()).clone();
         t.species = Species::HappyGhast;
@@ -730,11 +825,11 @@ mod still_float_tests {
         m.fluids.water = 1.0;
         let mut stopped = None;
         let ran = with_test_world(&[], |w, _| {
-            let mut lr = horizon_core::random::LegacyRandom::new(0);
+            let mut fixture = crate::health::TestLevel::new(0);
             let mut events = Vec::new();
             let mut cx = Cx {
                 w,
-                lr: &mut lr,
+                level: &mut fixture.level(),
                 events: &mut events,
             };
             let mut goals = std::mem::take(&mut m.ai.goals);
@@ -794,6 +889,7 @@ mod cloud_heal_tests {
     /// `Entity.isInClouds` is half of `isFastHealing`: a hurt ghast whose box
     /// reaches the cloud band heals on tick 20, one just below it on tick 600.
     #[test]
+    #[ignore = "daily"]
     fn a_happy_ghast_in_the_clouds_heals_every_second() {
         let dim = cloudy(0.8);
         let mut seen = None;
@@ -823,6 +919,7 @@ mod cloud_heal_tests {
     /// the bottom is in (`getY() + getBbHeight() < cloudBottom` is false), and
     /// so are feet exactly at the top (`getY() <= cloudTop`), but not above it.
     #[test]
+    #[ignore = "daily"]
     fn the_cloud_band_is_the_four_blocks_over_its_bottom() {
         let dim = cloudy(0.8);
         let mut seen = None;
@@ -853,6 +950,7 @@ mod cloud_heal_tests {
     /// A dimension whose `visual/cloud_color` is transparent has no clouds to
     /// stand in (the Nether and the End), so the slow interval stays.
     #[test]
+    #[ignore = "daily"]
     fn a_dimension_without_clouds_never_counts_as_in_them() {
         let dim = cloudy(0.0);
         let mut seen = None;
@@ -875,7 +973,9 @@ mod cloud_heal_tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../.local/horizon-client")
             .join(horizon_core::VANILLA_VERSION);
-        let Ok(biomes) = crate::biome::Biomes::load(&root) else {
+        let Ok(biomes) = crate::biome::Biomes::load(
+            &horizon_assets::resource_source::ResourceRoot::directory(root),
+        ) else {
             return;
         };
         let plains = biomes.id("minecraft:plains");

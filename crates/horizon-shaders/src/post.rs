@@ -15,10 +15,30 @@ use std::collections::BTreeSet;
 use crate::config::{self, Config};
 use crate::custom::Custom;
 use crate::{
-    ComputeProgram, eval_condition, preprocess, translate_composite, translate_compute,
-    translate_gbuffers, translate_shadow,
+    ComputeProgram, eval_condition, preprocess, translate_composite, translate_gbuffers,
+    translate_shadow,
 };
 use crate::{GbuffersInputs, Macros, Pack, Preprocessed, Program, Properties, Target};
+
+/// `indirect.<pass>`: three unsigned work-group counts in a storage buffer (3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndirectDispatch {
+    pub buffer: u32,
+    pub offset: u64,
+}
+
+impl IndirectDispatch {
+    fn parse(value: &str) -> Option<Self> {
+        let mut words = value.split_whitespace();
+        let buffer = words.next()?.parse().ok()?;
+        let offset: u64 = words.next()?.parse().ok()?;
+        if buffer > 8 || !offset.is_multiple_of(4) || words.next().is_some() {
+            return None;
+        }
+        offset.checked_add(12)?;
+        Some(Self { buffer, offset })
+    }
+}
 
 /// Which group of 2.1 a program belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -551,6 +571,8 @@ pub struct Post {
     /// The shadowcolor buffers the shadow programs have: 2, or all 8 when the pack names the
     /// `HIGHER_SHADOWCOLOR` feature (`iris.features.required` or `.optional`).
     pub shadow_colors: usize,
+    /// Required independent attachment blending (spec 3.2); the renderer checks its adapter.
+    pub per_buffer_blending_required: bool,
     /// `bufferObject.*`, by binding.
     pub buffer_objects: std::collections::BTreeMap<u32, BufferObject>,
     /// `image.*`.
@@ -770,6 +792,11 @@ pub fn load_post(
             2
         },
         buffer_objects: Default::default(),
+        per_buffer_blending_required: properties
+            .get("iris.features.required")
+            .unwrap_or_default()
+            .split_whitespace()
+            .any(|name| name.eq_ignore_ascii_case("PER_BUFFER_BLENDING")),
         images: Vec::new(),
         shadow_culling: match properties.get("shadow.culling").map(str::trim) {
             Some("false") => ShadowCulling::Off,
@@ -792,7 +819,7 @@ pub fn load_post(
             continue;
         }
         if let Some(name) = e.key.strip_prefix("image.") {
-            match CustomImage::parse(name, &options.expand(&e.value)) {
+            match CustomImage::parse(name, &e.value) {
                 Some(i) => post.images.push(i),
                 None => post.notes.push(format!("`{}`: not an image", e.key)),
             }
@@ -1163,16 +1190,33 @@ fn load_shadow(
     ];
     // A program's compute stages count as its other stages do: Iris 1.11.7 drew the shadow map
     // for a probe pack of ours whose only reader of it was `prepare.csh` (#10490).
+    let image_reads = |interface: &crate::Interface| {
+        interface.images.iter().any(|image| {
+            matches!(
+                image.before.as_deref().unwrap_or(&image.name),
+                "shadowcolorimg0" | "shadowcolorimg1"
+            )
+        })
+    };
     let reads = (post.programs.iter())
         .chain(gbuffers.into_iter().flatten())
         .flat_map(|p| {
             let stages = p.program.iter().map(|q| &q.interface);
             stages.chain(p.compute.iter().map(|(_, c)| &c.interface))
         })
-        .flat_map(|i| &i.samplers)
-        .any(|s| {
-            SHADOW_SAMPLERS.contains(&s.name.as_str())
-                || config::shadow_color(&s.name).is_some_and(|n| n < loader.post.shadow_colors)
+        .any(|i| {
+            i.samplers.iter().any(|s| {
+                SHADOW_SAMPLERS.contains(&s.name.as_str())
+                    || config::shadow_color(&s.name).is_some_and(|n| n < loader.post.shadow_colors)
+            }) || image_reads(i)
+        })
+        || post.lines.iter().any(|program| {
+            program
+                .program
+                .iter()
+                .map(|stage| &stage.interface)
+                .chain(program.compute.iter().map(|(_, stage)| &stage.interface))
+                .any(image_reads)
         });
     let forced = match loader.properties.get("shadow.enabled").map(str::trim) {
         Some("true") => Some(true),
@@ -1647,6 +1691,19 @@ impl Loader<'_> {
             {
                 continue;
             }
+            let indirect = match self.properties.get(&format!("indirect.{name}")) {
+                Some(value) => match IndirectDispatch::parse(&self.options.expand(value)) {
+                    Some(request) => Some(request),
+                    None => {
+                        self.post.notes.push(format!(
+                            "{name}: skipped: invalid indirect request; expected SSBO index 0–8 \
+                             and a four-byte-aligned byte offset"
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
             let pp = self.preprocess(&path);
             let problems = diagnostics(&pp);
             let notes = &mut self.post.notes;
@@ -1655,7 +1712,7 @@ impl Loader<'_> {
                 notes.push(format!("{name}: skipped"));
                 continue;
             }
-            match translate_compute(&pp) {
+            match crate::translate::translate_compute_dispatch(&pp, indirect) {
                 Ok(program) => {
                     notes.extend(
                         program
@@ -1827,6 +1884,46 @@ fn flips(properties: &Properties, program: &str) -> Vec<(u32, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_indirect_requests_skip_the_compute_instead_of_dispatching_directly() {
+        let pack = Pack::from_zip_bytes(
+            "original-indirect-property",
+            crate::pack::tests::zip(&[(
+                "shaders/composite.csh",
+                "#version 430\nlayout(local_size_x=1) in; void main() {}",
+            )]),
+        )
+        .unwrap();
+        for value in [
+            "",
+            "2",
+            "2 0 extra",
+            "-1 0",
+            "9 0",
+            "2 -4",
+            "2 2",
+            "2 18446744073709551612",
+        ] {
+            let properties =
+                Properties::parse(&format!("indirect.composite={value}"), &Macros::standard());
+            let post = load_post(
+                &pack,
+                "",
+                &properties,
+                &Macros::standard(),
+                &GameInputs::default(),
+            );
+            assert!(post.programs.is_empty(), "{value}: silently became direct");
+            assert!(
+                post.notes
+                    .iter()
+                    .any(|n| n.contains("invalid indirect request")),
+                "{value}: {:?}",
+                post.notes
+            );
+        }
+    }
 
     #[test]
     fn unsupported_defaults_are_notes_without_skipping_render_or_compute() {
@@ -2025,8 +2122,13 @@ mod tests {
 
     #[test]
     fn image_dimensions_expand_default_and_chosen_options() {
-        let bytes =
-            crate::pack::tests::zip(&[("shaders/options.glsl", "#define SIZE 16 // [8 16]\n")]);
+        let bytes = crate::pack::tests::zip(&[
+            ("shaders/options.glsl", "#define SIZE 16 // [8 16]\n"),
+            (
+                "shaders/shaders.properties",
+                "image.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
+            ),
+        ]);
         for (choice, expected) in [(None, [16, 16]), (Some("8"), [8, 8])] {
             let mut pack = Pack::from_zip_bytes("image.zip", bytes.clone()).unwrap();
             if let Some(value) = choice {
@@ -2035,16 +2137,96 @@ mod tests {
                     value.into(),
                 )]));
             }
-            let macros = Macros::standard();
-            let properties = Properties::parse(
-                "image.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
-                &macros,
-            );
+            let mut macros = Macros::standard();
+            let (properties, _) = crate::read_properties(&pack, &mut macros);
             let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
             assert!(post.notes.is_empty(), "{:?}", post.notes);
             assert_eq!(post.images.len(), 1);
             assert_eq!(post.images[0].size, ImageSize::Absolute(expected));
         }
+    }
+
+    #[test]
+    fn image_dimensions_keep_the_macros_of_their_own_line() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[("shaders/placeholder.glsl", "")]),
+        )
+        .unwrap();
+        let macros = Macros::standard();
+        let properties = Properties::parse(
+            "#define SIZE 16\n\
+             image.first = none RGBA RGBA8 BYTE false false SIZE SIZE\n\
+             #undef SIZE\n\
+             #define SIZE 32\n\
+             image.second = none RGBA RGBA8 BYTE false false SIZE SIZE",
+            &macros,
+        );
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        let sizes: Vec<ImageSize> = post.images.iter().map(|i| i.size).collect();
+        assert_eq!(
+            sizes,
+            [ImageSize::Absolute([16, 16]), ImageSize::Absolute([32, 32])]
+        );
+    }
+
+    #[test]
+    fn an_image_does_not_see_an_option_undefined_before_it() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[
+                ("shaders/options.glsl", "#define SIZE 16 // [16 32]\n"),
+                (
+                    "shaders/shaders.properties",
+                    "#undef SIZE\nimage.grid = none RGBA RGBA8 BYTE false false SIZE SIZE",
+                ),
+                ("shaders/placeholder.glsl", ""),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        let (properties, _) = crate::read_properties(&pack, &mut macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.images.is_empty(), "{:?}", post.images);
+        assert!(
+            post.notes.iter().any(|n| n.contains("not an image")),
+            "{:?}",
+            post.notes
+        );
+    }
+
+    #[test]
+    fn image_dimensions_expand_macros_the_properties_file_defines() {
+        let pack = Pack::from_zip_bytes(
+            "image.zip",
+            crate::pack::tests::zip(&[
+                (
+                    "shaders/options.glsl",
+                    "#define SKYBOX_RESOLUTION 128 // [128 256]\n",
+                ),
+                (
+                    "shaders/shaders.properties",
+                    "#if SKYBOX_RESOLUTION == 128\n\
+                     #define SKYBOX_RESOLUTION_X 384\n\
+                     #define SKYBOX_RESOLUTION_Y 256\n\
+                     #endif\n\
+                     image.skyBox2D = none RGBA RGBA8 BYTE false false \
+                     SKYBOX_RESOLUTION_X SKYBOX_RESOLUTION_Y",
+                ),
+                ("shaders/placeholder.glsl", ""),
+            ]),
+        )
+        .unwrap();
+        let mut macros = Macros::standard();
+        // The pack reads its properties with its options, and writes the size as macros it
+        // defines further up in the same file, inside an `#if` (IterationRP's
+        // `SKYBOX_RESOLUTION_X/Y`).
+        let (properties, _) = crate::read_properties(&pack, &mut macros);
+        let post = load_post(&pack, "", &properties, &macros, &GameInputs::default());
+        assert!(post.notes.is_empty(), "{:?}", post.notes);
+        assert_eq!(post.images.len(), 1);
+        assert_eq!(post.images[0].size, ImageSize::Absolute([384, 256]));
     }
 
     #[test]
@@ -2674,6 +2856,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     /// The shadow pass runs when a program reads a shadow buffer or `shadow.enabled` says so;
     /// then `shadow`, `shadow_water` and the `shadowcomp` series load, writing shadowcolor0/1.
     #[test]
+    #[ignore = "daily"]
     fn shadow_programs_load_when_a_shadow_buffer_is_read() {
         let reads = "#version 120\nuniform sampler2D shadowtex0;\nvarying vec2 uv;\n\
                      void main() { gl_FragColor = texture2D(shadowtex0, uv); }\n";
@@ -2821,6 +3004,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     /// Without the feature, outputs stop at shadowcolor1 as before. As in Iris 1.11.7 with
     /// probe packs p7951a to c (the PR has the readings).
     #[test]
+    #[ignore = "daily"]
     fn higher_shadowcolor_gives_shadow_programs_eight_buffers() {
         let shadow_vsh = "#version 120\nvoid main() {\ngl_Position = ftransform();\n}\n";
         let writes = |targets: Option<&str>| {
@@ -3334,6 +3518,7 @@ blend.composite1.colortex3 = ONE ONE ONE ONE
     }
 
     #[test]
+    #[ignore = "daily"]
     fn water_falls_back_to_terrain_and_blends() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/packs/terrain-test");
         let pack = Pack::open(&dir).unwrap();
@@ -3559,3 +3744,75 @@ mod buffer_blend_tests;
 
 #[cfg(test)]
 mod material_variant_tests;
+
+#[cfg(test)]
+mod shadow_image_demand_tests {
+    use super::*;
+
+    fn check_image_demand(line: bool) {
+        for (name, demand) in [
+            ("shadowcolorimg0", true),
+            ("shadowcolorimg1", true),
+            ("colorimg2", false),
+            ("shadowcolorimg2", false),
+        ] {
+            for (properties, enabled) in [("", demand), ("shadow.enabled=false", false)] {
+                let stage = if line {
+                    ""
+                } else {
+                    "layout(local_size_x=1) in;\n"
+                };
+                let output = if line {
+                    "gl_FragData[0]=vec4(0.5);"
+                } else {
+                    ""
+                };
+                let shader = format!(
+                    "#version 430\n{stage}layout(rgba8) writeonly uniform image2D {name};\nvoid main() {{ imageStore({name},ivec2(0),vec4(0.25)); {output} }}"
+                );
+                let mut files = vec![("shaders/shaders.properties", properties)];
+                if line {
+                    files.push((
+                        "shaders/gbuffers_line.vsh",
+                        "#version 430\nvoid main() { gl_Position=vec4(0,0,0,1); }",
+                    ));
+                    files.push(("shaders/gbuffers_line.fsh", shader.as_str()));
+                } else {
+                    files.push(("shaders/prepare.csh", shader.as_str()));
+                }
+                let pack =
+                    Pack::from_zip_bytes("original-shadow-demand", crate::pack::tests::zip(&files))
+                        .unwrap();
+                let mut macros = Macros::standard();
+                let (properties, _) = crate::read_properties(&pack, &mut macros);
+                let inputs = GameInputs {
+                    lines: line.then(GbuffersInputs::default),
+                    ..Default::default()
+                };
+                let post = load_post(&pack, "", &properties, &macros, &inputs);
+                assert_eq!(
+                    post.programs.len(),
+                    usize::from(!line),
+                    "line={line}, {name}: {:?}",
+                    post.notes
+                );
+                assert_eq!(post.lines.is_some(), line, "{name}: {:?}", post.notes);
+                assert_eq!(
+                    post.shadow_pass, enabled,
+                    "line={line}, {name}: {:?}",
+                    post.notes
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_images_request_shadow_buffers_without_a_sampler_and_respect_disable() {
+        check_image_demand(false);
+    }
+
+    #[test]
+    fn line_images_request_shadow_buffers_and_respect_disable() {
+        check_image_demand(true);
+    }
+}

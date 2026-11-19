@@ -1,8 +1,8 @@
 """Which jobs may run on our own runners (docs/ci-runners.md).
 
 - horizon-light (playhorizon's and other small runners, which refuse a fork's pull request): main's own scripts only.
-- horizon-checks (isolated runners; forks' pull requests run on GitHub's, but a fork's own copy of a workflow could
-  still name them): no secret and no token that writes.
+- horizon-checks (isolated runners; an approved fork's pull request ending in 0 runs there too): no secret and
+  no token that writes.
 - Neither takes a job that holds a secret or whose token can push, publish or start workflows: playhorizon is a
   partner's server, and a checks runner keeps what a fork's job left behind.
 """
@@ -15,6 +15,10 @@ WORKFLOWS = ROOT / ".github/workflows"
 LIGHT = ("horizon-light", "playhorizon-light", "playhorizon-ci")
 CHECKS = ("horizon-checks",)
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
+VERIFY_PARTS = ("verify-tree", "verify-lint", "verify-server", "verify-launcher", "verify-test", "verify-mod-points")
+# verify's parts: our checks runners only with SELF_HOSTED_CI=all, Blacksmith's otherwise.
+ONLY_WITH_ALL = re.compile(r"^\$\{\{ vars\.SELF_HOSTED_CI == 'all' && fromJSON\('\[\"self-hosted\", \"linux\", "
+                           r"\"horizon-checks\"\]'\) \|\| 'blacksmith-\d+vcpu-ubuntu-2404' \}\}$")
 TRUSTED_WRITES = re.compile(r"^\s*(contents|actions|packages|id-token|deployments|attestations): write", re.M)
 # actions: write can start workflows too; cancel-on-close needs it to cancel runs and runs no checkout at all.
 CANCELS_RUNS = {"cancel-on-close.yml cancel"}
@@ -70,11 +74,13 @@ class OwnRunnerTests(unittest.TestCase):
         count = 0
         for where, _, _, _, value, pools in routed():
             count += 1
+            if ONLY_WITH_ALL.match(value):
+                continue
             self.assertIn("vars.SELF_HOSTED_CI != 'off'", value, where)
-            # Both labels select a GitHub-hosted Ubuntu runner when our pools are disabled.
-            self.assertRegex(value, r"\|\| 'ubuntu-(?:latest|24\.04)' \}\}$", where)
+            # Both labels select a GitHub-hosted or Blacksmith Ubuntu runner when our pools are disabled.
+            self.assertRegex(value, r"\|\| '(?:ubuntu-(?:latest|24\.04)|blacksmith-\d+vcpu-ubuntu-2404)' \}\}$", where)
             if "checks" in pools:
-                # The desktop paused: every checks job back to GitHub, the bots stay.
+                # SELF_HOSTED_CI=light: every checks job back to GitHub, the bots stay.
                 self.assertIn("vars.SELF_HOSTED_CI != 'light'", value, where)
         self.assertGreaterEqual(count, 10)
 
@@ -105,33 +111,43 @@ class OwnRunnerTests(unittest.TestCase):
                 self.assertNotRegex(block, r":\s*write", where)
                 self.assertNotRegex(head, r":\s*write", where)
 
-    def test_checks_split_between_both_pools(self):
-        ci = (WORKFLOWS / "ci.yml").read_text()
-        verify = dict(jobs(ci))["verify"]
-        value = runs_on(verify)
-        # A pull request by the last digit of its number unless SELF_HOSTED_CI=all; main's pushes keep GitHub's cache.
-        self.assertIn("github.event_name == 'pull_request' && ", value)
-        self.assertIn("vars.SELF_HOSTED_CI == 'all'", value)
-        self.assertIn("endsWith(format('{0}', github.event.pull_request.number), '0')", value)
-        self.assertEqual(value, runs_on(dict(jobs(ci))["launcher"]))
+    def test_verify_parts_go_to_one_pool(self):
+        ci = dict(jobs((WORKFLOWS / "ci.yml").read_text()))
+        # Every part goes to our checks runners or every part to Blacksmith's (only the size differs); verify itself
+        # only waits for them.
+        for part in VERIFY_PARTS:
+            with self.subTest(part=part):
+                self.assertRegex(runs_on(ci[part]), ONLY_WITH_ALL)
+        self.assertIn(f"needs: [{', '.join(VERIFY_PARTS)}]", ci["verify"])
+        # Never skipped: GitHub counts a skipped required check as passed.
+        self.assertIn("if: always()", ci["verify"])
 
-    def test_forks_never_wait_for_our_checks_runners(self):
-        # A fork's run sees no repository variable, so SELF_HOSTED_CI can't send it elsewhere when the desktop is off:
-        # every job that may pick horizon-checks on a pull request picks it only for this repository's own branches.
-        for path in sorted(WORKFLOWS.glob("*.yml")):
-            text = path.read_text()
-            if "pull_request:" not in text:
-                continue
-            for name, block in jobs(text):
-                value = runs_on(block)
-                if "horizon-checks" in value:
-                    self.assertIn(FORK_GUARD, value, f"{path.name} {name}")
+    def test_forks_reach_only_the_checks_runners(self):
+        # An approved fork's pull request ending in 0 runs on horizon-checks like this repository's own (GitHub's
+        # 20-job pool is not the only place it may wait). Never the light runners: every light job that a pull request
+        # can start carries the fork guard (test_light_runners_take_main_code_only), and ci.yml's two runs-on
+        # expressions (the other workflows keep their own guards) no longer test the head repository.
+        ci = dict(jobs((WORKFLOWS / "ci.yml").read_text()))
+        for name in VERIFY_PARTS:
+            self.assertNotIn("head.repo", runs_on(ci[name]), name)
+        for where, on, _, block, _, pools in routed():
+            if "light" in pools and "pull_request" in on:
+                job_if = next((l for l in block.splitlines() if l.strip().startswith("if:")), "")
+                self.assertIn(FORK_GUARD, job_if, where)
+
+    def test_only_the_checks_runners_take_forks(self):
+        script = (ROOT / "tools/ci/checks-runners.sh").read_text()
+        self.assertIn('[ "${HORIZON_RUNNER_POOL:-}" != checks ]', script)
+        self.assertIn('echo "HORIZON_RUNNER_POOL=checks"', script)
+        # Only inside the branch of the runner that has the rust toolchain (the checks runner), never the light ones.
+        env = script.split('echo "HORIZON_RUNNER_POOL=checks"')[0].rsplit("if [", 1)[1]
+        self.assertTrue(env.startswith(' "$label" = playhorizon-ci'), env)
 
     def test_the_light_runners_refuse_forks_themselves(self):
         script = (ROOT / "tools/ci/checks-runners.sh").read_text()
         self.assertIn("ACTIONS_RUNNER_HOOK_JOB_STARTED=$shared/job-started.sh", script)
         self.assertIn('.pull_request.head.repo.full_name // "unknown"', script)
-        self.assertIn('if [ "$head" != "${GITHUB_REPOSITORY:-}" ]', script)
+        self.assertIn('if [ "$head" != "${GITHUB_REPOSITORY:-}" ]', script)  # refuses unless HORIZON_RUNNER_POOL=checks
 
 
 if __name__ == "__main__":

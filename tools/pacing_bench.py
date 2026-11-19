@@ -53,6 +53,7 @@ import argparse
 import json
 import math
 import os
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -462,7 +463,7 @@ def launch(args, distance, tag):
         options.write_text(text.replace("enableVsync:false\n", "enableVsync:true\n"))
     sock = Path("/tmp") / f"horizon-pacing-{os.getpid()}{tag}.sock"
     sock.unlink(missing_ok=True)
-    client = Path(args.build).resolve() / "horizon-client"
+    client = lab.binary(Path(args.build).resolve(), "horizon-client")
     command = [str(client), "--resources", str(Path(args.resources).resolve()), "--control-socket", str(sock),
                "--no-pause", "--weather", "clear", "--time", "6000"]
     if args.size:
@@ -470,7 +471,7 @@ def launch(args, distance, tag):
         command += ["--width", width, "--height", height]
     if args.offscreen:
         command.append("--offscreen")
-    env = lab.game_env(HORIZON_TELEMETRY_URL="off", HORIZON_SPIKES=str(args.spike_ms))
+    env = lab.game_env(HORIZON_SPIKES=str(args.spike_ms))
     for kv in args.env:
         k, _, v = kv.partition("=")
         env[k] = v
@@ -496,7 +497,7 @@ def dedicated_server(args, distance, directory):
     (directory / "server.properties").write_text("".join(f"{k}={v}\n" for k, v in properties.items()),
                                                  encoding="iso-8859-1")
     (directory / "eula.txt").write_text("eula=true\n")
-    binary = Path(args.build).resolve() / "horizon-client"
+    binary = lab.binary(Path(args.build).resolve(), "horizon-client")
     server = Server([binary, "--resources", Path(args.resources).resolve(), "--dedicated", "--nogui"],
                     directory, "server")
     server.wait_for(r"Done \(", 900)
@@ -507,7 +508,7 @@ def play(args, distance, names, result):
     """One game through `names`: in a fresh world, or (`join` alone) joining a dedicated server."""
     import shutil
     joining = names == ["join"]
-    perf = Path(args.perf or Path(args.build) / "horizon-perf").resolve()
+    perf = Path(args.perf or lab.binary(Path(args.build), "horizon-perf")).resolve()
     if not perf.exists():
         raise SystemExit(f"{perf} is missing: build it with `cargo build --profile fast -p horizon-perf` or pass --perf")
     proc, control, _, log, game_dir, sock, home = launch(args, distance, "-join" if joining else "")
@@ -590,7 +591,8 @@ def compare(labels):
                 cells = []
                 for key, _ in COLUMNS:
                     values = sorted(e.get(key, 0) for e in entries)
-                    cells.append(f"{values[len(values) // 2]:g}")
+                    # `statistics.median` averages the two middle runs of an even set; the upper one is not the median.
+                    cells.append(f"{statistics.median(values):g}")
                 print(f"| {label} | {len(entries)} | " + " | ".join(cells) + " |")
 
 

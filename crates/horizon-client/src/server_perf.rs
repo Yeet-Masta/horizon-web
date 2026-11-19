@@ -846,7 +846,11 @@ pub(crate) fn profiler_thread() {
 /// their CPU time where they waited for a tenth of it or more, as the log line the slow ring replaced.
 #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 fn slow_line(record: &SlowRecord) -> String {
-    let unit = if record.unit == Unit::Tick { "tick" } else { "frame" };
+    let unit = if record.unit == Unit::Tick {
+        "tick"
+    } else {
+        "frame"
+    };
     let cpu = if record.cpu_ms > 0.0 {
         format!(", cpu {:.1} ms", record.cpu_ms)
     } else {

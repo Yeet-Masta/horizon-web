@@ -86,7 +86,7 @@ IGNORED = {
     r'server_data\.state_updating_resumes_at)$':
         'block entity timers advance',
     r'^entity\.(Passengers\[\]\.)*(Age|Motion\[\]|Rotation\[\]|Pos\[\]|OnGround|HurtTime|Health|TimeInOverworld|fall_distance|'
-    r'wasOnGround|Fire|Air|DeathTime|Fuse|life|inGround|ticks_in_ground|Time|EggLayTime)$': 'entity simulation advances',
+    r'wasOnGround|Fire|Air|DeathTime|Fuse|life|inGround|ticks_in_ground|Time|EggLayTime|DespawnDelay)$': 'entity simulation advances',
     r'^level\.dat\.Data\.(Time|LastPlayed)$': 'clock and wall time of the save',
     r'^level\.dat\.Data\.(ServerBrands.*|singleplayer_uuid)$': 'a client world names its brand and its player',
     r'^entity\.listener\.selector\.(event|tick)$': 'the warden listener holds the last vibration it heard; timing',
@@ -354,7 +354,7 @@ def horizon_resave(source, destination, bin_dir):
     saves.mkdir(parents=True)
     shutil.copytree(source, saves / 'world')
     socket = Path(tempfile.mkdtemp(prefix='hzrt')) / 'control.sock'  # sockets need short paths
-    ctl = [str(bin_dir / 'horizon-ctl'), '--socket', str(socket)]
+    ctl = [str(lab.binary(bin_dir, 'horizon-ctl')), '--socket', str(socket)]
     extra = []
     # Offscreen on macOS, and on a Linux without vscreen (never a window on a real monitor).
     if sys.platform == 'darwin' or not shutil.which('vscreen'):
@@ -595,13 +595,22 @@ def compare_worlds(vanilla, horizon):
     compare_chunks(load_regions(va / 'region'), load_regions(ha / 'region'), report)
     chunks = {(k[1], k[2]) for k in load_regions(va / 'region')}
     compare_entities(load_regions(va / 'entities'), load_regions(ha / 'entities'), report, chunks)
-    for rel in ['level.dat'] + sorted(
-            p.relative_to(vanilla).as_posix() for pattern in ('data/**/*.dat', 'players/**/*.dat')
-            for p in vanilla.glob(pattern)):
+    # Enumerate both worlds: a .dat file Horizon writes that vanilla never saved
+    # is a real difference, not something to skip just because the vanilla side
+    # has no file to enumerate. Files present in both keep the NBT comparison
+    # below unchanged.
+    dat_files = {'level.dat'}
+    for pattern in ('data/**/*.dat', 'players/**/*.dat'):
+        dat_files.update(p.relative_to(world).as_posix()
+                         for world in (vanilla, horizon)
+                         for p in world.glob(pattern))
+    for rel in sorted(dat_files):
         a, b = vanilla / rel, horizon / rel
-        if not b.exists():
+        if not a.exists():
+            report.append((rel, 'missing from vanilla', 'present'))
+        elif not b.exists():
             report.append((rel, 'present', 'missing from Horizon'))
-        elif a.exists():
+        else:
             va, hb = anvil_dump.read_dat(str(a)), anvil_dump.read_dat(str(b))
             if rel.endswith('scoreboard.dat'):
                 va, hb = normalize_scoreboard(va), normalize_scoreboard(hb)
@@ -665,7 +674,7 @@ def main():
     else:
         bin_dir = Path(args.bin_dir).resolve() if args.bin_dir else None
         if bin_dir is None:
-            subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-client', '-p', 'horizon-client-lib', '--bins'], cwd=ROOT, check=True)
+            subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib', '--bins'], cwd=ROOT, check=True)
             bin_dir = ROOT / os.environ.get('CARGO_TARGET_DIR', 'target') / 'fast'
         h = horizon_resave(v0, RUN / 'h', bin_dir)
     print('comparing', v0, 'with', h)

@@ -149,7 +149,8 @@ Geist (400, 500, 600) and Geist Mono (400), bundled under the SIL Open Font Lice
 - **Game**: vanilla's screens. The on-screen keyboard is a rounded plate of keys in the page
   colour, the focused key in the accent. Horizon's graphics, controller, Extras and Shaders
   settings screens take the Blocks palette below in a lighter form (`graphics_style.rs`, through
-  the shared `settings_shell.rs`).
+  the shared `settings_shell.rs`); with no style given, they draw on vanilla's own surfaces
+  ([docs/ui-kit.md](ui-kit.md#its-look)).
 
 ## Blocks
 
@@ -193,7 +194,7 @@ than Pixelify. Hover and focus are vanilla's white edge.
 - **Pixel art drawn in code.** The stone behind the pages is close shades of the page colour
   (`TILE_SHADES`), never Minecraft's stone; the landscape is a banded sky, a sun cut in slices like
   the mark, hills and square trees (a sunset in dark, a dawn in light). The launcher bakes them in
-  `launcher/src/art.rs` at the window's scale so each texel covers whole device pixels; the website
+  `launcher/scenery/src/art.rs` at the window's scale so each texel covers whole device pixels; the website
   draws them in its `scripts/art.mjs`.
 - **Icons**: Pixelarticons (MIT), 24 unit pixel SVGs in `crates/horizon-theme/icons/pixel/`, tinted
   with the text colour.
@@ -251,7 +252,7 @@ Light); `tokens.css` carries them as `--night-*`. The game's menus don't use it.
 
 - **Motion that means something**: the sky drifts slowly and stops when the window is hidden or
   unfocused; the interface moves only to show cause and effect (a row arrives where it was added,
-  progress fills). Reduced motion: nothing moves. The launcher's sky (`launcher/src/sky.rs`) moves
+  progress fills). Reduced motion: nothing moves. The launcher's sky (`launcher/scenery/src/sky.rs`) moves
   in whole texels on a half-second beat, so it asks for two frames a second at most;
   `HORIZON_LAUNCHER_MOTION=off` stills it, `always` keeps it moving unfocused (for recordings).
 - **Copy says what happens** ("Downloads 26.3 and Java 21, about 600 MB"), never praises.
@@ -316,7 +317,7 @@ colour, state and motion. Its tokens are `horizon_theme::glass`; `tokens.css` ca
 as `--glass-*`.
 
 - **The scene is the background**: a pixel sunset over three ridges with trees, clouds, stars, a
-  meteor now and then and fireflies (`launcher/src/scene.rs`), a port of the website's
+  meteor now and then and fireflies (`launcher/scenery/src/scene.rs`), a port of the website's
   `HorizonScene` with its seeds and sums, so a window shows the picture the mockup shows at the
   same size. It eases with the pointer and stops 10 s after the window loses focus;
   `HORIZON_LAUNCHER_MOTION` works as for Night. Dark appearance only so far; Light keeps the dawn.
@@ -327,8 +328,9 @@ as `--glass-*`.
   menus 16, the Play group 14, rows and chips 12, buttons and tabs 10. No pixel steps, no strokes.
 - **Motion as the website plays it** (`launcher/src/motion.rs`): hovers ease over `quick`'s
   150 ms curve, toasts and a new page arrive as `hzl-pop` (a fade and a 6 px rise over 200 ms,
-  `cubic-bezier(0.2, 0.7, 0.2, 1)`), a switch's knob slides for 200 ms. Menus open at once. Under
-  reduced motion each is drawn where it ends.
+  `cubic-bezier(0.2, 0.7, 0.2, 1)`), a switch's knob slides for 200 ms, a mouse wheel's notch
+  glides over `move` (trackpads scroll as they are; Performance mode jumps). Menus open at once.
+  Under reduced motion each is drawn where it ends.
 - **Light**: plates are white at 84 % over the dawn sky washed with white (55 %), so the page
   reads white; icons and text on the accent keep `on-accent`.
 - **One accent, mixed like the mockup.** `accent` (`#6b4bff`) fills the main action;

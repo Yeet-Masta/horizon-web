@@ -1,8 +1,8 @@
 //! World-list operations. Metadata edits preserve every other NBT field;
 //! backups use vanilla's ZIP layout and never include the session lock.
 use crate::save::{read_dat, write_dat};
+use horizon_core::nbt::Tag;
 use horizon_std::fs;
-use horizon_world::nbt::Tag;
 use std::{
     io::{self, Seek, Write},
     path::{Path, PathBuf},
@@ -115,29 +115,15 @@ pub fn backups_path(saves: &Path) -> PathBuf {
     saves.parent().unwrap_or(saves).join("backups")
 }
 
+/// `Blaze3D.openPath` on the world's (or the backups') folder, made first if it is missing.
 pub(super) fn open_folder(path: &Path) -> crate::Result<()> {
     fs::create_dir_all(path)?;
-    let path = fs::canonicalize(path)?;
-    let program = if cfg!(target_os = "windows") {
-        "explorer"
-    } else if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    // Reap the desktop opener without blocking the UI thread.
-    let mut child = std::process::Command::new(program)
-        .arg(path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    horizon_std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    crate::desktop::open_path(path)?;
     Ok(())
 }
 
-pub fn backup(saves: &Path, folder: &str) -> crate::Result<u64> {
+/// A zip of the whole world folder in the backups folder: where it is, and its size.
+pub fn backup(saves: &Path, folder: &str) -> crate::Result<(PathBuf, u64)> {
     let world = world_path(saves, folder)?;
     let backups = backups_path(saves);
     fs::create_dir_all(&backups)?;
@@ -164,15 +150,18 @@ pub fn backup(saves: &Path, folder: &str) -> crate::Result<u64> {
             Err(e) => return Err(e.into()),
         }
     };
-    let result = (|| {
+    let result: crate::Result<u64> = (|| {
         let mut zip = zip::ZipWriter::new(file);
         write_tree(&mut zip, &world, &world, folder)?;
         Ok(zip.finish()?.metadata()?.len())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(path);
+    match result {
+        Ok(bytes) => Ok((path, bytes)),
+        Err(e) => {
+            let _ = fs::remove_file(path);
+            Err(e)
+        }
     }
-    result
 }
 
 fn write_tree<W: Write + Seek>(

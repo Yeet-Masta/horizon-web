@@ -12,6 +12,7 @@ sounds, game events and the level random. Motion drawn from an entity's own
 unseeded random (vanilla marks it "~") is compared within its spread.
 """
 import json
+import math
 import os
 import random
 import subprocess
@@ -361,6 +362,11 @@ def cases(facts, count, seed, only):
     yield from vehicle_cases(states, seed, only)
     yield from egg_and_pickup_cases(states, only)
     kinds = list(ITEMS)
+    if not only:
+        yield {'seed': 42, 'mode': 'dispense', 'pos': [0, 0, 0],
+               'cells': [[0, 0, 0, states.get('dropper', facing='east', triggered='false')]],
+               'items': [[0, 0, 0, 0, plain('stone', 3)]],
+               'entities': [{'type': 'minecraft:chest_minecart', 'pos': [1.5, 0.0, 0.5]}]}
     for n in range(count):
         kind = kinds[n % len(kinds)]
         item = item_choice(rng, kind)
@@ -494,11 +500,17 @@ def numbers_close(java, rust):
     for x, y in zip(a, b):
         if x.startswith('~'):
             try:
-                # An item's own motion spans 0.2 per axis, and a shearing
-                # sheep pushes each wool with its own random by up to 0.1 more.
-                if abs(float(x[1:]) - float(y)) > 0.4:
-                    return False
+                bound, value = float(x[1:]), float(y)
             except ValueError:
+                return False
+            # A non-finite bound (e.g. "nan" from the oracle) or value must
+            # never fall through: IEEE comparisons with NaN are always false,
+            # which would make every value match. Fail closed instead.
+            if not (math.isfinite(bound) and math.isfinite(value)):
+                return False
+            # An item's own motion spans 0.2 per axis, and a shearing
+            # sheep pushes each wool with its own random by up to 0.1 more.
+            if abs(bound - value) > 0.4:
                 return False
         elif x != y:
             return False
@@ -544,7 +556,7 @@ def main():
          '-cp', dependencies, '-d', str(classes), str(java_root / 'dev/horizonlab/parity/VanillaDispenserOracle.java')])
     run(['java', '-Xmx3G', '-cp', str(classes) + os.pathsep + dependencies, 'dev.horizonlab.parity.VanillaDispenserOracle',
          str(resources), str(work / 'cases.jsonl'), str(work / 'native.txt')])
-    run(['cargo', 'build', '-q', '--profile', 'fast', '-p', 'horizon-client', '--bin', 'horizon-client'], cwd=lab.ROOT,
+    run(['cargo', 'build', '-q', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], cwd=lab.ROOT,
         env={**os.environ, 'CARGO_BUILD_JOBS': os.environ.get('CARGO_BUILD_JOBS', '3')})
     executable = lab.cargo_target() / ('fast/horizon-client.exe' if os.name == 'nt' else 'fast/horizon-client')
     with tempfile.TemporaryDirectory(prefix='game-', dir=work) as game_dir:

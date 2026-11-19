@@ -4,7 +4,7 @@
 use super::{Event, OptionsUi, Page, tr};
 use crate::{
     gamepad,
-    hud::{HudAtlas, HudBatch},
+    hud::HudAtlas,
     radial_editor::Named,
     settings::{Opt, Settings},
     settings_shell as shell,
@@ -29,6 +29,7 @@ impl OptionsUi {
     }
     pub(super) fn shell_mut(&mut self) -> Option<&mut dyn shell::Hosted> {
         self.graphics.screen.output = self.output;
+        self.shader.screen.rays = self.output.rays;
         match self.page() {
             Page::Extras => Some(&mut self.extras),
             page if Self::graphics_page(page).is_some() => Some(&mut self.graphics),
@@ -190,24 +191,6 @@ impl OptionsUi {
     /// Whether the controller screen is open: a controller button pressed now may bind.
     pub fn controller_open(&self) -> bool {
         Self::controller_page(self.page()).is_some()
-    }
-    /// The radial screens' glyphs this frame, and the name of a radial page being typed, drawn
-    /// in place of a shell: whether it was.
-    pub(super) fn draw_radial_name(
-        &mut self,
-        batch: &mut HudBatch,
-        atlas: &HudAtlas,
-        cursor: (f32, f32),
-        in_world: bool,
-    ) -> bool {
-        self.radial.screen.glyphs = self.pad_glyphs;
-        if self.page() == Page::ControllerRadialName
-            && let Some(entry) = &mut self.radial.screen.naming
-        {
-            entry.draw(batch, atlas, cursor, in_world);
-            return true;
-        }
-        false
     }
     /// A click on a radial page's name entry (`ignored`: a drag or a right click).
     pub(super) fn click_radial_name(

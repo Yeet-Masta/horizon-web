@@ -8,11 +8,15 @@ screen (the same screen as vanilla's) or in game, and every loader reloads from 
 
 `packs.rs` finds the packs (`FolderRepositorySource`: folders and zips, plus the built-in Programmer Art and High
 Contrast, which only the asset index holds: preparation copies them, `horizon-prepare packs` repairs older resources),
-reads `pack.mcmeta` (format range, overlays, filters) and builds one overlay directory that layers the
-selected packs over the prepared vanilla resources, later packs winning. Files vanilla reads as a resource *stack*
-(language files, `sounds.json`, font definitions, atlas definitions) are merged layer by layer as vanilla merges them.
-Every loader then reads that one tree; `game/packs.rs` (`reload_packs`) reloads all of them in game, as
-`Minecraft.reloadResourcePacks` does. Unchanged selections reuse the overlay: `packs::build_overlay` keeps a versioned marker beside it and rebuilds when a pack, the order, a filter or a vanilla input changes.
+reads `pack.mcmeta` (format range, overlays, filters) and resolves one shared resource view over the
+prepared vanilla resources, later packs winning. Folders and open zip files use the same lookup and listing
+interface; archive entries stay in their archives. Files vanilla reads as a resource *stack* (language files,
+`sounds.json`, font definitions, atlas definitions) are merged layer by layer as vanilla merges them.
+Every loader reads that view; `game/world/packs/mod.rs` (`reload_packs`) prepares a new generation on a worker and
+publishes it after loading succeeds, as `Minecraft.reloadResourcePacks` does. Readers of the previous
+archive generation retain its open files. Prepared registry tables and disposable decoding caches have
+separate filesystem locations. [The older overlay measurements](reuse-pack-overlays.md) describe the
+previous materializing loader, not the current startup path.
 
 Vanilla 26.3's reload listeners (`Minecraft.<init>`, `Gui`, `Hud`): languages, textures, shaders, sounds, atlases,
 fonts, grass / foliage / dry foliage colour maps, models (block states, block models, item definitions), equipment
@@ -24,7 +28,7 @@ of them.
 
 **Works**: Horizon reads it from the pack and draws or plays it like vanilla. **Partly**: some of it.
 **No**: ignored (the vanilla version stays). Proof: a parity harness in `tools/` (compares with the pinned 26.3
-client), a unit test, or the loader reading the overlay (vanilla's files go through the same loader, and the
+client), a unit test, or the loader reading the resolved resources (vanilla's files go through the same loader, and the
 harness named checks that loader against vanilla).
 
 | Feature | Files | State | Proof |
@@ -38,7 +42,7 @@ harness named checks that loader against vanilla).
 | Block states: variants, multipart, weights, rotations, uvlock | `blockstates/` | works | `test_blockstate_model_parity`, `test_model_choice_parity`, `test_blockstate_transform_parity` |
 | Block models: parents, elements, rotations, faces, cullface, tint, shade, light emission, ambient occlusion | `models/block/` | works | `test_model_resolution_parity`, `test_model_baking_parity`, `test_section_mesh_parity` |
 | Item definitions and item models (all model types, display transforms, tints) | `items/`, `models/item/` | works | `test_item_model_parity` |
-| Custom entity models (OptiFine/EMF): a `.jem` reshapes a mob's model layer, with its animations and texture, or a block entity's model (chests, shulker boxes, banners, heads, bells, books, conduits, decorated pots) with its texture but no animations yet; Entity Model Features' files win over OptiFine's | `optifine/cem/`, `emf/cem/` | partly | `mobs::cem`, `mobs::cem_anim`, `block_entity_cem` and `block_entity_render` unit tests, `horizon-optifine` `cem::files` (which file wins); trapped and ender chests read only their own files and copper chests keep vanilla's model; no sign, hanging sign or bed models, no per-bone textures, no random models, no textures under `optifine/` (vanilla's own entity models are code in 26.3, which `test_entity_model_parity` checks) |
+| Custom entity models (OptiFine/EMF): a `.jem` reshapes a mob's model layer, with its animations and texture, and the model draws with it (a texture beside the model under `optifine/cem/` or `emf/cem/`, numbered variants' files too, is packed into the entity atlas), or a block entity's model (chests, shulker boxes, banners, heads, bells, books, conduits, decorated pots) with its texture but no animations yet; Entity Model Features' files win over OptiFine's | `optifine/cem/`, `emf/cem/` | partly | `mobs::cem`, `mobs::cem_anim`, `block_entity_cem` and `block_entity_render` unit tests, `horizon-optifine` `cem::files` (which file wins); trapped and ender chests read only their own files and copper chests keep vanilla's model; no sign, hanging sign or bed models, no per-bone textures, no random models (vanilla's own entity models are code in 26.3, which `test_entity_model_parity` checks); a model texture over 1024x512, or one past the entity atlas's budget, stays out of the atlas and that model draws vanilla's, and an animated strip packs its first frame only |
 | Random entity textures (OptiFine/ETF): numbered variants and their rules (biome, height, name, profession, colour, baby, health, moon, time, weather, size, blocks), chosen per entity from its UUID and rechecked once a second | `optifine/random/`, `optifine/mob/`, `mcpatcher/mob/`, `etf/random/`, `textures/entity/` with a `.properties` | partly | `horizon-optifine` `random` and `random_textures` tests, `mobs::random_textures` tests; no `nbt.*` or ETF's extra conditions (teams, items...), no block entities |
 | Connected textures (OptiFine/Continuity): every method (`ctm`, `ctm_compact` with `ctm.N`, `horizontal`, `vertical`, `horizontal+vertical`, `vertical+horizontal`, `top`, `random`, `repeat`, `fixed`, `overlay`, `overlay_ctm`/`_random`/`_repeat`/`_fixed`, and Continuity's `overlay_horizontal`/`_vertical`/`_h+v`/`_v+h`), `matchTiles`/`matchBlocks` and the file-name forms, `tiles` (ranges, names, paths, `<skip>`, `<default>`), `weight`, `faces`, `biomes`, `heights` (and the old `minHeight`/`maxHeight`), `connect`, `connectTiles`/`connectBlocks`, `innerSeams`, `weights`, `randomLoops`, `symmetry`, `linked`, `width`/`height`, `tintIndex`/`tintBlock`, `layer`; Continuity's `orient`, `prioritize`, `optifineOnly` and its stacked-pane culling; tiles a rule picked matched again by another; panes drawn with OptiFine's unmirrored UVs | `optifine/ctm/**/*.properties` (and `mcpatcher/ctm/`) in any namespace, with their tiles | partly | `horizon-optifine` `ctm` and `ctm::connect` tests (the tile tables read off OptiFine's template images), `connected` and `mesher::quarter_tests` tests; `name=` rules are not loaded (the client meshing chunks never receives block entities' custom names, so they could never match); `random` picks from its own fixed hash, so random tiles land in other places than in OptiFine (same weights); tiles glow with their `_e` overlays, sharing the emissive row's table and limits (block overlays come first) |
 | Emissive textures (OptiFine/ETF): `<texture>_e.png` (or the pack's `suffix.emissive`) drawn full bright over mobs, their layers and armour, armour stands, the elytra, the dragon, thrown tridents, block entities, placed blocks and connected-texture tiles | `<texture>_e.png` beside its texture (also random variants' and blink frames'); the suffix from `optifine/emissive.properties`, `etf/emissive.properties` or `textures/emissive.properties` | partly | `horizon-optifine` `emissive` tests, `mobs::render::emissive_tests`, `block_entity_render` and `native_emissive` tests; at most 96 block overlays (native mods keep 32 more), cutout; none on translucent faces, nor on blocks whose texture is pixel-identical to another's (they share a layer); not over items, armour trims, other projectiles, minecarts or end crystals |
@@ -63,8 +67,8 @@ harness named checks that loader against vanilla).
 | Grass, foliage and dry foliage colours | `textures/colormap/` | works | `biome.rs` reads the overlay; `test_section_mesh_parity` checks the tints |
 | Entity textures and variants | `textures/entity/` | works | `test_entity_model_parity`, loaded from the overlay |
 | Block entities: chests, signs, beds, banners, shields, shulker boxes, decorated pots | `atlases/`, `textures/entity/` | works | `test_block_entity_render_parity` |
-| Villager hats | `*.png.mcmeta` `villager` | works | `mobs/villager_hats.rs` reads the `villager.hat` metadata from the overlay |
-| Equipment (armour, horse/llama/wolf/nautilus armour, wings, dyeable layers) | `equipment/`, `textures/entity/equipment/` | works | `game/armor_stands.rs`, `mobs/render.rs` read the overlay |
+| Villager hats | `*.png.mcmeta` `villager` | **no** | the type layer's hat is always drawn; vanilla hides it under a profession hat marked `full`/`partial` |
+| Equipment (armour, horse/llama/wolf/nautilus armour, wings, dyeable layers) | `equipment/`, `textures/entity/equipment/` | works | `game/entities/armor_stands.rs`, `mobs/render.rs` read the overlay |
 | Armour trims on items | `atlases/items.json`, `textures/trims/items/` | works | `paletted_permutations` (`atlas_sources.rs` tests) |
 | Armour trims on worn armour | `textures/trims/entity/`, `textures/palettes/`, `palette` metadata | works | `trims.rs` (`PalettedTextureManager`), drawn by `game/armor_stands.rs` and the mob renderer |
 | Particles | `particles/`, `textures/particle/` | works | `test_particle_providers_parity` |

@@ -12,6 +12,26 @@ pub const MAX_FRAME: usize = (1 << 21) - 1;
 /// CompressionDecoder.MAXIMUM_UNCOMPRESSED_LENGTH.
 pub const MAX_UNCOMPRESSED: usize = 8_388_608;
 
+/// Which whole-packet boundary refused an outgoing packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameSize {
+    /// Packet contents after the compression header and optional compression.
+    Encoded,
+    /// Packet bytes before compression, including the packet id.
+    Uncompressed,
+}
+
+/// A named pre-write refusal, not a registered-payload body limit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameTooLarge {
+    /// Which stage's bound was exceeded.
+    pub stage: FrameSize,
+    /// Actual whole-packet byte count at that stage.
+    pub size: usize,
+    /// Inclusive maximum at that stage.
+    pub limit: usize,
+}
+
 /// Build the frame for one packet body (`id` + payload already concatenated):
 /// length prefix, and with compression enabled the uncompressed-length
 /// field (0 when below the threshold).
@@ -19,11 +39,46 @@ pub fn encode(body: &[u8], threshold: Option<usize>) -> Result<Vec<u8>> {
     Ok(prefixed(&contents(body, threshold)?))
 }
 
+/// Consume an uncompressed body without copying it; compressed framing uses [`contents`].
+pub fn contents_owned(body: Vec<u8>, threshold: Option<usize>) -> Result<Vec<u8>> {
+    if threshold.is_none() {
+        check_body_size(&body, threshold)?;
+        Ok(body)
+    } else {
+        contents(&body, threshold)
+    }
+}
+
+fn check_body_size(body: &[u8], threshold: Option<usize>) -> Result<()> {
+    let (stage, limit) = if threshold.is_some() {
+        (FrameSize::Uncompressed, MAX_UNCOMPRESSED)
+    } else {
+        (FrameSize::Encoded, MAX_FRAME)
+    };
+    if body.len() > limit {
+        return Err(Error::frame_too_large(FrameTooLarge {
+            stage,
+            size: body.len(),
+            limit,
+        }));
+    }
+    Ok(())
+}
+
 /// What [`encode`] puts after the length prefix: the same for every
 /// connection with the same threshold.
 pub fn contents(body: &[u8], threshold: Option<usize>) -> Result<Vec<u8>> {
+    check_body_size(body, threshold)?;
     let inner = match threshold {
         None => body.to_vec(),
+        // CompressionEncoder: a body over the other side's CompressionDecoder maximum is not sent,
+        // however small it deflates.
+        Some(_) if body.len() > MAX_UNCOMPRESSED => {
+            return Err(Error::new(format!(
+                "Packet too big (is {}, should be less than {MAX_UNCOMPRESSED})",
+                body.len()
+            )));
+        }
         Some(t) if body.len() < t => {
             let mut v = Vec::with_capacity(body.len() + 1);
             v.push(0);
@@ -40,10 +95,11 @@ pub fn contents(body: &[u8], threshold: Option<usize>) -> Result<Vec<u8>> {
         }
     };
     if inner.len() > MAX_FRAME {
-        return Err(Error::new(format!(
-            "packet too large: {} bytes",
-            inner.len()
-        )));
+        return Err(Error::frame_too_large(FrameTooLarge {
+            stage: FrameSize::Encoded,
+            size: inner.len(),
+            limit: MAX_FRAME,
+        }));
     }
     Ok(inner)
 }
@@ -192,6 +248,10 @@ pub fn body(frame: &[u8], threshold: Option<usize>, inflater: &mut Inflater) -> 
 }
 
 #[cfg(test)]
+#[path = "frame/limits_tests.rs"]
+mod limits_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use flate2::write::ZlibEncoder;
@@ -268,6 +328,25 @@ mod tests {
             super::body(&frame, Some(256), &mut inflater).unwrap(),
             Body::Inflated(_)
         ));
+    }
+
+    /// CompressionEncoder refuses a body over CompressionDecoder's MAXIMUM_UNCOMPRESSED_LENGTH (8 MiB),
+    /// which the other side would refuse: 8 MiB of zeros deflate to a few KiB, well inside a frame,
+    /// and are read back whole; one byte more is not sent.
+    #[test]
+    fn a_body_over_the_uncompressed_maximum_is_not_sent() {
+        // CompressionDecoder.MAXIMUM_UNCOMPRESSED_LENGTH, written out so the constant is checked too.
+        let mut body = vec![0u8; 8_388_608];
+        let frame = contents(&body, Some(256)).unwrap();
+        let Body::Inflated(out) = super::body(&frame, Some(256), &mut Inflater::default()).unwrap()
+        else {
+            panic!("compressed");
+        };
+        assert_eq!(out.len(), 8_388_608);
+        body.push(0);
+        assert!(contents(&body, Some(256)).is_err());
+        // Without compression there is no CompressionEncoder: the frame's own limit applies.
+        assert!(contents(&body, None).is_err());
     }
 
     /// Split one complete frame off the front of `buffer`, if available.

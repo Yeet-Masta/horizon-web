@@ -9,10 +9,10 @@
 //! (`L`). Nothing is ever extracted outside the new world folder: an entry that does not
 //! sit under `world/`, or climbs above it, is skipped as vanilla's `startsWith` check does.
 use super::client::WorldDownload;
+use horizon_core::nbt::Tag;
 use horizon_std::fs::PathExt as _;
 use horizon_std::fs::{self, File};
 use horizon_std::time::Duration;
-use horizon_world::nbt::Tag;
 use sha1::{Digest, Sha1};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};

@@ -66,6 +66,7 @@ fn project(id: &str, kind: Kind) -> Project {
         kind,
         game_versions: vec![GAME.into()],
         loaders: vec!["minecraft".into()],
+        blocked: None,
     }
 }
 
@@ -151,10 +152,7 @@ fn installs_with_dependencies_then_updates_and_removes() {
     // An update replaces the old file.
     fake.release("addon", "2", &["base"], b"addon pack v2", false);
     let entry = Installed::load(&home).lookup("addon").cloned().unwrap();
-    assert_eq!(
-        update_for(&fake, &entry, &home).unwrap().unwrap().number,
-        "2"
-    );
+    assert_eq!(update_for(&fake, &entry).unwrap().unwrap().number, "2");
     install(&fake, &addon, false, &home, NONE).unwrap();
     assert!(!home.join("resourcepacks/addon-1.zip").exists());
     assert_eq!(
@@ -166,7 +164,7 @@ fn installs_with_dependencies_then_updates_and_removes() {
         .cloned()
         .unwrap();
     assert_eq!(entry.number, "2");
-    assert!(update_for(&fake, &entry, &home).unwrap().is_none());
+    assert!(update_for(&fake, &entry).unwrap().is_none());
 
     let removed = remove(&home, "addon").unwrap();
     assert_eq!(removed.project, "addon");
@@ -235,6 +233,39 @@ fn modpacks_download_checked() {
     fake.release("atm", "2", &[], b"mrpack 2", true);
     assert!(fetch_modpack(&fake, &fake.project("atm").unwrap(), &downloads, &|_| {}).is_err());
     assert!(!downloads.join("atm-2.zip").exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+impl Fake {
+    /// Gives `id`'s newest file the name its source lists.
+    fn name_newest(&self, id: &str, name: &str) {
+        self.versions.lock().unwrap().get_mut(id).unwrap()[0].files[0].name = name.into();
+    }
+}
+
+#[test]
+fn a_source_name_with_a_colon_is_saved_and_recorded_under_a_plain_name() {
+    let home = home("colon");
+    let mut fake = Fake::default();
+    // Modrinth names a pack's file after its project: "Yet Another Bingo: Ultimate" (#18263).
+    fake.add(project("bingo", Kind::Modpack));
+    fake.release("bingo", "2.15.1", &[], b"mrpack", false);
+    fake.name_newest("bingo", "Yet Another Bingo: Ultimate-2.15.1.mrpack");
+    let downloads = home.join("downloads");
+    let path = fetch_modpack(&fake, &fake.project("bingo").unwrap(), &downloads, &|_| {}).unwrap();
+    assert_eq!(
+        path,
+        downloads.join("Yet Another Bingo- Ultimate-2.15.1.mrpack")
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"mrpack");
+
+    fake.add(project("tools", Kind::ResourcePack));
+    fake.release("tools", "1", &[], b"pack", false);
+    fake.name_newest("tools", "Tools: \"Extra\"?-1.zip");
+    let done = install(&fake, &fake.project("tools").unwrap(), false, &home, NONE).unwrap();
+    assert_eq!(done[0].file, "resourcepacks/Tools- -Extra---1.zip");
+    assert_eq!(fs::read(home.join(&done[0].file)).unwrap(), b"pack");
+    assert_eq!(Installed::load(&home).entries[0].file, done[0].file);
     fs::remove_dir_all(&home).unwrap();
 }
 

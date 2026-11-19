@@ -56,7 +56,10 @@ fn witnesses_use_sensor_candidates_radius_invisibility_and_cached_results() {
     };
     let mut victim = villager(1, 0.0, 0.0, false);
     victim.attrs.follow_range = 16.0;
-    let seen: Vec<_> = candidates.iter().map(|m| m.seen(None)).collect();
+    let seen: Vec<_> = candidates
+        .iter()
+        .map(|m| m.seen(None, &crate::items::Items::empty()))
+        .collect();
     assert!(super::super::world::with_resource_test_world(
         std::path::Path::new(&root),
         &seen,
@@ -74,7 +77,10 @@ fn witnesses_use_sensor_candidates_radius_invisibility_and_cached_results() {
     ));
     candidates[0].invisible = true;
     candidates[1].invisible = false;
-    let seen: Vec<_> = candidates.iter().map(|m| m.seen(None)).collect();
+    let seen: Vec<_> = candidates
+        .iter()
+        .map(|m| m.seen(None, &crate::items::Items::empty()))
+        .collect();
     assert!(super::super::world::with_resource_test_world(
         std::path::Path::new(&root),
         &seen,

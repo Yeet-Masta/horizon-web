@@ -3,7 +3,7 @@
 tarball for one of your own Linux or macOS machines. The resources are Mojang
 assets: keep the archive in ignored .local/ and never publish or commit it.
 
-    cargo build --release -p horizon-client -p horizon-client-lib --bins
+    cargo build --release -p horizon-game -p horizon-client-lib --bins
     python3 tools/package_native_client.py
 """
 import argparse
@@ -88,7 +88,7 @@ def main():
             cwd=ROOT, check=True, capture_output=True, text=True).stdout)
         args.binary = Path(metadata['target_directory']) / 'release/horizon-client'
     if not args.binary.is_file():
-        raise SystemExit(f'missing {args.binary}: run cargo build --release -p horizon-client')
+        raise SystemExit(f'missing {args.binary}: run cargo build --release -p horizon-game')
     if not (args.resources / 'horizon-resources.json').is_file():
         raise SystemExit(f'missing prepared resources in {args.resources}: run horizon-prepare --prepare (cargo run --release -p horizon-prepare -- --prepare)')
     if not (args.resources / 'assets/minecraft/sounds.json').is_file():
@@ -108,8 +108,9 @@ def main():
     with tarfile.open(archive, 'w:gz', compresslevel=1) as tar:
         tar.add(args.binary, 'horizon/horizon-client')
         tar.add(ROOT / 'LICENSE', 'horizon/LICENSE')
+        tar.add(ROOT / 'LICENSES', 'horizon/LICENSES')  # the GPL text the LGPL needs beside it (section 4b)
         tar.add(ROOT / 'THIRD_PARTY_NOTICES.md', 'horizon/THIRD_PARTY_NOTICES.md')
-        ctl = args.binary.with_name('horizon-ctl')  # built with --bins: scripts and agents play through it
+        ctl = lab.binary(args.binary.parent, 'horizon-ctl')  # built with --bins: scripts and agents play through it
         if ctl.is_file():
             tar.add(ctl, 'horizon/horizon-ctl')
         add_bytes(tar, 'horizon/horizon.sh', LAUNCHER.replace('@MINECRAFT@', lab.VERSION).encode(), 0o755)

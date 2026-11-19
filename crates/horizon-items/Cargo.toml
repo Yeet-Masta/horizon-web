@@ -8,6 +8,7 @@ description = "Blocks and items as the client knows them: block facts, item stac
 
 [dependencies]
 horizon-std = { path = "../horizon-std" }
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false }
 horizon-client-core = { path = "../horizon-client-core" }
 horizon-core = { path = "../horizon-core" }
 horizon-world = { path = "../horizon-world" }
@@ -21,3 +22,7 @@ test-support = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The enabled-mods test names a package side (`mod_api::Side`).
+horizon-mod-vocab = { path = "../horizon-mod-vocab" }

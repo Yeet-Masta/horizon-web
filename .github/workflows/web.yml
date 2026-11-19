@@ -53,9 +53,9 @@ jobs:
         with:
           cache-key: web-build
       - name: The one-thread wasm32 build compiles
-        run: cargo check --config web/simd.toml -p horizon-client --bin horizon-client --no-default-features --features horizon-extras --target wasm32-unknown-unknown
+        run: cargo check --config web/simd.toml -p horizon-game --bin horizon-client --no-default-features --features horizon-extras --target wasm32-unknown-unknown
       - name: The threaded wasm64 build compiles (web/build.sh --wasm64)
-        run: cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-client --bin horizon-client --no-default-features --features horizon-extras --target wasm64-unknown-unknown --profile fast --config web/simd.toml --config web/threads.toml
+        run: cargo +nightly check -Zbuild-std=std,panic_abort -p horizon-game --bin horizon-client --no-default-features --features horizon-extras --target wasm64-unknown-unknown --profile fast --config web/simd.toml --config web/threads.toml
       - name: Build the threaded wasm32 page
         run: bash web/build.sh --fast
       - uses: actions/setup-python@v5

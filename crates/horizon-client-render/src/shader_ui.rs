@@ -5,6 +5,7 @@
 //! collapses the screens into one row when the page list has no room for them, and has Undo. A
 //! `shaders/` pack's options apply when Apply is pressed or the screen closes, as the pack loads
 //! again with them; a Horizon pack's apply at once.
+use crate::gfx::output::RayStatus;
 use crate::shader_pack_list::Kind;
 use crate::{
     lang,
@@ -60,6 +61,13 @@ const PICK_A_PACK: &str = "Pick a shader pack. Picking the one in use turns shad
 const PENDING: &str = "Changed options apply with Apply, or when you leave.";
 /// Pack descriptions run longer than Horizon's own: the strip has room for a line more.
 const NOTE_LINES: usize = 3;
+/// Why a picked pack that declares `[ray_tracing]` draws without it.
+const RAY_RESTART: &str = "Ray tracing: %s Until then the pack draws without it.";
+const RAY_UNSUPPORTED: &str =
+    "This GPU or graphics API has no ray tracing: the pack draws without it.";
+const RAY_OFF: &str = "Ray tracing is off: HORIZON_RAY_TRACING is set to something other than 1.";
+/// The row's short tag while the pack waits for a restart to trace rays.
+const RAY_RESTART_TAG: &str = "Restart needed";
 /// Screens this many links from the main one, or fewer, are in the page list.
 const LISTED_DEPTH: u8 = 1;
 
@@ -414,12 +422,39 @@ fn pack_sheet(s: &Settings) -> Sheet<Tab, Item> {
 }
 
 /// The picked pack's name, over its screens in the page list.
-fn pack_name(s: &Settings) -> &str {
+pub(crate) fn pack_name(s: &Settings) -> &str {
     match native(s) {
         Some((_, pack)) => pack.title.as_str(),
         None => (s.horizon.shader_pack)
             .strip_suffix(".zip")
             .unwrap_or(&s.horizon.shader_pack),
+    }
+}
+
+/// The picked pack declares `[ray_tracing]` and the renderer (`rays`) traces none for it: why,
+/// after the pack's row's description and the pack list's and the pack's main screen's.
+fn ray_note(s: &Settings, rays: Option<RayStatus>, sheets: &mut [Sheet<Tab, Item>]) {
+    let Some((i, _)) = native(s).filter(|(_, p)| p.traces) else {
+        return;
+    };
+    let note = match rays {
+        None | Some(RayStatus::Ready) => return,
+        Some(RayStatus::Restart) => lang::tr(RAY_RESTART, &[&lang::get("options.needsRestart")]),
+        Some(RayStatus::Unsupported) => lang::get(RAY_UNSUPPORTED),
+        Some(RayStatus::Off) => lang::get(RAY_OFF),
+    };
+    let tag = matches!(rays, Some(RayStatus::Restart)).then(|| lang::get(RAY_RESTART_TAG));
+    for sheet in sheets.iter_mut() {
+        if matches!(sheet.id, Tab::Packs | Tab::Screen(0)) {
+            // A line of its own above the description: a long description must not push the
+            // reason the pack draws without rays out of the strip.
+            sheet.warning = Some(note.clone());
+        }
+        let rows = sheet.groups.iter_mut().flat_map(|g| &mut g.rows);
+        for row in rows.filter(|r| r.id == Item::Pack(i as u16)) {
+            row.warning = Some(note.clone());
+            row.tag = tag.clone();
+        }
     }
 }
 
@@ -431,6 +466,8 @@ pub(crate) struct ShaderScreen {
     /// The values this screen saved to a `shaders/` pack's file (picking another pack, Apply),
     /// by pack: Undo puts back the ones the screen opened with over them.
     written: BTreeMap<String, BTreeMap<String, String>>,
+    /// What the renderer's ray tracing is to a pack that asks for it (`OptionsUi::draw`).
+    pub(crate) rays: Option<RayStatus>,
 }
 
 impl ShaderScreen {
@@ -458,7 +495,7 @@ impl shell::Screen for ShaderScreen {
             .collect();
         let options = (s.shader_options.as_ref()).map(|o| (&o.pack, &o.chosen, o.changed));
         let h = &s.horizon;
-        shell::stamp_of(&(&h.shader_pack, h.shadow_cache, packs, options))
+        shell::stamp_of(&(&h.shader_pack, h.shadow_cache, packs, options, self.rays))
     }
     /// The pack list, then the picked pack's screens under its name: those the main screen links
     /// to in the page list, the ones farther in opened by their links.
@@ -484,6 +521,7 @@ impl shell::Screen for ShaderScreen {
             sheet.heading = (i == 0).then(|| lang::tr(PACK_HEADING, &[&pack_name(s)]));
             sheets.push(sheet);
         }
+        ray_note(s, self.rays, &mut sheets);
         sheets
     }
     fn link(&self, item: Item) -> Option<Tab> {
@@ -684,7 +722,10 @@ mod tests {
     const CHANGED: Output = Output::Event(Event::Changed);
 
     fn atlas() -> HudAtlas {
-        HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
+        HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            "/nonexistent/horizon-test-assets".into(),
+        ))
+        .unwrap()
     }
 
     fn entry(file: &str, kind: Kind) -> Entry {
@@ -696,6 +737,7 @@ mod tests {
             options: Vec::new(),
             values: Vec::new(),
             pages: Vec::new(),
+            traces: false,
         }
     }
 
@@ -834,11 +876,27 @@ mod tests {
         let s = many_screens(12);
         let mut shell = shell_at(Tab::Screen(4));
         // 427x480 GUI px: tall enough for the pack list, the pack's line and its 13 screens.
-        let mut batch = HudBatch::new([854, 960]);
-        shell.draw(&s, &mut batch, &atlas(), (0.0, 0.0), false, None);
+        let mut batch = HudBatch::scratch([854, 960]);
+        shell.draw_test_frame(
+            &s,
+            &mut batch,
+            &atlas(),
+            (0.0, 0.0),
+            false,
+            None,
+            &mut |_, _| {},
+        );
         assert_eq!(shell.page_places().len(), 1 + 13);
-        let mut batch = HudBatch::new([854, 480]);
-        shell.draw(&s, &mut batch, &atlas(), (0.0, 0.0), false, None);
+        let mut batch = HudBatch::scratch([854, 480]);
+        shell.draw_test_frame(
+            &s,
+            &mut batch,
+            &atlas(),
+            (0.0, 0.0),
+            false,
+            None,
+            &mut |_, _| {},
+        );
         let parts: Vec<(Tab, Part)> = shell.page_places().iter().map(|p| (p.0, p.2)).collect();
         assert_eq!(
             parts,
@@ -908,8 +966,16 @@ mod tests {
         press(&mut shell, &mut s, Item::Link(1));
         press(&mut shell, &mut s, Item::Link(2));
         assert_eq!(shell.open_page(), Some(Tab::Screen(2)));
-        let mut batch = HudBatch::new([1708, 960]);
-        shell.draw(&s, &mut batch, &atlas(), (0.0, 0.0), false, None);
+        let mut batch = HudBatch::scratch([1708, 960]);
+        shell.draw_test_frame(
+            &s,
+            &mut batch,
+            &atlas(),
+            (0.0, 0.0),
+            false,
+            None,
+            &mut |_, _| {},
+        );
         assert_eq!(shell.lit_page(), Some(Tab::Screen(1)));
         assert!(shell.key(&mut s, K::Escape, None, false, SIZE).is_empty());
         assert_eq!(shell.open_page(), Some(Tab::Screen(1)));

@@ -7,11 +7,11 @@
 //! wave); a raid reads them and the world through [`RaidLevel`] and asks the
 //! game for its side effects with [`Action`]s, so the game and the
 //! differential test (`tools/test_raid_parity.py`) run the same rules.
+use horizon_core::nbt::{JavaString, Tag};
 use horizon_core::{
     geometry::trig,
     random::{LegacyRandom, RandomSource},
 };
-use horizon_world::nbt::{JavaString, Tag};
 use std::collections::BTreeMap;
 
 pub const MAX_OMEN_LEVEL: i32 = 5;
@@ -177,9 +177,10 @@ pub fn horn_at(player: [f64; 3], center_x: f64, center_z: f64, in_raid: bool) ->
     Some([player[0] + k * dx, player[1], player[2] + k * dz])
 }
 
-/// The single player a raid sees (`level.players()`).
+/// One player of a raid's level (`level.players()`).
 #[derive(Clone, Copy, Debug)]
 pub struct RaidPlayer {
+    pub uuid: u128,
     pub position: [f64; 3],
     pub block: [i32; 3],
     pub alive: bool,
@@ -201,7 +202,8 @@ pub trait RaidLevel {
     fn is_position_entity_ticking(&self, pos: [i32; 3]) -> bool;
     /// The ravager's placement accepts the position, or it is air on snow.
     fn ravager_can_spawn(&self, pos: [i32; 3]) -> bool;
-    fn player(&self) -> Option<RaidPlayer>;
+    /// `level.players()`: the players of the raid's level, in order.
+    fn players(&self) -> Vec<RaidPlayer>;
 }
 /// `ServerLevel.isVillage`.
 pub fn is_village(level: &dyn RaidLevel, pos: [i32; 3]) -> bool {
@@ -253,8 +255,12 @@ pub struct Bar {
     pub name: BarName,
     pub progress: f32,
     pub visible: bool,
-    /// The local player sees the bar (`getPlayers` holds them).
+    /// `playSound`'s "the first player of the level is in the raid".
     pub player: bool,
+    /// `ServerBossEvent.players`: the players the bar is shown to. Only
+    /// `updatePlayers` fills it, on the 20-tick beats (`stop` clears it), so
+    /// it is stale by up to 19 ticks.
+    pub players: Vec<u128>,
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +306,7 @@ impl Raid {
                 progress: 0.0,
                 visible: true,
                 player: false,
+                players: Vec::new(),
             },
             celebration_ticks: 0,
             wave_spawn_pos: None,
@@ -333,6 +340,7 @@ impl Raid {
     pub fn stop(&mut self) {
         self.active = false;
         self.bar.player = false;
+        self.bar.players.clear();
         self.status = Status::Stopped;
     }
     fn has_bonus_wave(&self) -> bool {
@@ -361,9 +369,14 @@ impl Raid {
     }
     /// `Raid.absorbRaidOmen` for a player with Raid Omen at `amplifier`.
     /// True when this omen triggers the raid (no wave spawned yet: the
-    /// `raid_trigger` stat and the `voluntary_exile` advancement).
+    /// `raid_trigger` stat and the `voluntary_exile` player trigger, which no
+    /// vanilla advancement listens to).
     pub fn absorb_omen(&mut self, amplifier: i32) -> bool {
-        self.omen_level = (self.omen_level + amplifier + 1).clamp(0, MAX_OMEN_LEVEL);
+        self.omen_level = self
+            .omen_level
+            .wrapping_add(amplifier)
+            .wrapping_add(1)
+            .clamp(0, MAX_OMEN_LEVEL);
         !self.has_first_wave_spawned()
     }
     /// `Raid.getEnchantOdds`.
@@ -537,15 +550,25 @@ impl Raid {
             self.center = center;
         }
     }
-    /// The countdown's bar progress and the local player's membership
-    /// (`updatePlayers`).
-    fn update_players(&mut self, in_raid: bool) {
-        self.bar.player = in_raid;
+    /// `updatePlayers`: the bar's players are the living players whose
+    /// `getRaidAt` is this raid. Only the beats below call it, so a viewer
+    /// joins or leaves the bar up to 19 ticks late.
+    fn update_players(&mut self, level: &dyn RaidLevel, in_raid: &dyn Fn(&Raid, [i32; 3]) -> bool) {
+        let players = level.players();
+        let mut members = Vec::new();
+        for p in &players {
+            if p.alive && in_raid(self, p.block) {
+                members.push(p.uuid);
+            }
+        }
+        // `playSound` asks the event's set about the first player in the level.
+        self.bar.player = players.first().is_some_and(|p| members.contains(&p.uuid));
+        self.bar.players = members;
     }
 
     /// `Raid.tick`. `members` are the raid's raiders; `in_raid` answers
-    /// whether the player stands in this raid (`getRaidAt(pos) == this`,
-    /// with the raid's current centre and state).
+    /// whether a player at a block stands in this raid (`getRaidAt(pos) ==
+    /// this`, with the raid's current centre and state).
     pub fn tick(
         &mut self,
         level: &dyn RaidLevel,
@@ -556,11 +579,6 @@ impl Raid {
         if self.is_stopped() {
             return actions;
         }
-        let player_in = |raid: &Raid| {
-            level
-                .player()
-                .is_some_and(|p| p.alive && in_raid(raid, p.block))
-        };
         if self.status == Status::Ongoing {
             let mut members: Vec<RaiderInfo> = members.to_vec();
             let was_active = self.active;
@@ -610,8 +628,7 @@ impl Raid {
                         self.wave_spawn_pos = self.find_spawn_pos(level, 8);
                     }
                     if self.cooldown_ticks == PRE_RAID_TICKS || self.cooldown_ticks % 20 == 0 {
-                        let p = player_in(self);
-                        self.update_players(p);
+                        self.update_players(level, in_raid);
                     }
                     self.cooldown_ticks -= 1;
                     self.bar.progress = clamp_f32(
@@ -622,8 +639,7 @@ impl Raid {
                 }
             }
             if self.ticks_active % 20 == 0 {
-                let p = player_in(self);
-                self.update_players(p);
+                self.update_players(level, in_raid);
                 self.update_raiders(level, &mut members, &mut actions);
                 self.bar.name = if alive > 0 && alive <= 2 {
                     BarName::Remaining(alive as i32)
@@ -668,7 +684,7 @@ impl Raid {
                     self.status = Status::Victory;
                     actions.push(Action::Victory {
                         heroes: self.heroes(),
-                        amplifier: self.omen_level - 1,
+                        amplifier: self.omen_level.wrapping_sub(1),
                     });
                 }
             }
@@ -679,8 +695,7 @@ impl Raid {
                 return actions;
             }
             if self.celebration_ticks % 20 == 0 {
-                let p = player_in(self);
-                self.update_players(p);
+                self.update_players(level, in_raid);
                 self.bar.visible = true;
                 if self.is_victory() {
                     self.bar.progress = 0.0;
@@ -804,6 +819,20 @@ impl Raids {
     }
     pub fn get_mut(&mut self, id: i32) -> Option<&mut Raid> {
         self.map.get_mut(&id)
+    }
+    /// `Raid.stop`, marking its owning level's saved raids dirty.
+    pub fn stop(&mut self, id: i32) -> Option<[i32; 3]> {
+        let raid = self.get_mut(id)?;
+        raid.stop();
+        let center = raid.center;
+        self.dirty = true;
+        Some(center)
+    }
+    /// `Raid.setRaidOmenLevel`: assign without clamping and persist the change.
+    pub fn set_omen_level(&mut self, id: i32, level: i32) -> Option<i32> {
+        let before = std::mem::replace(&mut self.get_mut(id)?.omen_level, level);
+        self.dirty = true;
+        Some(before)
     }
     /// The raid ids in iteration order.
     pub fn ids(&self) -> Vec<i32> {
@@ -954,8 +983,15 @@ impl Raids {
     /// nothing decodes. Raids that fail to decode are dropped; a raid whose
     /// heroes partly fail keeps the others.
     pub fn from_nbt(tag: &Tag, seed: i64) -> Self {
+        let (mut raids, order) = Self::from_nbt_unseeded(tag);
+        raids.seed_loaded(seed, &order);
+        raids
+    }
+    /// `from_nbt` without seeding the raids' randoms, with each raid's id and
+    /// position in the file for `seed_loaded`.
+    pub fn from_nbt_unseeded(tag: &Tag) -> (Self, Vec<(i32, usize)>) {
         let Some(decoded) = decode_raids(tag) else {
-            return Self::default();
+            return (Self::default(), Vec::new());
         };
         let mut out = Self {
             dirty: false,
@@ -963,14 +999,24 @@ impl Raids {
             tick: decoded.tick,
             ..Self::default()
         };
+        let mut order = Vec::with_capacity(decoded.raids.len());
         for (i, (id, raid)) in decoded.raids.into_iter().enumerate() {
-            let mut raid = raid;
-            raid.random = LegacyRandom::new(seed.wrapping_add(i as i64));
             // Int2ObjectOpenHashMap.put: a repeated id replaces the raid.
             out.map.insert(id, raid);
             out.order.put(id);
+            order.push((id, i));
         }
-        out
+        (out, order)
+    }
+    /// Seeds the raids `from_nbt_unseeded` read as `from_nbt` does: the raid
+    /// at position `i` in the file gets `seed + i` (a repeated id, the last).
+    /// Raids gone since are skipped.
+    pub fn seed_loaded(&mut self, seed: i64, order: &[(i32, usize)]) {
+        for &(id, i) in order {
+            if let Some(raid) = self.map.get_mut(&id) {
+                raid.random = LegacyRandom::new(seed.wrapping_add(i as i64));
+            }
+        }
     }
 }
 /// The id of the closest active raid within 96 blocks (`getNearbyRaid`).
@@ -1526,12 +1572,38 @@ impl IntOpenHashOrder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn omen_arithmetic_wraps_as_java_ints() {
+        let mut raid = Raid::new([0, 64, 0], 2, 1);
+        raid.omen_level = i32::MAX;
+        raid.absorb_omen(0);
+        // Java: MAX + 0 + 1 wraps to MIN, then clamps to 0.
+        assert_eq!(raid.omen_level, 0);
+    }
+
+    #[test]
+    fn raids_read_then_seeded_match_raids_loaded_seeded() {
+        let mut raids = Raids::default();
+        raids.insert(3, Raid::new([0, 64, 0], 2, 1));
+        raids.insert(8, Raid::new([200, 64, 0], 2, 2));
+        let tag = raids.to_nbt();
+        let mut seeded = Raids::from_nbt(&tag, 99);
+        let (mut read, order) = Raids::from_nbt_unseeded(&tag);
+        read.seed_loaded(99, &order);
+        for id in [3, 8] {
+            let a = seeded.map.get_mut(&id).unwrap().random.next_long();
+            let b = read.map.get_mut(&id).unwrap().random.next_long();
+            assert_eq!(a, b);
+        }
+    }
+
     use super::*;
 
     struct Level {
         difficulty: i32,
         village: bool,
         loaded: bool,
+        players: Vec<RaidPlayer>,
     }
     impl RaidLevel for Level {
         fn difficulty(&self) -> i32 {
@@ -1555,8 +1627,8 @@ mod tests {
         fn ravager_can_spawn(&self, _: [i32; 3]) -> bool {
             true
         }
-        fn player(&self) -> Option<RaidPlayer> {
-            None
+        fn players(&self) -> Vec<RaidPlayer> {
+            self.players.clone()
         }
     }
     fn level(difficulty: i32) -> Level {
@@ -1564,7 +1636,25 @@ mod tests {
             difficulty,
             village: true,
             loaded: true,
+            players: Vec::new(),
         }
+    }
+    /// A player of the raid's level at a block position.
+    fn at(uuid: u128, block: [i32; 3]) -> RaidPlayer {
+        RaidPlayer {
+            uuid,
+            position: [
+                f64::from(block[0]),
+                f64::from(block[1]),
+                f64::from(block[2]),
+            ],
+            block,
+            alive: true,
+        }
+    }
+    /// `ServerLevel.getRaidAt`: within 96 blocks of the centre (9216 squared).
+    fn near_centre(_: &Raid, pos: [i32; 3]) -> bool {
+        dist_sqr([0, 64, 0], pos) < VALID_RAID_RADIUS_SQR
     }
     fn nobody(_: &Raid, _: [i32; 3]) -> bool {
         false
@@ -1640,6 +1730,40 @@ mod tests {
         assert!(count(&spawns, RaiderType::Pillager) >= 4);
         assert_eq!(raid.bar.progress, 1.0);
         assert!(raid.started);
+    }
+    /// `updatePlayers` runs on the countdown's beats and on the active tick's
+    /// every 20th tick, so the bar's players lag by up to 19 ticks: a player
+    /// who leaves `getRaidAt` keeps the bar until the next beat, and one who
+    /// walks in waits for it.
+    #[test]
+    fn the_bars_players_change_only_on_the_twenty_tick_beats() {
+        let (inside, outside) = (7u128, 9u128);
+        let mut l = level(2);
+        l.players = vec![at(inside, [8, 64, 8]), at(outside, [200, 64, 8])];
+        let mut raid = Raid::new([0, 64, 0], 2, 3);
+        // The first tick is a beat (countdown 300): only the player inside joins.
+        raid.tick(&l, &[], &near_centre);
+        assert_eq!(raid.bar.players, vec![inside]);
+        assert!(raid.bar.player);
+        // They walk out of the raid. Ticks 2 to 19 are not beats.
+        l.players[0] = at(inside, [200, 64, 8]);
+        for _ in 2..20 {
+            raid.tick(&l, &[], &near_centre);
+            assert_eq!(raid.bar.players, vec![inside]);
+        }
+        // Tick 20 is one (`ticksActive % 20 == 0`): they leave the bar.
+        raid.tick(&l, &[], &near_centre);
+        assert!(raid.bar.players.is_empty());
+        assert!(!raid.bar.player);
+        // Tick 21 is the countdown's beat (cooldown 280); ticks 22-39 are not.
+        raid.tick(&l, &[], &near_centre);
+        l.players[0] = at(inside, [8, 64, 8]);
+        for _ in 22..40 {
+            raid.tick(&l, &[], &near_centre);
+            assert!(raid.bar.players.is_empty());
+        }
+        raid.tick(&l, &[], &near_centre);
+        assert_eq!(raid.bar.players, vec![inside]);
     }
     #[test]
     fn losing_the_village_after_a_wave_loses_the_raid() {

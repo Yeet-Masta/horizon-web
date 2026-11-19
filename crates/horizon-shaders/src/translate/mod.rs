@@ -100,6 +100,8 @@ pub struct ComputeProgram {
     pub notes: Vec<Error>,
     pub work_groups: Option<[u32; 3]>,
     pub work_groups_render: [f32; 2],
+    /// An indirect request overrides both direct work-group declarations.
+    pub indirect: Option<crate::IndirectDispatch>,
 }
 
 /// The uniforms a gbuffers program reads per draw (5.3's "D"), in a block of their own
@@ -861,6 +863,13 @@ fn resources(
 
 /// Translates a compute program (`.csh`).
 pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<Error>> {
+    translate_compute_dispatch(compute, None)
+}
+
+pub(crate) fn translate_compute_dispatch(
+    compute: &Preprocessed,
+    indirect: Option<crate::IndirectDispatch>,
+) -> Result<ComputeProgram, Vec<Error>> {
     let named = anonymous_structs::name(&compute.code).map(|code| Preprocessed {
         code,
         ..compute.clone()
@@ -905,10 +914,16 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
         }
         Some(v)
     };
-    let mut work_groups =
-        sizes("workGroups", &[3]).map(|v| [v[0] as u32, v[1] as u32, v[2] as u32]);
-    let work_groups_render =
-        sizes("workGroupsRender", &[2, 3]).map_or([1.0, 1.0], |v| [v[0] as f32, v[1] as f32]);
+    let mut work_groups = if indirect.is_none() {
+        sizes("workGroups", &[3]).map(|v| [v[0] as u32, v[1] as u32, v[2] as u32])
+    } else {
+        None
+    };
+    let work_groups_render = if indirect.is_none() {
+        sizes("workGroupsRender", &[2, 3]).map_or([1.0, 1.0], |v| [v[0] as f32, v[1] as f32])
+    } else {
+        [1.0, 1.0]
+    };
     let code = c.rewrite(&samplers, &uniforms);
     let mut folded = None;
     let code = match work_groups.map(|g| fold_work_groups(&code, g)) {
@@ -1011,6 +1026,7 @@ pub fn translate_compute(compute: &Preprocessed) -> Result<ComputeProgram, Vec<E
         interface,
         work_groups,
         work_groups_render,
+        indirect,
     })
 }
 
@@ -4184,33 +4200,4 @@ in VertexData {{ {member} }} vIn;
 }
 
 #[cfg(test)]
-mod image_parameter_tests {
-    use crate::{Macros, Pack, preprocess, translate_compute};
-    #[test]
-    fn nested_image_helpers_specialize_multiple_storage_formats() {
-        let src = "#version 430\nlayout(local_size_x=1)in;layout(rgba16f) uniform image3D imageA;layout(r32f) uniform image3D imageB;void write_value(writeonly image3D img,ivec3 p){imageStore(img,p,vec4(0.5));}\nvoid nested(image3D img,ivec3 p){write_value(img,p);}\nvoid main(){nested(imageA,ivec3(0));nested(imageB,ivec3(0));}";
-        let pack = Pack::from_zip_bytes(
-            "formats.zip",
-            crate::pack::tests::zip(&[("shaders/setup.csh", src)]),
-        )
-        .unwrap();
-        let result = translate_compute(&preprocess(&pack, "setup.csh", &Macros::standard()));
-        assert!(result.is_ok(), "{:?}", result.err());
-    }
-}
-
-#[cfg(test)]
-mod mixed_integer_bounds_tests {
-    #[test]
-    fn compute_clamp_with_signed_index_and_unsigned_bounds_compiles() {
-        let source = "#version 430\nlayout(local_size_x=1) in; layout(std430,binding=0) buffer Data{uint result;};void main(){int index=int(gl_LocalInvocationID.x);result=clamp(index,0u,47u);}";
-        let pack = crate::Pack::from_zip_bytes(
-            "integer-bounds.zip",
-            crate::pack::tests::zip(&[("shaders/setup.csh", source)]),
-        )
-        .unwrap();
-        let stage = crate::preprocess(&pack, "setup.csh", &crate::Macros::standard());
-        let result = crate::translate_compute(&stage);
-        assert!(result.is_ok(), "{:?}", result.err());
-    }
-}
+mod image_parameter_and_mixed_integer_bounds_tests;

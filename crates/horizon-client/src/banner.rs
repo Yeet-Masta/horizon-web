@@ -3,13 +3,13 @@
 //! banners, and the loom rules of `LoomMenu` (selectable patterns, the
 //! six-layer limit and the result stack).
 use crate::{block_entity_render::DYES, items::ItemStack, items::Items};
+use horizon_core::nbt::Tag;
 use horizon_std::fs;
 use horizon_std::fs::PathExt as _;
-use horizon_world::nbt::Tag;
 use serde_json::Value;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-pub use horizon_items::banner_layer::{BannerLayer, layers_from_nbt, layers_to_nbt};
+pub use horizon_items::banner_layer::{BannerLayer, PatternRef, layers_from_nbt, layers_to_nbt};
 
 /// Layers a loom may stack on a banner (`LoomMenu`'s `hasMaxPatterns`).
 pub const MAX_LAYERS: usize = 6;
@@ -65,13 +65,7 @@ fn read_tag(root: &Path, name: &str, depth: u32) -> Vec<Arc<str>> {
 }
 
 impl Banners {
-    pub fn load(root: &Path) -> Self {
-        Self::load_with_defaults(root, None)
-    }
-    pub(crate) fn load_with_defaults(
-        root: &Path,
-        defaults: Option<&horizon_world::item_defaults::Defaults>,
-    ) -> Self {
+    pub fn load(root: &Path, defaults: &horizon_world::item_defaults::ItemDefaults) -> Self {
         let mut banners = Self::default();
         let mut files: Vec<_> = fs::read_dir(root.join("data/minecraft/banner_pattern"))
             .into_iter()
@@ -128,31 +122,21 @@ impl Banners {
                 }
             }
         }
-        let owned_defaults;
-        let defaults = match defaults {
-            Some(defaults) => Some(defaults),
-            None => {
-                owned_defaults = horizon_world::item_defaults::read(root).ok();
-                owned_defaults.as_ref()
+        for (item, c) in defaults.entries() {
+            let id: Arc<str> = Arc::from(item.as_str());
+            if let Some(dye) = c["minecraft:dye"].as_str() {
+                banners.dyes.insert(id.clone(), Arc::from(dye));
             }
-        };
-        if let Some(raw) = defaults {
-            for (item, c) in raw {
-                let id: Arc<str> = Arc::from(item.as_str());
-                if let Some(dye) = c["minecraft:dye"].as_str() {
-                    banners.dyes.insert(id.clone(), Arc::from(dye));
+            match &c["minecraft:provides_banner_patterns"] {
+                Value::String(tag) if tag.starts_with('#') => {
+                    banners.provided.insert(id, read_tag(root, &tag[1..], 0));
                 }
-                match &c["minecraft:provides_banner_patterns"] {
-                    Value::String(tag) if tag.starts_with('#') => {
-                        banners.provided.insert(id, read_tag(root, &tag[1..], 0));
-                    }
-                    Value::String(single) => {
-                        banners
-                            .provided
-                            .insert(id, vec![Arc::from(single.as_str())]);
-                    }
-                    _ => {}
+                Value::String(single) => {
+                    banners
+                        .provided
+                        .insert(id, vec![Arc::from(single.as_str())]);
                 }
+                _ => {}
             }
         }
         banners
@@ -174,17 +158,32 @@ impl Banners {
             None => format!("entity/shield/{}", id.trim_start_matches("minecraft:")),
         }
     }
+    /// `Sheets.getBannerSprite` texture name of a layer: a direct holder names
+    /// its own `asset_id`.
+    pub fn layer_texture(&self, layer: &BannerLayer) -> String {
+        match &layer.pattern {
+            PatternRef::Id(id) => self.banner_texture(id),
+            PatternRef::Inline { asset, .. } => {
+                format!("entity/banner/{}", asset.trim_start_matches("minecraft:"))
+            }
+        }
+    }
     /// `BannerPatternLayers.Layer.description` translation key.
     pub fn layer_key(&self, layer: &BannerLayer) -> String {
-        let base = self.pattern(&layer.pattern).map_or_else(
-            || {
-                format!(
-                    "block.minecraft.banner.{}",
-                    layer.pattern.trim_start_matches("minecraft:")
-                )
-            },
-            |p| p.translation_key.clone(),
-        );
+        let base = match &layer.pattern {
+            PatternRef::Inline {
+                translation_key, ..
+            } => translation_key.to_string(),
+            PatternRef::Id(id) => self.pattern(id).map_or_else(
+                || {
+                    format!(
+                        "block.minecraft.banner.{}",
+                        id.trim_start_matches("minecraft:")
+                    )
+                },
+                |p| p.translation_key.clone(),
+            ),
+        };
         format!("{base}.{}", layer.color)
     }
     /// `LoomMenu.isDyeItem`: the dye colour of a loom dye.
@@ -347,8 +346,10 @@ mod tests {
         if !root.join("items.json").exists() {
             return;
         }
-        let items = Items::tags_only(&root, &horizon_world::loot::PackOverlay::NONE).unwrap();
-        let b = Banners::load(&root);
+        let defaults = horizon_world::item_defaults::shared(&root).unwrap();
+        let items =
+            Items::tags_only(&root, &horizon_world::loot::PackOverlay::NONE, &defaults).unwrap();
+        let b = Banners::load(&root, &defaults);
         let mut dye = ItemStack::new("minecraft:white_dye", 1);
         assert_eq!(&*b.loom_dye(&items, &dye).unwrap(), "white");
         dye.data_mut()
@@ -368,8 +369,10 @@ mod tests {
         if !root.join("items.json").exists() {
             return;
         }
-        let items = Items::tags_only(&root, &horizon_world::loot::PackOverlay::NONE).unwrap();
-        let b = Banners::load(&root);
+        let defaults = horizon_world::item_defaults::shared(&root).unwrap();
+        let items =
+            Items::tags_only(&root, &horizon_world::loot::PackOverlay::NONE, &defaults).unwrap();
+        let b = Banners::load(&root, &defaults);
         let mut pattern = ItemStack::new("minecraft:globe_banner_pattern", 1);
         assert!(b.is_pattern_item(&items, &pattern));
         pattern.data_mut().set_other(
@@ -386,7 +389,8 @@ mod tests {
         if !root.join("items.json").exists() {
             return;
         }
-        let b = Banners::load(&root);
+        let defaults = horizon_world::item_defaults::shared(&root).unwrap();
+        let b = Banners::load(&root, &defaults);
         let mut pattern = ItemStack::new("minecraft:globe_banner_pattern", 1);
         assert_eq!(&*b.selectable(Some(&pattern))[0], "minecraft:globe");
         pattern.data_mut().set_other(
@@ -446,7 +450,7 @@ mod tests {
         );
         assert!(tooltip_layers(&banner).is_empty());
         banner.data_mut().custom_name =
-            Some(horizon_world::nbt::Tag::String("Captain's Standard".into()));
+            Some(horizon_core::nbt::Tag::String("Captain's Standard".into()));
         assert!(tooltip_layers(&banner).is_empty());
         banner.data_mut().ominous_banner = false;
         assert_eq!(tooltip_layers(&banner), layers(&banner));

@@ -3,8 +3,8 @@
 
     triage_command.py command     one comment (triage-command.yml): checks who asked, acts, answers in the thread
 
-A comment by Ludovic or by an account in .github/trusted-reviewers.txt (matched by numeric ID, never by login), on
-the first line:
+A comment by a council member (.github/council.txt) or by an account in .github/trusted-reviewers.txt (matched by
+numeric ID, never by login), on the first line:
 
     /close [completed|not planned]     closes an issue (a pull request: closes it without merging)
     /close duplicate of #123           comments "Duplicate of #123" and closes it as a duplicate
@@ -12,10 +12,10 @@ the first line:
     /label bug, good first issue       existing labels only; never creates one
     /unlabel bug
 
-Refused with a one-line answer: a label with `release` in it or `full-parity`; anything by Ludovic (his issues and
-pull requests); a merged pull request; a locked thread; more than 60 actions per reviewer in 24 hours. No code of any
-pull request is read or run: only the comment's text, its author and the API's answers, which reach this script as
-env vars.
+Refused with a one-line answer: a label with `release` in it or `full-parity`; anything by a council member (their
+issues and pull requests); a merged pull request; a locked thread; more than 60 actions per reviewer in 24 hours. No
+code of any pull request is read or run: only the comment's text, its author and the API's answers, which reach this
+script as env vars.
 """
 from __future__ import annotations
 
@@ -61,6 +61,8 @@ def safe(text: str) -> str:
 def parse(body: str) -> Command | None:
     """The command on a comment's first line; None when it isn't one. Raises Refused when it is one, but wrong."""
     line = next((line.strip() for line in body.splitlines() if line.strip()), "")
+    # Agents start every comment with "🤖 Agent:" (AGENTS.md), so their `/close` follows it, as in claim_command.
+    line = re.sub(r"^🤖\s*Agent:\s*", "", line)
     m = re.match(r"^/(\w+)(?:\s+(.*))?$", line)
     if not m or m.group(1).lower() not in COMMANDS:
         return None
@@ -92,18 +94,18 @@ def parse(body: str) -> Command | None:
 def label_refusal(name: str) -> str | None:
     low = name.lower()
     if "release" in low or low == "full-parity":
-        return f"`{safe(name)}` is a release or parity label: only Ludovic's side touches those."
+        return f"`{safe(name)}` is a release or parity label: only the council touches those."
     return None
 
 
 def authorize(actor: ns.Actor, reviewers: ns.Reviewers) -> None:
-    """Ludovic always; a listed reviewer unless the list is paused; nobody else. By numeric ID."""
+    """The council always; a listed reviewer unless the list is paused; nobody else. By numeric ID."""
     if ns.is_owner(actor):
         return
     if not reviewers.listed(actor.id):
-        raise Refused(f"Only Ludovic and the trusted reviewers listed in `{ns.REVIEWERS}` can triage this way.")
+        raise Refused(f"Only the council and the trusted reviewers listed in `{ns.REVIEWERS}` can triage this way.")
     if reviewers.paused:
-        raise Refused(f"Triage commands are paused: Ludovic stopped them in `{ns.REVIEWERS}`.")
+        raise Refused(f"Triage commands are paused: the council stopped them in `{ns.REVIEWERS}`.")
 
 
 def target_refusal(issue: dict, cmd: Command, actor: ns.Actor) -> str | None:
@@ -111,7 +113,7 @@ def target_refusal(issue: dict, cmd: Command, actor: ns.Actor) -> str | None:
     is_pr = "pull_request" in issue
     kind = "pull request" if is_pr else "issue"
     if not ns.is_owner(actor) and ns.is_owner_id((issue.get("user") or {}).get("id")):
-        return f"This {kind} is Ludovic's: triage commands don't touch it."
+        return f"This {kind} is a council member's: triage commands don't touch it."
     if is_pr and (issue["pull_request"] or {}).get("merged_at"):
         return "That pull request is already merged."
     if issue.get("locked"):
@@ -138,6 +140,11 @@ def gh(*args: str, check: bool = True) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def encode_label(name: str) -> str:
+    """One URL path segment: `/` would otherwise become a path segment of its own."""
+    return name.replace("/", "%2F").replace(" ", "%20")
+
+
 class Api:
     """The few GitHub calls this needs; tests replace it."""
 
@@ -150,7 +157,7 @@ class Api:
 
     def label(self, name: str) -> str | None:
         """The label's real name, or None when the repository has no such label."""
-        raw = gh("api", f"repos/{self.repo}/labels/{name.replace('/', '%2F').replace(' ', '%20')}", check=False)
+        raw = gh("api", f"repos/{self.repo}/labels/{encode_label(name)}", check=False)
         return json.loads(raw)["name"] if raw else None
 
     def add_labels(self, n: int, names: list[str]) -> None:
@@ -160,7 +167,7 @@ class Api:
         gh(*args)
 
     def remove_label(self, n: int, name: str) -> None:
-        gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{n}/labels/{name.replace(' ', '%20')}")
+        gh("api", "-X", "DELETE", f"repos/{self.repo}/issues/{n}/labels/{encode_label(name)}")
 
     def close(self, n: int, reason: str | None) -> None:
         args = ["api", "-X", "PATCH", f"repos/{self.repo}/issues/{n}", "-f", "state=closed"]
@@ -184,10 +191,10 @@ class Api:
 def actions_by(api, login: str, now: datetime) -> int:
     """Actions this workflow answered for `login` in the last 24 h, counted from its own comments."""
     since = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    tag = f"on behalf of @{login.lower()}"
+    tag = re.compile(rf"on behalf of @{re.escape(login.lower())}(?![a-z0-9-])")
     return sum(1 for c in api.recent_comments(since)
                if c["user"] == "github-actions[bot]" and c["body"].startswith(PREFIX)
-               and c["body"].split("\n", 1)[0].lower().count(tag))
+               and tag.search(c["body"].split("\n", 1)[0].lower()))
 
 
 def say(action: str, login: str, url: str) -> str:

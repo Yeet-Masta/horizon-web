@@ -40,8 +40,9 @@ pub enum Class {
     Urgent,
     /// The chunks around the player: generation, light, meshing.
     Near,
-    /// Far terrain: runs on what the near work leaves, and never on every
-    /// worker at once, so near work that arrives finds a worker free.
+    /// Far terrain and the meshing of levels the player only views: runs on
+    /// what the near work leaves, and never on every worker at once, so near
+    /// work that arrives finds a worker free.
     Far,
 }
 
@@ -113,18 +114,39 @@ impl<T> PerWorker<T> {
     }
 }
 
+/// One counter on a cache line of its own (as [`crate::alloc_count`]'s slots are):
+/// these are written by every worker on every job, and two of them within one
+/// 64-byte line make the cores that own the others re-read it for nothing
+/// (false sharing). Padding is per field, never by position: rustc's field
+/// order is not a contract.
+#[repr(align(64))]
+struct Padded<T>(T);
+
+impl<T> Padded<T> {
+    const fn new(value: T) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> std::ops::Deref for Padded<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 struct Entry {
     id: u64,
     source: Arc<dyn Source>,
     /// Workers running one of its jobs.
-    running: AtomicUsize,
+    running: Padded<AtomicUsize>,
     /// Taken out of the pool: the worker that ends its last job tells
     /// [`Registration`]'s drop, which waits for it.
     retired: AtomicBool,
     /// When one of its jobs last ended (or it was registered).
     last_job: Mutex<Instant>,
     /// It was told it is idle ([`release_quiet_sources`]) since that job.
-    quiet: AtomicBool,
+    quiet: Padded<AtomicBool>,
 }
 
 struct Inner {
@@ -136,17 +158,17 @@ struct Inner {
     /// notify is two atomic operations while every worker is busy, and takes
     /// `sleep` (held by no source code) only to wake one: the thread queuing
     /// work (a frame, a tick) never waits behind a worker's choice.
-    epoch: AtomicU64,
-    sleepers: AtomicUsize,
+    epoch: Padded<AtomicU64>,
+    sleepers: Padded<AtomicUsize>,
     sleep: Mutex<()>,
     wake: Condvar,
     /// Signalled when a retired source's job ends.
     finished: Condvar,
     /// Workers running a [`Class::Far`] job.
-    far: AtomicUsize,
+    far: Padded<AtomicUsize>,
     /// Workers that freed their buffers and took no job since.
-    released: AtomicUsize,
-    threads: AtomicUsize,
+    released: Padded<AtomicUsize>,
+    threads: Padded<AtomicUsize>,
     idle_release: Duration,
 }
 
@@ -211,20 +233,36 @@ impl Pool {
 
     /// [`Pool::new`] whose workers free their buffers after `idle_release`.
     pub fn with_idle_release(threads: usize, name: &str, idle_release: Duration) -> Self {
+        Self::with_spawner(threads, idle_release, |worker, i| {
+            // A Web Worker on the web build with threads.
+            horizon_guest_stack::spawn(format!("{name}-{i}"), move || {
+                crate::behind_server();
+                work(&worker, i);
+            })
+            .map(drop)
+        })
+    }
+
+    fn with_spawner(
+        threads: usize,
+        idle_release: Duration,
+        mut spawn: impl FnMut(Arc<Inner>, usize) -> std::io::Result<()>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             sources: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(0),
-            epoch: AtomicU64::new(0),
-            sleepers: AtomicUsize::new(0),
+            epoch: Padded::new(AtomicU64::new(0)),
+            sleepers: Padded::new(AtomicUsize::new(0)),
             sleep: Mutex::new(()),
             wake: Condvar::new(),
             finished: Condvar::new(),
-            far: AtomicUsize::new(0),
-            released: AtomicUsize::new(0),
-            threads: AtomicUsize::new(threads.max(1)),
+            far: Padded::new(AtomicUsize::new(0)),
+            released: Padded::new(AtomicUsize::new(0)),
+            threads: Padded::new(AtomicUsize::new(threads.max(1))),
             idle_release,
         });
         let mut started = 0;
+        let mut last_error = None;
         // Without threads nothing could run beside the page: its jobs run
         // there ([`Pool::run_here`]).
         let threads = if cfg!(all(target_family = "wasm", not(target_feature = "atomics"))) {
@@ -233,20 +271,19 @@ impl Pool {
             threads.max(1)
         };
         for i in 0..threads {
-            let worker = inner.clone();
-            let spawned = horizon_std::thread::spawn_worker(&format!("{name}-{i}"), move || {
-                // Ticks and frames come first.
-                crate::behind_server();
-                work(&worker, i);
-            });
-            if spawned.is_ok() {
-                started += 1;
+            match spawn(inner.clone(), i) {
+                Ok(()) => started += 1,
+                Err(error) => last_error = Some(error),
             }
         }
-        inner.threads.store(started.max(1), Ordering::Relaxed);
+        assert!(
+            started > 0 || threads == 0,
+            "GuestWorkerUnavailable: no job worker could start: {last_error:?}"
+        );
+        inner.threads.store(started, Ordering::Relaxed);
         Self {
             inner,
-            threads: started.max(1),
+            threads: started,
         }
     }
 
@@ -266,10 +303,10 @@ impl Pool {
             .push(Arc::new(Entry {
                 id,
                 source,
-                running: AtomicUsize::new(0),
+                running: Padded::new(AtomicUsize::new(0)),
                 retired: AtomicBool::new(false),
                 last_job: Mutex::new(Instant::now()),
-                quiet: AtomicBool::new(false),
+                quiet: Padded::new(AtomicBool::new(false)),
             }));
         self.inner.notify(true);
         Registration {
@@ -515,6 +552,7 @@ fn work(inner: &Inner, worker: usize) {
     // wait: with jobs queued every few seconds on some worker, a pool of idle
     // workers would otherwise never free anything.
     let mut idle_since = Instant::now();
+    let mut release_seen = crate::release_seen();
     loop {
         let epoch = inner.epoch.load(Ordering::SeqCst);
         if let Some((entry, far)) = choose(inner) {
@@ -525,18 +563,26 @@ fn work(inner: &Inner, worker: usize) {
             run_job(inner, worker, &entry, far);
             idle_since = Instant::now();
             release_quiet_sources(inner);
+            // Asked to give memory back while jobs keep this worker busy (no
+            // gap for the timed checks below): do it between two jobs.
+            if crate::release_asked(&mut release_seen) {
+                crate::release_free_memory();
+            }
             continue;
         }
         let sleep = lock(&inner.sleep);
         inner.sleepers.fetch_add(1, Ordering::SeqCst);
         let still = |_: &mut ()| inner.epoch.load(Ordering::SeqCst) == epoch;
         let timed_out = if released {
-            drop(
-                inner
-                    .wake
-                    .wait_while(sleep, still)
-                    .unwrap_or_else(|e| e.into_inner()),
-            );
+            // Already released: wake only for a job, or to give back what
+            // other threads freed into this worker's heap since
+            // (`release_everywhere`).
+            let timed_out = wait_timeout_while(&inner.wake, sleep, crate::RELEASE_POLL, still);
+            if timed_out && crate::release_asked(&mut release_seen) {
+                inner.sleepers.fetch_sub(1, Ordering::SeqCst);
+                crate::release_free_memory();
+                continue;
+            }
             false
         } else {
             let left = inner.idle_release.saturating_sub(idle_since.elapsed());
@@ -569,12 +615,21 @@ fn work(inner: &Inner, worker: usize) {
         // The allocator keeps freed pages until memory runs short: hand back
         // what this worker just freed (its own heap), and the shared arenas'
         // once every worker has.
+        crate::release_asked(&mut release_seen);
         crate::release_free_memory();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[should_panic(expected = "GuestWorkerUnavailable")]
+    fn all_worker_spawn_failures_refuse_the_pool() {
+        super::Pool::with_spawner(2, super::IDLE_RELEASE, |_, _| {
+            Err(std::io::Error::other("injected stack reservation refusal"))
+        });
+    }
+
     use super::*;
     use std::collections::VecDeque;
     use std::sync::mpsc;
@@ -766,6 +821,49 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(counter.idle.load(Ordering::Relaxed));
+    }
+
+    /// A server asking for its memory back while a job arrives every 50 ms,
+    /// shorter than any idle wait: the workers still give it back, between
+    /// two jobs.
+    #[test]
+    fn a_busy_worker_still_gives_memory_back_when_asked() {
+        let pool = Pool::with_idle_release(2, "test-busy-release", Duration::from_secs(60));
+        let counter = Arc::new(Counter {
+            left: Mutex::new(0),
+            done: AtomicUsize::new(0),
+            per_worker: PerWorker::new(pool.threads()),
+            idle: AtomicBool::new(false),
+            all_idle: AtomicBool::new(false),
+        });
+        let reg = pool.register(counter.clone());
+        let by_worker = || {
+            crate::RELEASED_BY
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|name| name.starts_with("test-busy-release-"))
+        };
+        // A worker that has run a job has started counting releases; one
+        // started after the request would rightly not see it.
+        *lock(&counter.left) += 1;
+        reg.notify();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while counter.done.load(Ordering::Relaxed) == 0 {
+            assert!(Instant::now() < deadline, "no worker ran the first job");
+            horizon_std::thread::sleep(Duration::from_millis(1));
+        }
+        crate::release_everywhere();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while !by_worker() {
+            assert!(
+                Instant::now() < deadline,
+                "kept busy, no worker gave its memory back"
+            );
+            *lock(&counter.left) += 1;
+            reg.notify();
+            horizon_std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// One source idle while another keeps the workers busy (a client meshing

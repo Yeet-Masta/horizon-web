@@ -3,7 +3,7 @@
 //! camera-relative world (section origins, entity offsets) is built once and
 //! only each view's rotation and lens differ.
 
-use glam::Mat4;
+use glam::{DVec3, Mat4, Vec3};
 
 /// The most views one frame draws.
 const MAX_VIEWS: usize = 2;
@@ -39,6 +39,13 @@ impl View {
     pub fn view_proj(&self, pose: Mat4) -> Mat4 {
         self.projection * pose * self.view
     }
+
+    /// The view matrix the sky shares with the world. `GameRenderer.renderLevel`
+    /// multiplies this pose (the hurt bob, the view bob and the nausea spin)
+    /// into the projection before the level, sky included, is drawn.
+    pub fn posed_view(&self, pose: Mat4) -> Mat4 {
+        pose * self.view
+    }
 }
 
 /// Every view of a frame, and the one geometry is culled with.
@@ -72,6 +79,44 @@ impl ViewSet {
     pub fn cull(&self) -> &View {
         &self.cull
     }
+}
+
+/// Where a perspective `view_proj` sees from, in its own (camera-relative)
+/// space: the point whose clip x, y and w are all 0. `None` for a
+/// projection without one (orthographic).
+pub(super) fn projection_center(view_proj: Mat4) -> Option<Vec3> {
+    let m = view_proj.as_dmat4();
+    let rows = [m.row(0), m.row(1), m.row(3)];
+    let a = glam::DMat3::from_cols(
+        DVec3::new(rows[0].x, rows[1].x, rows[2].x),
+        DVec3::new(rows[0].y, rows[1].y, rows[2].y),
+        DVec3::new(rows[0].z, rows[1].z, rows[2].z),
+    );
+    let det = a.determinant();
+    if !det.is_normal() {
+        return None;
+    }
+    let b = DVec3::new(rows[0].w, rows[1].w, rows[2].w);
+    Some((a.inverse() * -b).as_vec3())
+}
+
+/// `view_proj` mirrored about the horizontal plane at the camera-relative height `plane`:
+/// with F the mirror (y flips and moves to 2 * plane), `view_proj * F` negates column 1
+/// and moves column 3 by 2 * plane times column 1.
+///
+/// `mirror_inverse_view` is the inverse's other side: F * `inverse_view`.
+pub(super) fn mirror_view_projection(view_proj: Mat4, plane: f32) -> Mat4 {
+    let mut m = view_proj.to_cols_array_2d();
+    let col1 = m[1];
+    m[1] = col1.map(|v| -v);
+    m[3] = std::array::from_fn(|i| m[3][i] + 2.0 * plane * col1[i]);
+    Mat4::from_cols_array_2d(&m)
+}
+
+/// The mirror's `inverse_view` (the sky's rays): what the view sees, mirrored about the
+/// horizontal plane at the camera-relative height `plane`, so F * `inverse_view`.
+pub(super) fn mirror_inverse_view(inverse_view: [[f32; 4]; 4], plane: f32) -> [[f32; 4]; 4] {
+    inverse_view.map(|[x, y, z, w]| [x, 2.0 * plane * w - y, z, w])
 }
 
 #[cfg(test)]
@@ -129,5 +174,29 @@ mod tests {
         assert_eq!(set.views(), &[view]);
         assert_eq!(*set.primary(), view);
         assert_eq!(*set.cull(), view);
+    }
+
+    /// The sky gradient's rays and the sunrise fan use the same pose the
+    /// terrain is drawn with. A bare camera view leaves the sky still while
+    /// the world bobs.
+    #[test]
+    fn the_sky_view_includes_the_pose_the_world_is_drawn_with() {
+        let view = View::screen(20.0, -15.0, 70.0, 16.0 / 9.0, 512.0);
+        let pose =
+            Mat4::from_rotation_z(0.08) * Mat4::from_translation(Vec3::new(0.02, -0.04, 0.0));
+        let sky = view.posed_view(pose);
+        assert_ne!(
+            sky.to_cols_array().map(f32::to_bits),
+            view.view.to_cols_array().map(f32::to_bits)
+        );
+        assert_eq!(
+            sky.to_cols_array().map(f32::to_bits),
+            (pose * view.view).to_cols_array().map(f32::to_bits)
+        );
+        // `fs_sky` rebuilds its rays from this inverse. It is not the bare camera.
+        assert_ne!(
+            sky.inverse().to_cols_array().map(f32::to_bits),
+            view.view.inverse().to_cols_array().map(f32::to_bits)
+        );
     }
 }

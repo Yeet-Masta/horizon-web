@@ -2,9 +2,10 @@
 //! `server.toml`, each player's violation levels, and the rules of the checks. The server's hub
 //! (`horizon_client::lan`) feeds it what players send and carries out what it decides.
 //!
-//! It is on by default, and so is every check, but only the checks a vanilla client can't trip act on
-//! their own (`combat`); the others log only until they have shown no false positive with real
-//! players (their `setback`, `alert` and `kick` are 0). `enabled = false` turns the anticheat, or one
+//! It is on by default, and so is every check, but only the checks that have shown no false positive
+//! act on their own: `combat`, which a vanilla client can't trip, and `ground`, which players who
+//! weren't cheating never took near its thresholds on the official server; the others log only until
+//! they have (their `setback`, `alert` and `kick` are 0). `enabled = false` turns the anticheat, or one
 //! check, off. A check that fails *flags* the player: its violation level (VL) rises by the flag's
 //! weight and falls back by `decay` a second. From `setback` on, the move or action is cancelled (the
 //! player is sent back where the server last had them); from `alert` on, online operators and the
@@ -90,7 +91,8 @@ macro_rules! checks {
             pub enabled: bool,
             /// Tell online operators of an alert in their chat (the console and the log always are).
             pub alerts: bool,
-            /// The permission level a player needs to see alerts.
+            /// The permission level a player needs to see alerts, 0 to 4 (an operator's level is at
+            /// most 4).
             pub alert_level: u8,
             /// Every flag, one line each, relative to the server's folder; empty: no file.
             pub log: String,
@@ -186,7 +188,7 @@ checks! {
 pub const CHECKS: usize = Check::ALL.len();
 
 impl Config {
-    /// The `[anticheat]` section of a whole `server.toml`; the default (off) when it has none.
+    /// The `[anticheat]` section of a whole `server.toml`; the default (on) when it has none.
     pub fn from_server_toml(text: &str) -> Result<Self, String> {
         #[derive(Deserialize)]
         struct File {
@@ -206,8 +208,14 @@ impl Config {
         Ok(file.anticheat)
     }
 
-    /// Thresholds can't be negative, and neither can the timer's milliseconds.
+    /// Thresholds can't be negative, and neither can the timer's milliseconds. `alert_level` is a
+    /// permission level, 0 to 4.
     pub fn check(&self) -> Result<(), String> {
+        // No player's level is above 4 (`ops.json` and `op-permission-level` are read as 0 to 4),
+        // so a higher one would tell no operator, without a word.
+        if self.alert_level > 4 {
+            return Err("anticheat: alert_level is a permission level from 0 to 4".into());
+        }
         for &c in Check::ALL {
             let a = self.actions(c);
             if [a.setback, a.alert, a.kick, a.decay]
@@ -283,10 +291,11 @@ pub struct Verdict {
 #[derive(Clone, Debug, Default)]
 pub struct Player {
     vl: [f32; CHECKS],
-    /// The server tick of each check's last flag (its decay runs from there).
-    flagged: [u64; CHECKS],
-    /// The server tick of each check's last alert.
-    alerted: [Option<u64>; CHECKS],
+    /// When each check last flagged, in milliseconds of the server's clock (its decay runs from
+    /// there).
+    flagged: [f64; CHECKS],
+    /// When each check last alerted, in the same milliseconds.
+    alerted: [Option<f64>; CHECKS],
     pub timer: timer::Balance,
     /// The server tick and height where the ground last held the player.
     pub ground: Option<(u64, f64)>,
@@ -294,25 +303,47 @@ pub struct Player {
     pub attacks: combat::Attacks,
 }
 
+/// What [`Player::vl`] and [`Player::flag`] count a server tick as, in milliseconds: a tick at
+/// vanilla's default rate of 20 a second.
+const TICK_MS: f64 = 50.0;
+
+/// A second, in milliseconds: what `decay` and the pace of alerts are counted in.
+const SECOND_MS: f64 = 1000.0;
+
 impl Player {
-    /// The check's violation level at `tick`, with its decay since the last flag.
+    /// The check's violation level at server tick `tick`, each tick counted as a twentieth of a
+    /// second ([`Player::vl_at`]).
     pub fn vl(&self, config: &Config, check: Check, tick: u64) -> f32 {
+        self.vl_at(config, check, tick as f64 * TICK_MS)
+    }
+
+    /// The check's violation level at `now`, in milliseconds of the server's clock, with its decay
+    /// since the last flag: `decay` for each second of that clock, whatever the tick rate (`/tick
+    /// rate` or `/tick sprint` change how many ticks a second takes, not the second).
+    pub fn vl_at(&self, config: &Config, check: Check, now: f64) -> f32 {
         let i = check as usize;
-        let seconds = tick.saturating_sub(self.flagged[i]) as f32 / 20.0;
+        let seconds = ((now - self.flagged[i]) / SECOND_MS).max(0.0) as f32;
         (self.vl[i] - config.actions(check).decay * seconds).max(0.0)
     }
 
-    /// `check` failed with this weight at server tick `tick`.
+    /// `check` failed with this weight at server tick `tick`, each tick counted as a twentieth of a
+    /// second ([`Player::flag_at`]).
     pub fn flag(&mut self, config: &Config, check: Check, weight: f32, tick: u64) -> Verdict {
+        self.flag_at(config, check, weight, tick as f64 * TICK_MS)
+    }
+
+    /// `check` failed with this weight at `now`, in milliseconds of the server's clock: the level
+    /// decays by `decay` a second of it, and alerts come at most once a second of it.
+    pub fn flag_at(&mut self, config: &Config, check: Check, weight: f32, now: f64) -> Verdict {
         let i = check as usize;
         let a = config.actions(check);
-        let vl = self.vl(config, check, tick) + weight;
+        let vl = self.vl_at(config, check, now) + weight;
         self.vl[i] = vl;
-        self.flagged[i] = tick;
+        self.flagged[i] = now;
         let reached = |threshold: f32| threshold > 0.0 && vl >= threshold;
-        let alert = reached(a.alert) && self.alerted[i].is_none_or(|t| tick >= t + 20);
+        let alert = reached(a.alert) && self.alerted[i].is_none_or(|t| now >= t + SECOND_MS);
         if alert {
-            self.alerted[i] = Some(tick);
+            self.alerted[i] = Some(now);
         }
         Verdict {
             vl,
@@ -367,10 +398,48 @@ mod tests {
         assert!(!Config::from_server_toml(off).unwrap().runs(Check::Timer));
     }
 
+    /// Each check's own table, found by the check's name, turns that check off and sets its
+    /// thresholds, and leaves every other check as it was.
+    #[test]
+    fn each_checks_table_is_its_own() {
+        for &check in Check::ALL {
+            let text = format!("[anticheat.{}]\nenabled = false\nkick = 7\n", check.name());
+            let c = Config::from_server_toml(&text).unwrap();
+            for &other in Check::ALL {
+                let (runs, kick) = (c.runs(other), c.actions(other).kick);
+                if other == check {
+                    assert!(!runs && kick == 7.0, "{}", check.name());
+                } else {
+                    let default = Config::default().actions(other).kick;
+                    assert!(
+                        runs && kick == default,
+                        "{} off: {}",
+                        check.name(),
+                        other.name()
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn refuses_unknown_keys_and_negative_levels() {
         assert!(Config::from_server_toml("[anticheat]\nenable = true\n").is_err());
         assert!(Config::from_server_toml("[anticheat.timer]\nkick = -1\n").is_err());
+    }
+
+    /// `alert_level` 5 or more would tell no operator: a player's permission level is at most 4.
+    #[test]
+    fn refuses_an_alert_level_above_4() {
+        for bad in [5, 255] {
+            let text = format!("[anticheat]\nalert_level = {bad}\n");
+            let e = Config::from_server_toml(&text).expect_err(&text);
+            assert!(e.starts_with("anticheat: alert_level"), "{bad}: {e}");
+        }
+        for good in [0, 4] {
+            let text = format!("[anticheat]\nalert_level = {good}\n");
+            assert_eq!(Config::from_server_toml(&text).unwrap().alert_level, good);
+        }
     }
 
     /// A negative `tolerance_ms` flags a client on time every tick, and so does a `max_lag_ms` below
@@ -419,6 +488,46 @@ mod tests {
         assert!(v.kick && v.alert);
     }
 
+    /// `decay` and the pace of alerts count seconds of the server's clock: at 100 ticks a second
+    /// (`/tick rate 100`) 100 ticks are a second, not five, and at 10 ticks a second 10 are.
+    #[test]
+    fn decay_and_alerts_count_seconds_of_the_clock() {
+        let mut c = on();
+        c.timer = TimerConfig {
+            alert: 1.0,
+            decay: 1.0,
+            ..TimerConfig::default()
+        };
+        for tick_ms in [10.0, 100.0] {
+            let at = |tick: u32| f64::from(tick) * tick_ms;
+            let ticks_a_second = (1000.0 / tick_ms) as u32;
+            let mut p = Player::default();
+            assert!(p.flag_at(&c, Check::Timer, 3.0, at(1)).alert);
+            // Half a second later: half a level gone, and no second alert yet.
+            let half = 1 + ticks_a_second / 2;
+            assert_eq!(
+                p.vl_at(&c, Check::Timer, at(half)),
+                2.5,
+                "{tick_ms} ms ticks"
+            );
+            assert!(!p.flag_at(&c, Check::Timer, 0.5, at(half)).alert);
+            // A second after the first alert, the next one comes.
+            assert!(
+                p.flag_at(&c, Check::Timer, 0.5, at(1 + ticks_a_second))
+                    .alert
+            );
+            assert_eq!(p.vl_at(&c, Check::Timer, at(1 + 10 * ticks_a_second)), 0.0);
+        }
+        // Server ticks given as ticks are twentieths of a second, as before.
+        let mut p = Player::default();
+        p.flag(&c, Check::Timer, 3.0, 20);
+        assert_eq!(
+            p.vl(&c, Check::Timer, 30),
+            p.vl_at(&c, Check::Timer, 1500.0)
+        );
+        assert_eq!(p.vl(&c, Check::Timer, 30), 2.5);
+    }
+
     #[test]
     fn the_kick_that_reaches_ban_after_bans() {
         let c = Config::default();
@@ -438,11 +547,49 @@ mod tests {
         assert_eq!(s.kick("d", Check::Ground, 1), (1, true));
     }
 
+    /// The counts are kept across restarts while `server.toml` may change: a player already past a
+    /// `ban_after` that was lowered, or set on a check that never banned, is banned at its next kick.
+    #[test]
+    fn a_player_past_a_lowered_ban_after_is_banned_at_the_next_kick() {
+        let mut s = Strikes::default();
+        assert_eq!(s.kick("a", Check::Combat, 3), (1, false));
+        assert_eq!(s.kick("a", Check::Combat, 3), (2, false));
+        // `ban_after = 3` lowered to 1.
+        assert_eq!(s.kick("a", Check::Combat, 1), (3, true));
+        for _ in 0..4 {
+            s.kick("b", Check::Timer, 0);
+        }
+        // `timer` given `ban_after = 2` after four kicks that never banned.
+        assert_eq!(s.kick("b", Check::Timer, 2), (5, true));
+        assert_eq!(s.kick("b", Check::Timer, 2), (1, false));
+    }
+
     #[test]
     fn zero_turns_an_action_off() {
         let mut c = on();
         c.timer.kick = 0.0;
         let mut p = Player::default();
         assert!(!p.flag(&c, Check::Timer, 1000.0, 1).kick);
+    }
+
+    /// Every check's `setback`, `alert`, `kick` and `decay` must be a number from 0 up: a negative,
+    /// NaN or infinite one is refused with an error naming the check, as the section's other
+    /// mistakes are; 0 is allowed (the action off, or no decay).
+    #[test]
+    fn every_checks_thresholds_and_decay_are_numbers_from_0_up() {
+        for &check in Check::ALL {
+            for key in ["setback", "alert", "kick", "decay"] {
+                for bad in ["-1", "nan", "inf"] {
+                    let text = format!("[anticheat.{}]\n{key} = {bad}\n", check.name());
+                    let e = Config::from_server_toml(&text).expect_err(&text);
+                    assert!(
+                        e.starts_with(&format!("anticheat.{}:", check.name())),
+                        "{text}: {e}"
+                    );
+                }
+                let zero = format!("[anticheat.{}]\n{key} = 0\n", check.name());
+                assert!(Config::from_server_toml(&zero).is_ok(), "{zero}");
+            }
+        }
     }
 }

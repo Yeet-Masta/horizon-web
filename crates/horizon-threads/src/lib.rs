@@ -2,10 +2,13 @@
 //! that the other crates, which forbid unsafe code, can't make themselves.
 
 pub mod alloc_count;
+#[cfg(feature = "test-allocation-probe")]
+pub mod allocation_probe;
 pub mod allocator_stats;
 /// The game window's boot screen, before wgpu's first frame paints over it.
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
+pub mod callgrind;
 pub mod heap_census;
 #[cfg(target_os = "linux")]
 pub mod heap_sample;
@@ -47,7 +50,7 @@ pub fn worker_count() -> usize {
 /// `HORIZON_SERIAL_TICK=all`: every [`par_chunks_mut`] keeps its chunks on the
 /// calling thread, in order — the serial reference a parallel phase of the
 /// tick is checked against, tick by tick (#8158).
-fn serial_tick_all() -> bool {
+pub fn serial_tick_all() -> bool {
     static ALL: OnceLock<bool> = OnceLock::new();
     *ALL.get_or_init(|| {
         std::env::var("HORIZON_SERIAL_TICK").is_ok_and(|v| v.eq_ignore_ascii_case("all"))
@@ -91,10 +94,14 @@ pub fn par_chunks_mut_with<T: Send>(
             f(slice);
         }
     };
-    std::thread::scope(|scope| {
+    horizon_std::thread::scope(|scope| {
         let helpers = worker_count().saturating_sub(1).clamp(1, count - 1);
         let threads: Vec<_> = (0..helpers)
-            .filter_map(|_| std::thread::Builder::new().spawn_scoped(scope, work).ok())
+            .filter_map(|_| {
+                horizon_guest_stack::builder()
+                    .spawn_scoped(scope, work)
+                    .ok()
+            })
             .collect();
         work();
         for t in threads {
@@ -363,6 +370,14 @@ pub fn behind_server() -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
+fn idle_sched_param() -> libc::sched_param {
+    // SAFETY: `sched_param` is a plain C struct; zero-init also covers musl's extra fields.
+    let mut param: libc::sched_param = unsafe { std::mem::zeroed() };
+    param.sched_priority = 0;
+    param
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn behind() -> bool {
     // SAFETY: these read and set the calling thread's own nice value or
     // policy (who 0, pid 0 is the calling thread on Linux and Android); `param` lives
@@ -372,7 +387,7 @@ fn behind() -> bool {
         if nice + BEHIND <= 19 {
             libc::setpriority(libc::PRIO_PROCESS as _, 0, nice + BEHIND) == 0
         } else {
-            let param = libc::sched_param { sched_priority: 0 };
+            let param = idle_sched_param();
             libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) == 0
         }
     }
@@ -457,7 +472,7 @@ pub fn idle_current() -> bool {
 
 #[cfg(target_os = "linux")]
 fn idle() -> bool {
-    let param = libc::sched_param { sched_priority: 0 };
+    let param = idle_sched_param();
     // SAFETY: sets the calling thread's own policy (pid 0); `param` lives
     // across the call.
     unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &param) == 0 }
@@ -519,18 +534,21 @@ pub fn catch_stop_signals() {
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 pub fn catch_stop_signals() {}
 
-/// The game's global allocator (`#[global_allocator]` in its `main.rs`).
+/// The game's global allocator (`#[global_allocator]` in `horizon-client`'s library).
 /// World generation, meshing and the tick allocate and free small blocks on
 /// every worker at once; the system heaps serialise them (Windows' heap was
 /// 16% of a chunk's generation time), mimalloc keeps a heap per thread.
 /// On Linux it samples allocations while a capture runs (`heap_sample`). Not on
 /// the web build, which keeps its own (horizon-std's web/alloc.rs).
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "test-allocation-count")))]
 pub type Allocator = heap_sample::SamplingAllocator;
-#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
+#[cfg(all(
+    not(any(target_os = "linux", target_family = "wasm")),
+    not(feature = "test-allocation-count")
+))]
 pub type Allocator = mimalloc::MiMalloc;
 /// The game's mimalloc allocator.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(not(any(feature = "test-allocation-count", target_family = "wasm")))]
 pub const ALLOCATOR: Allocator = Allocator {};
 
 /// The game's global allocator: the census, else counting mimalloc, else [`Allocator`].
@@ -542,11 +560,20 @@ pub type GameAllocator = heap_census::CensusAllocator;
     not(target_family = "wasm")
 ))]
 pub type GameAllocator = alloc_count::CountingAllocator;
-#[cfg(not(any(feature = "alloc-count", target_family = "wasm")))]
+#[cfg(not(any(
+    feature = "alloc-count",
+    feature = "alloc-census",
+    target_family = "wasm"
+)))]
 pub type GameAllocator = Allocator;
 /// The value of [`GameAllocator`].
 #[cfg(not(target_family = "wasm"))]
 pub const GAME_ALLOCATOR: GameAllocator = GameAllocator {};
+
+#[cfg(feature = "test-allocation-count")]
+pub mod allocation_count;
+#[cfg(feature = "test-allocation-count")]
+pub use allocation_count::{ALLOCATOR, Allocator};
 
 /// The global allocator of a build with the `alloc-census` feature: live
 /// heap bytes by startup step and thread, for `horizon-ctl memory`.
@@ -565,16 +592,33 @@ pub fn heap_tag(name: &'static str) -> Option<heap_census::Tag> {
 /// don't name it.
 #[cfg(not(target_family = "wasm"))]
 const PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+/// `mi_option_allow_thp` in mimalloc.h (index 43 in v3); unnamed in the bindings too.
+#[cfg(target_os = "linux")]
+const ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 
 /// Set the allocator up, first thing in `main`: free pages go back to the OS
 /// at once instead of a second later. With mimalloc's delay the game held a
 /// quarter more memory than with the system heap; without it a few percent,
 /// and generation keeps most of its speed-up.
+///
+/// On Linux it also turns transparent huge pages off for the process.
+/// mimalloc asks for them on its arenas (`MADV_HUGEPAGE`, so `madvise` systems
+/// give them too), and a 2 MiB huge page stays resident whole while one
+/// 64 KiB mimalloc page in it is used: in a world at render distance 12 the
+/// game held 200 MiB more that way, at the same load time and frame rate.
 pub fn configure_allocator() {
     // SAFETY: sets one integer option, which mimalloc reads at each purge.
     #[cfg(not(target_family = "wasm"))]
     unsafe {
         libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: an integer option mimalloc reads at each new mapping, and a prctl
+    // that only sets this process's flag; the kernel reads it on each page fault,
+    // so the arenas mapped before `main` take small pages from now on too.
+    unsafe {
+        libmimalloc_sys::mi_option_set(ALLOW_THP, 0);
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
     }
 }
 
@@ -609,11 +653,55 @@ pub fn allocator_commit() -> (usize, usize) {
     (info[5], info[6])
 }
 
+/// Bumped by [`release_everywhere`]: each pool thread compares it with the
+/// value it saw last ([`release_asked`]).
+/// The names of the threads that called [`release_free_memory`], for tests.
+#[cfg(test)]
+static RELEASED_BY: horizon_std::sync::Mutex<Vec<String>> =
+    horizon_std::sync::Mutex::new(Vec::new());
+
+static RELEASE_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often a pool thread with nothing to do looks at [`release_asked`].
+pub const RELEASE_POLL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(5);
+
+/// Ask every pool thread to give back the memory its heap holds free, and
+/// give back this thread's now. mimalloc returns a page that one thread freed
+/// into another's heap only when the owning thread collects: the chunks a
+/// server unloads were mostly made on the workers, encoded on the chunk
+/// encoders and read on the network threads, which then sleep. Each of them
+/// calls [`release_free_memory`] within [`RELEASE_POLL`].
+pub fn release_everywhere() {
+    RELEASE_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    release_free_memory();
+}
+
+/// [`RELEASE_ASKED`] for a pool thread to start from: a release asked before
+/// it started is not its own.
+pub fn release_seen() -> u64 {
+    RELEASE_ASKED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// For a pool thread between jobs: whether [`release_everywhere`] was asked
+/// since `seen`, which it updates. The thread then calls
+/// [`release_free_memory`].
+pub fn release_asked(seen: &mut u64) -> bool {
+    let now = release_seen();
+    std::mem::replace(seen, now) != now
+}
+
 /// Give back to the OS the memory the allocator holds free, after something
 /// large was dropped: mimalloc's free pages, then the system heap's, which
 /// native libraries still use: glibc keeps freed pages in the arena of the
 /// thread that allocated them, and macOS in its zones until memory runs short.
 pub fn release_free_memory() {
+    #[cfg(test)]
+    RELEASED_BY.lock().unwrap_or_else(|e| e.into_inner()).push(
+        horizon_std::thread::current()
+            .name()
+            .unwrap_or_default()
+            .to_owned(),
+    );
     // SAFETY: frees only pages no allocation uses (this thread's heap, shared arenas).
     #[cfg(not(target_family = "wasm"))]
     unsafe {
@@ -679,7 +767,7 @@ pub fn junction(target: &std::path::Path, at: &std::path::Path) -> std::io::Resu
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
-    let target = std::path::absolute(target)?;
+    let target = horizon_std::fs::absolute(target)?;
     let target = target.as_os_str().to_string_lossy();
     let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
     let name: Vec<u16> = std::ffi::OsStr::new(&format!(r"\??\{target}"))
@@ -909,6 +997,24 @@ mod tests {
         }
         super::configure_allocator();
         assert_eq!(get(), 0);
+    }
+
+    /// Configured, the process takes no transparent huge pages, whatever the
+    /// system's setting.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configuring_the_allocator_turns_transparent_huge_pages_off() {
+        super::configure_allocator();
+        // SAFETY: reads this process's flag.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0, 0, 0, 0) },
+            1
+        );
+        // SAFETY: reads one integer option.
+        assert_eq!(
+            unsafe { libmimalloc_sys::mi_option_get(super::ALLOW_THP) },
+            0
+        );
     }
 }
 

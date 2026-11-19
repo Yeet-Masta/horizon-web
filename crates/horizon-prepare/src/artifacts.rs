@@ -13,8 +13,9 @@ use std::path::{Component, Path, PathBuf};
 const LAUNCHER_HINT: &str =
     "Horizon does not download the game: play {version} once in the launcher you play \
 Minecraft Java Edition with so it downloads the game's files, then rerun. Horizon reads the \
-official launcher's folder, ATLauncher's and the CurseForge app's; for Prism Launcher, MultiMC, \
-the Modrinth App or GDLauncher, prepare from the Horizon launcher, which finds their files. If your launcher keeps \
+official launcher's folder, ATLauncher's and the CurseForge app's; for Prism Launcher or MultiMC, \
+pass --prism-dir with its folder; for the Modrinth App or GDLauncher, prepare from the Horizon \
+launcher, which finds their files. If your launcher keeps \
 them in another folder, pass --minecraft-dir or set HORIZON_MINECRAFT_DIR, or name the files with \
 --version-json, --client-jar, --libraries-dir and --assets-dir.";
 const SERVER_HINT: &str = "Horizon does not download the game: download the {version} server jar yourself (minecraft.net/download/server \
@@ -842,7 +843,12 @@ fn library_allowed(library: &Value) -> Result<bool, String> {
     for rule in rules {
         let empty = Value::Object(Vec::new());
         let os = rule.get("os").unwrap_or(&empty);
-        if os.get("name").and_then(Value::as_str).unwrap_or(system) != system {
+        let name = os.get("name").and_then(Value::as_str).unwrap_or(system);
+        // Prism's metadata names an ARM native's OS `osx-arm64` (`linux-arm64`, `windows-arm64`).
+        let arm_name = name
+            .strip_suffix("-arm64")
+            .filter(|_| architectures.contains(&"arm64"));
+        if arm_name.unwrap_or(name) != system {
             continue;
         }
         if let Some(arch) = os.get("arch") {
@@ -883,21 +889,28 @@ fn classifier_ends_with(classifier: &str, names: &[&str]) -> bool {
 }
 
 /// Modern manifests list x64 and ARM natives with OS-only rules; keep this machine's. A plain
-/// natives-<os> jar is the x64 build when the manifest also lists an ARM variant of it.
+/// natives-<os> jar is the x64 build when the manifest also lists an ARM variant of it. Prism's
+/// metadata moves the classifier into the artifact name (`com.mojang:jtracy-natives-macos:1.14.38`).
 fn native_library_matches(library: &Value, names: &[&str]) -> bool {
     let arm = rule_architectures().contains(&"arm64");
     let name = library.get("name").and_then(Value::as_str).unwrap_or("");
-    let classifier = name.split(':').nth(3).unwrap_or("");
+    let (classifier, variant) = match name.split(':').collect::<Vec<_>>()[..] {
+        [group, artifact, version] if artifact.contains("-natives-") => {
+            (artifact, format!("{group}:{artifact}-{{}}:{version}"))
+        }
+        [_, _, _, classifier, ..] => (classifier, format!("{name}-{{}}")),
+        _ => ("", String::new()),
+    };
     if classifier_ends_with(classifier, &["arm64", "aarch64", "aarch_64"]) {
         return arm;
     }
     if classifier_ends_with(classifier, &["x86_64", "x64"]) {
         return !arm;
     }
-    if arm && classifier.starts_with("natives-") {
+    if arm && classifier.contains("natives-") {
         return !["arm64", "aarch64"]
             .iter()
-            .any(|suffix| names.contains(&format!("{name}-{suffix}").as_str()));
+            .any(|suffix| names.contains(&variant.replace("{}", suffix).as_str()));
     }
     true
 }
@@ -1565,6 +1578,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn imported_files_are_reused_without_the_official_install() {
         let fixture = Imports::new();
         fs::write(
@@ -1643,6 +1657,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn reuse_rejects_corrupt_imports() {
         for file in [
             "manifest.json",
@@ -1660,6 +1675,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn reuse_checks_the_target_pins() {
         let fixture = Imports::new();
         let mut lock = Lock::read(&fixture.target).unwrap();
@@ -1676,6 +1692,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn reuse_skips_a_bad_sibling_and_repairs_bad_current_imports() {
         let fixture = Imports::new();
         let bad = fixture.directory.join("a-bad");
@@ -1734,6 +1751,7 @@ mod tests {
     /// id and jars, its own fields, #1772) is refused with what to do, and Mojang's own copy saved
     /// as the imported one is then used.
     #[test]
+    #[ignore = "daily"]
     fn a_rewritten_version_file_falls_back_to_mojangs() {
         let root = std::env::temp_dir().join(format!("horizon-rewritten-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1777,6 +1795,7 @@ mod tests {
     /// Prism Launcher keeps its Minecraft component as `meta/net.minecraft/<version>.json`, not
     /// in a folder of that version. Both are read; the folder's file wins when both exist.
     #[test]
+    #[ignore = "daily"]
     fn the_prism_version_file_is_found_flat_or_in_its_folder() {
         let root = std::env::temp_dir().join(format!("horizon-prism-meta-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1811,6 +1830,7 @@ mod tests {
     /// names and never downloads Netty's native transport, which the game runs without. Preparing
     /// still checks every other library, and the transport whenever the launcher has it.
     #[test]
+    #[ignore = "daily"]
     fn a_prism_install_without_netty_natives_prepares() {
         let fixture = Imports::new();
         let old = fixture.imported(&fixture.source);
@@ -1842,9 +1862,14 @@ mod tests {
         let netty = |arch: &str| {
             library(
                 &format!("io.netty:netty-transport-native-kqueue:1:osx-{arch}"),
-                &format!("io/netty/netty-transport-native-kqueue/1/netty-transport-native-kqueue-1-osx-{arch}.jar"),
+                &format!(
+                    "io/netty/netty-transport-native-kqueue/1/netty-transport-native-kqueue-1-osx-{arch}.jar"
+                ),
                 &sha1(b"kqueue"),
-                &format!(r#","rules":[{{"action":"allow","os":{{"name":"{}"}}}}]"#, rule_system()),
+                &format!(
+                    r#","rules":[{{"action":"allow","os":{{"name":"{}"}}}}]"#,
+                    rule_system()
+                ),
             )
         };
         let client_sha1 = digest(&old.join("jars/client.jar"), "sha1").unwrap();
@@ -1931,6 +1956,7 @@ mod tests {
     /// `minecraft` folder, Maven libraries, assets and the LWJGL component are read as they are;
     /// the client jar stands in for the server side, so nothing is downloaded.
     #[test]
+    #[ignore = "daily"]
     fn a_prism_install_prepares_without_a_server_jar() {
         let fixture = Imports::new();
         let old = fixture.imported(&fixture.source);
@@ -2074,6 +2100,7 @@ mod tests {
     /// a library; its folder, or one of its instances, prepares like the official launcher's,
     /// with the same pins.
     #[test]
+    #[ignore = "daily"]
     fn an_atlauncher_install_prepares() {
         let fixture = Imports::new();
         let old = fixture.imported(&fixture.source);
@@ -2144,6 +2171,7 @@ mod tests {
     /// A launcher with a layout of its own names each file (`--version-json`, `--client-jar`,
     /// `--libraries-dir`): they prepare with the same pins, from no Minecraft folder at all.
     #[test]
+    #[ignore = "daily"]
     fn named_inputs_prepare_without_a_minecraft_folder() {
         let fixture = Imports::new();
         let old = fixture.imported(&fixture.source);
@@ -2207,6 +2235,7 @@ mod tests {
     /// With no launcher's files in the chosen folder, the error names where Horizon looked and
     /// the launchers it reads.
     #[test]
+    #[ignore = "daily"]
     fn the_error_names_the_folders_looked_in() {
         let fixture = Imports::new();
         let empty = fixture.directory.join("instances/empty");
@@ -2237,6 +2266,7 @@ mod tests {
     /// A folder with the version JSON and jar but a library missing loses to a later folder that
     /// has them all, and is still picked, for the error to name the library, when none has (#13872).
     #[test]
+    #[ignore = "daily"]
     fn a_folder_missing_a_library_loses_to_a_complete_one() {
         let fixture = Imports::new();
         let old = fixture.imported(&fixture.source);
@@ -2292,6 +2322,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn natives_follow_the_architecture() {
         let names = ["a:b:1:natives-macos", "a:b:1:natives-macos-arm64"];
         let lib = |name: &str| pyjson::loads(&format!("{{\"name\":\"{name}\"}}")).unwrap();
@@ -2313,6 +2344,28 @@ mod tests {
             !arm
         );
         assert!(native_library_matches(&lib("a:b:1"), &names));
+
+        let prism = ["a:b-natives-macos:1", "a:b-natives-macos-arm64:1"];
+        assert_eq!(
+            native_library_matches(&lib("a:b-natives-macos-arm64:1"), &prism),
+            arm
+        );
+        assert_eq!(
+            native_library_matches(&lib("a:b-natives-macos:1"), &prism),
+            !arm
+        );
+        let rule = |os: &str| {
+            pyjson::loads(&format!(
+                "{{\"name\":\"a:b:1\",\"rules\":[{{\"action\":\"allow\",\"os\":{{\"name\":\"{os}\"}}}}]}}"
+            ))
+            .unwrap()
+        };
+        let system = rule_system();
+        assert!(library_allowed(&rule(system)).unwrap());
+        assert_eq!(
+            library_allowed(&rule(&format!("{system}-arm64"))).unwrap(),
+            arm
+        );
     }
 
     #[test]

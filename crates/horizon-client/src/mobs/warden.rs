@@ -3,16 +3,17 @@
 //! tendril animations, the model and its emissive layers. Its brain
 //! (`WardenAi`) is in `warden_brain`.
 use super::{
-    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, Who,
+    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, TargetChange, Who,
     anim::{Poses, State},
     keyframes::Animation,
     path::PathType,
     warden_brain::{self, Brain},
 };
+use crate::health::DamageLevel;
 use crate::sculk::{self, Context, Info};
 use horizon_core::{
     geometry::{Vec3, trig::Mth},
-    random::{LegacyRandom, RandomSource},
+    random::RandomSource,
 };
 use horizon_protocol::entity_data::PositionSource;
 use std::{
@@ -341,7 +342,14 @@ impl Warden {
 }
 
 pub fn register(m: &mut Mob) {
-    m.extra.warden = Some(Box::default());
+    // The brain at construction, with the mob's own type id so a mod part's
+    // behaviors join it (arismoko/horizon#824).
+    let id = m.kind.id.clone();
+    let st = Warden {
+        brain: Brain::new(&id, 0),
+        ..Warden::default()
+    };
+    m.extra.warden = Some(Box::new(st));
     m.ai.nav.can_float = true;
     m.set_malus(PathType::UnpassableRail, 0.0);
     m.set_malus(PathType::Damaging, 8.0);
@@ -364,7 +372,8 @@ pub fn delay_sensors(m: &mut Mob) {
 pub fn init_brain(m: &mut Mob, seed: i64) {
     if let Some(st) = m.extra.warden.as_mut() {
         let mem = std::mem::take(&mut st.brain.mem);
-        st.brain = Brain::new(seed);
+        let id = m.kind.id.clone();
+        st.brain = Brain::new(&id, seed);
         st.brain.mem = mem;
     }
     delay_sensors(m);
@@ -406,18 +415,41 @@ fn closer_than(m: &Mob, p: Vec3, horizontal: f64, vertical: f64) -> bool {
 
 // ---- entity facts ----
 
+/// `Entity.isAlliedTo`: `source` on `warden`'s team (`Team.isAlliedTo`).
+fn allied(teams: &super::Teams<'_>, warden: u32, source: Option<Who>) -> bool {
+    let Some(source) = source else {
+        return false;
+    };
+    crate::scoreboard::teams_allied(teams.of(Who::Mob(warden)), teams.of(source))
+}
+/// A `GameEvent.Context` as this warden reads it: `canReceiveVibration`
+/// refuses a living source its `canTargetEntity` rejects, allies included.
+pub fn heard_by(ctx: Context, teams: &super::Teams<'_>, warden: u32) -> Context {
+    Context {
+        targetable: ctx.targetable
+            && !allied(teams, warden, ctx.source.and_then(|source| source.actor())),
+        ..ctx
+    }
+}
+
+/// The mob part of `Warden.canTargetEntity` that a `GameEvent.Context`'s
+/// `targetable` flag carries: alive, not a warden, not invulnerable.
+pub fn can_be_targeted(m: &Mob) -> bool {
+    m.alive() && m.species() != Species::Warden && !m.is_invulnerable()
+}
+
 /// `Warden.canTargetEntity`: living, neither creative nor spectator, not a
-/// warden, alive.
-pub fn can_target(w: &MobWorld, who: Who) -> bool {
-    match who {
+/// warden, not an ally, not invulnerable, alive.
+pub fn can_target(w: &MobWorld, warden: u32, who: Who) -> bool {
+    let targetable = match who {
         Who::Player => w
-            .player
-            .as_ref()
+            .selected_player()
             .is_some_and(|p| p.alive && !p.creative && !p.spectator),
         Who::Mob(id) => w
             .seen(id)
-            .is_some_and(|s| s.alive && s.species != Species::Warden),
-    }
+            .is_some_and(|s| s.alive && s.species != Species::Warden && !s.invulnerable),
+    };
+    targetable && !allied(&w.teams, warden, Some(who))
 }
 fn position_of(w: &MobWorld, who: Who) -> Option<Vec3> {
     w.target_info(who).map(|t| t.position)
@@ -435,7 +467,7 @@ pub(super) fn increase_anger(
     events: &mut Vec<MobEvent>,
 ) {
     let Some(who) = who else { return };
-    if m.no_ai || !can_target(w, who) {
+    if m.no_ai || !can_target(w, m.id, who) {
         return;
     }
     warden_brain::set_dig_cooldown(m);
@@ -444,8 +476,13 @@ pub(super) fn increase_anger(
     };
     let maybe_switch = st.target() != Some(Who::Player);
     let new = st.anger.increase(who, amount);
-    if who == Who::Player && maybe_switch && AngerLevel::by_anger(new).is_angry() {
-        st.brain.mem.attack_target.clear();
+    if who == Who::Player
+        && maybe_switch
+        && AngerLevel::by_anger(new).is_angry()
+        && warden_brain::mem(m).attack_target.present()
+        && let TargetChange::Set(target) = w.change_target(m, true, None)
+    {
+        warden_brain::mem(m).attack_target.set_opt(target);
     }
     if play_sound && pose(m) != Pose::Roaring {
         let level = anger_level(m);
@@ -457,7 +494,7 @@ pub(super) fn increase_anger(
 pub(super) fn entity_angry_at(m: &Mob, w: &MobWorld) -> Option<Who> {
     let st = m.extra.warden.as_ref()?;
     if anger_level(m).is_angry() {
-        st.anger.active_entity(|e| can_target(w, e))
+        st.anger.active_entity(|e| can_target(w, m.id, e))
     } else {
         None
     }
@@ -482,7 +519,11 @@ pub fn hurt(m: &mut Mob, source: &Damage) {
     }
     let direct = !matches!(
         source.kind,
-        DamageKind::Arrow | DamageKind::Thrown | DamageKind::Fireball | DamageKind::WitherSkull
+        DamageKind::Arrow
+            | DamageKind::Thrown
+            | DamageKind::Fireball
+            | DamageKind::WitherSkull
+            | DamageKind::WindCharge
     );
     if let Some(st) = m.extra.warden.as_mut() {
         st.hurt_by.push((source.attacker, direct));
@@ -510,7 +551,7 @@ fn handle_hurt(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
             && let Some(p) = position_of(w, who)
             && (direct || m.distance_sqr(p) < 25.0)
         {
-            warden_brain::set_attack_target(m, who);
+            warden_brain::set_attack_target(m, w, who);
         }
     }
 }
@@ -536,7 +577,7 @@ pub(super) fn do_hurt_target(
     m: &mut Mob,
     target: Who,
     w: &MobWorld,
-    lr: &mut LegacyRandom,
+    level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) {
     m.anim.states[ROAR].stop();
@@ -549,7 +590,7 @@ pub(super) fn do_hurt_target(
     let pitch = voice_pitch(m);
     sound(m, "entity.warden.attack_impact", 10.0, pitch, events);
     warden_brain::mem(m).sonic_boom_cooldown.set_ttl((), 40);
-    let mut cx = warden_brain::cx(w, lr, events);
+    let mut cx = warden_brain::cx(w, level, events);
     super::ai::do_hurt_target(m, target, &mut cx);
 }
 
@@ -599,7 +640,7 @@ pub fn listen(
     // isValidVibration: the warden can trigger avoid vibration.
     let listens = sculk::warden_can_listen(event);
     if listens
-        && ctx.source == Some(Who::Player)
+        && ctx.source == Some(Who::Player.into())
         && !ctx.spectator
         && ctx.stepping_carefully
         && sculk::ignored_when_sneaking(event)
@@ -632,7 +673,12 @@ pub fn listen(
 }
 /// `Level.gameEvent` for the mobs' own movement events from `from` on, as
 /// the mob AI probe has no sculk layer: every warden's listener hears them.
-pub fn hear_mob_events(mobs: &mut [Mob], events: &[MobEvent], from: usize, w: &MobWorld) {
+pub fn hear_mob_events(
+    mobs: &mut crate::join_seq::JoinList<Mob>,
+    events: &[MobEvent],
+    from: usize,
+    w: &MobWorld,
+) {
     for e in &events[from..] {
         let MobEvent::GameEvent {
             event,
@@ -646,14 +692,16 @@ pub fn hear_mob_events(mobs: &mut [Mob], events: &[MobEvent], from: usize, w: &M
         let who = mobs.iter().find(|m| m.id == source);
         let name = &w.facts.get(state).name;
         let ctx = Context {
-            source: Some(Who::Mob(source)),
+            source: Some(Who::Mob(source).into()),
+            affected_state: Some(state),
             dampening_state: w.has_tag("minecraft:dampens_vibrations", name),
             dampens: who.is_some_and(|m| m.species() == Species::Warden),
-            targetable: who.is_some_and(|m| m.alive() && m.species() != Species::Warden),
+            targetable: who.is_some_and(can_be_targeted),
             living: true,
             ..Context::default()
         };
         for m in mobs.iter_mut().filter(|m| m.extra.warden.is_some()) {
+            let ctx = heard_by(ctx, &w.teams, m.id);
             listen(m, w.game_time, event, at, &ctx, |a, b| {
                 sculk::is_occluded(a, b, |p| {
                     let block = w.world.block(p.x, p.y, p.z);
@@ -692,7 +740,7 @@ fn receive_vibration(m: &mut Mob, w: &MobWorld, info: Info, events: &mut Vec<Mob
             && m.distance_sqr(p) < 900.0
         {
             if warden_brain::mem(m).recent_projectile.present() {
-                if can_target(w, owner)
+                if can_target(w, m.id, owner)
                     && let Some(t) = w.target_info(owner)
                 {
                     suspicious = [
@@ -708,15 +756,23 @@ fn receive_vibration(m: &mut Mob, w: &MobWorld, info: Info, events: &mut Vec<Mob
         }
         warden_brain::mem(m).recent_projectile.set_ttl((), 100);
     } else {
-        increase_anger(m, w, info.source, DEFAULT_ANGER, true, events);
+        increase_anger(
+            m,
+            w,
+            info.source.and_then(|s| s.actor()),
+            DEFAULT_ANGER,
+            true,
+            events,
+        );
     }
     if !anger_level(m).is_angry() {
         let active = m
             .extra
             .warden
             .as_ref()
-            .and_then(|st| st.anger.active_entity(|e| can_target(w, e)));
-        if info.owner.is_some() || active.is_none() || active == info.source {
+            .and_then(|st| st.anger.active_entity(|e| can_target(w, m.id, e)));
+        if info.owner.is_some() || active.is_none() || active == info.source.and_then(|s| s.actor())
+        {
             warden_brain::set_disturbance(m, w, suspicious);
         }
     }
@@ -756,7 +812,7 @@ pub fn pre_tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
     if let Some(info) = tick.received {
         receive_vibration(m, w, info, events);
     }
-    if m.persistent || m.custom_name.is_some() {
+    if m.persistent || super::ai::requires_custom_persistence(m) {
         warden_brain::set_dig_cooldown(m);
     }
 }
@@ -765,14 +821,14 @@ pub fn pre_tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
 pub fn server_ai_step(
     m: &mut Mob,
     w: &MobWorld,
-    level_random: &mut LegacyRandom,
+    level: &mut DamageLevel<'_>,
     events: &mut Vec<MobEvent>,
 ) {
     if m.extra.warden.is_none() {
         return;
     }
     handle_hurt(m, w, events);
-    warden_brain::tick(m, w, level_random, events);
+    warden_brain::tick(m, w, level, events);
     if (i64::from(m.age) + i64::from(m.id)) % 120 == 0 {
         events.push(MobEvent::Darkness {
             at: at(m),
@@ -783,11 +839,23 @@ pub fn server_ai_step(
         && let Some(st) = m.extra.warden.as_mut()
     {
         st.anger
-            .tick(|who| can_target(w, who), |uuid| w.who_by_uuid(uuid));
+            .tick(|who| can_target(w, m.id, who), |uuid| w.who_by_uuid(uuid));
         st.client_anger = st.anger.active_anger(st.target());
     }
+    let target_change = m.extra.warden.as_ref().and_then(|st| {
+        st.brain
+            .will_clear_attack_target()
+            .then(|| st.brain.mem.attack_target.value())
+    });
+    let target_change = target_change.map(|original| match w.change_target(m, true, None) {
+        TargetChange::Keep => original,
+        TargetChange::Set(target) => target,
+    });
     if let Some(st) = m.extra.warden.as_mut() {
         st.brain.update_activity();
+        if let Some(target) = target_change {
+            st.brain.mem.attack_target.set_opt(target);
+        }
     }
 }
 /// `SonicBoom.tick`: face the target; once the sound delay is over, the
@@ -804,7 +872,7 @@ pub(super) fn tick_sonic_boom(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEve
         return;
     }
     mm.sonic_boom_sound_cooldown.set_ttl((), 60 - 34);
-    if !can_target(w, target) {
+    if !can_target(w, m.id, target) {
         return;
     }
     let Some(t) = w.target_info(target) else {
@@ -837,11 +905,16 @@ pub(super) fn tick_sonic_boom(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEve
         });
     }
     sound(m, "entity.warden.sonic_boom", 3.0, 1.0, events);
-    events.push(MobEvent::SonicBoom {
+    let event = MobEvent::SonicBoom {
         target,
         attacker: m.id,
         from: at(m),
         direction: normal,
+    };
+    events.push(if target == Who::Player {
+        w.route_player_event(event)
+    } else {
+        event
     });
 }
 /// `Warden.tick` off the window's client: the heart's clock, the tendril and
@@ -1258,3 +1331,6 @@ mod digging_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod warden_target_tests;

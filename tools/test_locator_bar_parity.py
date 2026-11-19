@@ -130,11 +130,11 @@ def ops_json():
     return json.dumps(entries, indent=2)
 
 
-def server_dir(directory, world=None):
+def server_dir(directory, world=None, *, port=None):
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
-    port = free_port()
+    port = free_port() if port is None else port
     props = dict(PROPERTIES, **{'server-port': str(port)})
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()),
                                                  encoding='iso-8859-1')
@@ -259,7 +259,7 @@ def sides(name, binary=None):
                     lab.ROOT / 'mods/horizon/src/test/java', '-cp', dependencies, '-d', classes, oracle],
                    cwd=lab.ROOT, check=True, capture_output=True)
     if binary is None:
-        subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-client', '--bin', 'horizon-client'], cwd=lab.ROOT,
+        subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], cwd=lab.ROOT,
                        check=True, capture_output=True)
         import json
         metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],

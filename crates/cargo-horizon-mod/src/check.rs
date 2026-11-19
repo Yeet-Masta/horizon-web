@@ -1,10 +1,7 @@
 //! `cargo horizon-mod check <file>`: what the registry checks of a submission,
-//! run anywhere: its kind's own checks (docs/api/mod-index.md), its signature
-//! when given a key, and for a `.hmod` that it is content only.
-use horizon_mods::{
-    Package,
-    index::{self, Facts, Kind},
-};
+//! run anywhere: its kind's own checks (docs/modding/src/reference/registry-index.md), its signature
+//! when given a key, and for a `.hmod` whether it is content only or WebAssembly code.
+use horizon_mod_package::index::{self, Facts, Kind};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -14,6 +11,8 @@ pub struct Report {
     pub sha256: String,
     pub size: u64,
     pub signed: bool,
+    /// A `.hmod` with a `[wasm]` section: WebAssembly code, not content only.
+    pub wasm: bool,
 }
 
 impl Report {
@@ -31,12 +30,12 @@ impl Report {
             "api": self.facts.api,
             "side": self.facts.side,
             "capabilities": self.facts.capabilities,
-            "api_level": self.facts.api_level,
             "game": self.facts.game,
             "requires": requires,
             "sha256": self.sha256,
             "size": self.size,
             "signed": self.signed,
+            "wasm": self.wasm,
         })
     }
 
@@ -68,9 +67,6 @@ impl Report {
             ")\n  {} bytes, SHA-256 {}, {signed}\n",
             self.size, self.sha256
         );
-        if let Some(level) = f.api_level {
-            out += &format!("  needs mod API level {level} or newer\n");
-        }
         for c in &f.capabilities {
             out += &format!("  may {}\n", c.describe());
         }
@@ -80,21 +76,22 @@ impl Report {
         if self.kind == Kind::NativeMod {
             out += "  native source: unsandboxed; not executed by the registry check. Compile and test against the exact pinned Horizon and Mixins revisions before review.\n";
         }
-        if self.kind == Kind::Mod {
+        if self.kind == Kind::Mod && self.wasm {
+            out += "  WebAssembly code: runs sandboxed in the game, with time and memory limits; the registry check doesn't run it\n";
+        } else if self.kind == Kind::Mod {
             out += "  no code: content only, nothing to run\n";
         }
         out
     }
 }
 
-/// The kind a file's extension says.
+/// The kind of a package, inspecting mod archives for their native manifest.
 pub fn kind_of(path: &Path) -> Option<Kind> {
     match path.extension()?.to_str()? {
-        "hmod" if horizon_mods::index::native::holds(path) => Some(Kind::NativeMod),
+        "hmod" if index::native::holds(path) => Some(Kind::NativeMod),
         "hmod" => Some(Kind::Mod),
-        "hnmod" => Some(Kind::NativeMod),
         "hpack" => Some(Kind::Modpack),
-        "zip" => Some(horizon_mods::index::zip_kind(path)),
+        "zip" => Some(horizon_mod_package::index::zip_kind(path)),
         "hshader" => Some(Kind::Shader),
         _ => None,
     }
@@ -124,28 +121,19 @@ pub fn check(
         (None, None) => false,
         _ => return Err("--key and --signature go together".into()),
     };
-    if kind == Kind::Mod {
-        content_only(path)?;
-    }
+    let wasm = kind == Kind::Mod
+        && horizon_mod_package::Package::read(path)?
+            .manifest
+            .wasm
+            .is_some();
     Ok(Report {
         kind,
         facts,
         sha256: index::sha256_file(path)?,
         size,
         signed,
+        wasm,
     })
-}
-
-/// A mod is content only: WebAssembly code mods don't run any more, code mods are native
-/// (`.hnmod`, docs/native-mods.md). `inspect` already read its content as the game does.
-fn content_only(path: &Path) -> Result<(), String> {
-    match Package::read(path)?.wasm {
-        Some(_) => Err(
-            "it has WebAssembly code, which Horizon doesn't run any more: make it a native mod (docs/native-mods.md)"
-                .into(),
-        ),
-        None => Ok(()),
-    }
 }
 
 #[cfg(test)]
@@ -154,7 +142,7 @@ mod tests {
 
     fn fixture(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../horizon-mods/tests/index")
+            .join("../horizon-mod-package/tests/index")
             .join(name)
     }
 
@@ -168,15 +156,16 @@ mod tests {
                 .text()
                 .contains("cozy 1.0.0 (modpack, format 1, for 26.3)")
         );
-        // A mod with WebAssembly code is refused: code mods are native.
+        // A signed content mod passes; a bad signature is still refused.
         let hmod = fixture("coords_hud-0.1.0.hmod");
         let key = std::fs::read_to_string(fixture("test.pub")).unwrap();
         let sig = std::fs::read_to_string(fixture("coords_hud-0.1.0.hmod.minisig")).unwrap();
         let key = key.lines().last().unwrap();
-        let e = check(&hmod, Kind::Mod, Some(key), Some(&sig))
-            .err()
-            .unwrap();
-        assert!(e.contains("native mod"), "{e}");
+        let report = check(&hmod, Kind::Mod, Some(key), Some(&sig)).unwrap();
+        assert!(report.signed);
+        assert!(!report.wasm);
+        assert!(report.text().contains("no code: content only"));
+        assert_eq!(report.json()["wasm"], false);
         let e = check(
             &hmod,
             Kind::Mod,
@@ -189,5 +178,34 @@ mod tests {
         let e = check(&pack, Kind::Shader, None, None).err().unwrap();
         assert!(e.contains("horizon-shaders.toml"), "{e}");
         assert!(check(&pack, Kind::Mod, None, None).is_err());
+    }
+
+    #[test]
+    fn a_wasm_mod_is_reported_as_code() {
+        use horizon_mod_package::{Package, manifest::sha512_of};
+        // A minimal valid shared member: a `dylink.0` section and the three guest exports.
+        let module = wat::parse_str(
+            r#"(module (@custom "dylink.0" "\01\04\00\00\00\00")
+                (func (export "horizon_layout")) (func (export "horizon_in")) (func (export "horizon_hook")))"#,
+        )
+        .unwrap();
+        let manifest = format!(
+            "id = \"wasm_hello\"\nname = \"Wasm hello\"\nversion = \"0.1.0\"\napi = \"0.2\"\n\
+             capabilities = [\"registries\"]\n[wasm]\nsha512 = \"{}\"\ntoolchain = \"1.99.1\"\nbuilt_with = \"test\"\n",
+            sha512_of(&module)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let hmod = dir.path().join("wasm_hello-0.1.0.hmod");
+        std::fs::write(
+            &hmod,
+            Package::write_files(&manifest, &[("mod.wasm", &module)]).unwrap(),
+        )
+        .unwrap();
+        let report = check(&hmod, kind_of(&hmod).unwrap(), None, None).unwrap();
+        assert!(report.wasm);
+        let text = report.text();
+        assert!(text.contains("WebAssembly code: runs sandboxed"), "{text}");
+        assert!(!text.contains("no code"), "{text}");
+        assert_eq!(report.json()["wasm"], true);
     }
 }

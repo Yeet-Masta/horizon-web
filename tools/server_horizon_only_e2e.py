@@ -11,7 +11,7 @@
 
 horizon-bots stand in for the clients (`--brand`). Each server runs in a fresh folder with fresh HORIZON_HOME
 and XDG folders (lab.game_env), on a free port. Build first:
-    cargo build --profile fast -p horizon-client --bin horizon-client
+    cargo build --profile fast -p horizon-game --bin horizon-client
     cargo build --profile fast -p horizon-bots
 """
 import argparse
@@ -21,7 +21,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab  # noqa: E402
@@ -90,7 +89,8 @@ def check(bins, scratch, out):
         entry = results[name]
         if joined(entry) or REASON not in (entry['error'] or ''):
             raise Failed(f'on: {name} was not turned away with the reason: {entry["error"]}')
-        if not any(f'Disconnecting {name}0' in l and 'horizon-clients-only' in l for l in lines):
+        # The console line carries the reason the client was given (lan/conn.rs).
+        if not any(f'Disconnecting {name}0' in l and REASON in l for l in lines):
             raise Failed(f'on: the console did not say why {name}0 was turned away')
     if not joined(results['Horizon']):
         raise Failed(f'on: the Horizon client was refused: {results["Horizon"]["error"]}')
@@ -106,7 +106,7 @@ def main():
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     os.environ.update(lab.game_env())
-    with tempfile.TemporaryDirectory(prefix='server-horizon-only-e2e-') as scratch:
+    with lab.temp_folder('server-horizon-only-e2e-') as scratch:
         try:
             check(bins, Path(scratch), out)
         except (Failed, RuntimeError) as e:

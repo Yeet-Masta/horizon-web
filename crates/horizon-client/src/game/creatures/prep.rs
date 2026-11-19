@@ -27,8 +27,9 @@ impl Game<'_> {
         for (m, climbing) in self.mobs.iter_mut().zip(climbing) {
             m.on_climbable = climbing;
         }
+        let items = self.items();
         snapshot.extend(par_map(&self.mobs, MIN_MOBS, |part, out| {
-            out.extend(part.iter().map(|m| super::seen(m, player)));
+            out.extend(part.iter().map(|m| super::seen(m, player, items)));
         }));
     }
 }
@@ -72,9 +73,10 @@ impl<'p> MobsNearest<'p> {
 /// `base` without its hooks into the game, which can't leave the server thread, as a recipe a
 /// helper thread builds its own world from: native mod effects (the phases on helpers don't run
 /// them) and the UUID lookup.
-pub(super) fn hookless<'w>(base: &MobWorld<'w>) -> impl Fn() -> MobWorld<'w> + Sync + use<'w> {
+pub(crate) fn hookless<'w>(base: &MobWorld<'w>) -> impl Fn() -> MobWorld<'w> + Sync + use<'w> {
     // Every field but the two hooks, named, so that a field added to `MobWorld` is decided here.
     let MobWorld {
+        mob_maps,
         world,
         registry,
         facts,
@@ -120,6 +122,7 @@ pub(super) fn hookless<'w>(base: &MobWorld<'w>) -> impl Fn() -> MobWorld<'w> + S
         border,
     } = base.clone();
     move || MobWorld {
+        mob_maps,
         world,
         registry,
         facts,
@@ -173,7 +176,7 @@ mod tests {
     use horizon_core::geometry::Aabb;
 
     #[test]
-    #[ignore = "needs prepared resources and scratch homes/cwd"]
+    #[ignore = "needs the upstream-parallel-mobs feature and prepared resources"]
     fn preparation_refreshes_climbing_and_nearest_after_a_move() {
         let mut game = super::super::super::native_machines::tests::server_game();
         game.build_registries();

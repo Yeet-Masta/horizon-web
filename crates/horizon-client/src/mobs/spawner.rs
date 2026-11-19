@@ -14,8 +14,8 @@ use super::{
 };
 use crate::chunk::block_entity::Next;
 pub use crate::chunk::block_entity::{CustomSpawnRules, SpawnData, Spawner};
+use horizon_core::nbt::{Compound, JavaString, Tag};
 use horizon_core::{geometry::Aabb, geometry::Vec3, random::RandomSource};
-use horizon_world::nbt::{Compound, JavaString, Tag};
 
 /// `SpawnData`'s codec and rules, over the data in `chunk::block_entity`.
 pub trait SpawnDataExt: Sized {
@@ -292,7 +292,7 @@ pub trait SpawnerExt: Sized {
         l: &L,
         random: &mut R,
         pos: [i32; 3],
-        spawn: &mut dyn FnMut(&L, &SpawnerSpawn) -> Option<SpawnerAdded>,
+        spawn: &mut dyn FnMut(&L, &mut R, &SpawnerSpawn) -> Option<SpawnerAdded>,
         events: &mut Vec<SpawnerEvent>,
     );
     /// `clientTick`: with a player near and a mob to show, a smoke and flame
@@ -464,7 +464,7 @@ impl SpawnerExt for Spawner {
         l: &L,
         random: &mut R,
         pos: [i32; 3],
-        spawn: &mut dyn FnMut(&L, &SpawnerSpawn) -> Option<SpawnerAdded>,
+        spawn: &mut dyn FnMut(&L, &mut R, &SpawnerSpawn) -> Option<SpawnerAdded>,
         events: &mut Vec<SpawnerEvent>,
     ) {
         if !self.near_player(l, pos) || !l.spawner_blocks_work() {
@@ -530,15 +530,7 @@ impl SpawnerExt for Spawner {
                     continue;
                 }
             } else if let Some(s) = species
-                && !spawn_rules::check_spawn_rules(
-                    s,
-                    l,
-                    Reason::Spawner,
-                    random,
-                    block[0],
-                    block[1],
-                    block[2],
-                )
+                && !spawn_rules::check_spawn_rules(&id, s, l, Reason::Spawner, random, block)
             {
                 continue;
             }
@@ -581,19 +573,25 @@ impl SpawnerExt for Spawner {
                 width * scale,
                 height * scale,
             );
-            let rules_ok = data.custom_spawn_rules.is_some()
-                || spawn_selection::mob_spawn_rules(s, l, own[0], own[1], own[2]);
-            if !rules_ok
-                || !spawn_selection::spawn_obstruction(
-                    s,
-                    l,
-                    bounds,
-                    Some(&added),
-                    own[0],
-                    own[1],
-                    own[2],
-                )
-            {
+            let pending = spawn_selection::Pending {
+                yaw,
+                fresh: data.unconfigured(),
+            };
+            let position_ok =
+                spawn_selection::position_ok(l, &id, Reason::Spawner, placed, pending, || {
+                    (data.custom_spawn_rules.is_some()
+                        || spawn_selection::mob_spawn_rules(s, l, own[0], own[1], own[2]))
+                        && spawn_selection::spawn_obstruction(
+                            s,
+                            l,
+                            bounds,
+                            Some(&added),
+                            own[0],
+                            own[1],
+                            own[2],
+                        )
+                });
+            if !position_ok {
                 continue;
             }
             let request = SpawnerSpawn {
@@ -605,7 +603,7 @@ impl SpawnerExt for Spawner {
                 equipment: data.equipment.as_ref(),
                 trial: false,
             };
-            let Some(result) = spawn(l, &request) else {
+            let Some(result) = spawn(l, random, &request) else {
                 self.delay(random, events);
                 return;
             };
@@ -714,7 +712,9 @@ pub fn entity_position(s: Species, at: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// `Vec3.CODEC`: a list of three doubles.
+/// `Vec3.CODEC`: a list of three doubles. A spawner's saved `Pos` is a spawn
+/// spot, not a loaded entity: vanilla snaps the spawn to it verbatim
+/// (`BaseSpawner.spawn`), so it stays raw here.
 pub(crate) fn read_pos(tag: Option<&Tag>) -> Option<[f64; 3]> {
     let Tag::List(v) = tag? else {
         return None;
@@ -743,7 +743,7 @@ mod tests {
     use horizon_core::random::LegacyRandom;
 
     fn tag(snbt: &str) -> Tag {
-        horizon_world::nbt::parse_snbt(snbt).expect("snbt").0
+        horizon_core::nbt::parse_snbt(snbt).expect("snbt").0
     }
 
     #[test]

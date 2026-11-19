@@ -6,6 +6,7 @@ generated files stay in .local/. Also the small helpers the harnesses share
 
 import argparse
 import atexit
+import contextlib
 from collections import Counter
 import hashlib
 import json
@@ -19,6 +20,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 import zipfile
@@ -72,6 +74,27 @@ def _scratch_dir(prefix):
     return path
 
 
+@contextlib.contextmanager
+def temp_folder(prefix):
+    """`tempfile.TemporaryDirectory` for a folder a server ran in: on Windows the folder can stay locked for a
+    second or two after the server exits, so removing it is retried instead of failing a run that passed."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield path
+    finally:
+        for attempt in range(10):
+            try:
+                shutil.rmtree(path)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as error:
+                if attempt == 9:
+                    print(f"Could not remove scratch folder {path}: {error}", file=sys.stderr)
+                else:
+                    time.sleep(0.5)
+
+
 @atexit.register
 def _remove_scratch_dirs():
     for path in _SCRATCH_DIRS:
@@ -80,7 +103,7 @@ def _remove_scratch_dirs():
 
 def game_env(base=None, **extra):
     """The environment for every run of the game, the launcher or horizon-ctl from a tool or a harness: no audio,
-    no Discord presence, and fresh scratch folders for the game's home (logs, saves, options), the launcher's home and the XDG folders,
+    fresh scratch folders for the game's home (logs, saves, options), the launcher's home and the XDG folders,
     so a run never writes into a real player's folders (the game falls back to them when HORIZON_HOME is unset).
     A folder the caller already has in `base` (default os.environ) or passes in `extra` is kept. The scratch folders
     are removed when this process exits."""
@@ -91,9 +114,6 @@ def game_env(base=None, **extra):
     # Local fixtures use real TCP, but need no inbound access from other machines.
     # Network/discovery suites can explicitly set HORIZON_TEST_LOOPBACK=0.
     env.setdefault("HORIZON_TEST_LOOPBACK", "1")
-    # Never a real Discord's Rich Presence; tools/discord_presence_e2e.py points the game at a fake one.
-    if not env.get("HORIZON_DISCORD_IPC_DIR"):
-        env["HORIZON_NO_DISCORD"] = "1"
     for key, prefix in (("HORIZON_HOME", "horizon-home-"), ("HORIZON_LAUNCHER_HOME", "horizon-launcher-home-"),
                         ("XDG_DATA_HOME", "horizon-xdg-data-"), ("XDG_CONFIG_HOME", "horizon-xdg-config-")):
         if not env.get(key):
@@ -179,13 +199,14 @@ def varint(value):
 def parse_varint(data, pos):
     """The VarInt at data[pos]: (the position after it, its unsigned value)."""
     value = shift = 0
-    while True:
+    for _ in range(5):
         b = data[pos]
         pos += 1
         value |= (b & 0x7F) << shift
         shift += 7
         if not b & 0x80:
             return pos, value
+    raise ValueError("VarInt too big")
 
 
 def fbits(value):

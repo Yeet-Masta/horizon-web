@@ -6,10 +6,11 @@
 //!
 //! Each row shows the mod's own icon: Modrinth's for what the browser installed from it (the URLs
 //! asked for in one request and kept beside the image cache, the images through the Mods page's
-//! cache at the row's size), else the one its jar names, else a generic glyph.
+//! cache at the row's size), else the package's icon or the one its jar names, else a generic glyph.
 use super::*;
 use crate::plate::alpha;
 use crate::shell::{c, Action};
+use build_mode::ModKind;
 use horizon_launcher::browser::{
     horizon, images, installed, java, modrinth, Kind as PackKind, SourceId,
 };
@@ -32,11 +33,34 @@ pub(super) struct ModRow {
     pub(super) on: bool,
     /// What the browser knows of it; None: a file put in by hand.
     pub(super) entry: Option<installed::Entry>,
-    /// The icon its jar names, scaled to the row (`images::ROW`) and decoded once by the UI.
+    /// Its validated package icon or jar icon, kept between draws.
     pub(super) icon: Option<Arc<gpui::Image>>,
+    pub(super) error: Option<String>,
+    /// The browser lists it, but its file is not found (a registry mod from before the cutover):
+    /// the row says so and offers Remove, instead of an error.
+    pub(super) missing: bool,
     pub(super) native: Option<native_status::Installed>,
-    /// A native mod turned on: where it stands in the instance's build ([`horizon::standings`]).
-    pub(super) standing: Option<horizon::Standing>,
+    pub(super) internals: Vec<String>,
+    /// What the package is and its mod id, for a Horizon mod; None for a Java jar.
+    pub(super) kind: Option<(ModKind, String)>,
+}
+
+impl ModRow {
+    /// Its mod id when it is a native mod: one that builds, needs the native permission and has
+    /// a build log. A hand-copied `.hmod` in `horizon-mods/` is not one.
+    pub(super) fn native_id(&self) -> Option<&str> {
+        match (&self.kind, &self.native) {
+            (Some((ModKind::Native, id)), _) => Some(id.as_str()),
+            (_, Some(n)) if n.native() => Some(n.id.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Whether it has an on/off switch: a local file has none when switching it could switch
+    /// another mod (`native_status::Installed::switch`).
+    pub(super) fn has_switch(&self) -> bool {
+        self.native.as_ref().is_none_or(|n| n.switch)
+    }
 }
 
 /// Modrinth projects' icon URLs by project id, kept on disk beside the image cache so the icons
@@ -133,8 +157,11 @@ fn read(home: &Path, java_instance: bool) -> Vec<ModRow> {
                         on,
                         entry,
                         icon,
+                        error: None,
+                        missing: false,
                         native: None,
-                        standing: None,
+                        internals: Vec::new(),
+                        kind: None,
                     }
                 })
             })
@@ -142,53 +169,91 @@ fn read(home: &Path, java_instance: bool) -> Vec<ModRow> {
     } else {
         entries
             .into_iter()
-            .map(|e| ModRow {
-                file: e.file.clone(),
-                name: e.title.clone(),
-                version: e.number.clone(),
-                on: horizon::mod_id(&e).is_some_and(|id| java::is_enabled(home, id)),
-                entry: Some(e),
-                icon: None,
-                native: None,
-                standing: None,
+            .map(|e| {
+                let missing = installed::file_missing(home, &e);
+                let package =
+                    horizon_platform::mod_package::manifest::Package::read(&home.join(&e.file));
+                let icon = mod_icons::load(package.as_ref().map(|p| p.icon.as_ref()));
+                ModRow {
+                    file: e.file.clone(),
+                    name: e.title.clone(),
+                    version: e.number.clone(),
+                    on: horizon::mod_id(&e).is_some_and(|id| java::is_enabled(home, id)),
+                    entry: Some(e),
+                    icon: icon.image,
+                    error: icon.error.filter(|_| !missing),
+                    missing,
+                    native: None,
+                    internals: package
+                        .as_ref()
+                        .map(|p| native_status::declared_internals(&p.manifest))
+                        .unwrap_or_default(),
+                    kind: package
+                        .as_ref()
+                        .ok()
+                        .map(|p| (ModKind::of(&p.manifest), p.manifest.id.clone())),
+                }
             })
             .collect()
     };
     if !java_instance {
-        rows.extend(
-            native_status::untracked(home)
-                .into_iter()
-                .map(|native| ModRow {
-                    file: native.file.clone(),
-                    name: native.id.clone(),
-                    version: native.version.clone(),
-                    on: java::is_enabled(home, &native.id),
-                    entry: None,
-                    icon: None,
-                    native: Some(native),
-                    standing: None,
-                }),
-        );
-        let native_id = |r: &ModRow| match (&r.native, &r.entry) {
-            (Some(native), _) => Some(native.id.clone()),
-            (None, Some(e)) if native_status::is_native_file(&e.file) => {
-                horizon::mod_id(e).map(str::to_owned)
+        rows.extend(native_status::untracked(home).into_iter().map(|native| {
+            let icon = mod_icons::load(native.icon.as_ref().map(|i| i.as_deref()));
+            // A hand-copied `.hmod` in `horizon-mods/` is wasm or content: its manifest says which.
+            let kind = if native.native() {
+                Some(ModKind::Native)
+            } else {
+                horizon_platform::mod_package::manifest::Package::read(&home.join(&native.file))
+                    .ok()
+                    .map(|p| ModKind::of(&p.manifest))
+            };
+            ModRow {
+                file: native.file.clone(),
+                name: native.id.clone(),
+                version: native.version.clone(),
+                on: java::is_enabled(home, &native.id),
+                entry: None,
+                icon: icon.image,
+                error: native.note().map(String::from).or(icon.error),
+                missing: false,
+                kind: kind.map(|kind| (kind, native.id.clone())),
+                internals: native.internals.clone(),
+                native: Some(native),
             }
-            _ => None,
-        };
-        let ids: Vec<String> = rows.iter().filter(|r| r.on).filter_map(native_id).collect();
-        let instance = horizon_launcher::instances::list()
-            .into_iter()
-            .find(|i| i.home == home);
-        if let (false, Some(instance)) = (ids.is_empty(), instance) {
-            let mut standings = horizon::standings(&instance, &ids);
-            for row in rows.iter_mut().filter(|r| r.on) {
-                row.standing = native_id(row).and_then(|id| standings.remove(&id));
-            }
-        }
+        }));
     }
     rows.sort_by_key(|r| r.name.to_lowercase());
     rows
+}
+
+/// What a missing-only removal did, for the notice.
+#[derive(Debug, Default, PartialEq)]
+struct Forgotten {
+    dropped: usize,
+    /// Rows whose entry or file changed since the list was read: kept.
+    changed: Vec<String>,
+    first_error: Option<String>,
+}
+
+/// Drops the entries of the missing `rows` whose file is still not found, each rechecked under
+/// the lock (`installed::forget_missing`). No file is touched.
+fn forget_missing(home: &Path, rows: &[&ModRow]) -> Forgotten {
+    let mut done = Forgotten::default();
+    for (row, e) in rows
+        .iter()
+        .filter(|r| r.missing)
+        .filter_map(|r| Some((r, r.entry.as_ref()?)))
+    {
+        match installed::forget_missing(home, e) {
+            Ok(true) => done.dropped += 1,
+            Ok(false) => done.changed.push(row.name.clone()),
+            Err(error) => {
+                done.first_error
+                    .get_or_insert(format!("{}: {error}", row.name));
+            }
+        }
+    }
+    done
 }
 
 /// Turns a Java instance's jar on or off by renaming it.
@@ -212,6 +277,9 @@ impl Launcher {
 
     /// Reads the selected instance's mods off the UI thread, once until something changes them.
     fn load_instance_mods(&mut self, cx: &mut Context<Self>) {
+        if self.mod_preview.active {
+            return;
+        }
         let Some(i) = self.selected_instance() else {
             return;
         };
@@ -307,11 +375,11 @@ impl Launcher {
         self.mods_image(&url, images::ROW)
     }
 
-    /// A mod's icon at the row's size: Modrinth's, else its jar's, else a glyph.
+    /// A mod's icon at the row's size: Modrinth's, else its package's or jar's, else a glyph.
     pub(super) fn mod_icon(
         &mut self,
         entry: Option<&installed::Entry>,
-        jar: Option<Arc<gpui::Image>>,
+        local: Option<Arc<gpui::Image>>,
         side: f32,
     ) -> Div {
         let n = self.theme.night;
@@ -324,7 +392,7 @@ impl Launcher {
             .size(px(side))
             .rounded(px(night::RADIUS_CONTROL))
             .overflow_hidden();
-        match (remote, jar) {
+        match (remote, local) {
             (Some(path), _) => tile.child(gpui::img(path).size(px(side))),
             (None, Some(image)) => tile.child(gpui::img(image).size(px(side))),
             (None, None) => tile
@@ -339,6 +407,44 @@ impl Launcher {
         self.load_instance_mods(cx);
         let m = &self.instance_mods;
         m.fresh.then_some(m.list.len())
+    }
+
+    /// How many of the selected instance's rows have their file missing.
+    pub(super) fn missing_mods(&self) -> usize {
+        self.instance_mods.list.iter().filter(|r| r.missing).count()
+    }
+
+    /// Remove missing, and a missing row's own Remove: the entries of `rows` (all the missing
+    /// ones, or the one) whose file is still gone leave the browser's list. No file is touched;
+    /// a row that changed since the list was read is kept and named.
+    pub(super) fn forget_missing_mods(&mut self, file: Option<&str>) {
+        let Some(home) = self.instance_mods.home.clone() else {
+            return;
+        };
+        let Some(_lock) = horizon_launcher::browser::try_lock_home(&home) else {
+            self.mods.message = Some(Err(tr("Wait for the current operation to finish.").into()));
+            return;
+        };
+        let rows: Vec<&ModRow> = (self.instance_mods.list.iter())
+            .filter(|r| file.is_none_or(|f| r.file == f))
+            .collect();
+        let done = forget_missing(&home, &rows);
+        self.mods.message = Some(if let Some(error) = done.first_error {
+            Err(error)
+        } else if !done.changed.is_empty() {
+            Err(trf(
+                "Kept, as its file changed since the list was read: {mods}",
+                &[("mods", &done.changed.join(", "))],
+            ))
+        } else {
+            Ok(trf(
+                "Missing mods removed: {count}",
+                &[("count", &done.dropped.to_string())],
+            ))
+        });
+        self.mods.reload_installed();
+        self.mods.reset_lists();
+        self.instance_mods_changed();
     }
 
     pub(super) fn switch_mod(&mut self, row: &ModRow) {
@@ -358,11 +464,23 @@ impl Launcher {
         let t = self.theme;
         let n = t.night;
         let busy = self.mods.busy.is_some();
-        let updates = self.mods.updates.len();
+        let updates = self.mods_updatable().len();
+        let missing = self.missing_mods();
         let actions = div()
             .flex()
             .items_center()
             .gap(px(8.))
+            .children((missing > 0 && !busy).then(|| {
+                shell::action("instance-mods-remove-missing", Action::Raised, &t)
+                    .child(shell::label(trf(
+                        "Remove missing ({count})",
+                        &[("count", &missing.to_string())],
+                    )))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.forget_missing_mods(None);
+                        cx.notify();
+                    }))
+            }))
             .children((updates > 0 && !busy).then(|| {
                 shell::action("instance-mods-update-all", Action::Raised, &t)
                     .child(shell::label(trf(
@@ -453,12 +571,16 @@ impl Launcher {
             )
         };
         let native = self.mods.java.is_none()
-            && self.instance_mods.list.iter().any(|r| {
-                r.native.is_some()
-                    || r.entry
-                        .as_ref()
-                        .is_some_and(|e| native_status::is_native_file(&e.file))
-            });
+            && (native_status::asks_for_build(
+                self.instance_mods
+                    .list
+                    .iter()
+                    .filter_map(|r| r.native.as_ref()),
+            ) || self.instance_mods.list.iter().any(|r| {
+                r.entry
+                    .as_ref()
+                    .is_some_and(|e| native_status::is_native_file(&e.file))
+            }));
         let build = native.then(|| self.native_build(cx)).flatten();
         let card = plate::cut(
             night::PIXEL_CORNER,
@@ -487,7 +609,30 @@ impl Launcher {
         let t = self.theme;
         let n = t.night;
         let icon = self.mod_icon(row.entry.as_ref(), row.icon.clone(), 40.);
-        let controls = if let Some(native) = &row.native {
+        let chip = row
+            .kind
+            .as_ref()
+            .filter(|(kind, _)| *kind == ModKind::Native)
+            // Its menu can turn the mod off: not from a row that may not switch that id.
+            .filter(|_| row.has_switch())
+            .and_then(|(_, id)| self.route_chip(id, cx));
+        let controls = if row.missing {
+            // A missing file has nothing to switch: its one action is Remove.
+            let doomed = row.clone();
+            let remove = shell::action(
+                SharedString::from(format!("mod-remove-missing-{}", row.file)),
+                Action::Raised,
+                &t,
+            )
+            .child(shell::label(tr("Remove").to_string()));
+            div().child(match busy {
+                true => remove.opacity(theme::DISABLED),
+                false => remove.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.forget_missing_mods(Some(&doomed.file));
+                    cx.notify();
+                })),
+            })
+        } else if let Some(native) = &row.native {
             self.native_mod_actions(native, busy, cx)
         } else {
             let switch_row = row.clone();
@@ -500,7 +645,11 @@ impl Launcher {
                 )),
             )
         };
-        let source = if let Some(origin) = row.native.as_ref().and_then(|n| n.origin.as_ref()) {
+        let source = if row.missing {
+            tr("File missing").to_string()
+        } else if let Some(error) = &row.error {
+            error.clone()
+        } else if let Some(origin) = row.native.as_ref().and_then(|n| n.origin.as_ref()) {
             trf("from GitHub: {source}", &[("source", &origin.label())])
         } else {
             match &row.entry {
@@ -515,7 +664,7 @@ impl Launcher {
                 ),
             }
         };
-        let update = row.entry.as_ref().and_then(|e| {
+        let update = row.entry.as_ref().filter(|_| !row.missing).and_then(|e| {
             let key = (e.source, e.project.clone());
             let number = self.mods.updates.get(&key)?.clone();
             let (source, id): (SourceId, String) = key;
@@ -570,11 +719,23 @@ impl Launcher {
                             .child(shell::text(night::CAPTION, c(n.muted)).child(row.version)),
                     )
                     .child(
-                        shell::text(night::CAPTION, c(n.muted))
-                            .truncate()
-                            .child(source),
+                        shell::text(
+                            night::CAPTION,
+                            c(if row.missing {
+                                n.warn
+                            } else if row.error.is_some() {
+                                n.danger
+                            } else {
+                                n.muted
+                            }),
+                        )
+                        .truncate()
+                        .child(source),
                     ),
             )
+            .children(row.kind.as_ref().map(|(kind, _)| self.kind_badge(*kind)))
+            .children(chip)
+            .children(self.internals_chip(&row.file, &row.internals))
             .children(update)
             .child(controls)
     }
@@ -618,12 +779,114 @@ mod tests {
     }
 
     #[test]
+    fn package_rows_cache_content_and_code_icons_and_preserve_refusals() {
+        use std::io::{Cursor, Write};
+
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        std::fs::create_dir_all(home.join("mods")).unwrap();
+        std::fs::create_dir_all(home.join(native_mods::INSTALLED)).unwrap();
+        let mut png = Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([35, 180, 145, 255]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        let pin = "a".repeat(40);
+        let mut entries = Vec::new();
+        for (id, code, tracked, icon) in [
+            ("content", false, true, Some(png.as_slice())),
+            ("tracked_code", true, true, Some(png.as_slice())),
+            ("local_code", true, false, Some(png.as_slice())),
+            ("no_icon", false, true, None),
+            ("broken", true, false, Some(b"not a PNG".as_slice())),
+        ] {
+            let folder = if code { native_mods::INSTALLED } else { "mods" };
+            let file = format!("{folder}/{id}.hmod");
+            let mut manifest = format!(
+                "id = '{id}'\nname = '{id}'\nversion = '1'\napi = '0.2'\ncapabilities = ['registries']\n"
+            );
+            if code {
+                manifest +=
+                    &format!("[native]\ngame = '26.3'\nhorizon = '{pin}'\nmixins = '{pin}'\n");
+                if id == "tracked_code" || id == "local_code" {
+                    manifest = manifest.replace("[native]", &format!(
+                        "internals = [{{path = 'horizon_client::game::Game', hash = '{}'}}]\n[native]",
+                        "b".repeat(64)
+                    ));
+                }
+            }
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(home.join(&file)).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("horizon-mod.toml", options).unwrap();
+            zip.write_all(manifest.as_bytes()).unwrap();
+            if code {
+                zip.start_file("Cargo.toml", options).unwrap();
+                zip.write_all(b"[package]\nname = 'other'\nversion = '9'\n")
+                    .unwrap();
+                zip.start_file("src/lib.rs", options).unwrap();
+                zip.write_all(b"pub fn hooks() {}\n").unwrap();
+            }
+            if let Some(icon) = icon {
+                zip.start_file("icon.png", options).unwrap();
+                zip.write_all(icon).unwrap();
+            }
+            zip.finish().unwrap();
+            if tracked {
+                entries.push(serde_json::from_value(serde_json::json!({"source":"horizon","project":id,"slug":id,"title":id,"kind":"mod","version":"1","number":"1","file":file,"checksum":"","page":""})).unwrap());
+            }
+        }
+        installed::Installed { entries }.save(home).unwrap();
+        let rows = read(home, false);
+        assert_eq!(rows.len(), 5, "tracked native rows must not be duplicated");
+        for id in ["content", "tracked_code", "local_code"] {
+            let row = rows.iter().find(|r| r.name == id).unwrap();
+            assert!(row.icon.is_some(), "{id} must show its package icon");
+            assert!(row.error.is_none(), "{id}: {:?}", row.error);
+            let expected: &[&str] = if id == "content" {
+                &[]
+            } else {
+                &["horizon_client::game::Game"]
+            };
+            assert_eq!(row.internals, expected);
+        }
+        let no_icon = rows.iter().find(|r| r.name == "no_icon").unwrap();
+        assert!(no_icon.icon.is_none() && no_icon.error.is_none());
+        let broken = rows.iter().find(|r| r.name == "broken").unwrap();
+        assert!(broken.icon.is_none());
+        assert!(broken.error.as_ref().unwrap().contains("icon.png"));
+        assert!(
+            broken.native.is_some(),
+            "invalid files must remain removable"
+        );
+    }
+
+    #[test]
+    fn a_retired_hnmod_row_says_why_and_asks_for_no_build() {
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        let installed = home.join(native_mods::INSTALLED);
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("teem_client-0.1.0.hnmod"), b"old format").unwrap();
+        let rows = read(home, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].error.as_deref(),
+            Some("Old format (.hnmod): ask its author to republish it as .hmod")
+        );
+        assert!(!native_status::asks_for_build(
+            rows.iter().filter_map(|r| r.native.as_ref())
+        ));
+        // No switch, permission prompt or route menu: each could switch `mod.teem_client-0.1.0`.
+        assert!(!rows[0].has_switch());
+    }
+
+    #[test]
     fn native_mod_changes_during_read_trigger_a_fresh_read() {
         let scratch = TestHome::new();
         let home = &scratch.0;
         let installed = home.join(native_mods::INSTALLED);
         std::fs::create_dir_all(&installed).unwrap();
-        std::fs::write(installed.join("first.hnmod"), b"unreadable").unwrap();
+        std::fs::write(installed.join("first.hmod"), b"unreadable").unwrap();
 
         let mut mods = InstanceMods {
             home: Some(home.clone()),
@@ -635,7 +898,7 @@ mod tests {
         let old_list = read(home, false);
         assert_eq!(old_list.len(), 1);
 
-        std::fs::write(installed.join("second.hnmod"), b"unreadable").unwrap();
+        std::fs::write(installed.join("second.hmod"), b"unreadable").unwrap();
         mods.observe_fingerprint(native_status::fingerprint(home, None));
         assert!(!mods.fresh);
         assert!(mods.reading, "the first read must still be pending");
@@ -648,8 +911,8 @@ mod tests {
         }
         let final_files: Vec<_> = mods.list.iter().map(|row| row.file.as_str()).collect();
         let final_listing_is_fresh = mods.fresh
-            && final_files.contains(&"horizon-native-mods/first.hnmod")
-            && final_files.contains(&"horizon-native-mods/second.hnmod");
+            && final_files.contains(&"horizon-native-mods/first.hmod")
+            && final_files.contains(&"horizon-native-mods/second.hmod");
         assert!(
             another_read_needed && final_listing_is_fresh,
             "a native change during a read must leave another read needed and deliver both files; another_read_needed={another_read_needed}, fresh={}, files={final_files:?}",
@@ -665,13 +928,12 @@ mod tests {
         std::fs::create_dir_all(home.join(native_mods::INSTALLED)).unwrap();
         for id in ["local", "registry"] {
             std::fs::write(
-                home.join(native_mods::INSTALLED)
-                    .join(format!("{id}.hnmod")),
+                home.join(native_mods::INSTALLED).join(format!("{id}.hmod")),
                 b"unreadable",
             )
             .unwrap();
         }
-        let entry: installed::Entry = serde_json::from_value(serde_json::json!({"source":"horizon","project":"registry","slug":"registry","title":"Registry mod","kind":"mod","version":"1","number":"1","file":"horizon-native-mods/registry.hnmod","checksum":"","page":""})).unwrap();
+        let entry: installed::Entry = serde_json::from_value(serde_json::json!({"source":"horizon","project":"registry","slug":"registry","title":"Registry mod","kind":"mod","version":"1","number":"1","file":"horizon-native-mods/registry.hmod","checksum":"","page":""})).unwrap();
         installed::Installed {
             entries: vec![entry],
         }
@@ -693,6 +955,266 @@ mod tests {
             "native mods stay out of Java instances"
         );
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    fn entry(project: &str, file: &str) -> installed::Entry {
+        serde_json::from_value(serde_json::json!({"source":"horizon","project":project,"slug":project,"title":project,"kind":"mod","version":"1","number":"1","file":file,"checksum":"","page":""})).unwrap()
+    }
+
+    /// A name the system refuses with an error other than "not found".
+    fn unreadable_name() -> String {
+        if cfg!(windows) {
+            "horizon-mods/bad?name.hmod".into()
+        } else {
+            format!("horizon-mods/{}.hmod", "n".repeat(300))
+        }
+    }
+
+    #[test]
+    fn a_row_whose_file_is_not_found_is_missing_and_any_other_error_fails() {
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        std::fs::create_dir_all(home.join("horizon-mods")).unwrap();
+        installed::Installed {
+            entries: vec![
+                entry("gone", "horizon-mods/gone.hmod"),
+                entry("refused", &unreadable_name()),
+            ],
+        }
+        .save(home)
+        .unwrap();
+        let rows = read(home, false);
+        let gone = rows.iter().find(|r| r.name == "gone").unwrap();
+        assert!(gone.missing && gone.error.is_none(), "{:?}", gone.error);
+        let refused = rows.iter().find(|r| r.name == "refused").unwrap();
+        assert!(!refused.missing, "only NotFound counts as missing");
+        assert!(
+            refused.error.is_some(),
+            "another error keeps the failed row"
+        );
+    }
+
+    /// Every path under `home` and each file's bytes, but the list and the lock beside it.
+    fn tree(home: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut seen = Vec::new();
+        let mut todo = vec![home.to_path_buf()];
+        while let Some(dir) = todo.pop() {
+            for f in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = f.path();
+                let name = path.strip_prefix(home).unwrap().to_path_buf();
+                if name == Path::new("mod-browser.json") || name == Path::new(".mod-browser.lock") {
+                    continue;
+                }
+                if path.is_dir() {
+                    todo.push(path);
+                    seen.push((name, None));
+                } else {
+                    seen.push((name, Some(std::fs::read(&path).unwrap())));
+                }
+            }
+        }
+        seen.sort();
+        seen
+    }
+
+    #[test]
+    fn remove_missing_drops_only_missing_entries_and_touches_no_mod_file() {
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        let mods = home.join("horizon-mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        std::fs::write(mods.join("kept.hmod"), b"kept").unwrap();
+        std::fs::write(mods.join("stray.hmod"), b"stray").unwrap();
+        std::fs::write(
+            home.join("horizon-mods.txt"),
+            "mod.gone:true
+",
+        )
+        .unwrap();
+        let kept = entry("kept", "horizon-mods/kept.hmod");
+        let refused = entry("refused", &unreadable_name());
+        installed::Installed {
+            entries: vec![
+                entry("gone", "horizon-mods/gone.hmod"),
+                kept.clone(),
+                refused.clone(),
+            ],
+        }
+        .save(home)
+        .unwrap();
+        let rows = read(home, false);
+        let all: Vec<&ModRow> = rows.iter().collect();
+        let before = tree(home);
+
+        let done = forget_missing(home, &all);
+        assert_eq!(
+            (done.dropped, done.changed, done.first_error),
+            (1, vec![], None)
+        );
+        assert_eq!(
+            installed::Installed::load(home).entries,
+            [kept, refused.clone()]
+        );
+        assert_eq!(tree(home), before, "no file is written, moved or deleted");
+        assert_eq!(
+            forget_missing(home, &all),
+            Forgotten {
+                changed: vec!["gone".into()],
+                ..Forgotten::default()
+            },
+            "an entry already gone is not removed twice"
+        );
+        // Another error than "not found" keeps the entry, whatever the row said.
+        assert_eq!(installed::forget_missing(home, &refused), Ok(false));
+        assert_eq!(installed::Installed::load(home).entries.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_row_whose_file_comes_back_keeps_the_file_and_its_entry() {
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        let mods = home.join("horizon-mods");
+        std::fs::create_dir_all(&mods).unwrap();
+        let back = entry("back", "horizon-mods/back.hmod");
+        installed::Installed {
+            entries: vec![back.clone()],
+        }
+        .save(home)
+        .unwrap();
+        let rows = read(home, false);
+        assert!(rows[0].missing);
+        // The drive or the file returns between the list's read and the click.
+        std::fs::write(mods.join("back.hmod"), b"back").unwrap();
+
+        let done = forget_missing(home, &[&rows[0]]);
+        assert_eq!(
+            (done.dropped, done.changed, done.first_error),
+            (0, vec!["back".to_string()], None)
+        );
+        assert_eq!(std::fs::read(mods.join("back.hmod")).unwrap(), b"back");
+        assert_eq!(installed::Installed::load(home).entries, [back]);
+    }
+
+    #[test]
+    fn a_hmod_copied_by_hand_into_horizon_mods_is_listed_with_its_switch() {
+        use std::io::Write;
+        let scratch = TestHome::new();
+        let home = &scratch.0;
+        let folder = home.join(horizon_platform::mod_package::mod_list::DIR);
+        std::fs::create_dir_all(&folder).unwrap();
+        // The file name isn't the id: the on/off list is keyed by the manifest's. A copy with a
+        // tracked mod's id and two copies with one id switch nothing; the unreadable native
+        // `ruby.hmod` below gives no id, so the valid `ruby` copy keeps its switch.
+        for (file, id) in [
+            ("tracked", "tracked"),
+            ("my-build", "handmade"),
+            ("copy-of-tracked", "tracked"),
+            ("valid-ruby", "ruby"),
+            ("twin-a", "twin"),
+            ("twin-b", "twin"),
+        ] {
+            let mut zip = zip::ZipWriter::new(
+                std::fs::File::create(folder.join(format!("{file}.hmod"))).unwrap(),
+            );
+            zip.start_file("horizon-mod.toml", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            let manifest = format!(
+                "id = '{id}'\nname = '{id}'\nversion = '1.4'\napi = '0.2'\ncapabilities = ['registries']\n"
+            );
+            zip.write_all(manifest.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let entry: installed::Entry = serde_json::from_value(serde_json::json!({"source":"horizon","project":"tracked","slug":"tracked","title":"Tracked mod","kind":"mod","version":"1","number":"1.4","file":"horizon-mods/tracked.hmod","checksum":"","page":""})).unwrap();
+        installed::Installed {
+            entries: vec![entry],
+        }
+        .save(home)
+        .unwrap();
+        // Unreadable, so its id is only its file name: it keeps its build role, not a switch.
+        let native = home.join(native_mods::INSTALLED);
+        std::fs::create_dir_all(&native).unwrap();
+        std::fs::write(native.join("ruby.hmod"), b"unreadable").unwrap();
+        std::fs::write(home.join("horizon-mods.txt"), "mod.handmade:true\n").unwrap();
+        let rows = read(home, false);
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.file.as_str(),
+                    r.on,
+                    r.kind.as_ref().map(|(kind, _)| *kind),
+                    r.native_id(),
+                    r.has_switch(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (
+                    "horizon-mods/my-build.hmod",
+                    true,
+                    Some(ModKind::Content),
+                    None,
+                    true
+                ),
+                (
+                    "horizon-native-mods/ruby.hmod",
+                    false,
+                    Some(ModKind::Native),
+                    Some("ruby"),
+                    false
+                ),
+                (
+                    "horizon-mods/valid-ruby.hmod",
+                    false,
+                    Some(ModKind::Content),
+                    None,
+                    true
+                ),
+                (
+                    "horizon-mods/copy-of-tracked.hmod",
+                    false,
+                    Some(ModKind::Content),
+                    None,
+                    false
+                ),
+                (
+                    "horizon-mods/tracked.hmod",
+                    false,
+                    Some(ModKind::Content),
+                    None,
+                    true
+                ),
+                (
+                    "horizon-mods/twin-a.hmod",
+                    false,
+                    Some(ModKind::Content),
+                    None,
+                    false
+                ),
+                (
+                    "horizon-mods/twin-b.hmod",
+                    false,
+                    Some(ModKind::Content),
+                    None,
+                    false
+                ),
+            ]
+        );
+        let local = rows[0]
+            .native
+            .as_ref()
+            .expect("removable like a local native file");
+        assert!(local.origin.is_none());
+        assert!(
+            !native_status::asks_for_build(
+                rows.iter()
+                    .filter_map(|r| r.native.as_ref())
+                    .filter(|n| !n.native())
+            ),
+            "a content mod needs no native build"
+        );
     }
 
     #[test]

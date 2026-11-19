@@ -188,7 +188,7 @@ class PublicationTests(unittest.TestCase):
         for path in ["tools/Minecraft.java", "tests/java/Client.java", ".local/tools/JfrSummary.java"]:
             self.assertTrue(check_public_tree.prohibited(path), path)
 
-    def test_copied_data_fixer_tables_are_rejected_in_the_tree_only(self):
+    def test_copied_data_fixer_tables_are_rejected_in_tree_and_history(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
@@ -211,7 +211,7 @@ class PublicationTests(unittest.TestCase):
             self.assertEqual(check().returncode, 0, check().stderr)
             for path, text in [("crates/a/src/items.rs", flattening), ("data/states.txt", states),
                                ("data/states.json", json.dumps(states.splitlines())),
-                               ("crates/horizon-world/src/datafix/block_state_data.txt", "retired\n")]:
+                               ("crates/horizon-world/src/datafix/block_state_data.txt", states + "# retired copy\n")]:
                 with self.subTest(path=path):
                     commit(path, text)
                     result = check()
@@ -219,9 +219,16 @@ class PublicationTests(unittest.TestCase):
                     self.assertIn(path, result.stderr)
                     git("rm", "-q", path)
                     git("commit", "-q", "-m", "remove")
-            # History keeps the old copies: only the tree is checked for them.
+            # The index is clean again, so the plain tree check passes. History now rejects blobs
+            # newly introduced by these commits even though they were later deleted: the legacy
+            # exception in table_blobs_in_revisions covers only the documented RETIRED_TABLES
+            # paths, not fresh copies of the tables at other paths.
             self.assertEqual(check().returncode, 0)
-            self.assertEqual(check("--history").returncode, 0)
+            history = check("--history")
+            self.assertEqual(history.returncode, 1)
+            for path in ("crates/a/src/items.rs", "data/states.txt", "data/states.json"):
+                self.assertIn(path, history.stderr)
+            self.assertNotIn("crates/horizon-world/src/datafix/block_state_data.txt", history.stderr)
 
     def test_force_added_ignored_file_is_detected_in_index_and_history(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -382,6 +389,41 @@ class GameEnvScreenTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertEqual(env["HORIZON_HOME"], home)
                 self.assertNotIn("VSCREEN", env)
+
+
+
+class ScratchCleanupTests(unittest.TestCase):
+    def test_exhausted_retries_report_retained_path_and_error(self):
+        from tools import lab
+        with mock.patch.object(lab.shutil, "rmtree", side_effect=PermissionError("locked")), \
+                mock.patch.object(lab.time, "sleep"), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with lab.temp_folder("horizon-test-") as path:
+                pass
+            self.assertIn(path, stderr.getvalue())
+            self.assertIn("locked", stderr.getvalue())
+        shutil.rmtree(path)
+class VarIntTests(unittest.TestCase):
+    def test_overlong_varint_is_rejected(self):
+        # Five bytes with the continuation bit still set followed by 0x01: no
+        # vanilla client would read this (VarInt.read throws "VarInt too big").
+        overlong = bytes.fromhex("80 80 80 80 80 01")
+        with self.assertRaisesRegex(ValueError, "VarInt too big"):
+            lab.parse_varint(overlong, 0)
+
+    def test_valid_encodings_stay_byte_for_byte_identical(self):
+        # (wire bytes, position after, unsigned value) for legal 1-5 byte VarInts.
+        cases = [
+            (bytes.fromhex("00"), 1, 0),
+            (bytes.fromhex("7f"), 1, 127),
+            (bytes.fromhex("80 01"), 2, 128),
+            (bytes.fromhex("ff ff 7f"), 3, 2097151),
+            (bytes.fromhex("80 80 80 80 08"), 5, 0x80000000),
+            (bytes.fromhex("ff ff ff ff 0f"), 5, 0xFFFFFFFF),
+        ]
+        for data, expected_pos, expected_value in cases:
+            with self.subTest(data=data.hex()):
+                self.assertEqual(lab.parse_varint(data, 0), (expected_pos, expected_value))
 
 
 if __name__ == "__main__":

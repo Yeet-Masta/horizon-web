@@ -80,23 +80,47 @@ pub fn ensure(version: &Path) -> io::Result<PathBuf> {
             fs::hard_link(&from, &to)?;
         }
     }
-    // Native builds read both companions beside current_exe(), including on a reused bundle.
-    let (from, to) = (
-        version.join("native-mods.json"),
-        programs.join("native-mods.json"),
-    );
-    match fs::metadata(&from) {
-        Ok(_) if !same_file(&from, &to) => {
-            replace_link(&to, |temp| fs::hard_link(fs::canonicalize(&from)?, temp))?;
+    // Native and wasm builds read their companions beside current_exe(), including on a reused
+    // bundle.
+    for name in ["native-mods.json", "horizon-wasm-std.wasm"] {
+        let (from, to) = (version.join(name), programs.join(name));
+        match fs::metadata(&from) {
+            Ok(_) if !same_file(&from, &to) => {
+                replace_link(&to, |temp| fs::hard_link(fs::canonicalize(&from)?, temp))?;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => remove_if_present(&to)?,
+            Err(e) => return Err(e),
         }
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => remove_if_present(&to)?,
-        Err(e) => return Err(e),
     }
-    for name in ["native-data", "native-content"] {
+    for name in ["native-data", "native-content", "horizon-native-mods"] {
         sync_native_directory(version, &programs, name)?;
     }
+    for entry in fs::read_dir(version)? {
+        let entry = entry?;
+        if runtime_library(&entry.file_name().to_string_lossy()) {
+            let to = programs.join(entry.file_name());
+            if !same_file(&entry.path(), &to) {
+                replace_link(&to, |temp| fs::hard_link(entry.path(), temp))?;
+            }
+        }
+    }
+    // Remove retired runtime links, without touching unexpected directories.
+    for entry in fs::read_dir(&programs)? {
+        let entry = entry?;
+        if runtime_library(&entry.file_name().to_string_lossy())
+            && !version.join(entry.file_name()).exists()
+        {
+            remove_if_present(&entry.path())?;
+        }
+    }
     Ok(programs.join(PROGRAMS[0]))
+}
+
+// Runtime libraries installed by the native routes, the game's and each mod's own library; keep
+// bundle discovery in one place.
+fn runtime_library(name: &str) -> bool {
+    name.ends_with(".dylib")
 }
 
 fn sync_native_directory(version: &Path, programs: &Path, name: &str) -> io::Result<()> {
@@ -174,6 +198,41 @@ mod tests {
     }
 
     #[test]
+    fn runtime_libraries_and_packages_follow_reinstalls() {
+        let version = native_version("runtime");
+        let library = version.join("libhorizon_mod_host.dylib");
+        fs::write(&library, b"old").unwrap();
+        fs::write(version.join("libstd-test.dylib"), b"std").unwrap();
+        fs::write(version.join("libhorizon_client.dylib"), b"game").unwrap();
+        fs::write(version.join("libexample.dylib"), b"mod").unwrap();
+        fs::create_dir_all(version.join("horizon-native-mods/example")).unwrap();
+        let program = ensure(&version).unwrap();
+        let bundled = program.with_file_name("libhorizon_mod_host.dylib");
+        assert!(same_file(&library, &bundled));
+        assert!(program.with_file_name("libstd-test.dylib").exists());
+        assert!(program.with_file_name("libhorizon_client.dylib").exists());
+        // A mod's library is found beside the bundled executable too.
+        assert!(program.with_file_name("libexample.dylib").exists());
+        assert!(program
+            .with_file_name("horizon-native-mods/example")
+            .is_dir());
+        fs::remove_file(&library).unwrap();
+        fs::write(&library, b"new").unwrap();
+        ensure(&version).unwrap();
+        assert_eq!(fs::read(&bundled).unwrap(), b"new");
+        fs::remove_file(&library).unwrap();
+        fs::rename(
+            version.join("horizon-native-mods"),
+            version.join("old-mods"),
+        )
+        .unwrap();
+        ensure(&version).unwrap();
+        assert!(!bundled.exists());
+        assert!(!program.with_file_name("horizon-native-mods").exists());
+        fs::remove_dir_all(version).unwrap();
+    }
+
+    #[test]
     fn native_receipt_refreshes_without_replacing_the_game_and_is_removed_for_vanilla() {
         let version = native_version("receipt");
         let receipt = version.join("native-mods.json");
@@ -196,6 +255,40 @@ mod tests {
         assert_eq!(fs::read(&program).unwrap(), b"unchanged signed game");
 
         fs::remove_file(&receipt).unwrap();
+        ensure(&version).unwrap();
+        assert!(!bundled.exists());
+        fs::remove_dir_all(version).unwrap();
+    }
+
+    #[test]
+    fn wasm_std_is_linked_into_bundle_follows_atomic_replace_and_is_removed_when_absent() {
+        let version = native_version("wasm-std");
+        let wasm_std = version.join("horizon-wasm-std.wasm");
+        let first = b"\0asm\x01\0\0\0first";
+        let second = b"\0asm\x01\0\0\0second";
+        fs::write(&wasm_std, first).unwrap();
+
+        let program = ensure(&version).unwrap();
+        let bundled = program.with_file_name("horizon-wasm-std.wasm");
+        assert_eq!(
+            bundled,
+            version.join("Horizon.app/Contents/MacOS/horizon-wasm-std.wasm")
+        );
+        assert!(same_file(&wasm_std, &bundled));
+        assert_eq!(fs::read(&bundled).unwrap(), first);
+
+        // Keep a hardlink to the old inode to verify atomic replacement updates the bundle's link.
+        fs::hard_link(&wasm_std, version.join("old-wasm-std")).unwrap();
+        fs::write(version.join("replacement"), second).unwrap();
+        fs::rename(version.join("replacement"), &wasm_std).unwrap();
+
+        ensure(&version).unwrap();
+        assert!(same_file(&wasm_std, &bundled));
+        assert!(!same_file(&version.join("old-wasm-std"), &bundled));
+        assert_eq!(fs::read(&bundled).unwrap(), second);
+        assert_eq!(fs::read(version.join("old-wasm-std")).unwrap(), first);
+
+        fs::remove_file(&wasm_std).unwrap();
         ensure(&version).unwrap();
         assert!(!bundled.exists());
         fs::remove_dir_all(version).unwrap();
