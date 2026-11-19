@@ -76,13 +76,25 @@ def main():
                 "const imports = __wbg_get_imports(memory);"
                 " imports.horizon_jspi = globalThis.horizonJspiImports(); horizonJspiImports = imports.horizon_jspi;"
                 " globalThis.horizonJspiMemory ??= Object.values(imports).find((i) => i?.memory)?.memory;",
+            # A closure's run on the page may end later (a promise): its environment is freed
+            # only then, not when the call returns.
+            "            return f(a, state.b, ...args);\n        } finally {\n            state.a = a;\n"
+            "            real._wbg_cb_unref();\n":
+                "            return out = f(a, state.b, ...args);\n        } finally {\n            state.a = a;\n"
+                "            if (out instanceof Promise) out.finally(real._wbg_cb_unref); else real._wbg_cb_unref();\n",
+            "    const real = (...args) => {\n":
+                "    const real = (...args) => {\n        let out;\n",
             "    wasm = instance.exports;\n":
                 "    wasm = globalThis.horizonJspiReady(instance.exports, horizonJspiImports, import.meta.url);\n",
         }
         for hook, patched in hooks.items():
-            if glue_text.count(hook) != (2 if "imports" in hook else 1):
+            if glue_text.count(hook) != (2 if "imports =" in hook else 1):
                 sys.exit(f"single_file: the wasm-bindgen glue changed: {hook.strip()!r}")
             glue_text = glue_text.replace(hook, patched)
+        # ... which the void closures' glue passes on.
+        glue_text, n = re.subn(r"(\n    try \{\n        )(wasm\.\w*convert__closures\w*\()", r"\1return \2", glue_text)
+        if not n:
+            sys.exit("single_file: the wasm-bindgen glue's closures changed")
         glue_text = "let horizonJspiImports;\n" + glue_text
     page = (dist / "index.html").read_text(encoding="utf-8")
     page = page.replace('href="favicon.svg"', f'href="{data_url(dist / "favicon.svg", "image/svg+xml")}"')

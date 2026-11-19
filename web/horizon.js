@@ -316,10 +316,17 @@ const notify = (addr, count) => {
 // One instance's horizon_jspi imports (the glue asks as it instantiates). While the page's own
 // instance is suspended, its horizon_coroutine is off: a call into it meanwhile may not wait.
 globalThis.horizonJspiImports = () => {
-  const slot = {};
-  const away = () => slot.page && (slot.exports.horizon_coroutine.value = 0);
+  // `running`: the page's promising call is on the stack (not suspended).
+  const slot = { running: false };
+  const away = () => {
+    if (!slot.page) return;
+    slot.exports.horizon_coroutine.value = 0;
+    slot.running = false;
+  };
   const back = (result) => {
-    if (slot.page) slot.exports.horizon_coroutine.value = 1;
+    if (!slot.page) return result;
+    slot.exports.horizon_coroutine.value = 1;
+    slot.running = true;
     return result;
   };
   return {
@@ -341,37 +348,88 @@ globalThis.horizonJspiImports = () => {
 const threadGlues = new Set();
 globalThis.horizonJspiReady = (exports, imports, glueUrl) => {
   imports.slot.exports = exports;
-  if (threadGlues.has(glueUrl)) return exports;
-  imports.slot.page = true;
   const entries = new Set(build.jspiEntries ?? []);
+  // A thread's own work runs in its promising call (spawnPageThread); what calls into its
+  // instance meanwhile (its futures, the glue's callbacks) runs outside any, so may not wait.
+  if (threadGlues.has(glueUrl)) {
+    const thread = {};
+    for (const [name, value] of Object.entries(exports)) {
+      thread[name] = typeof value !== "function" || !entries.has(name) ? value : (...args) => {
+        const was = exports.horizon_coroutine.value;
+        exports.horizon_coroutine.value = 0;
+        try {
+          return value(...args);
+        } finally {
+          exports.horizon_coroutine.value = was;
+        }
+      };
+    }
+    return thread;
+  }
+  const slot = imports.slot;
+  slot.page = true;
   const queue = [];
   let busy = false;
-  const run = (entry, args) => {
+  // Each run's promise settles when it ends; the glue keeps its closure alive until then.
+  const run = (entry, args, settle) => {
     busy = true;
     exports.horizon_coroutine.value = 1;
+    slot.running = true;
     let done;
     try {
       done = entry(...args);
     } finally {
       exports.horizon_coroutine.value = 0;
+      slot.running = false;
     }
     done.catch((e) => {
       // winit's web event loop throws to hand control back to the page: not an error.
       if (!String(e).includes("Using exceptions for control flow")) console.error(e);
     }).finally(() => {
+      settle();
       exports.horizon_coroutine.value = 0;
+      slot.running = false;
       busy = false;
       while (!busy && queue.length) run(...queue.shift());
     });
   };
   const page = {};
   for (const [name, value] of Object.entries(exports)) {
+    // Promise callbacks (a closure returning Result<(), JsError>) and closure frees run Rust
+    // too: while the page's call is suspended they wait their turn, as it isn't reentrant.
+    // Their result is Ok then.
+    const later = name === "__wbindgen_destroy_closure" ||
+      /convert__closures.*Result_____wasm_bindgen_[0-9a-f]+___JsError___true_$/.test(name);
+    if (typeof value === "function" && later) {
+      const entry = WebAssembly.promising(value);
+      page[name] = (...args) => {
+        if (!busy || slot.running) return value(...args);
+        queue.push([entry, args, () => {}]);
+        return [0, 0];
+      };
+      continue;
+    }
     if (typeof value !== "function" || !entries.has(name)) {
       page[name] = value;
       continue;
     }
     const entry = WebAssembly.promising(value);
-    page[name] = (...args) => (busy ? queue.push([entry, args]) : run(entry, args), undefined);
+    page[name] = (...args) => {
+      // Called back from the running call (JS it called calls Rust again): at once, not
+      // suspending (JS frames are in between), as it would be without page threads.
+      if (slot.running) {
+        exports.horizon_coroutine.value = 0;
+        try {
+          return value(...args);
+        } finally {
+          exports.horizon_coroutine.value = 1;
+        }
+      }
+      const { promise, resolve } = Promise.withResolvers();
+      if (busy) queue.push([entry, args, resolve]);
+      else run(entry, args, resolve);
+      return promise;
+    };
   }
   return page;
 };
