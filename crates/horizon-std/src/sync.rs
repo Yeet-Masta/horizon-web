@@ -39,7 +39,7 @@ pub fn recv_timeout<T>(
             if crate::thread::may_block() {
                 crate::thread::sleep((deadline - now).min(Duration::from_micros(500)));
             } else {
-                std::hint::spin_loop();
+                crate::thread::page_wait(Duration::ZERO);
             }
         }
     }
@@ -67,7 +67,9 @@ mod spin {
             match attempt() {
                 Ok(guard) => return Ok(guard),
                 Err(TryLockError::Poisoned(poisoned)) => return Err(poisoned),
-                Err(TryLockError::WouldBlock) => std::hint::spin_loop(),
+                Err(TryLockError::WouldBlock) => {
+                    crate::thread::page_wait(std::time::Duration::ZERO)
+                }
             }
         }
     }
@@ -177,7 +179,7 @@ pub fn wait_while<'a, T>(
         let mut guard = guard;
         while still(&mut guard) {
             drop(guard);
-            std::hint::spin_loop();
+            crate::thread::page_wait(std::time::Duration::ZERO);
             guard = mutex
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

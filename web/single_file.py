@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Folds a one-thread web build (web/dist) into one HTML file: web/build.sh --single-file.
+"""Folds a web build (web/dist) into one HTML file: web/build.sh --single-file.
 
     python3 web/single_file.py [DIST] [OUT]     # default: web/dist, DIST/horizon.html
 
-The page opens from anywhere, a file on disk included: no server and no headers. Only the
-one-thread build: threads need cross-origin isolation, which a server's headers give and a
-file can't. The module is stored gzipped (the browser's DecompressionStream inflates it), its
-JS glue and the page's script inline, the fonts and the icon as data URLs. The resources zip
-is still the player's own: drop it on the page, as anywhere else. The one-thread build can't
-host single player yet (web/README.md).
+The page opens from anywhere, a file on disk included: no server and no headers. The module is
+stored gzipped (the browser's DecompressionStream inflates it), its JS glue and the page's
+script inline, the fonts and the icon as data URLs. The resources zip is still the player's
+own: drop it on the page, as anywhere else.
+
+A threaded build's workers need cross-origin isolation, which a server's headers give and a
+file can't. Its threads run on the page instead, each an instance of the module over the
+page's shared memory, their waits suspending through JSPI (Chrome 137+): web/jspi rewrites the
+module's waits for that, and web/horizon.js starts them. One core runs them all. The one-thread
+build can't host single player yet (web/README.md).
 """
 import base64
 import gzip
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -55,22 +60,44 @@ def main():
     dist = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "dist"
     out = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else dist / "horizon.html"
     build = json.loads((dist / "build.json").read_text(encoding="utf-8"))
+    module = dist / "pkg" / "horizon-client_bg.wasm"
+    glue_text = (dist / "pkg" / "horizon-client.js").read_text(encoding="utf-8")
     if build.get("threads"):
-        sys.exit("single_file: the threaded build needs a server's headers: build with --no-threads")
+        build["jspi"] = True
+        module = dist / "pkg" / "horizon-client_bg.jspi.wasm"
+        subprocess.run(["cargo", "run", "--quiet", "--release", "--manifest-path", str(HERE / "jspi" / "Cargo.toml"),
+                        "--", str(dist / "pkg" / "horizon-client_bg.wasm"), str(module)], check=True)
+        # Each instance's waits and notifies go to web/horizon.js, which reads the shared memory,
+        # and the page's instance runs its event handlers and page tasks in promising calls.
+        entries = json.loads(pathlib.Path(f"{module}.entries.json").read_text(encoding="utf-8"))
+        build["jspiEntries"] = [e for e in entries if "convert__closures" in e or e == "horizon_page_task"]
+        hooks = {
+            "const imports = __wbg_get_imports(memory);":
+                "const imports = __wbg_get_imports(memory);"
+                " imports.horizon_jspi = globalThis.horizonJspiImports(); horizonJspiImports = imports.horizon_jspi;"
+                " globalThis.horizonJspiMemory ??= Object.values(imports).find((i) => i?.memory)?.memory;",
+            "    wasm = instance.exports;\n":
+                "    wasm = globalThis.horizonJspiReady(instance.exports, horizonJspiImports, import.meta.url);\n",
+        }
+        for hook, patched in hooks.items():
+            if glue_text.count(hook) != (2 if "imports" in hook else 1):
+                sys.exit(f"single_file: the wasm-bindgen glue changed: {hook.strip()!r}")
+            glue_text = glue_text.replace(hook, patched)
+        glue_text = "let horizonJspiImports;\n" + glue_text
     page = (dist / "index.html").read_text(encoding="utf-8")
     page = page.replace('href="favicon.svg"', f'href="{data_url(dist / "favicon.svg", "image/svg+xml")}"')
     for font in (dist / "fonts").glob("*.ttf"):
         page = page.replace(f'url("fonts/{font.name}")', f'url("{data_url(font, "font/ttf")}")')
 
-    wasm = gzip.compress((dist / "pkg" / "horizon-client_bg.wasm").read_bytes(), 9, mtime=0)
+    wasm = gzip.compress(module.read_bytes(), 9, mtime=0)
     files = {
         "build.json": {"id": "horizon-build", "type": "application/json", "gzip": False},
         "pkg/horizon-client_bg.wasm": {"id": "horizon-module", "type": "application/wasm", "gzip": True},
     }
-    glue = data_url(dist / "pkg" / "horizon-client.js", "text/javascript")
+    glue = "data:text/javascript;base64," + base64.b64encode(glue_text.encode()).decode()
     head = "\n".join([
         f'<script type="application/octet-stream" id="horizon-build">'
-        f'{base64.b64encode((dist / "build.json").read_bytes()).decode()}</script>',
+        f'{base64.b64encode(json.dumps(build).encode()).decode()}</script>',
         f'<script type="application/octet-stream" id="horizon-module">{base64.b64encode(wasm).decode()}</script>',
         f"<script>{BOOT % {'files': json.dumps(files)}}</script>",
         # horizon.js imports the glue by this name.

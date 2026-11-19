@@ -13,8 +13,8 @@ rem                                (web\unwind.toml; the one-thread wasm32 build
 rem   web\build.bat --profiling    keeps the module's function names, which wasm-opt drops, for a
 rem                                profiler (web\README.md, "Profiling"): 8 MB more, 2 MB downloaded
 rem   web\build.bat --single-file  also folds the build into one file, web\dist\horizon.html, that
-rem                                opens without a server (web\single_file.py; needs Python 3). One
-rem                                thread, as threads need a server's headers: no single player yet
+rem                                opens without a server (web\single_file.py; needs Python 3). Its
+rem                                threads run on the page, sharing one core (JSPI: Chrome 137+)
 rem
 rem A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 rem Every build uses WebAssembly SIMD and tail calls (web\simd.toml), which every browser with
@@ -67,11 +67,10 @@ echo   default: wasm32 with threads on nightly Rust, the web profile (fat LTO), 
 echo   --wasm64 for up to 8 GiB; --no-threads for servers without COOP/COEP headers; --fast to
 echo   build quicker, without LTO; --config adds a cargo config; --abort for panics that abort;
 echo   --profiling keeps function names for a profiler; --single-file also makes
-echo   web\dist\horizon.html, one file that opens without a server ^(one thread^)
+echo   web\dist\horizon.html, one file that opens without a server ^(its threads share one core^)
 exit /b 0
 :args_done
 rem One file has no server to send the headers threads need.
-if "%single%"=="1" set "threads=0"
 
 cd /d "%root%" || exit /b 1
 

@@ -235,11 +235,16 @@ const TAIL_CALL = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0
   11]);
 const build = await fetch("build.json").then((r) => r.json()).catch(() => ({ target: "wasm32-unknown-unknown" }));
 const wasm64 = build.target.startsWith("wasm64");
+// The threaded build folded into one file (web/single_file.py --threads): its threads are
+// instances of the module on this page, over its shared memory, which a page that isn't
+// isolated may make but not share with a worker. Their waits suspend (JSPI) instead of
+// blocking. One core does all the work.
+const pageThreads = !!build.jspi;
 
 // A host that can't send the isolation headers (a static one: GitHub Pages...) gets them from a
 // service worker (coi.js) that adds them to this site's responses. Registered only when the page
 // isn't isolated, it serves the page once it controls it: the page reloads, once per tab.
-if (build.threads && !globalThis.crossOriginIsolated && globalThis.isSecureContext && "serviceWorker" in navigator) {
+if (build.threads && !pageThreads && !globalThis.crossOriginIsolated && globalThis.isSecureContext && "serviceWorker" in navigator) {
   let tried = true;
   try {
     tried = sessionStorage.getItem("horizon-coi") === "1";
@@ -264,6 +269,7 @@ if (build.threads && !globalThis.crossOriginIsolated && globalThis.isSecureConte
 // started here too (worker.js forwards it): a worker's own workers would end with it.
 let threadModule, threadMemory;
 globalThis.horizonSpawnThread = (name, module, memory, work) => {
+  if (pageThreads) return spawnPageThread(name, module, memory, work);
   threadModule = module;
   threadMemory = memory;
   const worker = new Worker(new URL("worker.js", import.meta.url), { type: "module", name });
@@ -275,6 +281,120 @@ globalThis.horizonSpawnThread = (name, module, memory, work) => {
   };
   worker.postMessage([module, memory, work, globalThis.horizonBlobs]);
 };
+
+// Waits of the page's threads, by address: each suspended in memory.atomic.wait (rewritten into
+// horizon_jspi.wait32/64 by web/jspi), until a notify or its timeout.
+const waiters = new Map();
+const shared = () => globalThis.horizonJspiMemory.buffer;
+const suspend = (addr, current, expected, timeout) => {
+  if (current !== expected) return 1;
+  return new Promise((resolve) => {
+    const list = waiters.get(addr) ?? waiters.set(addr, []).get(addr);
+    const waiter = { resolve };
+    if (timeout >= 0n) {
+      waiter.timer = setTimeout(() => {
+        const at = list.indexOf(waiter);
+        if (at >= 0) list.splice(at, 1);
+        resolve(2);
+      }, Number(timeout / 1000000n));
+    }
+    list.push(waiter);
+  });
+};
+// The page's own waits are JS's (Atomics.waitAsync: wasm-bindgen-futures): a notify wakes those too.
+const notify = (addr, count) => {
+  count >>>= 0;
+  const list = waiters.get(addr) ?? [];
+  const woken = list.splice(0, count);
+  for (const waiter of woken) {
+    clearTimeout(waiter.timer);
+    waiter.resolve(0);
+  }
+  if (!list.length) waiters.delete(addr);
+  return woken.length + Atomics.notify(new Int32Array(shared()), addr >> 2, count - woken.length);
+};
+// One instance's horizon_jspi imports (the glue asks as it instantiates). While the page's own
+// instance is suspended, its horizon_coroutine is off: a call into it meanwhile may not wait.
+globalThis.horizonJspiImports = () => {
+  const slot = {};
+  const away = () => slot.page && (slot.exports.horizon_coroutine.value = 0);
+  const back = (result) => {
+    if (slot.page) slot.exports.horizon_coroutine.value = 1;
+    return result;
+  };
+  return {
+    slot,
+    wait32: new WebAssembly.Suspending(async (addr, expected, timeout) => {
+      away();
+      return back(await suspend(addr, Atomics.load(new Int32Array(shared()), addr >> 2), expected, timeout));
+    }),
+    wait64: new WebAssembly.Suspending(async (addr, expected, timeout) => {
+      away();
+      return back(await suspend(addr, Atomics.load(new BigInt64Array(shared()), addr >> 3), expected, timeout));
+    }),
+    notify,
+  };
+};
+// An instance is up (the glue's finalize): a thread's goes on as it is (spawnPageThread). The
+// page's runs its event handlers and page tasks (build.jspiEntries) in promising calls, so they
+// may wait for the threads, as a worker would: one at a time, those that come meanwhile queued.
+const threadGlues = new Set();
+globalThis.horizonJspiReady = (exports, imports, glueUrl) => {
+  imports.slot.exports = exports;
+  if (threadGlues.has(glueUrl)) return exports;
+  imports.slot.page = true;
+  const entries = new Set(build.jspiEntries ?? []);
+  const queue = [];
+  let busy = false;
+  const run = (entry, args) => {
+    busy = true;
+    exports.horizon_coroutine.value = 1;
+    let done;
+    try {
+      done = entry(...args);
+    } finally {
+      exports.horizon_coroutine.value = 0;
+    }
+    done.catch((e) => {
+      // winit's web event loop throws to hand control back to the page: not an error.
+      if (!String(e).includes("Using exceptions for control flow")) console.error(e);
+    }).finally(() => {
+      exports.horizon_coroutine.value = 0;
+      busy = false;
+      while (!busy && queue.length) run(...queue.shift());
+    });
+  };
+  const page = {};
+  for (const [name, value] of Object.entries(exports)) {
+    if (typeof value !== "function" || !entries.has(name)) {
+      page[name] = value;
+      continue;
+    }
+    const entry = WebAssembly.promising(value);
+    page[name] = (...args) => (busy ? queue.push([entry, args]) : run(entry, args), undefined);
+  }
+  return page;
+};
+// A thread on this page: another instance of the module (its own copy of the glue, so its own
+// stack and thread-locals), whose work runs in a promising call so its waits can suspend.
+let glueText;
+async function spawnPageThread(name, module, memory, work) {
+  try {
+    glueText ??= await fetch(import.meta.resolve("./pkg/horizon-client.js")).then((r) => r.text());
+    const url = URL.createObjectURL(new Blob([glueText], { type: "text/javascript" }));
+    threadGlues.add(url);
+    const glue = await import(url);
+    URL.revokeObjectURL(url);
+    const exports = await glue.default({ module_or_path: module, memory });
+    threadGlues.delete(url);
+    exports.horizon_coroutine.value = 1;
+    await WebAssembly.promising(exports.horizon_thread_entry)(work);
+  } catch (e) {
+    console.error(`Horizon: ${name} stopped:`, e?.message ?? e);
+  }
+}
+// Work a page thread hands the page's own instance (horizon_std::web::run_on_page).
+if (pageThreads) globalThis.horizonRunOnPage = (task) => setTimeout(() => globalThis.horizonGlue?.horizon_page_task(task));
 
 async function checkBrowser() {
   const checks = [];
@@ -301,7 +421,11 @@ async function checkBrowser() {
     checks.push([false, "This build needs WebAssembly tail calls (Chrome 112+, Firefox 121+, Safari 18.2+)."]);
   }
   // Shared memory exists only on a cross-origin isolated page: the server sends COOP and COEP.
-  if (build.threads) {
+  if (pageThreads) {
+    const ok = typeof WebAssembly.Suspending === "function";
+    checks.push([ok, ok ? "Threads: on this page's thread"
+      : "This build runs its threads with WebAssembly JS Promise Integration (Chrome 137+)."]);
+  } else if (build.threads) {
     const ok = globalThis.crossOriginIsolated === true;
     checks.push([ok, ok ? `Threads: ${navigator.hardwareConcurrency || "?"} cores`
       : "This build uses threads, which need the page cross-origin isolated: serve it with the headers "
@@ -580,7 +704,7 @@ $("args").value = params.get("args") ?? localStorageGet("horizon.args") ?? "";
 $("relay").value = params.get("relay") ?? localStorageGet("horizon.relay") ?? "";
 $("keep").value = localStorageGet("horizon.keep") === "storage" ? "storage" : "memory";
 // The one-thread build has no workers to read browser storage while it plays.
-if (!build.threads) $("keep").disabled = true;
+if (!build.threads || pageThreads) $("keep").disabled = true;
 function localStorageGet(key) {
   try { return localStorage.getItem(key); } catch { return null; }
 }
@@ -605,8 +729,10 @@ globalThis.horizonBoot = async () => {
   if (relay) boot.env.HORIZON_WEB_RELAY = relay;
   // Game data in browser storage: only the threaded build reads it there (its workers can).
   localStorageSet("horizon.keep", $("keep").value);
-  const inStorage = !!build.threads && $("keep").value === "storage";
+  const inStorage = !!build.threads && !pageThreads && $("keep").value === "storage";
   Object.assign(boot.env, urlEnv());
+  // The game's page waits suspend while its threads run (horizon_std::thread::page_wait).
+  boot.pageThreads = pageThreads;
   // How long each step before the game takes, in the console: a slow start says where it went.
   const at = performance.now();
   const step = (name) => {
@@ -624,7 +750,7 @@ globalThis.horizonBoot = async () => {
   if (chosen.files) {
     boot.resourceFiles = await Promise.all(
       chosen.files.map(async ([path, blob]) => [path, new Uint8Array(await blob.arrayBuffer())]));
-  } else if (build.threads) {
+  } else if (build.threads && !pageThreads) {
     // Read in place: in storage the game reads the entries it opens; in memory it keeps all
     // but the sounds, which it reads as they are first played (vfs.rs, mount_zip_blob_eager).
     boot.resourcesBlob = blobId(chosen.blob);

@@ -1,0 +1,13 @@
+# web/single_file.py's rewriter for the threaded build in one file: its own workspace, a build
+# tool kept out of the game's.
+[package]
+name = "horizon-web-jspi"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Turns a threaded web module's waits into JSPI suspends (web/single_file.py --threads)"
+
+[dependencies]
+walrus = "0.27"
+
+[workspace]

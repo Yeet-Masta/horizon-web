@@ -66,6 +66,31 @@ where
     spawn_task(name, task)
 }
 
+/// The threaded web build folded into one file (web/single_file.py): its threads are instances
+/// of the module on the page, whose waits suspend (JSPI) instead of blocking. Set as it starts.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+static PAGE_THREADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub(crate) fn set_page_threads(on: bool) {
+    PAGE_THREADS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where the page's thread would spin waiting on another thread: with page threads it lets
+/// them run for `pause`, its wait suspending through the module's rewritten
+/// `memory.atomic.wait32` (web/jspi); elsewhere it spins.
+pub fn page_wait(pause: std::time::Duration) {
+    #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+    if PAGE_THREADS.load(std::sync::atomic::Ordering::Relaxed) {
+        static NEVER: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+        let nanos = i64::try_from(pause.as_nanos()).unwrap_or(i64::MAX);
+        // SAFETY: a wait on a static that stays 0, woken by its timeout.
+        unsafe { core::arch::wasm32::memory_atomic_wait32(NEVER.as_ptr(), 0, nanos) };
+        return;
+    }
+    let _ = pause;
+    std::hint::spin_loop();
+}
+
 /// Whether this thread may block: everywhere but the web build's page
 /// thread (every thread of the one-thread build is the page's).
 pub fn may_block() -> bool {
@@ -102,7 +127,7 @@ impl<T> ThreadHandle<T> {
             if may_block() {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             } else {
-                std::hint::spin_loop();
+                page_wait(std::time::Duration::ZERO);
             }
         }
     }
@@ -225,11 +250,14 @@ mod web {
     pub fn available_parallelism() -> io::Result<NonZeroUsize> {
         Ok(NonZeroUsize::MIN)
     }
-    /// Nothing else runs while the page's thread would wait, so it doesn't;
-    /// the threaded build's workers sleep.
+    /// Nothing else runs while the page's thread would wait, so it doesn't,
+    /// unless its threads run on the page (`page_wait`); the threaded build's
+    /// workers sleep.
     pub fn sleep(duration: Duration) {
         if super::may_block() {
             std::thread::sleep(duration);
+        } else {
+            super::page_wait(duration);
         }
     }
 

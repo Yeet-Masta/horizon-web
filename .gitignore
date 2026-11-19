@@ -44,3 +44,4 @@
 
 # Visual Studio editor state.
 .vs/
+/web/jspi/target/

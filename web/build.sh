@@ -13,8 +13,8 @@
 #   web/build.sh --profiling     keeps the module's function names, which wasm-opt drops, for a
 #                                profiler (web/README.md, "Profiling"): 8 MB more, 2 MB downloaded
 #   web/build.sh --single-file   also folds the build into one file, web/dist/horizon.html, that
-#                                opens without a server (web/single_file.py; needs Python 3). One
-#                                thread, as threads need a server's headers: no single player yet
+#                                opens without a server (web/single_file.py; needs Python 3). Its
+#                                threads run on the page, sharing one core (JSPI: Chrome 137+)
 #
 # A release is the root Cargo.toml's `web` profile: release with whole-program (fat) LTO.
 # Every build uses WebAssembly SIMD and tail calls (web/simd.toml), which every browser with
@@ -52,7 +52,6 @@ for arg in "$@"; do
   esac
 done
 # One file has no server to send the headers threads need.
-[ "$single" = 1 ] && threads=0
 
 cd "$root"
 # wasm-bindgen comes from its main branch for now (Cargo.toml's [patch.crates-io]): the CLI

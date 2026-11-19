@@ -175,6 +175,8 @@ pub async fn boot() -> Result<(), String> {
     {
         blobs::start_reader().await;
     }
+    #[cfg(target_feature = "atomics")]
+    crate::thread::set_page_threads(get(&boot, "pageThreads").as_bool() == Some(true));
     if let Ok(zip) = get(&boot, "resources").dyn_into::<Uint8Array>() {
         vfs::mount_zip(Path::new(RESOURCES), zip.to_vec(), Some(RESOURCES_MARKER))
             .map_err(|e| format!("the resources zip could not be read: {e}"))?;
