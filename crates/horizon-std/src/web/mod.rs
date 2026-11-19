@@ -362,8 +362,14 @@ mod threads {
         }
     }
 
-    /// `navigator.hardwareConcurrency`: the cores the browser reports.
+    /// `navigator.hardwareConcurrency`: the cores the browser reports. Page threads
+    /// (web/single_file.py) share the page's one core: sized for 2, the game runs one chunk
+    /// worker. Measured walking in a new world, against 12 workers on 32 cores: frames' 99th
+    /// percentile 25 ms instead of 75, the longest 33 instead of 117, joining in 6 s instead of 9.
     pub fn hardware_concurrency() -> usize {
+        if crate::thread::page_threads() {
+            return 2;
+        }
         let navigator = super::get(&js_sys::global(), "navigator");
         super::get(&navigator, "hardwareConcurrency")
             .as_f64()

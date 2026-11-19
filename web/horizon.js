@@ -313,11 +313,52 @@ const notify = (addr, count) => {
   if (!list.length) waiters.delete(addr);
   return woken.length + Atomics.notify(new Int32Array(shared()), addr >> 2, count - woken.length);
 };
+// A thread's yield (a wait of 0: horizon_std::thread::page_yield) resumes in the time the page's
+// frames leave: from a frame's start, up to 3/4 of the time between frames, one thread at a
+// time; past that, at the next frame (or after 50 ms without one). The page's own yields don't
+// wait: what it waits for is its frame.
+const turns = [];
+let frameAt = performance.now();
+let frameGap = 1000 / 60;
+let pumping = false;
+const pump = new MessageChannel();
+const kick = () => {
+  if (pumping || !turns.length) return;
+  pumping = true;
+  pump.port2.postMessage(0);
+};
+pump.port1.onmessage = () => {
+  pumping = false;
+  if (performance.now() - frameAt > frameGap * 0.75) return;
+  turns.shift()?.();
+  kick();
+};
+if (pageThreads) {
+  const frame = (at) => {
+    frameGap += (Math.min(at - frameAt, 100) - frameGap) / 8;
+    frameAt = at;
+    kick();
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  setInterval(() => {
+    if (performance.now() - frameAt < 50) return;
+    frameAt = performance.now();
+    kick();
+  }, 50);
+}
+const turn = () => new Promise((resolve) => {
+  turns.push(() => resolve(2));
+  kick();
+});
+let pageSlot;
+
 // One instance's horizon_jspi imports (the glue asks as it instantiates). While its promising
 // call is suspended, its horizon_coroutine is off: a call into it meanwhile may not wait.
 globalThis.horizonJspiImports = () => {
   // `running`: the instance's promising call is on the stack (not suspended).
   const slot = { running: false };
+  pageSlot ??= slot;
   const away = () => {
     slot.exports.horizon_coroutine.value = 0;
     slot.running = false;
@@ -331,7 +372,9 @@ globalThis.horizonJspiImports = () => {
     slot,
     wait32: new WebAssembly.Suspending(async (addr, expected, timeout) => {
       away();
-      return back(await suspend(addr, Atomics.load(new Int32Array(shared()), addr >> 2), expected, timeout));
+      const current = Atomics.load(new Int32Array(shared()), addr >> 2);
+      if (timeout === 0n && slot !== pageSlot && current === expected) return back(await turn());
+      return back(await suspend(addr, current, expected, timeout));
     }),
     wait64: new WebAssembly.Suspending(async (addr, expected, timeout) => {
       away();

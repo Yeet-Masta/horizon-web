@@ -74,6 +74,10 @@ static PAGE_THREADS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub(crate) fn set_page_threads(on: bool) {
     PAGE_THREADS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+pub(crate) fn page_threads() -> bool {
+    PAGE_THREADS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Where the page's thread would spin waiting on another thread: with page threads it lets
 /// them run for `pause`, its wait suspending through the module's rewritten
@@ -92,7 +96,7 @@ pub fn page_wait(pause: std::time::Duration) {
 }
 
 /// A point in long work where a page thread (see [`page_wait`]) hands the core to the page and
-/// the other threads, once it has had it 10 ms: they share one, and only a wait hands it over.
+/// the other threads, once it has had it 4 ms: they share one, and only a wait hands it over.
 /// Elsewhere nothing.
 pub fn page_yield() {
     #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
@@ -103,7 +107,7 @@ pub fn page_yield() {
         }
         let now = Instant::now();
         let ran = SINCE.with(|since| since.get().map(|t| now - t));
-        if ran.is_none_or(|ran| ran >= std::time::Duration::from_millis(10)) {
+        if ran.is_none_or(|ran| ran >= std::time::Duration::from_millis(4)) {
             if ran.is_some() {
                 page_wait(std::time::Duration::ZERO);
             }
