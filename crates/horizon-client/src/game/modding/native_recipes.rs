@@ -172,8 +172,15 @@ impl Game<'_> {
                 let grid = &grid[..size * size];
                 let scale = |id: i32| self.maps.data.get(&id).map(|m| m.scale);
                 let recipes = self.recipes();
-                let matched =
-                    recipes.find_with_dimensions(&self.loop_context, grid, size, w, h, &scale);
+                let matched = recipes.find_with_dimensions(
+                    &self.loop_context,
+                    horizon_client::crafting::Crafter::NOBODY,
+                    grid,
+                    size,
+                    w,
+                    h,
+                    &scale,
+                );
                 let Some((id, output)) = matched.filter(|(_, output)| output.count > 0) else {
                     return Ok(None);
                 };

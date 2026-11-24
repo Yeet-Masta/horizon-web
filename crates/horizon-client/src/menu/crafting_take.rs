@@ -6,8 +6,9 @@ impl Menu {
             return true;
         }
         env.recipes
-            .find_with(
+            .find_for(
                 env.loop_context,
+                crate::crafting::Crafter::player(env.player),
                 &self.state.containers[GRID],
                 self.state.grid_size,
                 &|id| {
@@ -167,6 +168,7 @@ impl Menu {
         }
         let n = self.state.grid_size;
         let grid = self.state.containers[GRID].clone();
+        let crafter = crate::crafting::Crafter::player(env.player);
         let map_scale = |id| {
             env.maps
                 .and_then(|maps| maps.state(id))
@@ -174,7 +176,7 @@ impl Menu {
         };
         if let Some((id, _)) = env
             .recipes
-            .find_with(env.loop_context, &grid, n, &map_scale)
+            .find_for(env.loop_context, crafter, &grid, n, &map_scale)
         {
             let id = crate::crafting::qualified(id);
             let made = (id.clone(), taken.clone(), grid.clone());
@@ -183,7 +185,7 @@ impl Menu {
         }
         let remaining = match env
             .recipes
-            .find_with(env.loop_context, &grid, n, &map_scale)
+            .find_for(env.loop_context, crafter, &grid, n, &map_scale)
         {
             Some((id, _))
                 if env.loop_context.side()

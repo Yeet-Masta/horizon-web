@@ -71,6 +71,37 @@ impl Game<'_> {
         true
     }
 
+    /// `AbstractContainerMenu.slotsChanged` of every crafting grid guest `player` has open, the
+    /// grids unchanged, for a mod whose `crafting_recipe_choice` answer changed: the inventory's
+    /// grid, an open crafting table, and a mod's crafting menu (made again by this tick's
+    /// `lan_mod_crafting_tick`). Refuses clients, stale players and the acting player.
+    pub(super) fn player_crafting_changed(&mut self, player: PlayerRef) -> bool {
+        if !self.is_logical_server() {
+            return false;
+        }
+        let Some(super::native_server::PlayerRead::Guest(guest)) = self.player_handle_read(player)
+        else {
+            return false;
+        };
+        let conn = guest.conn;
+        self.guest_craft_result(conn);
+        self.lan_table_slots_changed(conn);
+        let Some(host) = self.lan.as_mut() else {
+            return false;
+        };
+        host.hub
+            .update_guest(conn, |g| {
+                if let Some(m) = g
+                    .menu
+                    .as_mut()
+                    .filter(|m| m.mod_type.is_some_and(|t| t.crafting.is_some()))
+                {
+                    m.craft = None;
+                }
+            })
+            .is_some()
+    }
+
     /// Press button `button` of the local player's open menu as a click on
     /// one of its buttons does (`MultiPlayerGameMode.handleInventoryButtonClick`,
     /// `ContainerButtonClick`): the server's menu decides what it does

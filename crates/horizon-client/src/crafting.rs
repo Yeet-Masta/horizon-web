@@ -1665,6 +1665,35 @@ impl ResolvedSources {
     }
 }
 
+/// Who crafts in a grid being matched, as `crafting_recipe_choice` is told: the player whose
+/// grid it is (an inventory's, a crafting table's, a mod's crafting menu's), or the crafter
+/// block that crafts on its own. Neither for a lookup made on nobody's behalf (`RecipesHost`,
+/// a sheep's dye mix).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Crafter {
+    pub player: Option<u128>,
+    pub block: Option<[i32; 3]>,
+}
+
+impl Crafter {
+    pub const NOBODY: Self = Self {
+        player: None,
+        block: None,
+    };
+    pub fn player(player: Option<u128>) -> Self {
+        Self {
+            player,
+            block: None,
+        }
+    }
+    pub fn block(pos: [i32; 3]) -> Self {
+        Self {
+            player: None,
+            block: Some(pos),
+        }
+    }
+}
+
 impl Recipes {
     pub fn empty() -> Self {
         Self {
@@ -2088,7 +2117,19 @@ impl Recipes {
         size: usize,
         map_scale: &dyn Fn(i32) -> Option<u8>,
     ) -> Option<(&str, ItemStack)> {
-        self.find_with_dimensions(context, grid, size, size, size, map_scale)
+        self.find_for(context, Crafter::NOBODY, grid, size, map_scale)
+    }
+    /// `find_with` for a grid `crafter` crafts in: a mod choosing among the matches
+    /// (`crafting_recipe_choice`) is told who it is.
+    pub fn find_for(
+        &self,
+        context: &LoopContext,
+        crafter: Crafter,
+        grid: &[Option<ItemStack>],
+        size: usize,
+        map_scale: &dyn Fn(i32) -> Option<u8>,
+    ) -> Option<(&str, ItemStack)> {
+        self.find_with_dimensions(context, crafter, grid, size, size, size, map_scale)
     }
     /// `Recipe.matches` then `assemble` for one recipe: None when it does
     /// not match, Some(None) when it matches with nothing to make.

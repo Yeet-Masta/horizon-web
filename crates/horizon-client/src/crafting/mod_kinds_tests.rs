@@ -248,7 +248,7 @@ fn registered_kind_receives_the_full_empty_grid_at_every_match_entry() {
             assert!(recipes.recipe_matches(context, "test:empty", &grid, 2));
             assert_eq!(
                 recipes
-                    .find_with_dimensions(context, &grid, 2, 2, 2, &|_| None)
+                    .find_with_dimensions(context, Crafter::NOBODY, &grid, 2, 2, 2, &|_| None)
                     .unwrap()
                     .1,
                 ItemStack::new("test:output", 3)

@@ -213,9 +213,11 @@ pub(crate) mod tests;
 
 impl Recipes {
     /// Lookup preserves the dimensions supplied to recipe_for, including rectangles.
+    #[allow(clippy::too_many_arguments)]
     pub fn find_with_dimensions(
         &self,
         context: &LoopContext,
+        crafter: Crafter,
         grid: &[Option<ItemStack>],
         size: usize,
         width: usize,
@@ -236,6 +238,10 @@ impl Recipes {
             context,
             map_scale,
         };
+        // A mod that chooses among the matches (`crafting_recipe_choice`) sees them all;
+        // otherwise the first match is made, as `RecipeManager.getRecipeFor` does.
+        let choosing = crate::native_client_hooks::crafting_recipe_choice_listens();
+        let mut matches: Vec<(&str, ItemStack)> = Vec::new();
         for (id, recipe) in &self.crafting {
             let result = match recipe {
                 Recipe::Mod(recipe) => input
@@ -248,12 +254,62 @@ impl Recipes {
                         Self::assemble_if_matches(&ctx, input, stacks.as_slice(), recipe)
                     }),
             };
-            if let Some(output) = result {
-                return output.map(|output| (id.as_str(), output));
+            match result {
+                Some(Some(output)) if choosing => matches.push((id.as_str(), output)),
+                Some(output) if matches.is_empty() => {
+                    return output.map(|output| (id.as_str(), output));
+                }
+                _ => {}
             }
         }
-        None
+        if matches.len() < 2 {
+            return matches.pop();
+        }
+        let cells: Vec<Option<ItemStack>> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| y * size + x))
+            .map(|i| grid.get(i).cloned().flatten())
+            .collect();
+        let recipes: Vec<String> = matches.iter().map(|(id, _)| qualified(id)).collect();
+        let results: Vec<ItemStack> = matches.iter().map(|(_, output)| output.clone()).collect();
+        let mut choice = 0;
+        crate::native_client_hooks::crafting_recipe_choice(
+            context,
+            crafter,
+            &cells,
+            width,
+            &recipes,
+            &results,
+            &mut choice,
+        );
+        let chosen = usize::try_from(choice)
+            .ok()
+            .filter(|&i| i < matches.len())
+            .unwrap_or(0);
+        Some(matches.swap_remove(chosen))
     }
+}
+
+/// The game's `crafting_recipe_choice` entry point: `choice` arrives as 0, the first match, and
+/// the mods listening may set it to another of `recipes`. Asked by `find_with_dimensions` only
+/// when the ingredients match more than one recipe; `player` and `crafter` say who crafts
+/// (`Crafter`).
+#[inline(never)]
+pub fn native_crafting_recipe_choice(call: CraftingRecipeChoiceCall<'_>) {
+    mod_api::dispatch_crafting_recipe_choice(
+        &horizon_client_render::api_context::LoopReader(call.context).context(),
+        call.values,
+    );
+}
+
+/// A `crafting_recipe_choice` invocation: the loop context of the side that matches and the
+/// hook's declared arguments.
+#[doc(hidden)]
+pub struct CraftingRecipeChoiceCall<'a> {
+    pub context: &'a LoopContext,
+    pub values: mod_api::__private::CraftingRecipeChoiceCall<'a>,
+}
+
+impl Recipes {
     /// Remainders for a rectangular host lookup, placed back on the padded grid.
     pub fn mod_remainders_rect(
         &self,
@@ -341,3 +397,7 @@ fn reading(file: &Value) -> Option<Reading> {
         .as_str()
         .and_then(|id| recipe_type("sync", id).ok())
 }
+
+#[cfg(test)]
+#[path = "recipe_choice_tests.rs"]
+mod recipe_choice_tests;

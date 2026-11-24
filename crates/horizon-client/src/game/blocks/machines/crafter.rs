@@ -135,9 +135,13 @@ impl Game<'_> {
         let maps = self.level_maps(grid.iter().flatten());
         let found = self
             .recipes()
-            .find_with(&self.loop_context, &grid, 3, &|id| {
-                maps.state(id).map(|(_, scale)| scale)
-            })
+            .find_for(
+                &self.loop_context,
+                horizon_client::crafting::Crafter::block([pos.x, pos.y, pos.z]),
+                &grid,
+                3,
+                &|id| maps.state(id).map(|(_, scale)| scale),
+            )
             .map(|(name, result)| (name.to_owned(), result))
             .filter(|(_, result)| result.count > 0);
         let Some((recipe, mut result)) = found else {
@@ -309,7 +313,15 @@ impl Game<'_> {
     pub(in crate::game) fn crafter_result(&self) -> Option<ItemStack> {
         let key = self.container?;
         let c = self.crafter_at(key)?;
-        self.recipes().craft(&self.loop_context, &c.items, 3)
+        self.recipes()
+            .find_for(
+                &self.loop_context,
+                horizon_client::crafting::Crafter::block([key.0, key.1, key.2]),
+                &c.items,
+                3,
+                &|_| None,
+            )
+            .map(|(_, result)| result)
     }
     pub(in crate::game) fn crafter_open(&self) -> bool {
         matches!(self.container_kind(), Some(BlockEntity::Crafter(_)))

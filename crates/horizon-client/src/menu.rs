@@ -2057,8 +2057,9 @@ impl Menu {
         }
         let result = env
             .recipes
-            .find_with(
+            .find_for(
                 env.loop_context,
+                crate::crafting::Crafter::player(env.player),
                 &self.state.containers[GRID],
                 self.state.grid_size,
                 &|id| {
