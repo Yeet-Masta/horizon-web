@@ -2,7 +2,8 @@
 // catalog-order: 0127
 
 pub trait Hooks {
-    /// Before a real held-button movement reaches screen drag handlers.
+    /// Before a held-button movement reaches screen drag handlers. Synthetic
+    /// pointer movement only reaches this hook on an active book or sign editor.
     /// `screen.mouse` is the current GUI position; `delta` is its GUI-space movement.
     /// Cancel keeps the new cursor position but skips all screen drag handlers.
     #[hook(

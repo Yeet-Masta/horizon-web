@@ -811,12 +811,10 @@ impl Game<'_> {
             self.save_title_options();
             return Ok(());
         }
-        if self.sign_edit.is_some() {
-            self.close_sign_editor();
-            return Ok(());
-        }
-        if self.book.is_some() {
-            self.close_book();
+        if let Some(editor) = self.active_editor_overlay() {
+            if !self.screen_key_pressed(KeyCode::Escape, false) {
+                self.editor_input(editor, Some(KeyCode::Escape), None);
+            }
             return Ok(());
         }
         self.key_pressed(KeyCode::Escape, KeyCode::Escape)

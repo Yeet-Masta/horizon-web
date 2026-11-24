@@ -809,6 +809,62 @@ pub struct SignEditView {
     pub front: bool,
 }
 
+/// A snapshot of the client-visible book or sign editor, from `ClientHost::editor_overlay`.
+/// Changing the snapshot does not edit the book or sign.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum EditorOverlayView {
+    /// `book_view`, including a book on a lectern.
+    BookView {
+        /// Zero-based page index.
+        page: usize,
+        /// Displayed page count (at least one, even for an empty book).
+        page_count: usize,
+        /// The current page component, or none for an empty book.
+        text: Option<Text>,
+        /// The lectern, when reading from one.
+        lectern: Option<BlockPos>,
+        /// Whether the stock screen offers Take Book.
+        can_take: bool,
+    },
+    /// `book_edit`, the page of a book and quill.
+    BookEdit {
+        /// Zero-based page index.
+        page: usize,
+        /// Displayed page count.
+        page_count: usize,
+        /// The current page text.
+        text: String,
+        /// The caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
+    /// `book_sign`, the title entry of a book and quill.
+    BookSign {
+        /// The proposed title, as shown in the title box.
+        title: String,
+        /// The author displayed under the title.
+        author: String,
+        /// The caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
+    /// `sign_edit` or `hanging_sign_edit`.
+    Sign {
+        /// The sign's block position.
+        pos: BlockPos,
+        /// True for the front side; false for the back side.
+        front: bool,
+        /// True for either mounting style of hanging sign.
+        hanging: bool,
+        /// The four lines displayed on the side being edited.
+        lines: [String; 4],
+        /// Zero-based index of the line that has the caret.
+        line: usize,
+        /// The active line's caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
+}
+
 // no wire: borrowed call-scoped view; transport uses owned snapshots rather than serializing references.
 /// The open screen, for the screen hooks (`screen_render_post`, the
 /// mouse ones `screen_mouse_button_pressed_pre`, `..._released_pre` and
@@ -828,6 +884,9 @@ pub struct ScreenView<'a> {
     /// `world_select`, `world_create`, `world_create_flat`, `world_edit`,
     /// `multiplayer`, `add_server`, `direct_connect`…, with no menu, no title
     /// and no slots.
+    /// Gameplay editor overlays report `book_view`, `book_edit`, `book_sign`,
+    /// `sign_edit` or `hanging_sign_edit`, also with no menu, title or slots.
+    /// Read their contents through `ClientHost::editor_overlay`.
     pub id: &'static str,
     /// The type id of the menu the server opened for this screen
     /// (`minecraft:generic_9x3`, `minecraft:furnace`, a mod's own id; a mount's
@@ -843,7 +902,8 @@ pub struct ScreenView<'a> {
     /// The screen's container panel in GUI pixels, `[x, y, width, height]`;
     /// the whole window for a screen with none. The panel is where the game
     /// draws the window: 176 wide for most, wider for the merchant and the
-    /// beacon, a mod screen's own size for a mod's.
+    /// beacon, a mod screen's own size for a mod's. For an editor
+    /// overlay, this is the stock editor frame, excluding its full-window shade.
     pub rect: [f32; 4],
     /// The slots the open menu has, as `Game::slots` counts them: the player
     /// inventory's 36, then the container's, the station's, the mod screen's

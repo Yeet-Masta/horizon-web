@@ -50,7 +50,52 @@ fn done_button(w: f32, h: f32) -> (f32, f32) {
     )
 }
 
+/// The preview and footer button, without the full-screen shade.
+pub(super) fn sign_editor_rect(width: f32, height: f32) -> [f32; 4] {
+    let (x, done_y) = done_button(width, height);
+    [x, 40.0, 200.0, (done_y + 20.0).max(168.0) - 40.0]
+}
+
 impl Game<'_> {
+    pub(super) fn sign_overlay_id(&self) -> Option<&'static str> {
+        let (_, sign) = self.edited_sign()?;
+        Some(if sign.hanging {
+            "hanging_sign_edit"
+        } else {
+            "sign_edit"
+        })
+    }
+
+    pub(super) fn sign_overlay_view(&self) -> Option<mod_api::EditorOverlayView> {
+        let (edit, sign) = self.edited_sign()?;
+        let side = if edit.front { &sign.front } else { &sign.back };
+        let lines = std::array::from_fn(|i| {
+            let shown = if i == edit.line {
+                &edit.edit.value
+            } else {
+                &side.lines[i]
+            };
+            shown.clone()
+        });
+        let (x, y, z) = edit.pos;
+        Some(mod_api::EditorOverlayView::Sign {
+            pos: mod_api::BlockPos::new(x, y, z),
+            front: edit.front,
+            hanging: sign.hanging,
+            lines,
+            line: edit.line,
+            selection: [edit.edit.cursor, edit.edit.highlight],
+        })
+    }
+
+    fn edited_sign(&self) -> Option<(&SignEditor, &horizon_client::signs::SignData)> {
+        let edit = self.sign_edit.as_ref()?;
+        let BlockEntity::Sign(sign) = self.world.block_entities.get(&edit.pos)? else {
+            return None;
+        };
+        Some((edit, sign))
+    }
+
     /// `SignBlockEntity.getSlotPlayerIsFacing`: whether the player stands in
     /// front of the sign's text (within 90 degrees of its facing).
     fn facing_sign_front(&self, pos: (i32, i32, i32)) -> bool {
@@ -698,7 +743,11 @@ impl Game<'_> {
             PhysicalKey::Code(k) => Some(k),
             _ => None,
         };
-        self.sign_input(key, event.text.as_deref());
+        let text = event
+            .text
+            .as_deref()
+            .and_then(|text| self.editor_text_pre(text));
+        self.sign_input(key, text.as_deref());
     }
     /// A key and the text it typed on the sign being edited (the keyboard,
     /// or a controller's on-screen keyboard).
@@ -913,12 +962,18 @@ impl Game<'_> {
             text.lines.to_vec(),
         ))
     }
-    pub(super) fn draw_sign_editor(&self, batch: &mut HudBatch) {
-        let Some(edit) = &self.sign_edit else { return };
-        let Some(BlockEntity::Sign(sign)) = self.world.block_entities.get(&edit.pos) else {
+    pub(super) fn draw_sign_editor(
+        &self,
+        batch: &mut HudBatch,
+        view: Option<&mod_api::ScreenView<'_>>,
+    ) {
+        let Some((edit, sign)) = self.edited_sign() else {
             return;
         };
         self.render_transparent_background("sign_editor", batch);
+        if let Some(view) = view {
+            self.native_screen_render_background(batch, view);
+        }
         let atlas = &self.gui.atlas;
         let (w, h) = (batch.width, batch.height);
         let (key, fallback) = if sign.hanging {
@@ -1067,6 +1122,9 @@ impl Game<'_> {
             u32::MAX,
             true,
         );
+        if let Some(view) = view {
+            self.native_screen_render_foreground(batch, view);
+        }
     }
 }
 

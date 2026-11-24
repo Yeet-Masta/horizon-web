@@ -1231,12 +1231,9 @@ impl Game<'_> {
     /// `&self`, so it reads and draws only. The Win and Options screens call
     /// it on their own path, after their drawing.
     ///
-    /// It does not fire for the screens drawn over gameplay after it (a
-    /// server dialog, the server pack, link and code-of-conduct prompts, a
-    /// book, a sign editor): those keep `Screen::Playing`, which it skips (the
-    /// server pack prompt hides an open screen too, and that screen does not
-    /// fire under it), and draw over what it drew, while vanilla's
-    /// `ScreenEvent.Render.Post` fires for them. The title's own screens
+    /// The active book or sign editor fires Post at its own render boundary,
+    /// including when Pre cancelled. Server dialogs and prompts do not fire
+    /// this hook. The title's own screens
     /// (`title`, `world_select`, `world_create`, `multiplayer`…) fire it too,
     /// their `screen.id` from the title state machine and the whole window
     /// their `rect`, and no dialog or prompt over them.
@@ -1262,11 +1259,9 @@ impl Game<'_> {
     /// and the pack list opened from the title screen count, with no player
     /// and no `menu`; the title's own screens, their
     /// `screen.id` from the title state machine). It does not fire on the
-    /// connect and loading screens, nor for a server
-    /// dialog, the server pack, link and code-of-conduct prompts, a book or a
-    /// sign editor drawn over gameplay, nor while a world loads or saves: the
-    /// click there stays the game's own. A gamepad click or a click the
-    /// keyboard's focus sends is not the mouse and fires nothing.
+    /// connect and loading screens, nor for server dialogs or prompts.
+    /// The active book or sign editor receives it, including clicks routed
+    /// there from the controller or keyboard focus.
     pub(in crate::game) fn native_screen_mouse_button_pressed_pre(
         &self,
         screen: &ScreenView<'_>,
@@ -1328,12 +1323,9 @@ impl Game<'_> {
     /// while a screen of the game's or the title's is open (Options and the
     /// pack list opened from the title screen count, with no player and no
     /// `menu`; the title's own). It
-    /// does not fire on the connect and loading
-    /// screens, nor for a server dialog, the server pack, link and
-    /// code-of-conduct prompts, a book or a sign editor drawn over gameplay,
-    /// nor while a world loads or saves: the scroll there stays the game's
-    /// own. A wheel a gamepad or the keyboard's focus sends is not the mouse
-    /// and fires nothing.
+    /// does not fire on the connect and loading screens or server dialogs and
+    /// prompts. The active book or sign editor receives it, including wheels
+    /// routed there from a controller.
     pub(in crate::game) fn native_screen_mouse_scrolled_pre(
         &self,
         screen: &ScreenView<'_>,
@@ -1359,10 +1351,9 @@ impl Game<'_> {
     /// keys and the narrator — and while a screen of the game's or the title's
     /// is open (Options and the pack list opened from the title screen count,
     /// with no player and no `menu`; the title's own). It does
-    /// not fire on the connect and loading screens, nor for a server dialog, the server pack,
-    /// link and code-of-conduct prompts, a book or a sign editor drawn over
-    /// gameplay, nor while a world loads or saves: the key there stays the
-    /// game's own. A cancelled press's release still runs, and its characters
+    /// not fire on the connect and loading screens, nor for server dialogs or
+    /// prompts. The active book or sign editor receives it. A cancelled press's
+    /// release still runs, and its characters
     /// are GLFW's separate char callback and still come; see
     /// `native_screen_char_typed_pre`.
     pub(in crate::game) fn native_screen_key_pressed_pre(
@@ -1395,7 +1386,8 @@ impl Game<'_> {
     ///
     /// `field` is `None` with no box focused, and for the boxes that keep
     /// their own validators: Options' and World Options' fields, the game
-    /// rules' and the block editor's. `cursor` and `highlight` count Unicode
+    /// rules', block editor's and book and sign editors'. The latter can be
+    /// read with `ClientHost::editor_overlay`. `cursor` and `highlight` count Unicode
     /// scalar characters, and a character sees the box as the one before it
     /// left it. Change `value`, `cursor` or `highlight` and the box takes the
     /// change, cancelled or not, so cancel to replace the character yourself.

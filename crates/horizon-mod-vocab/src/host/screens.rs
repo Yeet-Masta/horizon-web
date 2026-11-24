@@ -127,6 +127,10 @@ pub trait ScreensClientHost {
     /// no sign editor is open or outside a world.
     #[access(ClientSetup)]
     fn sign_editor(&self) -> Option<SignEditView>;
+    /// Copies the active book or sign overlay's client-visible contents.
+    /// None when no such editor is active or a modal prompt covers it.
+    #[access(ClientSetup)]
+    fn editor_overlay(&self) -> Option<EditorOverlayView>;
     /// Side: client.
     /// The mod whose own screen is open, if one is (Escape, or another screen
     /// replacing it, closes it).
@@ -147,7 +151,7 @@ pub trait ScreensClientHost {
     #[access(ClientSetup)]
     fn window_focused(&self) -> bool;
     /// Side: client.
-    /// The same screen identifier provided to screen hooks.
+    /// The visible screen's identifier, as used by its render and input hooks.
     #[access(ClientSetup)]
     fn observed_screen_id(&self) -> Option<ScreenId>;
     /// The topmost open screen, including dialogs and prompts, without needing a rendered view.

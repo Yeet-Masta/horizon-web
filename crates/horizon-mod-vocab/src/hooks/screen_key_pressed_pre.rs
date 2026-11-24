@@ -18,10 +18,9 @@ pub trait Hooks {
     /// keys and the narrator — and while a screen of the game's or the title's
     /// is open (Options and the pack list opened from the title screen count,
     /// with no player and no `menu`; the title's own). It does
-    /// not fire on the connect and loading screens, nor for a server dialog, the server pack,
-    /// link and code-of-conduct prompts, a book or a sign editor drawn over
-    /// gameplay, nor while a world loads or saves: the key there stays the
-    /// game's own. A cancelled press's release still runs, and its characters
+    /// not fire on the connect and loading screens or on server dialogs or
+    /// prompts. The active book or sign editor receives it. A cancelled
+    /// press's release still runs, and its characters
     /// are GLFW's separate char callback and still come; see
     /// `screen_char_typed_pre`.
     #[hook(

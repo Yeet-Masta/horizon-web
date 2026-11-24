@@ -5,6 +5,7 @@
 //! with a redstone pulse, the comparator output and taking the book).
 use super::{
     Game,
+    api_values::TryIntoApi,
     chat::PLAYER_NAME,
     commands::{Target, execute::Source},
     screen_info,
@@ -59,6 +60,11 @@ fn book_page_box() -> ui::EditBox {
 /// Where a book's text is, from its top left corner, above its page buttons.
 const BOOK_TEXT: [f32; 4] = [36.0, 16.0, 120.0, 136.0];
 
+/// The page and its footer buttons, not the full-screen shade behind them.
+pub(super) fn book_rect(width: f32) -> [f32; 4] {
+    [width / 2.0 - 100.0, 2.0, 200.0, 214.0]
+}
+
 pub(super) enum BookScreen {
     Edit {
         /// Inventory slot of the book (the selected hotbar slot).
@@ -93,7 +99,7 @@ impl BookScreen {
         }
     }
 
-    /// The id the screen hooks see (`ScreenView.id`).
+    /// The screen-opening lifecycle's id (lecterns have their own legacy id).
     pub(super) fn id(&self) -> &'static str {
         match self {
             Self::Edit { signing: true, .. } => "book_sign",
@@ -102,6 +108,13 @@ impl BookScreen {
                 lectern: Some(_), ..
             } => "lectern",
             Self::View { .. } => "book_view",
+        }
+    }
+
+    pub(super) fn editor_id(&self) -> &'static str {
+        match self {
+            Self::View { .. } => "book_view",
+            _ => self.id(),
         }
     }
 }
@@ -127,6 +140,52 @@ fn view_pages(data: Option<&StackData>) -> Vec<Text> {
         .collect()
 }
 impl Game<'_> {
+    pub(super) fn book_overlay_view(&self) -> Option<mod_api::EditorOverlayView> {
+        use mod_api::EditorOverlayView;
+        Some(match self.book.as_ref()? {
+            BookScreen::View {
+                pages,
+                page,
+                lectern,
+            } => EditorOverlayView::BookView {
+                page: *page,
+                page_count: pages.len().max(1),
+                text: pages.get(*page).map(|text| {
+                    text.try_into_api()
+                        .unwrap_or_else(|_| mod_api::Text::literal(text.plain()))
+                }),
+                lectern: lectern.map(|(x, y, z)| mod_api::BlockPos::new(x, y, z)),
+                can_take: lectern.is_some() && self.may_build(),
+            },
+            BookScreen::Edit {
+                signing: true,
+                title_edit,
+                ..
+            } => EditorOverlayView::BookSign {
+                title: title_edit.value.clone(),
+                author: self.book_sign_author().to_owned(),
+                selection: [title_edit.cursor, title_edit.highlight],
+            },
+            BookScreen::Edit {
+                pages,
+                page,
+                page_edit,
+                ..
+            } => EditorOverlayView::BookEdit {
+                page: *page,
+                page_count: pages.len(),
+                text: pages[*page].clone(),
+                selection: [page_edit.cursor, page_edit.highlight],
+            },
+        })
+    }
+
+    fn book_sign_author(&self) -> &str {
+        self.remote
+            .as_ref()
+            .map_or(PLAYER_NAME, |r| r.profile_name.as_str())
+    }
+
     fn book_lines(&self, page: &str) -> Vec<Text> {
         self.page_lines(&Text::untrusted(page))
     }
@@ -616,7 +675,11 @@ impl Game<'_> {
             PhysicalKey::Code(k) => Some(k),
             _ => None,
         };
-        self.book_input(key, event.text.as_deref());
+        let text = event
+            .text
+            .as_deref()
+            .and_then(|text| self.editor_text_pre(text));
+        self.book_input(key, text.as_deref());
     }
     /// A key and the text it typed in the open book (the keyboard, or a
     /// controller's on-screen keyboard).
@@ -1494,7 +1557,11 @@ impl Game<'_> {
             None => {}
         }
     }
-    pub(super) fn draw_book(&mut self, batch: &mut HudBatch) {
+    pub(super) fn draw_book(
+        &mut self,
+        batch: &mut HudBatch,
+        view: Option<&mod_api::ScreenView<'_>>,
+    ) {
         let mut hovered = None;
         let Some(book) = &self.book else { return };
         let atlas = &self.gui.atlas;
@@ -1510,6 +1577,9 @@ impl Game<'_> {
             r.u1 = r.u0 + 192.0 * du;
             r.v1 = r.v0 + 192.0 * dv;
             batch.rect_uv(left, top, 192.0, 192.0, r, u32::MAX);
+        }
+        if let Some(view) = view {
+            self.native_screen_render_background(batch, view);
         }
         // The page, or the signing title on it: a field to a controller, which opens its keyboard.
         if matches!(book, BookScreen::Edit { .. }) {
@@ -1660,10 +1730,7 @@ impl Game<'_> {
                     );
                 }
                 // BookSignScreen: `owner.getName()`, the account's name on a server.
-                let owner = self
-                    .remote
-                    .as_ref()
-                    .map_or(super::chat::PLAYER_NAME, |r| r.profile_name.as_str());
+                let owner = self.book_sign_author();
                 let by = tr("book.byAuthor", "by %1$s").replace("%1$s", owner);
                 let tw = HudBatch::text_width(atlas, &by);
                 batch.text(
@@ -1847,6 +1914,9 @@ impl Game<'_> {
                 // event, drawn as the chat draws it (componentHoverEffect).
                 hovered = pages.get(*page).and_then(|t| self.book_style_at(t, left));
             }
+        }
+        if let Some(view) = view {
+            self.native_screen_render_foreground(batch, view);
         }
         if let Some(style) = hovered {
             if let Some(cursor) = link_cursor(&style) {

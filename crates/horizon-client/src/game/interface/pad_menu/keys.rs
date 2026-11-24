@@ -34,14 +34,12 @@ impl Game<'_> {
     /// mods searches, the anvil's name, a command block, a dialog, a key or
     /// button being bound, the credits, the on-screen keyboard.
     fn key_focus_blocked(&self) -> bool {
+        if self.active_editor_overlay().is_some() {
+            return self.pad_keyboard_captures() || self.pad_typing();
+        }
         let playing_screen = |screen| self.title.is_none() && self.screen == screen;
         self.pad_keyboard_captures()
             || playing_screen(Screen::Chat)
-            || self.sign_edit.is_some()
-            || matches!(
-                self.book,
-                Some(super::super::books::BookScreen::Edit { .. })
-            )
             || (playing_screen(Screen::Creative) && self.creative_screen.tab().search)
             || self.recipe_search_focused()
             || self.mod_browser_typing()
@@ -186,7 +184,12 @@ impl Game<'_> {
             .as_ref()
             .map(|t| t.screen_key())
             .hash(&mut hasher);
-        (self.sign_edit.is_some(), self.book.is_some()).hash(&mut hasher);
+        match self.active_editor_overlay() {
+            Some(super::EditorOverlay::Book) => self.book.as_ref().map(super::BookScreen::editor_id),
+            Some(super::EditorOverlay::Sign) => self.sign_overlay_id(),
+            None => None,
+        }
+        .hash(&mut hasher);
         self.pad_prompt_key().hash(&mut hasher);
         hasher.finish()
     }

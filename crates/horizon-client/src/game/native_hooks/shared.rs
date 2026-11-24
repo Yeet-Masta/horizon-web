@@ -39,17 +39,24 @@ fn observed_overlay_id(overlays: &[(bool, &'static str)]) -> Option<&'static str
 }
 
 impl Game<'_> {
-    fn observed_prefix_screen_id(&self) -> Option<&'static str> {
-        let book = self.book.as_ref().map(super::books::BookScreen::id);
+    fn modal_screen_id(&self) -> Option<&'static str> {
         observed_overlay_id(&[
             (self.command_prompt.is_some(), "command_prompt"),
             (self.link_prompt.is_some(), "link_prompt"),
             (self.code_of_conduct.is_some(), "code_of_conduct"),
             (self.server_packs.prompt.is_some(), "server_pack_prompt"),
             (self.dialog_open(), "dialog"),
-            (book.is_some(), book.unwrap_or("book_view")),
-            (self.sign_edit.is_some(), "sign_editor"),
         ])
+    }
+
+    fn observed_prefix_screen_id(&self) -> Option<&'static str> {
+        self.modal_screen_id().or_else(|| {
+            let book = self.book.as_ref().map(super::books::BookScreen::id);
+            observed_overlay_id(&[
+                (book.is_some(), book.unwrap_or("book_view")),
+                (self.sign_edit.is_some(), "sign_editor"),
+            ])
+        })
     }
 
     /// Classify the live screen without constructing a render/input view.
@@ -68,14 +75,14 @@ impl Game<'_> {
     }
 
     pub(super) fn observed_screen_view(&self) -> Option<ScreenView<'_>> {
-        let Some(id) = self.observed_prefix_screen_id() else {
-            return self.screen_view_now();
-        };
-        let renderer = self.renderer.as_ref()?;
-        let batch = HudBatch::new(
-            [renderer.config.width, renderer.config.height],
-            self.settings.gui_scale_inputs(),
-        );
+        match self.modal_screen_id() {
+            Some(id) => self.observed_overlay_view(id),
+            None => self.screen_view_now(),
+        }
+    }
+
+    fn observed_overlay_view(&self, id: &'static str) -> Option<ScreenView<'static>> {
+        let batch = self.gui_batch()?;
         Some(ScreenView::from(mod_api::__private::built::ScreenView {
             id,
             menu: None,
@@ -297,9 +304,17 @@ impl Game<'_> {
 
     /// What `observe_screen` compares with the last frame's.
     fn observed_now(&self) -> Option<ObservedScreen> {
-        // Only the title's screens and the overlays show over `Screen::Playing`.
-        self.observed_screen_view()
-            .map(|view| self.observe_view(view))
+        // Opening, Init and Closing already used these overlay identities and
+        // whole-window bounds. Only the presentation hooks use the editor IDs.
+        let overlay = self
+            .modal_screen_id()
+            .or_else(|| self.book.as_ref().map(super::books::BookScreen::id))
+            .or_else(|| self.sign_edit.is_some().then_some("sign_editor"));
+        let view = match overlay {
+            Some(id) => self.observed_overlay_view(id),
+            None => self.screen_view_now(),
+        };
+        view.map(|view| self.observe_view(view))
     }
 
     fn observe_view(&self, view: ScreenView<'_>) -> ObservedScreen {
@@ -976,13 +991,22 @@ impl Game<'_> {
         self.drag_button = pressed.then_some(button);
     }
     pub(super) fn screen_mouse_dragged(&self, previous: (f32, f32)) -> ScreenMousePre {
-        if self.pad_synthetic_input() || self.cursor == previous {
+        if !self.screen_mouse_hooks_input() || self.cursor == previous {
             return ScreenMousePre::NotFired;
         }
-        let Some(button) = self
-            .drag_button
-            .filter(|b| self.physical_buttons.contains(b))
-        else {
+        let button = if self.pad_synthetic_input() {
+            if self.pad.menu.held[1] {
+                Some(MouseButton::Right)
+            } else if self.pad.menu.held[0] {
+                Some(MouseButton::Left)
+            } else {
+                None
+            }
+        } else {
+            self.drag_button
+                .filter(|b| self.physical_buttons.contains(b))
+        };
+        let Some(button) = button else {
             return ScreenMousePre::NotFired;
         };
         let Some(screen) = self.screen_view_now() else {
@@ -1079,25 +1103,24 @@ impl Game<'_> {
             self.native_screen_char_typed_post(&screen, c, modifiers, &mut false);
         }
     }
-    /// A screen the native mods' input hooks are for is open: the window has a
-    /// renderer, either the title's own (`title`, `world_select`,
-    /// `world_create`, `multiplayer`…) or a screen over the world
-    /// (`Screen::Playing` behind it, so not a book, a sign editor, a server
-    /// dialog or a prompt drawn over gameplay), and no connect or world load
-    /// is in progress. The one gate they all ask before they fire.
+    /// An ordinary screen or title mode is open in the window, without a
+    /// gameplay overlay or a world load. Editors use a separate owner check.
     pub(super) fn screen_hooks_open(&self) -> bool {
         self.renderer.is_some()
             && !self.screen_over_playing()
             && !self.remote_loading()
             && (self.screen != Screen::Playing || self.title.is_some())
     }
-    /// The open screen as an input hook sees it (`ScreenView`), or None
-    /// when `screen_hooks_open` says no screen is. `screen.mouse` is the
+    /// The active editor, ordinary screen or title mode as an input hook
+    /// sees it. `screen.mouse` is the
     /// pointer the hook's event is at, so a hook takes no position, and
     /// `partial_tick` is the clock's fraction at this event, not a frame's.
     /// The `HudBatch` built here is only what `screen.rect` needs: the
     /// window's GUI scale, no allocation.
     pub(super) fn screen_view_now(&self) -> Option<ScreenView<'_>> {
+        if let Some(editor) = self.active_editor_overlay() {
+            return self.editor_screen_view_now(editor);
+        }
         if !self.screen_hooks_open() {
             return None;
         }
@@ -1117,6 +1140,9 @@ impl Game<'_> {
     /// False when no screen of the hooks' is open, and for a key with no
     /// vanilla name.
     pub(super) fn screen_key_pressed(&self, key: KeyCode, repeat: bool) -> bool {
+        if !mod_api::__private::listened(mod_api::HookId::ScreenKeyPressedPre) {
+            return false;
+        }
         let Some(name) = keybinds::key_name(key) else {
             return false;
         };
@@ -1134,6 +1160,9 @@ impl Game<'_> {
         canceled
     }
     pub(super) fn screen_key_released(&self, key: KeyCode) -> bool {
+        if !mod_api::__private::listened(mod_api::HookId::ScreenKeyReleasedPre) {
+            return false;
+        }
         let Some(name) = keybinds::key_name(key) else {
             return false;
         };
@@ -1153,9 +1182,15 @@ impl Game<'_> {
     /// box's edit: what the listeners leave of `field` goes back to the box
     /// before the character does. Whether they cancelled the character.
     fn screen_char_canceled(&mut self, c: char) -> bool {
-        if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre)
-            || !self.screen_hooks_open()
-        {
+        if !mod_api::__private::listened(mod_api::HookId::ScreenCharTypedPre) {
+            return false;
+        }
+        if let Some(editor) = self.active_editor_overlay() {
+            return self
+                .editor_screen_view_now(editor)
+                .is_some_and(|view| self.editor_char_pre(&view, c));
+        }
+        if !self.screen_hooks_open() {
             return false;
         }
         let modifiers = super::glfw_modifiers(self.modifiers);

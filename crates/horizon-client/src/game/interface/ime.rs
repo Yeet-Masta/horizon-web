@@ -2,7 +2,7 @@
 //! field through the same sinks the keyboard and `horizon-ctl type` use.
 //! The window only asks the OS for an input method while such a field has
 //! focus, so movement keys keep arriving as plain key events.
-use super::{Game, Screen, books::BookScreen};
+use super::{Game, Screen, books::BookScreen, editor_overlay::EditorOverlay};
 use horizon_client::{
     hud::HudBatch,
     preedit::{self, PreeditEvent},
@@ -22,8 +22,9 @@ impl Game<'_> {
             // `title_edit` types into it).
             return title.has_caret_field() || title.focused_field().is_some();
         }
-        if self.sign_edit.is_some() || matches!(self.book, Some(BookScreen::Edit { .. })) {
-            return true;
+        if let Some(editor) = self.active_editor_overlay() {
+            return editor == EditorOverlay::Sign
+                || matches!(self.book, Some(BookScreen::Edit { .. }));
         }
         match self.screen {
             Screen::Chat | Screen::CommandBlock | Screen::Social => true,
@@ -68,13 +69,16 @@ impl Game<'_> {
         let event = PreeditEvent::from_winit(text, cursor);
         // ScreenEvent.Preedit.Pre, then the screen's handler (the focused
         // field takes it), then Preedit.Post when no field did.
-        let shown = event.clone().unwrap_or_default();
-        if self.dispatch_preedit_pre_hook(&shown) {
+        let empty = PreeditEvent::default();
+        let shown = event.as_ref().unwrap_or(&empty);
+        if self.dispatch_preedit_pre_hook(shown) {
             return;
         }
-        preedit::set_preedit(event.filter(|_| taken));
-        if !taken {
-            self.dispatch_preedit_post_hook(&shown);
+        if taken {
+            preedit::set_preedit(event);
+        } else {
+            preedit::set_preedit(None);
+            self.dispatch_preedit_post_hook(shown);
         }
     }
 
@@ -169,10 +173,8 @@ impl Game<'_> {
         }
         if self.title_input_active() {
             self.title_edit(Some(text), false);
-        } else if self.book.is_some() {
-            self.book_input(None, Some(text));
-        } else if self.sign_edit.is_some() {
-            self.sign_input(None, Some(text));
+        } else if let Some(editor) = self.active_editor_overlay() {
+            self.editor_input(editor, None, Some(text));
         } else {
             match self.screen {
                 Screen::Chat => self.chat_type(text),

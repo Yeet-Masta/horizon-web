@@ -186,7 +186,7 @@ impl Game<'_> {
 
 impl Game<'_> {
     /// `ScreenEvent.Render.Post`, after the screen's drawing and tooltips,
-    /// including when Pre cancelled. Gameplay overlays keep their exclusions.
+    /// including when Pre cancelled. Editors have their own render boundaries.
     pub(super) fn draw_screen_with_post_hook(&self, batch: &mut HudBatch) {
         if let Some(view) = self.screen_render_view(batch) {
             self.screen_render_end(batch, &view);
@@ -223,6 +223,7 @@ impl Game<'_> {
         if screen == Screen::Playing
             || self.server_packs.prompt.is_some()
             || self.book.is_some()
+            || self.active_editor_overlay().is_some()
             || !self.screen_render_listened()
         {
             return None;

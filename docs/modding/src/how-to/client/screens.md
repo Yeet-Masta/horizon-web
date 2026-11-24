@@ -40,6 +40,40 @@ the sign's block position and whether its front side is being edited. It returns
 editor open, or outside a world. A close of the sign editor always sends the sign update, however it
 closes; there is no close that skips it, because the vanilla client never omits that packet.
 
+## Book and sign overlay hooks
+
+The active editor has a stable `event.screen.id` in the screen render and input hooks:
+
+| ID | `host.editor_overlay()` snapshot |
+|---|---|
+| `book_view` | `BookView`: zero-based `page`, displayed `page_count` (at least one), current page `text` as a component or `None`, optional `lectern` position, and `can_take` for its Take Book button. |
+| `book_edit` | `BookEdit`: zero-based `page`, `page_count`, current page `text`, and `selection`. |
+| `book_sign` | `BookSign`: proposed `title`, displayed `author`, and `selection` in the title box. |
+| `sign_edit` | `Sign`: block `pos`, `front` side flag, `hanging: false`, the four displayed `lines`, zero-based focused `line`, and its `selection`. |
+| `hanging_sign_edit` | The same `Sign` fields, with `hanging: true` (including wall-mounted hanging signs). |
+
+Each `selection` is `[caret, anchor]` in Unicode scalar characters. These are owned, read-only
+snapshots, available to native and Wasm mods. Request one only when you need the text; the hook
+itself only carries the usual `ScreenView` (no menu, title or slots for these editors).
+`screen.rect` gives `[x, y, width, height]` in GUI pixels around the stock editor and footer buttons,
+not its full-screen shade. A covered editor does not receive hooks while a modal prompt or loading
+screen owns the UI. The opening, initialization and closing notices still use their original IDs
+(including `lectern` and `sign_editor`).
+
+`screen_render_pre` runs before the editor's stock drawing. Cancel it to skip the editor (including
+its shade, widgets and tooltips) without skipping the world, HUD, toasts or unrelated IME drawing.
+Background runs after the stock background, Foreground after the editor's contents, and Post after
+its tooltips. Only Post still runs when Pre cancels. Use the event's `draw` context to paint a
+replacement there.
+
+Mouse press, release, drag, wheel, named keys, typed characters and IME preedit reach the active
+editor's cancellable pre hooks. Controller actions routed to the editor also reach the corresponding
+pre hook; controls that only navigate the on-screen keyboard do not target the editor. Cancelling a
+key does not cancel the separate typed-character event. In `screen_char_typed_pre` the editor's
+`field` is `None`; use the snapshot to read it instead. Render cancellation alone does not change
+input. Unconsumed input takes the stock editing, page navigation, close or save path and retains all
+existing text checks and server validation.
+
 ## Reading and interacting with a container
 
 `host.screen_menu()` returns the live menu only when its container screen is open, including the

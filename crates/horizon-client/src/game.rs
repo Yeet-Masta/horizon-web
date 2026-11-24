@@ -65,6 +65,7 @@ fn pack_files(world_tables: &Option<WorldTables>) -> horizon_world::loot::PackOv
 include!(concat!(env!("OUT_DIR"), "/game_modules.rs"));
 mod host;
 mod native_hooks;
+use editor_overlay::EditorOverlay;
 use event_loop::EventLoopCtl;
 use hand::interact_location;
 pub(crate) use hit::Hit;
@@ -5351,10 +5352,8 @@ impl Game<'_> {
         }
         glyph_scratch.clear();
         self.hud_glyph_scratch = glyph_scratch;
-        // ScreenEvent.Render.Post: the open screen has drawn itself and its
-        // tooltips, so a native mod draws over it here. Never `Playing`: the
-        // prompts, books and sign editors drawn over gameplay keep it, draw
-        // after this point and so over what a mod drew.
+        // An ordinary screen's Post follows its tooltips. Gameplay editors
+        // own a separate boundary below, at the point they actually draw.
         if !dialog {
             self.draw_screen_with_post_hook(batch);
         }
@@ -5362,8 +5361,7 @@ impl Game<'_> {
         self.draw_every_toast(batch, !show_hud);
         if !dialog && self.server_packs.prompt.is_none() {
             self.remote_hud(batch);
-            self.draw_sign_editor(batch);
-            self.draw_book(batch);
+            self.draw_editor_overlays(batch);
         }
         self.draw_studio_bars(batch);
         if show_hud {
@@ -9399,6 +9397,15 @@ impl Game<'_> {
             && let Some(text) = key_event.text.as_deref()
         {
             let text: String = text.chars().filter(|c| !c.is_control()).collect();
+            if let Some(editor) = self.active_editor_overlay() {
+                if self.types_text()
+                    && !text.is_empty()
+                    && let Some(text) = self.editor_text_pre(&text)
+                {
+                    self.editor_input(editor, None, Some(&text));
+                }
+                return;
+            }
             if !text.is_empty() && self.text_field_focused() && self.types_text() {
                 self.screen_text_each(&text, |game, c| {
                     // Err only says no box of the screen takes it.
@@ -9606,11 +9613,30 @@ impl Game<'_> {
         // carries text closes that screen or moves its focus. The title's
         // screens keep theirs while no box has focus: Space presses a button
         // there, and the box that opens must not take its character.
+        if let WindowEvent::KeyboardInput { event, .. } = &event
+            && event.state == ElementState::Pressed
+            && let Some(editor) = self.active_editor_overlay()
+            && let PhysicalKey::Code(key) = event.physical_key
+            && self.screen_key_pressed(key, event.repeat)
+        {
+            // CharacterTyped is separate, including for a cancelled key press.
+            if self.types_text()
+                && let Some(text) = event.text.as_deref()
+            {
+                self.screen_text_each(text, |game, c| {
+                    if !c.chars().next().is_some_and(char::is_control) {
+                        game.editor_input(editor, None, Some(c));
+                    }
+                });
+            }
+            return;
+        }
         let mut typed: Option<String> = None;
         if let WindowEvent::KeyboardInput {
             event: key_event, ..
         } = &mut event
             && key_event.state == ElementState::Pressed
+            && self.active_editor_overlay().is_none()
         {
             let title_text = control::title_owns_text(&self.screen, self.title.is_some());
             if self.screen_hooks_open()
@@ -9679,7 +9705,10 @@ impl Game<'_> {
                 self.track_drag_button(*button, *state == ElementState::Pressed);
             }
             // The emote key let go over the wheel, a click on it.
-            if self.screen == Screen::EmoteWheel && self.emote_wheel_event(&event) {
+            if self.screen == Screen::EmoteWheel
+                && self.active_editor_overlay().is_none()
+                && self.emote_wheel_event(&event)
+            {
                 return Ok(());
             }
             if let WindowEvent::KeyboardInput { event, .. } = &event
@@ -9706,10 +9735,9 @@ impl Game<'_> {
             // a cancelled one goes no further — no hotbar key, no slot, no
             // button, no sort, no drag. First in the event, so none of the
             // arms below (which hold the container hotkey and the sort and
-            // header buttons too) see it. A click the pad or the keyboard's
-            // focus made up is not the mouse: it fires nothing.
+            // header buttons too) see it. Synthetic clicks only reach editor hooks.
             if let WindowEvent::MouseInput { state, button, .. } = &event
-                && !self.pad_synthetic_input()
+                && self.screen_mouse_hooks_input()
                 && let Some(screen) = self.screen_view_now()
             {
                 let (button, modifiers) = (glfw_button(*button), glfw_modifiers(self.modifiers));
@@ -9816,7 +9844,8 @@ impl Game<'_> {
                         let b = Self::gui_metrics(dim, self.settings.gui_scale_inputs());
                         let previous = self.cursor;
                         self.cursor = (position.x as f32 / b.scale, position.y as f32 / b.scale);
-                        if self.studio_mouse_dragged(b.width) {
+                        let editor_active = self.active_editor_overlay().is_some();
+                        if !editor_active && self.studio_mouse_dragged(b.width) {
                             return Ok(());
                         }
                         match self.screen_mouse_dragged(previous) {
@@ -9828,6 +9857,9 @@ impl Game<'_> {
                                 mouse_post = Some(post);
                             }
                             native_hooks::ScreenMousePre::NotFired => {}
+                        }
+                        if editor_active {
+                            return Ok(());
                         }
                         if self.dialog_open() {
                             self.dialog_drag();
@@ -9893,10 +9925,9 @@ impl Game<'_> {
                     // the wheel before anything scrolls, and a cancelled turn
                     // scrolls nothing — no bundle, no list, slider or
                     // scrollbar. The hotbar below reads the wheel only while
-                    // playing, which the gate excludes. A wheel the pad or the
-                    // keyboard's focus made up is not the mouse: it fires
-                    // nothing.
-                    if !self.pad_synthetic_input()
+                    // playing, which the gate excludes. A synthetic wheel
+                    // targets the screen hooks only on an editor overlay.
+                    if self.screen_mouse_hooks_input()
                         && let Some(screen) = self.screen_view_now()
                     {
                         let mut canceled = false;
@@ -9930,6 +9961,9 @@ impl Game<'_> {
                         } else if self.server_packs.prompt.is_none() {
                             self.dialog_scroll(d);
                         }
+                        return Ok(());
+                    }
+                    if self.active_editor_overlay().is_some() {
                         return Ok(());
                     }
                     let stick_scroll = self.pad_stick_scroll();
@@ -10126,24 +10160,19 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::MouseInput { .. } if self.title_input_active() => {}
-                WindowEvent::MouseInput { state, button, .. } if self.book.is_some() => {
+                WindowEvent::MouseInput { state, button, .. }
+                    if let Some(editor) = self.active_editor_overlay() =>
+                {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         let size = self
                             .renderer
                             .as_ref()
                             .map(|r| [r.config.width, r.config.height])
                             .unwrap_or([1, 1]);
-                        self.book_click(size);
-                    }
-                }
-                WindowEvent::MouseInput { state, button, .. } if self.sign_edit.is_some() => {
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        let size = self
-                            .renderer
-                            .as_ref()
-                            .map(|r| [r.config.width, r.config.height])
-                            .unwrap_or([1, 1]);
-                        self.sign_edit_click(size);
+                        match editor {
+                            EditorOverlay::Book => self.book_click(size),
+                            EditorOverlay::Sign => self.sign_edit_click(size),
+                        }
                     }
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
@@ -10382,6 +10411,14 @@ impl Game<'_> {
                     }
                 }
                 WindowEvent::KeyboardInput { event, .. }
+                    if let Some(editor) = self.active_editor_overlay() =>
+                {
+                    match editor {
+                        EditorOverlay::Book => self.book_key(&event),
+                        EditorOverlay::Sign => self.sign_edit_key(&event),
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. }
                     if self.screen == Screen::Chat && self.title.is_none() =>
                 {
                     if let PhysicalKey::Code(key) = event.physical_key {
@@ -10392,12 +10429,6 @@ impl Game<'_> {
                             self.keys.remove(&key);
                         }
                     }
-                }
-                WindowEvent::KeyboardInput { event, .. } if self.sign_edit.is_some() => {
-                    self.sign_edit_key(&event)
-                }
-                WindowEvent::KeyboardInput { event, .. } if self.book.is_some() => {
-                    self.book_key(&event)
                 }
                 WindowEvent::KeyboardInput { event, .. }
                     if self.screen == Screen::Creative

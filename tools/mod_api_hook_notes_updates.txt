@@ -1,0 +1,2 @@
+# Exact generated note revisions paired with an additive API change.
+23eb36bfd3125f3ed1d6f309fdcb32279f02840aa74bfe6e963e6419aa53a224 9bc67237143ce77326618d39e591ef9d41988604cba40d45740f051fd5ab571d #18648 ## More hook capabilities

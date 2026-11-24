@@ -23,10 +23,12 @@ class ScreenMouseScrolledTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_pre_cancellation_and_post_scheduling(self):
         source = (ROOT / "crates/horizon-client/src/game.rs").read_text(encoding="utf-8")
-        dispatch = block(source, "if !self.pad_synthetic_input()\n                        && let Some(screen)")
+        dispatch = block(source, "if self.screen_mouse_hooks_input()\n                        && let Some(screen)")
         hooks = (ROOT / "crates/horizon-client/src/game/native_hooks/base.rs").read_text(encoding="utf-8")
         pre = block(hooks, "    pub(in crate::game) fn native_screen_mouse_scrolled_pre(")
         pre = pre.replace("pub(in crate::game) ", "")
+        editor = (ROOT / "crates/horizon-client/src/game/interface/editor_overlay.rs").read_text(encoding="utf-8")
+        gate = block(editor, "    pub(super) fn screen_mouse_hooks_input(").replace("pub(super) ", "")
         fixture = r"""
 use std::cell::RefCell;
 fn glfw_modifiers(bits: u32) -> u32 { bits }
@@ -35,17 +37,21 @@ mod native_hooks {
     #[derive(Debug, PartialEq)]
     pub enum ScreenMousePost { Scroll([f64; 2]) }
 }
-struct Game { modifiers: u32, synthetic: bool, open: bool, cancel: bool,
+struct Game { modifiers: u32, synthetic: bool, target: Option<&'static str>,
+    captured: bool, cancel: bool,
     calls: RefCell<Vec<&'static str>>, scrolled: usize }
 impl Game {
     fn pad_synthetic_input(&self) -> bool { self.synthetic }
+    fn active_editor_overlay(&self) -> Option<()> { (self.target == Some("sign_edit")).then_some(()) }
+    fn pad_keyboard_captures(&self) -> bool { self.captured }
+    GATE
     fn screen_view_now(&self) -> Option<ScreenView<'_>> {
-        self.open.then_some(ScreenView { id: "inventory", mouse: [7.0, 9.0] })
+        self.target.map(|id| ScreenView { id, mouse: [7.0, 9.0] })
     }
     PRE
     fn fire_screen_mouse_scrolled_pre(&self, screen: &ScreenView<'_>, scroll: [f64; 2], modifiers: u32, canceled: &mut bool) {
         assert_eq!((screen.id, screen.mouse, scroll, modifiers),
-            ("inventory", [7.0, 9.0], [3.0, -2.0], 5));
+            (self.target.unwrap(), [7.0, 9.0], [3.0, -2.0], 5));
         assert!(!*canceled);
         self.calls.borrow_mut().push("pre");
         *canceled = self.cancel;
@@ -59,7 +65,7 @@ impl Game {
         // stop both screen handling and Post scheduling when Pre cancels.
         self.calls.borrow_mut().push("screen");
         self.scrolled += 1;
-        assert_eq!(mouse_post, if self.open && !self.synthetic {
+        assert_eq!(mouse_post, if self.target.is_some() && self.screen_mouse_hooks_input() {
             Some(native_hooks::ScreenMousePost::Scroll([3.0, -2.0]))
         } else { None });
         Ok(())
@@ -69,22 +75,25 @@ impl Game {
 fn cancellation_and_input_gates() {
     for cancel in [false, true] {
         for synthetic in [false, true] {
-            for open in [false, true] {
-                let mut g = Game { modifiers: 5, synthetic, open, cancel,
-                    calls: RefCell::new(vec![]), scrolled: 0 };
-                g.wheel().unwrap();
-                let expected = match (open && !synthetic, cancel) {
-                    (true, true) => vec!["pre"],
-                    (true, false) => vec!["pre", "screen"],
-                    (false, _) => vec!["screen"],
-                };
-                assert_eq!(*g.calls.borrow(), expected, "{cancel} {synthetic} {open}");
-                assert_eq!(g.scrolled, usize::from(!(open && !synthetic && cancel)));
+            for target in [None, Some("inventory"), Some("sign_edit")] {
+                for captured in [false, true] {
+                    let mut g = Game { modifiers: 5, synthetic, target, captured, cancel,
+                        calls: RefCell::new(vec![]), scrolled: 0 };
+                    g.wheel().unwrap();
+                    let expected = match (target, synthetic, captured, cancel) {
+                        (Some(_), false, _, true) | (Some("sign_edit"), true, false, true) => vec!["pre"],
+                        (Some(_), false, _, false) | (Some("sign_edit"), true, false, false) =>
+                            vec!["pre", "screen"],
+                        _ => vec!["screen"],
+                    };
+                    assert_eq!(*g.calls.borrow(), expected, "{cancel} {synthetic} {target:?} {captured}");
+                    assert_eq!(g.scrolled, usize::from(expected.contains(&"screen")));
+                }
             }
         }
     }
 }
-""".replace("DISPATCH", dispatch).replace("PRE", pre)
+""".replace("DISPATCH", dispatch).replace("PRE", pre).replace("GATE", gate)
         with tempfile.TemporaryDirectory() as folder:
             src, exe = Path(folder) / "scroll.rs", Path(folder) / "scroll.exe"
             src.write_text(fixture, encoding="utf-8")

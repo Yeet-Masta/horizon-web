@@ -7,3 +7,4 @@ horizon-client game::native_client_screens::client_screen_tests::opening_the_inv
 horizon-client game::native_client_screens::client_screen_tests::opening_the_inventory_riding_a_horse_sends_the_player_command lib daily resources
 horizon-client game::native_client_screens::client_screen_tests::the_sign_editor_reports_its_sign_and_closing_sends_the_update lib daily resources
 horizon-client game::native_client_screens::client_screen_tests::no_sign_editor_reports_no_sign lib daily resources
+horizon-client game::native_client_screens::editor_overlay_tests::editor_overlays_dispatch_and_preserve_stock_interaction lib daily resources # Prepared assets, a window and Vulkan.

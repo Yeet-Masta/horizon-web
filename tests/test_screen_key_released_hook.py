@@ -43,6 +43,10 @@ BUTTON
 fn container_key_clones(_: i32, _: KeyAction) -> bool { false }
 mod keybinds { pub fn key_name(key: i32) -> Option<&'static str> { (key == 1).then_some("key.keyboard.a") } }
 mod horizon_client { pub(crate) use crate::keybinds; }
+mod mod_api {
+    pub enum HookId { ScreenKeyReleasedPre }
+    pub mod __private { pub fn listened(_: super::HookId) -> bool { true } }
+}
 enum Source { Keyboard }
 struct Bindings;
 impl Bindings { fn translate_all(&self, _: i32) -> Vec<std::result::Result<i32, i32>> { vec![Ok(10), Ok(11), Err(2)] } }

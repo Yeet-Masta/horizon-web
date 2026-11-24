@@ -11,7 +11,8 @@ pub trait Hooks {
     ///
     /// `field` is `None` with no box focused, and for the boxes that keep
     /// their own validators: Options' and World Options' fields, the game
-    /// rules' and the block editor's. `cursor` and `highlight` count Unicode
+    /// rules', block editor's and book and sign editors'. Read the editor's
+    /// state with `ClientHost::editor_overlay`. `cursor` and `highlight` count Unicode
     /// scalar characters, and a character sees the box as the one before it
     /// left it. Change `value`, `cursor` or `highlight` and the box takes the
     /// change, cancelled or not, so cancel to replace the character yourself.

@@ -65,6 +65,10 @@ impl Game<'_> {
 }
 
 #[cfg(test)]
+#[path = "native_client_screens/editor_overlay_tests.rs"]
+mod editor_overlay_tests;
+
+#[cfg(test)]
 mod client_screen_tests {
     use super::*;
     use crate::game::native_entity_refs::tests::with_client_game;
@@ -79,7 +83,7 @@ mod client_screen_tests {
     use horizon_protocol::packets::play::{self, Clientbound as C, Serverbound as S};
 
     /// What the window sent since the last call, as play packets.
-    fn sent(reader: &mut ConnReader) -> Vec<S> {
+    pub(super) fn sent(reader: &mut ConnReader) -> Vec<S> {
         reader
             .set_read_timeout(Some(std::time::Duration::from_millis(200)))
             .unwrap();
@@ -92,7 +96,7 @@ mod client_screen_tests {
 
     /// A window logged in to the overworld at (0.5, 65, 0.5), its player made
     /// by the server's position packet, with everything the login sent drained.
-    fn logged_in(game: &mut Game<'_>) -> ConnReader {
+    pub(super) fn logged_in(game: &mut Game<'_>) -> ConnReader {
         let (mut reader, _writer) = connect_menu_test(game);
         game.handle_packet(C::Login(play::Login {
             player_id: 7,

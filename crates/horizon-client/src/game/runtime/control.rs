@@ -1,6 +1,6 @@
 //! Commands from the control socket (`horizon-ctl`), run on the game thread.
 use super::event_loop::EventLoopCtl;
-use super::{Game, Screen};
+use super::{Game, Screen, editor_overlay::EditorOverlay};
 use horizon_client::gfx::pack_timing;
 use horizon_client::held::Source;
 use horizon_client::{Result, items::ItemStack};
@@ -324,12 +324,11 @@ impl Game<'_> {
     /// Nothing here is a key — the caller drops control characters. `Err` when
     /// no text box of the screen takes them.
     pub(super) fn type_chars_into_screen(&mut self, text: &str) -> Result<()> {
-        if self.book.is_some() {
-            self.book_type(text);
-            return Ok(());
-        }
-        if self.sign_edit.is_some() {
-            self.sign_input(None, Some(text));
+        if let Some(editor) = self.active_editor_overlay() {
+            match editor {
+                EditorOverlay::Book => self.book_type(text),
+                EditorOverlay::Sign => self.sign_input(None, Some(text)),
+            }
             return Ok(());
         }
         // The title's screens: the world name, the seed, a server's address.
@@ -808,32 +807,6 @@ impl Game<'_> {
                 self.require_world()?;
                 // KeyboardHandler.keyPress: the open screen's narration hears it.
                 super::narrator::narrate_key(&mut self.narration, key, arg(2)? != "up");
-                // The sign editor takes raw presses (Enter, arrows, Backspace, Escape).
-                if self.sign_edit.is_some() {
-                    if arg(2)? != "up" {
-                        self.sign_input(Some(key), None);
-                    }
-                    return ok();
-                }
-                // A held edit modifier (`key super down`) and A/C/V/X: the
-                // open book's Select All, Copy, Paste or Cut.
-                if self.book.is_some() && arg(2)? != "up" {
-                    let held = |k: [KeyCode; 2]| k.iter().any(|k| self.keys.raw(k));
-                    let edit = if cfg!(target_os = "macos") {
-                        held([KeyCode::SuperLeft, KeyCode::SuperRight])
-                    } else {
-                        held([KeyCode::ControlLeft, KeyCode::ControlRight])
-                    };
-                    let name = arg(1)?;
-                    let letter = name.chars().next().filter(|_| name.len() == 1);
-                    let shift = held([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
-                    if let Some(shortcut) =
-                        horizon_client::clipboard::edit_shortcut(letter, edit, shift, false)
-                    {
-                        self.book_shortcut(shortcut);
-                        return ok();
-                    }
-                }
                 // KeyboardHandler.keyPress: the debug keys see the physical key first.
                 let physical = key;
                 {
@@ -856,6 +829,37 @@ impl Game<'_> {
                     }
                 }
                 let action = arg(2)?;
+                if let Some(editor) = self.active_editor_overlay() {
+                    if action == "up" {
+                        self.screen_key_released(key);
+                        return ok();
+                    }
+                    let screenshot = action != "repeat" && self.screenshot_shortcut(key, false);
+                    if !screenshot && !self.screen_key_pressed(key, action == "repeat") {
+                        // A held edit modifier and A/C/V/X on a book.
+                        let name = arg(1)?;
+                        let letter = name.chars().next().filter(|_| name.len() == 1);
+                        let shortcut = horizon_client::clipboard::edit_shortcut(
+                            letter,
+                            self.has_control_down_with_quirk(),
+                            self.has_shift_down(),
+                            false,
+                        );
+                        if let (EditorOverlay::Book, Some(shortcut)) = (editor, shortcut) {
+                            self.book_shortcut(shortcut);
+                        } else {
+                            self.editor_input(editor, Some(key), None);
+                        }
+                    }
+                    if action == "tap" {
+                        self.physical_keys.remove(&key);
+                        self.debug_key(key, horizon_client::debug_keys::KeyAction::Release);
+                        if self.active_editor_overlay().is_some() {
+                            self.screen_key_released(key);
+                        }
+                    }
+                    return ok();
+                }
                 // ScreenEvent.KeyPressed.Pre: the open screen hears of the
                 // press before it acts on it. A cancelled press goes no further.
                 if action != "up" && self.screen_key_pressed(physical, action == "repeat") {
