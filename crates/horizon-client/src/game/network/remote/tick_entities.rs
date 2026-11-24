@@ -1,5 +1,6 @@
 //! Abilities, pushing, and ticking the server's entities on the client.
 
+use crate::game::crossbow::DEFAULT_CROSSBOW_CHARGE_TICKS;
 use super::*;
 
 impl Game<'_> {
@@ -181,7 +182,9 @@ impl Game<'_> {
                 };
                 m.extra
                     .slot_stack(using_slot)
-                    .map_or(25, |stack| Self::charge_ticks(stack).max(1)) as i32
+                    .map_or(DEFAULT_CROSSBOW_CHARGE_TICKS, |stack| {
+                        self.crossbow_charge_preview(stack, &m.random)
+                    })
             });
             self.mobs[i].extra.held_arm_pose = poses;
             if let Some(duration) = charge_duration {

@@ -252,6 +252,9 @@ impl Game<'_> {
         let (release, spyglass) = item_use::release_parts(canceled, hand_changed);
         match &*stack.item {
             "minecraft:bow" if release => self.release_bow(stack, self.ticks_held(stack, ticks)),
+            "minecraft:crossbow" if release => {
+                self.release_crossbow(stack, self.ticks_held(stack, ticks));
+            }
             "minecraft:trident" if release => self.release_trident(self.ticks_held(stack, ticks)),
             "minecraft:spyglass" if spyglass => self.stop_spyglass(),
             _ => {}

@@ -2,6 +2,7 @@
 //! own output over HID: rumble, adaptive triggers, lights, HD haptics and impulse triggers. A build
 //! without the feature (the server build) has the stub in pad.rs instead, and only `horizon-ctl
 //! pad`'s virtual pad.
+use crate::game::crossbow::DEFAULT_CROSSBOW_CHARGE_TICKS;
 use super::{
     super::{Game, Screen},
     Connection, PadEvent, Pads,
@@ -920,7 +921,13 @@ impl Game<'_> {
                     TriggerFeel::Draw(ticks as f32 / 10.0)
                 }
                 Some(s) if &*s.item == "minecraft:crossbow" => {
-                    TriggerFeel::Draw(ticks as f32 / Self::charge_ticks(s).max(1) as f32)
+                    let duration = self
+                        .player
+                        .as_ref()
+                        .map_or(DEFAULT_CROSSBOW_CHARGE_TICKS, |p| {
+                            self.crossbow_charge_preview(s, &p.random)
+                        });
+                    TriggerFeel::Draw(ticks as f32 / duration as f32)
                 }
                 Some(s) if self.blocks_attacks(s).is_some() => TriggerFeel::Brace,
                 _ => TriggerFeel::Free,

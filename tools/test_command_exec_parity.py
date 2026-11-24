@@ -558,11 +558,24 @@ def main():
         from pufferfish_contact_corpus import advancements as contact_advancements
         advancements.update(contact_advancements())
 
+    try:
+        from .command_exec_groups.crossbow_effects import ENCHANTMENT, GROUP
+    except ImportError:
+        from command_exec_groups.crossbow_effects import ENCHANTMENT, GROUP
+
+    def install_world_fixtures(world):
+        if any(name == GROUP for name, _ in groups):
+            functions['crossbow_test:ready'] = 'return 1\n'
+            path = world / 'datapacks/command-selector-fixture/data/crossbow_test/enchantment/volley.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(ENCHANTMENT), encoding='utf-8')
+        install_datapack_fixtures(world, predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+
     run(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-cp', str(jars['server']) + os.pathsep + dependency_path, '-d', classes, oracle], 'compile-java')
     vanilla_dir = build / 'vanilla'
     shutil.rmtree(vanilla_dir, ignore_errors=True)
     vanilla_dir.mkdir()
-    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    install_world_fixtures(vanilla_dir / 'universe/harness')
     java_options = ['-DMC_DEBUG_ENABLED=true', '-DMC_DEBUG_DEV_COMMANDS=true'] if args.raid_village_fixture else []
     if args.merchant_gate_fixture:
         java_options.append('-Dhorizon.merchantFixture=true')
@@ -623,7 +636,7 @@ def main():
     rust_dir = build / 'rust'
     shutil.rmtree(rust_dir, ignore_errors=True)
     rust_dir.mkdir()
-    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    install_world_fixtures(rust_dir / 'saves/harness')
     if any(op['op'] == 'crafter_max_map_fixture' for op in script):
         source = vanilla_dir / 'universe/harness/data/minecraft/maps/31.dat'
         target = rust_dir / 'saves/harness/data/minecraft/maps/31.dat'

@@ -2,6 +2,7 @@
 //! in front, cycled by F5), the detached camera (`Camera.setup` with
 //! `getMaxZoom`), and the local player drawn as a model: in third person
 //! and in the inventory (`InventoryScreen.extractEntityInInventoryFollowsMouse`).
+use crate::game::crossbow::DEFAULT_CROSSBOW_CHARGE_TICKS;
 use super::{Game, Screen, native_mob_draw::PlayerRender, shoulders::shoulder_variants};
 use horizon_client::{
     blocks::BlockFacts,
@@ -545,9 +546,12 @@ impl Game<'_> {
         let charged = self.inventory[self.selected]
             .as_ref()
             .is_some_and(|s| s.data().is_some_and(|d| !d.charged.is_empty()));
-        let charge_duration = self.inventory[self.selected]
-            .as_ref()
-            .map_or(25, |s| Self::charge_ticks(s).max(1)) as i32;
+        let charge_duration = self
+            .using
+            .and_then(|(slot, _)| self.stack_in(slot))
+            .map_or(DEFAULT_CROSSBOW_CHARGE_TICKS, |stack| {
+                self.crossbow_charge_preview(stack, &p.random)
+            });
         let attack = (self.swing.old_animation, self.swing.animation);
         let swinging = self.swing.swinging();
         // currentSwing.hand().asArm(mainArm).

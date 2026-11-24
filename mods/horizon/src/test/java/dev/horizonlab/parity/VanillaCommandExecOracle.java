@@ -929,6 +929,7 @@ public final class VanillaCommandExecOracle {
                         }
                         }
                     }
+                    case "release_item" -> player.releaseUsingItem();
                     case "crafter_max_map_fixture" -> {
                         // Independent official saved-map file, copied unchanged to the Game scratch world.
                         level.setMapData(new net.minecraft.world.level.saveddata.maps.MapId(31),

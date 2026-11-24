@@ -802,6 +802,12 @@ impl Game<'_> {
                         Ok(())
                     })?;
                 }
+                "release_item" => {
+                    self.harness_owner(|g| {
+                        g.release_using_item();
+                        Ok(())
+                    })?;
+                }
                 "frame_map_state" => {
                     // Read saved-map association and live decorations, not network delivery.
                     let uuid = u128::from_str_radix(

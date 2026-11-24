@@ -3,6 +3,7 @@
 //! dropped items (`ItemEntityRenderer`) and items posed in the world (hands,
 //! frames, armour stands). This binds the resolver's host services
 //! (`ItemEnv`) and the special renderers' registries to the game.
+use crate::game::crossbow::DEFAULT_CROSSBOW_CHARGE_TICKS;
 use super::api_values::TryIntoApi;
 use super::{Dim, Game, entity_culling::EntityCullDecision};
 use horizon_assets::item_model::{
@@ -511,7 +512,12 @@ impl Game<'_> {
             // getUseItemRemainingTicks: the duration the use started with,
             // as LivingEntityUseItemEvent.Start and .Tick left it (`game/items/item_use.rs`).
             owner.use_item_remaining_ticks = self.use_duration - ticks as i32;
-            owner.crossbow_charge_duration = Self::charge_ticks(stack).max(1) as i32;
+            owner.crossbow_charge_duration = self
+                .player
+                .as_ref()
+                .map_or(DEFAULT_CROSSBOW_CHARGE_TICKS, |p| {
+                    self.crossbow_charge_preview(stack, &p.random)
+                });
         }
         owner.fishing_cast_with_this_item = stack
             .zip(self.cast_rod())
