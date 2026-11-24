@@ -107,6 +107,19 @@ pub(super) fn surface_config(
     config
 }
 
+/// Frames the swapchain may hold ahead of the display (its images, less one). Fifo shows
+/// every frame in order, so each extra image is a frame of input lag: it keeps 2. Mailbox
+/// and Immediate always show the newest frame, so extra images cost only memory. They are
+/// needed where the compositor scans the game's frames out directly (fullscreen on GNOME
+/// Wayland): it hands images back only at the display's refresh, so with 2 frames ahead the
+/// game drew one frame per refresh even with VSync off, with 3 two, with 6 up to five.
+pub(super) fn frame_latency(mode: wgpu::PresentMode) -> u32 {
+    match mode {
+        wgpu::PresentMode::Mailbox | wgpu::PresentMode::Immediate => 6,
+        _ => 2,
+    }
+}
+
 /// How long Auto keeps HDR on once the display stops reporting it. A fixed window that
 /// coalesces the report's churn as a display wakes or the window moves to another one; not a
 /// measured sleep/wake time.
@@ -684,6 +697,13 @@ mod tests {
     use crate::graphics::{Graphics, HdrMode, Reported};
     use hdr::Output::{Pq, ScRgb};
     use output::tests::{snapshot, window};
+
+    #[test]
+    fn newest_frame_modes_keep_more_images() {
+        assert_eq!(frame_latency(wgpu::PresentMode::Fifo), 2);
+        assert_eq!(frame_latency(wgpu::PresentMode::Mailbox), 6);
+        assert_eq!(frame_latency(wgpu::PresentMode::Immediate), 6);
+    }
 
     /// A swapchain that records what it was asked to present, and fails `fails`.
     #[derive(Default)]

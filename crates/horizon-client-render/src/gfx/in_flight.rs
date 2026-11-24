@@ -1,5 +1,6 @@
 //! Frames in flight: the readbacks a submission starts, landing frames the submit thread
-//! submitted, keeping offscreen frames at most two ahead of the GPU, and a screenshot's copy.
+//! submitted, keeping frames no swapchain paces at most two ahead of the GPU, and a
+//! screenshot's copy.
 
 use super::{Renderer, ScreenshotRequest, copy_frame, submit};
 
@@ -37,10 +38,11 @@ impl Renderer {
     pub fn stats_lag(&self) -> u64 {
         self.frame_serial - self.stats_frame
     }
-    /// Take in the frame the submit thread submitted: start its readbacks and, offscreen,
-    /// keep at most two frames ahead of the GPU, as a frame submitted in place does.
+    /// Take in the frame the submit thread submitted: start its readbacks and, when no
+    /// swapchain paces it, keep at most two frames ahead of the GPU, as a frame submitted
+    /// in place does.
     pub(super) fn land_frame(&mut self) {
-        let Some(offscreen) = self.deferred.take() else {
+        let Some(unpaced) = self.deferred.take() else {
             return;
         };
         let submission = self.queue.landed();
@@ -52,7 +54,7 @@ impl Renderer {
         if let Some(timer) = &mut self.own_timing {
             timer.submitted(&self.queue);
         }
-        if offscreen && let Some(submission) = submission {
+        if unpaced && let Some(submission) = submission {
             self.in_flight.push_back(submission);
             if !self.paced_elsewhere {
                 self.wait_frames();
@@ -70,6 +72,11 @@ impl Renderer {
     /// turn before; this is the turn's own.)
     pub fn wait_submissions(&mut self) {
         self.queue.wait();
+    }
+    /// Frames presented without VSync: the swapchain keeps more images than frames may run
+    /// ahead (`output_apply::frame_latency`), so acquiring one no longer holds the CPU back.
+    pub(super) fn unpaced(&self) -> bool {
+        self.config.present_mode != wgpu::PresentMode::Fifo
     }
     pub(super) fn wait_frames(&mut self) {
         while self.in_flight.len() > 2 {

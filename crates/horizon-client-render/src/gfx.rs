@@ -1739,7 +1739,8 @@ pub struct Renderer {
     /// The offscreen colour target, sized like `config`.
     offscreen: Option<wgpu::Texture>,
     frame_export: Option<frame_export::Readbacks>,
-    /// Offscreen submissions still on the GPU: at most two frames run ahead.
+    /// Submissions still on the GPU that no swapchain paces (offscreen, or presented without
+    /// VSync to a swapchain long enough for the compositor): at most two frames run ahead.
     in_flight: std::collections::VecDeque<wgpu::SubmissionIndex>,
     /// Splitscreen: the caller waits for the GPU once every player has submitted
     /// (`wait_in_flight`), so one player's work overlaps the GPU drawing another's.
@@ -1771,8 +1772,8 @@ pub struct Renderer {
     reuse: Arc<reuse::Reuse>,
     /// Frames are finished and submitted on its submit thread ([`submit`]).
     pub queue: submit::Queue,
-    /// The last frame went to the submit thread; whether it had no window surface.
-    /// The next frame takes it in ([`Self::land_frame`]).
+    /// The last frame went to the submit thread; whether the swapchain doesn't pace it
+    /// ([`Self::unpaced`]). The next frame takes it in ([`Self::land_frame`]).
     deferred: Option<bool>,
     /// Set by the device's lost callback. wgpu reports nothing else when an
     /// operation fails on a lost device (no error scope sees it).
@@ -7130,6 +7131,11 @@ impl Renderer {
         hdr: Option<&hdr::Hdr>,
         device_lost: &std::sync::atomic::AtomicBool,
     ) -> std::result::Result<(), String> {
+        // Every configuration goes through here, so the frames ahead always follow the mode.
+        let config = &wgpu::SurfaceConfiguration {
+            desired_maximum_frame_latency: output_apply::frame_latency(config.present_mode),
+            ..config.clone()
+        };
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         {
@@ -13675,7 +13681,7 @@ impl Renderer {
                 .submit_frame(job, copies.take(), Some(&self.device))
             {
                 Ok(()) => {
-                    self.deferred = Some(offscreen);
+                    self.deferred = Some(offscreen || self.unpaced());
                     self.handed_off = true;
                     self.handed_patches.clone_from(&frame.hud.patches);
                     // The frame's waits for the previous one on the submit thread.
@@ -13832,8 +13838,8 @@ impl Renderer {
         } else if let Some((real, generated)) = fg_frames {
             self.present_generated(real, generated, fg_made);
         }
-        if self.surface.is_none() {
-            // No swapchain paces offscreen frames: keep two on the GPU at most.
+        if self.surface.is_none() || self.unpaced() {
+            // No swapchain paces these frames: keep two on the GPU at most.
             self.in_flight.push_back(submission);
             if !self.paced_elsewhere {
                 self.wait_in_flight();

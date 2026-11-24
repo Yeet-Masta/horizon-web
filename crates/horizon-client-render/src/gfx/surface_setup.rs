@@ -65,6 +65,7 @@ pub(super) fn set_up_surface(
                 wgpu::PresentMode::Fifo
             }
         });
+    config.desired_maximum_frame_latency = super::output_apply::frame_latency(config.present_mode);
     if log_step {
         log_configured(&config, Some("device ready; "));
     }
@@ -94,8 +95,12 @@ pub(super) fn log_configured(config: &wgpu::SurfaceConfiguration, start: Option<
         return;
     }
     let line = format!(
-        "configuring the surface ({}x{} {:?}, {:?})",
-        config.width, config.height, config.format, config.present_mode
+        "configuring the surface ({}x{} {:?}, {:?}, {} frames ahead)",
+        config.width,
+        config.height,
+        config.format,
+        config.present_mode,
+        config.desired_maximum_frame_latency
     );
     match start {
         Some(lead) => startup_step(format_args!("{lead}{line}")),

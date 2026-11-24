@@ -25,7 +25,7 @@ pack supplies the file. The selected mode is saved in `options.txt` and is not c
 
 With VSync off, **Present Mode: Mailbox** uses FIFO on surfaces that do not support Mailbox, so
 the explicit tear-free choice never becomes Immediate. **Auto** still follows vanilla's selection.
-The F3 display shows the mode that the surface actually uses.
+The F3 display shows the mode that the surface actually uses. With Mailbox or Immediate the swapchain keeps 7 images, since only the newest frame is shown: a compositor that scans fullscreen frames out directly (GNOME on Wayland) returns images only at each refresh, and with the 3 images FIFO keeps the frame rate stopped at the refresh rate even with VSync off.
 
 Each preset is a fixed table (`graphics_preset.rs`), so picking one gives the same settings whatever was set before:
 
