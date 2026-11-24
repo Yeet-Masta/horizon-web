@@ -1051,7 +1051,17 @@ fn run(
                         address,
                     ));
                 };
-                status(send, &tr(lang, "connect.connecting"));
+                status(
+                    send,
+                    &tr(
+                        lang,
+                        if transferred {
+                            "connect.transferring"
+                        } else {
+                            "connect.connecting"
+                        },
+                    ),
+                );
                 log_connecting(&target.0, target.1);
                 (target.0, target.1, Vec::new())
             }
