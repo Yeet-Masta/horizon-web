@@ -635,6 +635,9 @@ impl PlayerMotion {
                 .and_then(|t| crate::save::number(t.get("invulnerable_time")))
                 .unwrap_or(0) as i32;
             self.fall_distance = level.fall_distance;
+            // LivingEntity.readAdditionalSaveData: the impulse context, so a launch
+            // saved mid-air still measures its fall from the impact point.
+            self.impulse = crate::save::saved_impulse(extra);
             // LivingEntity.readAdditionalSaveData applies the saved attributes
             // before it reads the health (a raised max_health keeps its hearts).
             self.apply_saved_attributes(extra.and_then(|t| t.get("attributes")))?;

@@ -361,7 +361,7 @@ impl Game<'_> {
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
         });
         let player_save_projection = (
-            self.level.player_impulse_grace.take(),
+            self.level.player_impulse.take(),
             self.level.player_fall_particles.take(),
         );
         let g = &host.hub.guests[i];
@@ -851,7 +851,7 @@ impl Game<'_> {
             std::mem::swap(&mut self.level.recipe_book, &mut g.recipe_book);
             std::mem::swap(&mut self.level.player_extra, &mut g.saved);
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
-            self.level.player_impulse_grace = player_save_projection.0;
+            self.level.player_impulse = player_save_projection.0;
             self.level.player_fall_particles = player_save_projection.1;
             std::mem::swap(&mut self.stats, &mut play.stats);
             std::mem::swap(&mut self.hook, &mut play.hook);

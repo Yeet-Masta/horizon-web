@@ -2961,6 +2961,7 @@ mod hub_tests {
                 ticks_frozen: 60,
                 invulnerable: false,
                 invulnerable_time: 0,
+                impulse: Default::default(),
             });
             let mut extra = Tag::Compound(Default::default());
             if let Tag::Compound(map) = &mut extra {
@@ -3019,6 +3020,7 @@ mod hub_tests {
             ticks_frozen: 0,
             invulnerable: false,
             invulnerable_time: 0,
+            impulse: Default::default(),
         };
         {
             let value = Some(mine);
@@ -3067,6 +3069,7 @@ mod hub_tests {
                     ticks_frozen: 0,
                     invulnerable: false,
                     invulnerable_time: 0,
+                    impulse: Default::default(),
                 });
             }),
         ];

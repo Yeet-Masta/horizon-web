@@ -324,6 +324,7 @@ pub fn apply(guest: &mut Guest, level: &Level, prototypes: &crate::item_data::It
             .and_then(|t| crate::save::number(t.get("Invulnerable")))
             .is_some_and(|v| v != 0),
         invulnerable_time: short("invulnerable_time", 0),
+        impulse: crate::save::saved_impulse(extra),
     });
     guest.saved_vehicle = level.root_vehicle;
     guest.recipe_book = level.recipe_book.clone();
@@ -549,7 +550,6 @@ impl Drop for Autosaves {
 /// Put a guest's state in `level`'s player fields; `vehicle` is the
 /// RootVehicle compound of the ride (`ServerPlayer.saveParentVehicle`).
 pub fn store(guest: &Guest, level: &mut Level, vehicle: Option<Tag>) {
-    level.player_impulse_grace = guest.motion.as_ref().map(|p| p.impulse.reset_grace_time);
     level.player_fall_particles = guest
         .motion
         .as_ref()
@@ -621,6 +621,8 @@ pub fn store(guest: &Guest, level: &mut Level, vehicle: Option<Tag>) {
         .as_deref()
         .map(SavedBody::of)
         .or(guest.loaded_body);
+    // LivingEntity.addAdditionalSaveData's impulse context, the live body's or the file's.
+    level.player_impulse = body.map(|b| b.impulse);
     if let Some(body) = body {
         level.fall_distance = body.fall_distance;
         level.motion = body.velocity;

@@ -679,6 +679,7 @@ fn a_saved_burn_and_fall_come_back() {
         ticks_frozen: 0,
         invulnerable: false,
         invulnerable_time: 0,
+        impulse: Default::default(),
     });
     let mut level = Level::default();
     store(&g, &mut level, None);
@@ -707,6 +708,7 @@ fn a_saved_flag_and_window_come_back() {
         ticks_frozen: 0,
         invulnerable: true,
         invulnerable_time: 41,
+        impulse: Default::default(),
     });
     let (tag, back) = round_trip(&g);
     assert_eq!(tag.get("Invulnerable"), Some(&Tag::Byte(1)));
@@ -779,6 +781,7 @@ fn a_saved_motion_comes_back() {
         ticks_frozen: 0,
         invulnerable: false,
         invulnerable_time: 0,
+        impulse: Default::default(),
     });
     let (tag, back) = round_trip(&g);
     let mut read = Level::default();
@@ -820,6 +823,7 @@ fn a_saved_exhaustion_and_food_timer_come_back() {
         ticks_frozen: 0,
         invulnerable: false,
         invulnerable_time: 0,
+        impulse: Default::default(),
     });
     let (tag, back) = round_trip(&g);
     assert_eq!(
@@ -866,6 +870,7 @@ fn a_saved_freeze_comes_back_and_a_thaw_clears_it() {
         ticks_frozen: ticks,
         invulnerable: false,
         invulnerable_time: 0,
+        impulse: Default::default(),
     };
     let mut g = guest();
     g.loaded_body = Some(frozen(120));
@@ -1179,4 +1184,41 @@ fn a_downloaded_realms_world_finds_the_accounts_player_file() {
     assert!(load_owner(&mut g, &dir, Some(&read), &Default::default()));
     assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #20845: LivingEntity's impulse context rides the player's file. A wind-charge
+/// launch saved mid-air comes back measuring its fall from the impact point, and once
+/// the context has ended the file's old point is not written back.
+#[test]
+fn a_saved_impulse_context_comes_back_and_an_ended_one_leaves_no_impact_point() {
+    use horizon_core::geometry::Vec3;
+    use horizon_world::living_fall::ImpulseContext;
+    let d = |v: f64| Tag::Double(v.to_bits());
+    let impact = Tag::List(vec![d(3.5), d(80.0), d(-2.5)]);
+    let vanilla = Tag::compound([
+        ("current_impulse_context_reset_grace_time", Tag::Int(12)),
+        ("current_explosion_impact_pos", impact.clone()),
+    ]);
+    let mut level = Level::default();
+    level.read_player(&vanilla);
+    level.player_extra = Some(vanilla);
+    let mut g = guest();
+    apply(&mut g, &level, &Default::default());
+    let launched = ImpulseContext {
+        reset_grace_time: 12,
+        impact_position: Some(Vec3::new(3.5, 80.0, -2.5)),
+    };
+    assert_eq!(g.loaded_body.unwrap().impulse, launched);
+    let (tag, back) = round_trip(&g);
+    assert_eq!(back.loaded_body.unwrap().impulse, launched);
+    assert_eq!(tag.get("current_explosion_impact_pos"), Some(&impact));
+    // The context ended (a landing reset it): the key goes, as storeNullable leaves out null.
+    g.loaded_body.as_mut().unwrap().impulse.reset();
+    let (tag, back) = round_trip(&g);
+    assert_eq!(tag.get("current_explosion_impact_pos"), None);
+    assert_eq!(
+        tag.get("current_impulse_context_reset_grace_time"),
+        Some(&Tag::Int(0))
+    );
+    assert_eq!(back.loaded_body.unwrap().impulse, ImpulseContext::default());
 }

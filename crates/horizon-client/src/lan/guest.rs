@@ -71,6 +71,10 @@ pub struct SavedBody {
     /// tags the host's own save keeps.
     pub invulnerable: bool,
     pub invulnerable_time: i32,
+    /// `current_impulse_context_reset_grace_time` and `current_explosion_impact_pos`
+    /// (LivingEntity): a wind charge's launch goes on measuring its fall from the
+    /// impact point after a rejoin.
+    pub impulse: horizon_world::living_fall::ImpulseContext,
 }
 
 impl SavedBody {
@@ -87,6 +91,7 @@ impl SavedBody {
             ticks_frozen: motion.ticks_frozen,
             invulnerable: motion.health.permanently_invulnerable,
             invulnerable_time: motion.health.invulnerable_time,
+            impulse: motion.impulse,
         }
     }
     /// Put it on a new body.
@@ -101,6 +106,7 @@ impl SavedBody {
         motion.ticks_frozen = self.ticks_frozen;
         motion.health.permanently_invulnerable = self.invulnerable;
         motion.health.invulnerable_time = self.invulnerable_time;
+        motion.impulse = self.impulse;
     }
 }
 

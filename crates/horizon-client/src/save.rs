@@ -168,6 +168,23 @@ pub(crate) fn put(tag: &mut Tag, key: &str, value: Tag) {
         map.insert(key.into(), value);
     }
 }
+/// `LivingEntity`'s save keys for its impulse context: the grace time before the
+/// context may end, and the impact point fall damage is measured from.
+pub const IMPULSE_GRACE_KEY: &str = "current_impulse_context_reset_grace_time";
+pub const IMPACT_POS_KEY: &str = "current_explosion_impact_pos";
+/// `LivingEntity.readAdditionalSaveData`: `getIntOr(IMPULSE_GRACE_KEY, 0)` and
+/// `read(IMPACT_POS_KEY, Vec3.CODEC).orElse(null)`, from a saved player compound.
+pub fn saved_impulse(tag: Option<&Tag>) -> horizon_world::living_fall::ImpulseContext {
+    let tag = tag.filter(|t| matches!(t, Tag::Compound(_)));
+    horizon_world::living_fall::ImpulseContext {
+        reset_grace_time: tag
+            .and_then(|t| number(t.get(IMPULSE_GRACE_KEY)))
+            .unwrap_or(0) as i32,
+        impact_position: tag
+            .and_then(|t| read_doubles::<3>(t.get(IMPACT_POS_KEY)))
+            .map(|[x, y, z]| horizon_core::geometry::Vec3::new(x, y, z)),
+    }
+}
 fn compound_or_empty(tag: Option<Tag>) -> Tag {
     match tag {
         Some(t @ Tag::Compound(_)) => t,
@@ -3956,9 +3973,10 @@ pub struct Level {
     /// `LivingEntity.addAdditionalSaveData`'s `FallFlying`: the player was
     /// gliding (shared flag 7), so the glide goes on after the load.
     pub fall_flying: bool,
-    /// Current body's save projection. None before a live body supplies it;
-    /// retained raw data stays intact until then.
-    pub player_impulse_grace: Option<i32>,
+    /// Current body's save projection: its impulse context (the grace time and the
+    /// wind charge's impact point). None before a live body supplies it; retained raw
+    /// data stays intact until then.
+    pub player_impulse: Option<horizon_world::living_fall::ImpulseContext>,
     pub player_fall_particles: Option<bool>,
     pub food_exhaustion: f32,
     pub food_tick_timer: i32,
@@ -4243,7 +4261,7 @@ impl Level {
         Some(level)
     }
     pub fn read_player(&mut self, p: &Tag) {
-        self.player_impulse_grace = None;
+        self.player_impulse = None;
         self.player_fall_particles = None;
         let n = |k: &str| number(p.get(k));
         let f = |k: &str| float(p.get(k));
@@ -4478,11 +4496,23 @@ impl Level {
                 .or_insert(Tag::Float(0.1f32.to_bits()));
             map.entry("flying".into()).or_insert(Tag::Byte(0));
         }
-        let impulse_grace = self
-            .player_impulse_grace
-            .map(Tag::Int)
-            .or_else(|| p.get("current_impulse_context_reset_grace_time").cloned())
-            .unwrap_or(Tag::Int(0));
+        // LivingEntity.addAdditionalSaveData: `putInt(IMPULSE_GRACE_KEY, ...)` and
+        // `storeNullable(IMPACT_POS_KEY, Vec3.CODEC, currentImpulseImpactPos)`. A body's
+        // context replaces the file's; a point the body no longer has leaves the key out.
+        let impulse_grace = match self.player_impulse {
+            Some(impulse) => {
+                match impulse.impact_position {
+                    Some(at) => put(&mut p, IMPACT_POS_KEY, doubles(&[at.x, at.y, at.z])),
+                    None => {
+                        if let Tag::Compound(map) = &mut p {
+                            map.remove(&JavaString::from(IMPACT_POS_KEY));
+                        }
+                    }
+                }
+                Tag::Int(impulse.reset_grace_time)
+            }
+            None => p.get(IMPULSE_GRACE_KEY).cloned().unwrap_or(Tag::Int(0)),
+        };
         let fall_particles = self
             .player_fall_particles
             .map(|v| Tag::Byte(i8::from(v)))
@@ -4506,7 +4536,7 @@ impl Level {
                 "Brain",
                 Tag::compound([("memories", Tag::Compound(Default::default()))]),
             ),
-            ("current_impulse_context_reset_grace_time", impulse_grace),
+            (IMPULSE_GRACE_KEY, impulse_grace),
             ("spawn_extra_particles_on_fall", fall_particles),
             ("AbsorptionAmount", Tag::Float(self.absorption.to_bits())),
             ("foodLevel", Tag::Int(self.food)),

@@ -492,6 +492,7 @@ impl Kept {
                 if !has("position") {
                     imported.fall_distance = mine.fall_distance;
                     imported.velocity = mine.velocity;
+                    imported.impulse = mine.impulse;
                 }
                 if !has("health") {
                     imported.fire_ticks = mine.fire_ticks;

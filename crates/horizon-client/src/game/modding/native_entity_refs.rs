@@ -2786,6 +2786,7 @@ pub(super) mod tests {
                         ticks_frozen: 0,
                         invulnerable: false,
                         invulnerable_time: 0,
+                        impulse: Default::default(),
                     });
                 }
                 guest.inventory[0] = Some(ItemStack::new("minecraft:stone", 1));
