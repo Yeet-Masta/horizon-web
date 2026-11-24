@@ -3441,6 +3441,30 @@ def gameplay_guide(args, name):
             rows = rows_on(block, item)
             shown = [c for b, c in rows if b == 'lt']
             check(shown == wanted, f'{item} on {block}: {rows}')
+        # Sneak latched (the stick click toggles it on a pad): with something in a hand the click
+        # skips the door and places the item, so the row says Place; an empty hand still uses it.
+        game.pad('rs')
+        left, _ = guide(game)
+        check(('rs', 'stand') in left, f'sneak did not latch: {left}')
+        before = (at[0], at[1], at[2] - 1)  # the door's face toward the player
+        for item, wanted in (('stone', ['place']), ('air', ['use'])):
+            rows = rows_on('oak_door', item)
+            shown = [c for b, c in rows if b == 'lt']
+            check(shown == wanted, f'sneaking, {item} on a door: {rows}')
+            # What LT does is what the row said. A tap: held, the use repeats every 4 ticks.
+            game.ctl('pad', 'trigger', 'left', 1)
+            time.sleep(0.1)
+            game.ctl('pad', 'trigger', 'left', 0)
+            time.sleep(SETTLE)
+            door = game.ctl('block', *at)['state']
+            placed = game.ctl('block', *before)['block']
+            if item == 'stone':
+                check('open=false' in door and placed == 'minecraft:stone',
+                      f'sneaking LT with stone: door {door}, in front {placed}')
+            else:
+                check('open=true' in door, f'sneaking LT with an empty hand: door {door}')
+            game.ctl('command', f'fill {before[0]} {before[1]} {before[2] - 1} {before[0]} {before[1]} {before[2]} air')
+        game.pad('rs')
         give('air')
 
         game.ctl('command', 'gamemode survival')

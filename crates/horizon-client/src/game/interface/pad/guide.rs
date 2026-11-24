@@ -403,7 +403,7 @@ impl Game<'_> {
         } else {
             let held = self.held().cloned();
             let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-            let secondary = self.keys.held(Action::Sneak) && hands_full;
+            let secondary = self.pad_guide_click_sneaks() && hands_full;
             let ender_chest = &*self
                 .res
                 .facts()
@@ -417,7 +417,9 @@ impl Game<'_> {
             } else if !secondary && ender_chest && !self.pad_guide_block_covered(&hit) {
                 // EnderChestBlock has no menu provider but opens one: nothing solid on top.
                 Some(Verb::Open)
-            } else if self.block_takes_click(&hit, held.as_ref()) {
+            } else if !secondary && self.block_takes_click(&hit, held.as_ref()) {
+                // Sneaking with something in a hand skips the block, as the click itself does
+                // (Player.isSecondaryUseActive): a door stays shut and the item is used instead.
                 Some(Verb::Use)
             } else {
                 None
@@ -445,13 +447,24 @@ impl Game<'_> {
     /// The block keeps the click and nothing happens, so neither it nor the item gets a row:
     /// `InteractionResult.CONSUME`, which an empty lectern also returns for anything but a book
     /// (`LecternBlock.useWithoutItem`; `ItemTags.LECTERN_BOOKS`).
+    /// Whether a click on a block now would count as sneaking: the sneak bit the server last
+    /// heard, as the click itself reads it (`interaction_prediction.rs`), so the row matches LT
+    /// even in the tick a sneak starts or ends.
+    fn pad_guide_click_sneaks(&self) -> bool {
+        if self.remote.is_some() {
+            self.remote_shift_down()
+        } else {
+            self.keys.held(Action::Sneak)
+        }
+    }
+
     fn pad_guide_click_swallowed(
         &mut self,
         hit: &super::super::Hit,
         held: Option<&ItemStack>,
     ) -> bool {
         let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-        if self.keys.held(Action::Sneak) && hands_full {
+        if self.pad_guide_click_sneaks() && hands_full {
             return false;
         }
         let book = held.is_some_and(|s| {

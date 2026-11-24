@@ -949,7 +949,7 @@ impl Game<'_> {
     fn send_action(&self, action: i32) {
         self.send_action_body(action)
     }
-    fn remote_shift_down(&self) -> bool {
+    pub(in crate::game) fn remote_shift_down(&self) -> bool {
         self.remote_shift_down_body()
     }
     fn next_sequence(&mut self) -> i32 {
