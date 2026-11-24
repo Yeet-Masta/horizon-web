@@ -4961,6 +4961,18 @@ impl PackPost {
             && (self.shadow_terrain.is_some() || self.shadow_water.is_some())
     }
 
+    /// Whether the pack draws solid terrain into the shadow map with a program without a
+    /// geometry stage, which reads the arena page as the flat list's calls have it: one with a
+    /// geometry stage reads the flat list's indices itself, and its draws stay in that list, as
+    /// they do where no program draws them (`gfx::pack_shadow_indirect`).
+    pub fn shadow_solid_flat(&self) -> bool {
+        self.shadow_targets.is_some()
+            && self
+                .shadow_terrain
+                .as_ref()
+                .is_some_and(|p| p.geometry == 0)
+    }
+
     /// Whether the pack draws the sky (disc, sunset, stars, void) itself.
     /// What the world's background is when the pack draws the sky: colortex0's clear colour
     /// (`None`: the fog colour, its default).

@@ -421,8 +421,10 @@ impl<T> Resident<T> {
 /// A section in view.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Visible {
-    /// Its centre's squared distance from the camera, as bits: non-negative
-    /// floats order like their bits, so sorting compares integers.
+    /// What its list sorts by, as an integer: its centre's squared distance
+    /// from the camera, as bits (non-negative floats order like their bits).
+    /// In a shader pack's shadow list (`Renderer::shadow_visible`), its place
+    /// in the light's order instead (`external::sort_shadow_sections`).
     pub distance: u64,
     pub key: SectionKey,
     pub slot: u32,
@@ -619,11 +621,46 @@ impl<T> Resident<T> {
     ) {
         self.walk(camera, radius, frustum, reachable, beyond, false, out);
     }
+    /// `visible` in no particular order: for a list its caller sorts by something else (the
+    /// shader pack shadow pass's, along the light).
+    pub fn visible_unsorted(
+        &self,
+        camera: DVec3,
+        radius: i32,
+        frustum: &impl Cull,
+        reachable: impl Fn(SectionKey) -> bool,
+        beyond: impl Fn(i32, i32) -> bool,
+        out: &mut Vec<Visible>,
+    ) {
+        self.walk_unsorted(camera, radius, frustum, reachable, beyond, false, out);
+    }
     /// `visible`, less the sections within the render distance that are not
     /// marked (`insert_marked`) when `marked_only_near`, in the same order: GPU
     /// culling's frames, where the GPU draws those. A column's box spans all of
     /// its sections either way, so both decide alike on those they share.
     pub fn walk(
+        &self,
+        camera: DVec3,
+        radius: i32,
+        frustum: &impl Cull,
+        reachable: impl Fn(SectionKey) -> bool,
+        beyond: impl Fn(i32, i32) -> bool,
+        marked_only_near: bool,
+        out: &mut Vec<Visible>,
+    ) {
+        self.walk_unsorted(
+            camera,
+            radius,
+            frustum,
+            reachable,
+            beyond,
+            marked_only_near,
+            out,
+        );
+        sort_visible(out);
+    }
+    /// `walk` without its sort.
+    fn walk_unsorted(
         &self,
         camera: DVec3,
         radius: i32,
@@ -795,7 +832,6 @@ impl<T> Resident<T> {
                 }
             }
         }
-        sort_visible(out);
     }
 }
 

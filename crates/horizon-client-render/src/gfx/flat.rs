@@ -349,7 +349,9 @@ fn buffer(
 /// from `shadow[0]` (solid) and `shadow[1]` (translucent) on are a shader
 /// pack's shadow camera's, with calls of their own. Phase 1's draws before
 /// `passes[0]` and from `passes[1]` on, the two solid passes' on Metal, too,
-/// and phase 2's from `passes[2]` on (its cutout pass's).
+/// and phase 2's from `passes[2]` on (its cutout pass's). Draws `skip` are
+/// drawn indirectly instead (a shader pack's shadow camera's solid ones,
+/// `gfx::pack_shadow_indirect`): no indices, no calls.
 #[allow(clippy::too_many_arguments)]
 fn plan(
     draws: &[[u32; 5]],
@@ -358,6 +360,7 @@ fn plan(
     solid_draws: usize,
     marks: [usize; MARKS],
     passes: [usize; 3],
+    skip: std::ops::Range<usize>,
     align: u64,
     key: impl Fn(u32, Option<u32>) -> u32,
     calls: &mut Vec<Call>,
@@ -388,6 +391,9 @@ fn plan(
             if i == from {
                 pass_calls[k].get_or_insert(calls.len());
             }
+        }
+        if skip.contains(&i) {
+            continue;
         }
         let starts =
             i == phase1_draws || i == solid_draws || marks.contains(&i) || passes.contains(&i);
@@ -814,7 +820,8 @@ impl Flat {
     ///
     /// When culling, the solid draws from `phase1_draws` are phase 2's, which
     /// `phase2` holds as the test leaves them: `flatten_phase2` copies them.
-    /// Draws from `shadow` on are a shader pack's shadow camera's (`plan`).
+    /// Draws from `shadow` on are a shader pack's shadow camera's (`plan`), and
+    /// draws `skip`, drawn indirectly, are left out.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         &mut self,
@@ -827,6 +834,7 @@ impl Flat {
         solid_draws: usize,
         marks: [usize; MARKS],
         passes: [usize; 3],
+        skip: std::ops::Range<usize>,
         phase2: Option<&wgpu::Buffer>,
         translucent_arena: bool,
         origins: impl Iterator<Item = (u32, [f32; 4])>,
@@ -857,6 +865,7 @@ impl Flat {
             solid_draws,
             marks,
             passes,
+            skip,
             self.range_align,
             // Translucent draws, and only they, have sorted indices.
             |page, sorted| match sorted {
@@ -1441,6 +1450,7 @@ mod tests {
             solid,
             [draws.len(); MARKS],
             [draws.len(), 0, solid],
+            0..0,
             4,
             |page, _| page,
             &mut calls,
@@ -1490,6 +1500,7 @@ mod tests {
             solid,
             [draws.len(); MARKS],
             [3, 1, solid],
+            0..0,
             4,
             |page, _| page,
             &mut calls,
@@ -1529,6 +1540,7 @@ mod tests {
             solid,
             marks,
             [camera, 0, solid],
+            0..0,
             4,
             |page, _| page,
             &mut calls,
@@ -1555,6 +1567,52 @@ mod tests {
         assert_eq!(plan.total, 6 * 19);
     }
 
+    /// The shadow camera's solid draws a shader pack draws indirectly (`skip`) get no indices
+    /// and no calls: the list packs every other draw's as before, and the shadow's translucent
+    /// calls and the view's begin where its solid ones would have.
+    #[test]
+    fn plan_leaves_out_the_draws_drawn_indirectly() {
+        let (mut draws, mut pages, solid) = sample();
+        let camera = draws.len();
+        draws.extend([[6, 1, 0, 40, 6], [6 * 2, 1, 0, 64, 7], [6, 1, 6, 80, 7]]);
+        draws.extend([[6, 1, 0, 88, 8], [6, 1, 12, 90, 8]]);
+        pages.extend([(0, None), (0, None), (0, Some(0)), (0, None), (0, Some(0))]);
+        let (mut calls, mut ranges, mut segments) = (Vec::new(), Vec::new(), Vec::new());
+        let mut marks = [usize::MAX; MARKS];
+        marks[..4].copy_from_slice(&[camera, camera + 2, camera + 3, camera + 4]);
+        let plan = plan(
+            &draws,
+            &pages,
+            solid,
+            solid,
+            marks,
+            [camera, 0, solid],
+            camera..camera + 2,
+            4,
+            |page, _| page,
+            &mut calls,
+            &mut ranges,
+            &mut segments,
+        );
+        // The two left out held 18 indices.
+        assert_eq!(plan.total, 6 * 16);
+        assert_eq!(&plan.marks[..4], [4, 4, 5, 6]);
+        let call = |page, first, count| Call { page, first, count };
+        assert_eq!(
+            &calls[3..],
+            [
+                call(0, 60, 18),
+                call(0, 78, 6),
+                call(0, 84, 6),
+                call(0, 90, 6)
+            ]
+        );
+        // The camera's four solid ranges and the view's: none at the left-out base vertices.
+        assert_eq!(segments[0], (Source::Quads, 0, 5));
+        assert_eq!(ranges[4], [6, QUADS, 88, 84]);
+        assert!(ranges[..5].iter().all(|r| r[2] != 40 && r[2] != 64));
+    }
+
     /// Phase 2's draws (here the third and fourth) get calls of their own,
     /// each with room for all of its draws, and ranges naming their draw
     /// and call in phase 2.
@@ -1569,6 +1627,7 @@ mod tests {
             solid,
             [draws.len(); MARKS],
             [draws.len(), 0, solid],
+            0..0,
             4,
             |page, _| page,
             &mut calls,
@@ -1688,6 +1747,7 @@ mod tests {
                 solid,
                 [draws.len(); MARKS],
                 [draws.len(), 0, solid],
+                0..0,
                 align,
                 |page, _| page,
                 &mut calls,

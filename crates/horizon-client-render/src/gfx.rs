@@ -307,7 +307,7 @@ pub use entity_batch::{
     WATER_MASK_OVERLAY, WORLD_TEXT_OVERLAY, WORLD_TEXT_POLYGON_OFFSET_OVERLAY, is_native_terrain,
     mark_oit,
 };
-use external::{shadow_box, shadow_runs};
+use external::{shadow_box, shadow_runs, sort_shadow_sections};
 pub use frustum::{Cull, Frusta, JoinedFrusta, ShadowCull};
 use frustum::{block_entities_within_reach, frustum, shadow_casters, taa_frustum};
 use section_fade::{
@@ -435,6 +435,21 @@ impl<'a> SectionLists<'a> {
         count: u32,
         pulled: bool,
     ) {
+        self.draw_paged(pass, indirect, base, first, count, pulled, &|_, _| {});
+    }
+    /// `draw`, calling `paged` with each run's arena page before drawing it: a shader pack's
+    /// flat program binds that page's vertices for reading there, as it does before each of
+    /// `flat::Flat::draw_with`'s calls.
+    pub(super) fn draw_paged(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        indirect: &wgpu::Buffer,
+        base: u32,
+        first: u32,
+        count: u32,
+        pulled: bool,
+        paged: &dyn Fn(&mut wgpu::RenderPass<'_>, u32),
+    ) {
         let (draws, pages) = (self.draws, self.pages);
         let (mut i, end) = (first as usize, (first + count) as usize);
         while i < end {
@@ -466,9 +481,10 @@ impl<'a> SectionLists<'a> {
             {
                 pass.set_bind_group(1, group, &[]);
             }
+            paged(pass, page);
             pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
             if self.multi_draw {
-                let offset = (i - base as usize) as u64 * 20;
+                let offset = indirect_offset(i, base);
                 pass.multi_draw_indexed_indirect(indirect, offset, run as u32);
             } else {
                 for d in &draws[i..i + run] {
@@ -516,6 +532,89 @@ fn translucent_split(batching: bool, flat_draws: bool, terrain: bool, shadow: bo
 /// The compact layout of solid quads, unless `HORIZON_PACKED_QUADS=0` (A/B checks).
 fn packed_wanted() -> bool {
     std::env::var("HORIZON_PACKED_QUADS").as_deref() != Ok("0")
+}
+
+/// Whether a `shaders/` pack's shadow pass draws its solid list (draws `solid` of `draws`) with
+/// indirect multi-draws over the quad indices, each at its section's base vertex, rather than
+/// from the flat list (`flat::Flat::prepare`'s `skip`). Its program reads the arena page
+/// itself and sees the same vertex index either way, the base vertex plus the quad's corner;
+/// the frame no longer copies every index of the light's sections, its largest list, into the
+/// flat list each frame and reads them back. Only where frames without a pack draw section by
+/// section (`vanilla_flat` false, `flat::for_vanilla`: not where multi-draws are emulated or
+/// mishandled), where the device runs each of the list's multi-draws as one command (`limit`,
+/// `native_multi_draw_limit`; a page's run holds at most the whole list), as one replayed draw
+/// by draw would turn the flat list's few calls into a command a draw, for a shadow program
+/// without a geometry stage, which reads the flat list's indices itself (`program`), while
+/// another draw keeps the frame flat, and unless `HORIZON_PACK_SHADOW_INDIRECT=0` (`wanted`).
+fn pack_shadow_indirect(
+    wanted: bool,
+    limit: u32,
+    vanilla_flat: bool,
+    program: bool,
+    draws: &[[u32; 5]],
+    solid: std::ops::Range<usize>,
+) -> bool {
+    wanted
+        && solid.len() <= limit as usize
+        && !vanilla_flat
+        && program
+        && !solid.is_empty()
+        && (draws.iter().enumerate()).any(|(i, d)| !solid.contains(&i) && d[0] > 0)
+}
+
+/// `pack_shadow_indirect`'s switch, for A/B checks: on unless `HORIZON_PACK_SHADOW_INDIRECT=0`.
+fn pack_shadow_indirect_wanted() -> bool {
+    static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WANTED.get_or_init(|| std::env::var("HORIZON_PACK_SHADOW_INDIRECT").as_deref() != Ok("0"))
+}
+
+/// The most draws one of the device's indirect multi-draws may hold and still be one command,
+/// 0 where they are replayed draw by draw or missing (`multi_draw`): all of them under DirectX 12
+/// (`ExecuteIndirect`); on Vulkan up to `maxDrawIndirectCount` with `multiDrawIndirect`
+/// (`horizon_hdr::vulkan_multi_draw_limit`), past which wgpu-hal issues one
+/// `vkCmdDrawIndexedIndirect` a draw; none under OpenGL and Metal. wgpu reports none of it.
+fn native_multi_draw_limit(adapter: &wgpu::Adapter, multi_draw: bool) -> u32 {
+    match adapter.get_info().backend {
+        _ if !multi_draw => 0,
+        wgpu::Backend::Dx12 => u32::MAX,
+        #[cfg(not(target_os = "macos"))]
+        wgpu::Backend::Vulkan => horizon_hdr::vulkan_multi_draw_limit(adapter).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Where draw `i`'s `DrawIndexedIndirectArgs` sit in an indirect buffer that holds them from
+/// draw `base` on: 20 bytes a draw.
+fn indirect_offset(i: usize, base: u32) -> u64 {
+    (i - base as usize) as u64 * 20
+}
+
+/// What a frame writes to its indirect buffer: the byte offset, and the draws whose
+/// `DrawIndexedIndirectArgs` (index count, instance count, first index, base vertex, first
+/// instance) go there, each where `SectionLists::draw_paged` reads it (`indirect_offset` from
+/// draw 0). A frame drawn section by section gives all of its draws, as listed, where it has
+/// indirect multi-draws (`multi_draw`; elsewhere each draw is a call of its own). A flat frame
+/// gives only the shadow camera's solid draws a `shaders/` pack draws indirectly (`shadow`,
+/// `pack_shadow_indirect`), at their base vertices, each turned into instance 0 as the flat
+/// list's calls draw theirs, which is what `gl_InstanceID` reads there.
+fn indirect_upload(
+    draws: &mut [[u32; 5]],
+    flat_frame: bool,
+    shadow: Option<std::ops::Range<usize>>,
+    multi_draw: bool,
+) -> Option<(u64, std::ops::Range<usize>)> {
+    let range = if flat_frame {
+        let range = shadow?;
+        for d in &mut draws[range.clone()] {
+            d[4] = 0;
+        }
+        range
+    } else if multi_draw && !draws.is_empty() {
+        0..draws.len()
+    } else {
+        return None;
+    };
+    Some((indirect_offset(range.start, 0), range))
 }
 
 /// On Vulkan, naga's SPIR-V writer leaves a loop it proves finite without the bound wgpu forces
@@ -2010,6 +2109,9 @@ pub struct Renderer {
     indirect_capacity: u64,
     /// Indirect draws may set `first_instance` (the section origin).
     pub multi_draw: bool,
+    /// The most draws an indirect multi-draw may hold and still be one command
+    /// (`native_multi_draw_limit`).
+    multi_draw_limit: u32,
     /// Per-frame scratch, kept to avoid allocating every frame.
     visible: Vec<resident::Visible>,
     visible_lods: Vec<lod::Visible>,
@@ -4843,6 +4945,7 @@ impl Renderer {
             .features()
             .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
             && indirect_execution;
+        let multi_draw_limit = native_multi_draw_limit(&adapter, multi_draw);
         let translucent = match &flat {
             Some(f) if translucent_pulled(&adapter.get_info(), multi_draw, true) => {
                 let layout = kept.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -5216,6 +5319,7 @@ impl Renderer {
             indirect,
             indirect_capacity: 1024,
             multi_draw,
+            multi_draw_limit,
             visible: Vec::new(),
             visible_lods: Vec::new(),
             shadow_visible: Vec::new(),
@@ -5478,6 +5582,42 @@ impl Renderer {
     /// buffer, a lost or full one (#15464).
     fn quad_indices(device: &wgpu::Device, quads: u32) -> Option<wgpu::Buffer> {
         rt::query::quad_indices(device, quads)
+    }
+    /// Room in the indirect buffer for the arguments of `draws` draws, grown to the next power
+    /// of two: `false` where video memory had none (#13624, warned of once as `kind`), the
+    /// buffer left as it was.
+    /// Takes the fields it changes rather than `self`, so a frame can grow the buffer while it
+    /// still holds other fields of the renderer.
+    fn grow_indirect(
+        device: &wgpu::Device,
+        indirect: &mut wgpu::Buffer,
+        indirect_capacity: &mut u64,
+        draws: usize,
+        kind: frame_targets::Kind,
+    ) -> bool {
+        if draws as u64 <= *indirect_capacity {
+            return true;
+        }
+        // A scaled screenshot's `made` checks nothing, and a buffer that failed would replace
+        // this one: the shadow's draws stay in the flat list instead (`pack_shadow_indirect`).
+        if matches!(kind, frame_targets::Kind::ShadowDraws) && frame_targets::screenshot_frame() {
+            return false;
+        }
+        let capacity = (draws as u64).next_power_of_two();
+        let made = frame_targets::made(device, kind, || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Section draws"),
+                size: capacity * 20,
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        });
+        let Some(buffer) = made else {
+            return false;
+        };
+        *indirect_capacity = capacity;
+        *indirect = buffer;
+        true
     }
 
     /// A window frame was given up (#13624). Where video memory stays full, every frame would
@@ -9408,7 +9548,7 @@ impl Renderer {
                         reach: v.distance,
                     };
                     let near = radius.min((d / 16.0).ceil() as i32);
-                    self.sections.visible(
+                    self.sections.visible_unsorted(
                         camera,
                         near,
                         &all,
@@ -9418,20 +9558,23 @@ impl Renderer {
                     );
                 }
                 boxed.clear();
-                self.sections
-                    .visible(camera, radius, &light, |_| true, |_, _| false, &mut boxed);
+                self.sections.visible_unsorted(
+                    camera,
+                    radius,
+                    &light,
+                    |_| true,
+                    |_, _| false,
+                    &mut boxed,
+                );
                 seen.clear();
                 seen.extend(shadow_visible.iter().map(|s| s.key));
                 shadow_visible.extend(boxed.drain(..).filter(|s| !seen.contains(&s.key)));
             });
             self.shadow_boxed_scratch = boxed;
             self.shadow_seen_scratch = seen;
-            // Nearest the light first, so the depth test rejects what lies under it.
-            let light = v.light;
-            shadow_visible.sort_unstable_by(|a, b| {
-                let height = |s: &resident::Visible| glam::Vec3::from(s.origin).dot(light);
-                height(b).total_cmp(&height(a))
-            });
+            // Nearest the light first. The lists come unsorted: their order by distance from the
+            // camera would be undone here.
+            sort_shadow_sections(&mut shadow_visible, v.light);
             for v in &shadow_visible {
                 self.sort_unseen(&mut encoder, v.slot, v.key, camera);
             }
@@ -10900,6 +11043,31 @@ impl Renderer {
                 &self.globals,
             );
         }
+        // A `shaders/` pack's shadow pass draws its solid list with indirect multi-draws, as
+        // frames without a pack draw theirs, not from the flat list (`pack_shadow_indirect`):
+        // only its flat programs read the page as the flat list's calls have them do.
+        let shadow_solid_draws = shadow_first as usize..(shadow_first + shadow_solid) as usize;
+        let shadow_indirect = self.pack_terrain_flat
+            && pack_shadow_indirect(
+                pack_shadow_indirect_wanted(),
+                self.multi_draw_limit,
+                (self.flat.as_ref()).is_some_and(|f| f.min_sections != usize::MAX),
+                (self.pack_post.as_ref())
+                    .and_then(|p| p.1.as_ref())
+                    .is_some_and(|p| p.shadow_solid_flat()),
+                &self.draws,
+                shadow_solid_draws.clone(),
+            )
+            // Their arguments need room in the indirect buffer before the flat list leaves them
+            // out: where video memory has none for a larger one (#13624), the flat list keeps
+            // them this frame rather than the frame being given up.
+            && Self::grow_indirect(
+                &self.device,
+                &mut self.indirect,
+                &mut self.indirect_capacity,
+                shadow_solid_draws.end,
+                frame_targets::Kind::ShadowDraws,
+            );
         let flat_frame = match &mut self.flat {
             Some(flat)
                 if self.flat_on
@@ -10932,6 +11100,11 @@ impl Renderer {
                         solid_draws as usize,
                         lists.marks([shadow_first, shadow_first + shadow_solid]),
                         [opaque_end, cutout_start, phase2_cutout as usize],
+                        if shadow_indirect {
+                            shadow_solid_draws.clone()
+                        } else {
+                            0..0
+                        },
                         phase2,
                         self.translucent_arena.is_some(),
                         visible
@@ -11003,29 +11176,33 @@ impl Renderer {
         }
         if flat_frame {
             section_draw_calls = self.flat.as_ref().map_or(0, |f| f.shadow_calls[0]);
-        } else if self.multi_draw && !self.draws.is_empty() {
-            if self.draws.len() as u64 > self.indirect_capacity {
-                let capacity = (self.draws.len() as u64).next_power_of_two();
-                let usage = wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST;
-                let made =
-                    frame_targets::buffer(&self.device, "Section draws", capacity * 20, usage);
-                let Some(buffer) = made else {
-                    return self.abandon_frame(frame_targets::Abandoned::grown(
-                        encoder,
-                        copies,
-                        surface_frame,
-                        fg_frames,
-                        backstop,
-                    ));
-                };
-                self.indirect_capacity = capacity;
-                self.indirect = buffer;
+        }
+        // The draws the indirect buffer gives (`indirect_upload`).
+        let shadow = shadow_indirect.then(|| shadow_solid_draws.clone());
+        if let Some((offset, range)) =
+            indirect_upload(&mut self.draws, flat_frame, shadow, self.multi_draw)
+        {
+            // A flat frame's shadow draws found their room before the flat list left them out.
+            if !Self::grow_indirect(
+                &self.device,
+                &mut self.indirect,
+                &mut self.indirect_capacity,
+                range.end,
+                frame_targets::Kind::Buffers,
+            ) {
+                return self.abandon_frame(frame_targets::Abandoned::grown(
+                    encoder,
+                    copies,
+                    surface_frame,
+                    fg_frames,
+                    backstop,
+                ));
             }
             self.uploads.buffer(
                 &mut encoder,
                 &self.indirect,
-                0,
-                bytemuck::cast_slice(&self.draws),
+                offset,
+                bytemuck::cast_slice(&self.draws[range]),
             );
         }
         if mesh_frame && let (Some(mesh_terrain), Some(flat)) = (&mut self.mesh_terrain, &self.flat)
@@ -12964,6 +13141,34 @@ impl Renderer {
                         return;
                     }
                     match flat {
+                        // The shadow camera's solid draws, which the flat list left out: drawn
+                        // with indirect multi-draws, each page's run binding the page as the
+                        // flat calls do (`pack_shadow_indirect`).
+                        Some(flat)
+                            if shadow_indirect && list == L::ShadowSolid && geometry.is_none() =>
+                        {
+                            let lists = SectionLists {
+                                draws: &self.draws,
+                                pages: &self.draw_pages,
+                                arena: &self.arena,
+                                translucent_arena: self.translucent_arena.as_ref(),
+                                sorted_indices: &self.sorted_indices,
+                                indices: &self.indices,
+                                flat: Some(flat),
+                                multi_draw: self.multi_draw,
+                                looks: self.look_groups.as_ref(),
+                            };
+                            let indirect = &self.indirect;
+                            lists.draw_paged(
+                                rp,
+                                indirect,
+                                0,
+                                shadow_first,
+                                shadow_solid,
+                                true,
+                                page,
+                            );
+                        }
                         Some(flat) => {
                             let [shadow, shadow_translucent] = flat.shadow_calls;
                             let calls = match list {
@@ -16791,6 +16996,329 @@ mod shadow_caster_tests {
             .copied()
             .collect();
         assert_eq!(taken, vec![([3, 70, 3], 7)]);
+    }
+
+    /// The shadow pass draws its sections nearest the light first: highest along the light,
+    /// those level with each other by key, whatever order they were listed in.
+    #[test]
+    fn the_shadow_pass_draws_its_sections_nearest_the_light_first() {
+        // A light toward +Y and +Z (0.8, 0.6): the heights are 12.8, 12.8, 9.6, -19.2, -25.6.
+        let light = Vec3::new(0.0, 0.8, 0.6);
+        let section = |key: SectionKey, origin: [f32; 3]| resident::Visible {
+            distance: 0,
+            key,
+            slot: 0,
+            origin,
+        };
+        let mut sections = vec![
+            section((0, 0, 0), [0.0, -32.0, 0.0]),
+            section((1, 0, 0), [16.0, 16.0, 0.0]),
+            section((2, 0, 0), [-16.0, 0.0, -32.0]),
+            section((0, 1, 0), [0.0, 16.0, 0.0]),
+            section((0, 0, 1), [0.0, 0.0, 16.0]),
+        ];
+        sort_shadow_sections(&mut sections, light);
+        let keys: Vec<SectionKey> = sections.iter().map(|s| s.key).collect();
+        assert_eq!(
+            keys,
+            [(0, 1, 0), (1, 0, 0), (0, 0, 1), (2, 0, 0), (0, 0, 0)]
+        );
+        // The order is `total_cmp`'s, highest first, past zero and at the extremes too.
+        let heights = [-2.5, 3.0e20, f32::NEG_INFINITY, 0.0, -1.0e30, 1.5];
+        let mut sections: Vec<_> = (heights.iter().enumerate())
+            .map(|(k, &h)| section((k as i32, 0, 0), [0.0, h, 0.0]))
+            .collect();
+        sort_shadow_sections(&mut sections, Vec3::Y);
+        let sorted: Vec<f32> = sections.iter().map(|s| s.origin[1]).collect();
+        assert_eq!(sorted, [3.0e20, 1.5, 0.0, -2.5, -1.0e30, f32::NEG_INFINITY]);
+    }
+
+    /// A `shaders/` pack's shadow pass draws its solid list with indirect multi-draws where
+    /// frames without a pack do, where the device runs each of them as one command, for a
+    /// program without a geometry stage, while the flat list keeps another draw; from the flat
+    /// list everywhere else.
+    #[test]
+    fn the_pack_shadow_draws_its_solid_list_indirectly_where_vanilla_frames_do() {
+        // The camera's solid draw, then the shadow camera's two solid ones and its water.
+        let draws = [
+            [6, 1, 0, 0, 0],
+            [12, 1, 0, 40, 1],
+            [6, 1, 0, 64, 2],
+            [6, 1, 6, 80, 2],
+        ];
+        // (switch, vanilla frames flat, program without a geometry stage), and the most draws a
+        // multi-draw holds as one command.
+        let indirect = |[wanted, vanilla_flat, program]: [bool; 3], limit| {
+            pack_shadow_indirect(wanted, limit, vanilla_flat, program, &draws, 1..3)
+        };
+        // DirectX 12; Vulkan with `multiDrawIndirect`, the two draws within its
+        // `maxDrawIndirectCount`.
+        assert!(indirect([true, false, true], u32::MAX));
+        assert!(indirect([true, false, true], 2));
+        // Where a multi-draw of the two would be replayed draw by draw: past that count; Vulkan
+        // without `multiDrawIndirect`, OpenGL, Metal.
+        assert!(!indirect([true, false, true], 1));
+        assert!(!indirect([true, false, true], 0));
+        // `HORIZON_PACK_SHADOW_INDIRECT=0`; frames that draw flat anyway (Metal, Intel Gen11 and
+        // Gen12 on Vulkan); a geometry stage.
+        assert!(!indirect([false, false, true], u32::MAX));
+        assert!(!indirect([true, true, true], u32::MAX));
+        assert!(!indirect([true, false, false], u32::MAX));
+        // No shadow solid draws; or none left for the flat list, without which the frame would
+        // not be drawn flat.
+        let listed = |draws: &[[u32; 5]], solid| {
+            pack_shadow_indirect(true, u32::MAX, false, true, draws, solid)
+        };
+        assert!(!listed(&draws[..], 1..1));
+        assert!(!listed(&draws[1..3], 0..2));
+    }
+
+    /// A flat frame's indirect buffer holds the shadow camera's solid draws a `shaders/` pack
+    /// draws indirectly, at their own place, where the draws read them, each at its base vertex
+    /// as instance 0; a frame drawn section by section, all of its draws as listed.
+    #[test]
+    fn the_indirect_buffer_holds_the_pack_shadow_draws_at_their_place_as_instance_0() {
+        // The camera's solid draw, then the shadow camera's two solid ones and its water.
+        let listed = [
+            [6, 1, 0, 0, 0],
+            [12, 1, 0, 40, 1],
+            [6, 1, 0, 64, 2],
+            [6, 1, 6, 80, 2],
+        ];
+        let mut draws = listed;
+        let upload = indirect_upload(&mut draws, true, Some(1..3), true);
+        // Draw 1's arguments 20 bytes in, where `SectionLists::draw_paged` reads draw 1's.
+        assert_eq!(upload, Some((20, 1..3)));
+        assert_eq!(indirect_offset(1, 0), 20);
+        assert_eq!(draws[1..3], [[12, 1, 0, 40, 0], [6, 1, 0, 64, 0]]);
+        assert_eq!([draws[0], draws[3]], [listed[0], listed[3]]);
+        // A flat frame with no shadow draws drawn indirectly writes none.
+        let mut draws = listed;
+        assert_eq!(indirect_upload(&mut draws, true, None, true), None);
+        // Section by section: every draw from the start, keeping its instance (its section's
+        // origin); without indirect multi-draws, none.
+        assert_eq!(
+            indirect_upload(&mut draws, false, Some(1..3), true),
+            Some((0, 0..4))
+        );
+        assert_eq!(draws, listed);
+        assert_eq!(indirect_upload(&mut draws, false, None, false), None);
+    }
+
+    /// On the GPU, a `shaders/` pack's shadow solid draws drawn indirectly
+    /// (`SectionLists::draw_paged` over the arguments `indirect_upload` gives a flat frame) reach
+    /// the vertices the flat list's call reaches, each draw's base vertex plus its quad's corner
+    /// (the indices `flatten_writes_the_indices_of_the_per_section_draws` pins), as instance 0
+    /// as that call does: what a pack's vertex stage reads as `gl_VertexIndex` and
+    /// `gl_InstanceID`. Each vertex is a point on the texel of its index, which keeps the index
+    /// and instance it was drawn with. On each adapter this machine has (Vulkan, DirectX 12 with
+    /// each compiler, whose indirect draws get the base vertex through wgpu's indirect
+    /// validation); skipped without one.
+    #[test]
+    fn the_pack_shadow_s_indirect_draws_reach_the_flat_list_s_vertices_as_instance_0() {
+        use wgpu::util::DeviceExt;
+        let _gpu = crate::gfx::test_gpu::lock();
+        const WIDTH: u32 = 16;
+        const ROWS: u32 = 4;
+        // The camera's two solid draws, then the shadow camera's three solid ones, listed with
+        // their sections' instances, and its water.
+        let listed: [[u32; 5]; 6] = [
+            [6, 1, 0, 0, 0],
+            [6, 1, 0, 4, 1],
+            [12, 1, 0, 8, 2],
+            [6, 1, 0, 20, 3],
+            [6, 1, 0, 40, 4],
+            [6, 1, 6, 48, 4],
+        ];
+        let shadow = 2..5;
+        let source = format!(
+            "struct Drawn {{
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) drawn: vec2<u32>,
+}}
+
+@vertex
+fn vs(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> Drawn {{
+    let at = (vec2(f32(vertex % {WIDTH}u), f32(vertex / {WIDTH}u)) + 0.5)
+        / vec2({WIDTH}.0, {ROWS}.0);
+    return Drawn(vec4(at.x * 2.0 - 1.0, 1.0 - at.y * 2.0, 0.5, 1.0), vec2(vertex, instance));
+}}
+
+@fragment
+fn fs(v: Drawn) -> @location(0) vec4<f32> {{
+    return vec4(vec2<f32>(v.drawn), 0.0, 1.0);
+}}
+"
+        );
+        let mut tested = Vec::new();
+        for (adapter, backend) in crate::gfx::test_gpu::each_adapter() {
+            let flags = adapter.get_downlevel_capabilities().flags;
+            if !flags.contains(wgpu::DownlevelFlags::INDIRECT_EXECUTION) {
+                eprintln!("{backend}: no indirect draws, skipped");
+                continue;
+            }
+            let Ok((device, queue)) =
+                pollster::block_on(adapter.request_device(&Default::default()))
+            else {
+                continue;
+            };
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+            let format = wgpu::TextureFormat::Rgba32Float;
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::PointList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(format.into())],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            // What `draw` leaves on a target cleared to -1: a texel per vertex index.
+            let points = |draw: &dyn Fn(&mut wgpu::RenderPass<'_>)| -> Vec<[f32; 4]> {
+                let target = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: WIDTH,
+                        height: ROWS,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = target.create_view(&Default::default());
+                let read = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: u64::from(256 * ROWS),
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let mut encoder = device.create_command_encoder(&Default::default());
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: -1.0,
+                                g: -1.0,
+                                b: -1.0,
+                                a: -1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&pipeline);
+                draw(&mut pass);
+                drop(pass);
+                encoder.copy_texture_to_buffer(
+                    target.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &read,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(256),
+                            rows_per_image: None,
+                        },
+                    },
+                    target.size(),
+                );
+                queue.submit([encoder.finish()]);
+                read.slice(..)
+                    .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                bytemuck::pod_collect_to_vec(&read.slice(..).get_mapped_range().unwrap())
+            };
+            // The section arena's page the draws name, and the quad indices.
+            let mut arena = arena::Arena::new(&device, 16, 64, false);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let (page, _) = arena
+                .alloc(&device, &mut encoder, 64)
+                .expect("an arena page");
+            queue.submit([encoder.finish()]);
+            let sorted_indices = arena::Arena::indices(&device, 64, false);
+            let indices = Renderer::quad_indices(&device, 8).expect("quad indices");
+            let pages: Vec<(u32, Option<u32>)> = vec![(page, None); listed.len()];
+            // Indirectly, from the arguments a flat frame uploads.
+            let mut draws = listed;
+            let (offset, range) = indirect_upload(&mut draws, true, Some(shadow.clone()), true)
+                .expect("the shadow draws' arguments");
+            let indirect = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: listed.len() as u64 * 20,
+                usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&indirect, offset, bytemuck::cast_slice(&draws[range]));
+            let lists = SectionLists {
+                draws: &draws,
+                pages: &pages,
+                arena: &arena,
+                translucent_arena: None,
+                sorted_indices: &sorted_indices,
+                indices: &indices,
+                flat: None,
+                multi_draw: true,
+                looks: None,
+            };
+            let (first, count) = (shadow.start as u32, shadow.len() as u32);
+            let indirectly = points(&|pass| {
+                lists.draw_paged(pass, &indirect, 0, first, count, true, &|_, _| {});
+            });
+            // From the flat list: one call over the draws' base vertices plus their quads'
+            // corners, as instance 0.
+            let flat: Vec<u32> = (listed[shadow.clone()].iter())
+                .flat_map(|d| {
+                    (0..d[0]).map(move |k| d[3] + k / 6 * 4 + [0, 1, 2, 0, 2, 3][k as usize % 6])
+                })
+                .collect();
+            let flat_indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: None,
+                contents: bytemuck::cast_slice(&flat),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            let from_flat = points(&|pass| {
+                pass.set_index_buffer(flat_indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..flat.len() as u32, 0, 0..1);
+            });
+            assert_eq!(indirectly, from_flat, "{backend}");
+            // Those are the shadow draws' vertices, 8 to 15, 20 to 23 and 40 to 43, as
+            // instance 0, and nothing else.
+            for (v, &texel) in indirectly.iter().enumerate() {
+                let want = if matches!(v, 8..16 | 20..24 | 40..44) {
+                    [v as f32, 0.0, 0.0, 1.0]
+                } else {
+                    [-1.0; 4]
+                };
+                assert_eq!(texel, want, "{backend}: vertex {v}");
+            }
+            tested.push(backend);
+        }
+        eprintln!("the pack shadow's indirect draws ran on {tested:?}");
     }
 
     /// What the shadow pass keeps of a camera-relative section at `min`, the camera at the

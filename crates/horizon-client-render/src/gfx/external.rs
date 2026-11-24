@@ -539,6 +539,33 @@ pub(super) fn shadow_box(view: &ShadowView) -> Frustum {
     Frustum { planes }
 }
 
+/// Where a section comes in the shadow pass's draw order, nearest the light first: a key that
+/// sorts as the height of its camera-relative `origin` along `light` (the direction toward the
+/// light) does with `f32::total_cmp`, highest first. Worked out once a section, where comparing
+/// heights worked them out again at every comparison.
+fn shadow_order(origin: [f32; 3], light: Vec3) -> u64 {
+    let bits = Vec3::from(origin).dot(light).to_bits();
+    // `total_cmp`'s order as unsigned integers (negatives below positives, each by magnitude),
+    // then turned around so that the highest comes first.
+    let ascending = if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    };
+    u64::from(!ascending)
+}
+
+/// Puts a shadow pass's `sections` in its draw order, nearest the light first, so that the
+/// depth test rejects what lies under them: highest along `light` first (`shadow_order`, worked
+/// out once a section into `distance`, which nothing reads of them after), those level with
+/// each other by key. They come in any order (`Resident::visible_unsorted`).
+pub(super) fn sort_shadow_sections(sections: &mut [super::resident::Visible], light: Vec3) {
+    for s in &mut *sections {
+        s.distance = shadow_order(s.origin, light);
+    }
+    sections.sort_unstable_by_key(|s| (s.distance, s.key));
+}
+
 /// The runs of a section's solid quads the shadow pass draws: every face within the unculled
 /// distance, or everywhere for `every_face`; else the quads that can face the light.
 pub(super) fn shadow_runs(

@@ -172,6 +172,17 @@ Not implemented: anisotropic filtering (wgpu needs linear magnification for it, 
 
 It runs only in frames drawn flat (Metal past `flat::MIN_SECTIONS` sections in view, or `HORIZON_FLAT_DRAWS=1` elsewhere), with or without occlusion culling. Frames with a shader pack's terrain, one of Horizon's own packs with a material stage or a shadow pass, a pack's surface target, and the title screen keep the normal solid passes, as do translucent terrain and the water mirror's own pass.
 
+## Shader pack shadow draws
+
+A `shaders/` pack's frames are drawn flat: each frame a compute pass copies the indices of every section draw into one list, which the pack's programs draw from. The shadow pass's solid terrain, the frame's largest list (the light sees down to bedrock, with no cave culling), is left out of that list and drawn with indirect multi-draws over the quad indices at each section's base vertex instead (`gfx::pack_shadow_indirect`), where all of these hold:
+
+- frames without a pack draw section by section: DirectX 12 and Vulkan, not OpenGL, Metal, Qualcomm's Adreno under DirectX 12, or Intel Gen11 and Gen12 on Vulkan, except Raptor Lake on Mesa 26.0.8 or later; and not with `HORIZON_FLAT_DRAWS=1`, which draws every frame flat;
+- the device runs a multi-draw of the whole list as one command: always under DirectX 12, and on Vulkan with `multiDrawIndirect` and a `maxDrawIndirectCount` of at least the list's draws (wgpu-hal replays it draw by draw otherwise);
+- the pack's shadow program has no geometry stage, which reads the flat list itself;
+- the indirect buffer has room for the list's arguments; where video memory has none, that frame keeps the list flat.
+
+The pack's vertex stage reads the same `gl_VertexIndex` (the base vertex plus the quad's corner) and `gl_InstanceID` (0) either way. `HORIZON_PACK_SHADOW_INDIRECT=0` keeps the shadow's solid terrain in the flat list, for A/B checks; it is read once per process, so set it before the game starts.
+
 ## Benchmark
 
 `tools/graphics_bench.py` opens a fresh creative world (seed 1234) on a virtual screen and flies the camera along four fixed 192-block paths, over a village, a forest, the ocean and a mountain, at render distances 8, 16 and 32, one game per distance. Each flight takes 12 seconds and reports average FPS, 1% lows, frame-time percentiles, CPU time per frame (frame time minus waits for the GPU, the display and the limiter), the split of that CPU time (world update, ticks, frame preparation, renderer) for all frames and for the slowest 1%, and GPU time per frame from timestamp queries.
