@@ -148,14 +148,7 @@ enum Values<'a> {
     Constant(f32),
     Buffer(&'a [f32]),
 }
-impl Values<'_> {
-    fn get(self, index: usize) -> f32 {
-        match self {
-            Self::Constant(value) => value,
-            Self::Buffer(buffer) => buffer[index],
-        }
-    }
-}
+
 #[derive(Clone, Debug)]
 pub struct LerpSampler {
     pub alpha: Arc<dyn DensitySampler>,
@@ -226,8 +219,27 @@ impl LerpSampler {
             .with_volume(context, volume, first_needed, |context, first| {
                 self.second
                     .with_volume(context, volume, second_needed, |_, second| {
-                        for (index, alpha) in buffer.iter_mut().enumerate() {
-                            *alpha = interpolate(*alpha, first.get(index), second.get(index));
+                        match (first, second) {
+                            (Values::Constant(a), Values::Constant(b)) => {
+                                for alpha in buffer.iter_mut() {
+                                    *alpha = interpolate(*alpha, a, b);
+                                }
+                            }
+                            (Values::Constant(a), Values::Buffer(bs)) => {
+                                for (alpha, &b) in buffer.iter_mut().zip(bs) {
+                                    *alpha = interpolate(*alpha, a, b);
+                                }
+                            }
+                            (Values::Buffer(as_), Values::Constant(b)) => {
+                                for (alpha, &a) in buffer.iter_mut().zip(as_) {
+                                    *alpha = interpolate(*alpha, a, b);
+                                }
+                            }
+                            (Values::Buffer(as_), Values::Buffer(bs)) => {
+                                for ((alpha, &a), &b) in buffer.iter_mut().zip(as_).zip(bs) {
+                                    *alpha = interpolate(*alpha, a, b);
+                                }
+                            }
                         }
                         Ok(())
                     })
@@ -317,17 +329,26 @@ impl IntervalSelectSampler {
             .filter(|count| *count <= isize::MAX as usize / size_of::<f32>())
             .ok_or(DensityError::VolumeTooLarge)?;
         sample_with(&*self.input, context, buffer, volume, needed)?;
-        // Each value is read from the one branch its input selects, so a branch need not be
-        // sampled elsewhere. Every branch is still asked, in vanilla's order.
-        let branch_needed = self.branch_needed(buffer, volume, needed);
-        let columns = volume.size() / volume.sizes()[1];
+        let volume_size = volume.size();
+        // Select each cell's branch once (at most 256 branches) and build the per-branch
+        // needed masks in the same pass, avoiding a second threshold scan during gather.
+        let mut selected_stack = [0u8; 4096];
+        let mut selected_heap = Vec::new();
+        let selected: &mut [u8] = if volume_size <= selected_stack.len() {
+            &mut selected_stack[..volume_size]
+        } else {
+            selected_heap.resize(volume_size, 0);
+            &mut selected_heap
+        };
+        let branch_needed = self.classify(buffer, volume, needed, selected);
+        let columns = volume_size / volume.sizes()[1];
         // Contiguous retained storage replaces a separate allocation per branch.
         // Each child still receives a slice with exactly the logical volume size.
         context.with_buffer(total, |context, values| {
             for (index, (branch, output)) in self
                 .branches
                 .iter()
-                .zip(values.chunks_exact_mut(volume.size()))
+                .zip(values.chunks_exact_mut(volume_size))
                 .enumerate()
             {
                 let needed = branch_needed
@@ -336,32 +357,43 @@ impl IntervalSelectSampler {
                 sample_with(&**branch, context, output, volume, needed)?;
             }
             // Delay every output selection until all child volumes have returned.
-            for (index, input) in buffer.iter_mut().enumerate() {
-                *input = values[self.select(*input) * volume.size() + index];
+            for (index, (slot, &branch)) in buffer.iter_mut().zip(selected.iter()).enumerate() {
+                *slot = values[usize::from(branch) * volume_size + index];
             }
             Ok(())
         })
     }
 
-    /// For each branch in turn, the Ys of each column (one bit per Y, if at most 64) a caller
-    /// needing `needed` reads from it: those whose `input` selects it.
-    fn branch_needed(
+    /// Classifies every cell into its selected branch index (`0..branches.len()`) and,
+    /// when `size_y <= 64`, builds the per-branch needed bitmasks in the same pass.
+    fn classify(
         &self,
         input: &[f32],
         volume: DensityVolume,
         needed: Option<&[u64]>,
+        selected: &mut [u8],
     ) -> Option<Vec<u64>> {
+        let volume_size = volume.size();
         let size_y = volume.sizes()[1];
         if size_y > 64 {
+            for (slot, &value) in selected.iter_mut().zip(&input[..volume_size]) {
+                *slot = self.select(value) as u8;
+            }
             return None;
         }
-        let columns = volume.size() / size_y;
+        let columns = volume_size / size_y;
         let mut masks = vec![0_u64; self.branches.len() * columns];
-        for (column, values) in input[..volume.size()].chunks_exact(size_y).enumerate() {
+        for (column, (values, out_sel)) in input[..volume_size]
+            .chunks_exact(size_y)
+            .zip(selected.chunks_exact_mut(size_y))
+            .enumerate()
+        {
             let wanted = needed.map_or(u64::MAX, |needed| needed[column]);
-            for (y, &value) in values.iter().enumerate() {
+            for (y, (&value, slot)) in values.iter().zip(out_sel.iter_mut()).enumerate() {
+                let branch = self.select(value);
+                *slot = branch as u8;
                 if (wanted >> y) & 1 == 1 {
-                    masks[self.select(value) * columns + column] |= 1 << y;
+                    masks[branch * columns + column] |= 1 << y;
                 }
             }
         }
