@@ -150,6 +150,12 @@ pub(super) struct Parked {
     level_events: Vec<LevelEvent>,
     /// Entity portal processes and cooldowns belong to this level's entities.
     pub(super) portal_states: HashMap<u32, horizon_client::nether_portal::PortalState>,
+    /// End gateway travellers and the chunks their exits keep loaded belong to
+    /// this level's entities too (`Game::swap_level`).
+    end_gateways: HashMap<u32, horizon_client::end_gateway::Traveller>,
+    end_arrivals: Vec<super::end::GatewayArrival>,
+    end_areas: Vec<(i32, i32)>,
+    end_tickets: Vec<((i32, i32), u32)>,
     /// Which of this level's chunks may hold a portal (`Game::find_portals`), kept per level:
     /// one cache asked by two levels in turn read every palette of both again each tick.
     pub(super) portal_sections: horizon_client::portal_sections::PortalSections,
@@ -821,6 +827,10 @@ impl Game<'_> {
             random_tick_sections: Default::default(),
             level_events: Vec::new(),
             portal_states: HashMap::new(),
+            end_gateways: HashMap::new(),
+            end_arrivals: Vec::new(),
+            end_areas: Vec::new(),
+            end_tickets: Vec::new(),
             portal_sections: Default::default(),
             falling: Default::default(),
             paintings: Default::default(),
@@ -978,6 +988,10 @@ impl Game<'_> {
         swap(&mut self.random_tick_sections, &mut p.random_tick_sections);
         swap(&mut self.level_events, &mut p.level_events);
         swap(&mut self.portals.entities, &mut p.portal_states);
+        swap(&mut self.end.gateways, &mut p.end_gateways);
+        swap(&mut self.end.arrivals, &mut p.end_arrivals);
+        swap(&mut self.end.areas, &mut p.end_areas);
+        swap(&mut self.end.tickets, &mut p.end_tickets);
         swap(&mut self.portals.sections, &mut p.portal_sections);
         swap(&mut self.falling, &mut p.falling);
         swap(&mut self.paintings, &mut p.paintings);

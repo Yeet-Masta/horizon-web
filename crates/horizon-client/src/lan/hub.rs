@@ -2234,7 +2234,7 @@ impl Hub {
             g.pending_move = None;
             if let Some(p) = position {
                 g.position = p;
-                g.previous_position = p;
+                (g.previous_position, g.first_good) = (p, p); // connection.resetPosition
             }
             g.last_reported = (g.position, [g.yaw, g.pitch]);
             g.teleport_counter = (g.teleport_counter + 1) & 0x7FFF_FFFF;
