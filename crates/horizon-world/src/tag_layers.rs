@@ -34,10 +34,19 @@ pub(crate) mod work_budget {
     }
 }
 
-/// A tag's entries over its layers, in order: an id or `#tag`, and whether
-/// the entry removes (`TagLoader.EntryWithSource.remove`).
+/// A tag's entries over its layers, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TagLayers(Vec<(String, bool)>);
+pub struct TagLayers(Vec<Entry>);
+
+/// One tag file entry: an id or `#tag`, whether it removes
+/// (`TagLoader.EntryWithSource.remove`), and whether it is `required`
+/// (`TagEntry.required`, true unless the entry says `"required": false`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Entry {
+    id: String,
+    remove: bool,
+    required: bool,
+}
 
 /// A tag file entry's id: a string, or an object's `id` (`TagEntry.CODEC`).
 pub fn entry_id(entry: &Value) -> Option<&str> {
@@ -61,18 +70,23 @@ impl TagLayers {
         if file.get("replace").and_then(Value::as_bool) == Some(true) {
             self.0.clear();
         }
-        let push_entry = |entry: &Value, remove: bool, out: &mut Vec<(String, bool)>| {
+        let push_entry = |entry: &Value, remove: bool, out: &mut Vec<Entry>| {
             let Some(id) = entry_id(entry) else {
                 return;
             };
             let removes = remove || (entry.get("remove").and_then(Value::as_bool) == Some(true));
+            let required = entry.get("required").and_then(Value::as_bool) != Some(false);
             let (prefix, name) = id.strip_prefix('#').map_or(("", id), |name| ("#", name));
             let id = if name.contains(':') {
                 format!("{prefix}{name}")
             } else {
                 format!("{prefix}minecraft:{name}")
             };
-            out.push((id, removes));
+            out.push(Entry {
+                id,
+                remove: removes,
+                required,
+            });
         };
         let mut next = Vec::new();
         if let Some(values) = file.get("values").and_then(Value::as_array) {
@@ -91,25 +105,29 @@ impl TagLayers {
     /// The `#tags` the entries name, adding or removing: what building
     /// the tag needs built first.
     pub fn tags(&self) -> impl Iterator<Item = &str> {
-        self.0
-            .iter()
-            .filter_map(|(entry, _)| entry.strip_prefix('#'))
+        self.0.iter().filter_map(|entry| entry.id.strip_prefix('#'))
     }
 
     /// The tag's members (`TagLoader.tryBuildTag`): each entry in order adds
     /// to or removes from an insertion-ordered set; a `#tag` adds or removes
     /// every member `members` gives for it. A removal never fails the tag.
     pub fn build(&self, mut members: impl FnMut(&str) -> Vec<String>) -> Vec<String> {
-        self.build_ordered(|tag| members(tag).into_iter().map(Cow::Owned))
+        self.build_ordered(|tag| members(tag).into_iter().map(Cow::Owned), |_| true)
     }
 
+    /// As [`Self::build`], an element `known` doesn't have adding nothing
+    /// (`TagEntry.build`: `lookup.element` gives no value for it).
     fn build_ordered<'a, I: IntoIterator<Item = Cow<'a, str>>>(
         &'a self,
         mut members: impl FnMut(&str) -> I,
+        known: impl Fn(&str) -> bool,
     ) -> Vec<String> {
         let mut positions = HashMap::new();
         let mut next_position = 0;
-        for (entry, remove) in &self.0 {
+        for Entry {
+            id: entry, remove, ..
+        } in &self.0
+        {
             let mut apply = |id: Cow<'a, str>| {
                 if *remove {
                     positions.remove(id.as_ref());
@@ -121,7 +139,7 @@ impl TagLayers {
             };
             if let Some(tag) = entry.strip_prefix('#') {
                 members(tag).into_iter().for_each(apply);
-            } else {
+            } else if known(entry) {
                 apply(Cow::Borrowed(entry));
             }
         }

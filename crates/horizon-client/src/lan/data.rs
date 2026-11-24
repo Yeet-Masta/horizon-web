@@ -909,7 +909,9 @@ impl SyncData {
     /// One registry's tags of the pack stack: the resource root's files, then
     /// each world pack's in order (`TagLoader`: a file adds its values, or
     /// replaces the earlier ones with `"replace": true`), nested tags expanded
-    /// to the registry's ids.
+    /// to the registry's ids. A tag missing a required entry, an id the
+    /// registry doesn't have or a `#tag` that didn't load, is sent empty, as
+    /// `TagLoader.build` leaves it (`TagLayers::resolve_all`).
     fn merge_registry_tags(
         tags: &mut UpdateTags,
         root: &Path,
@@ -919,116 +921,42 @@ impl SyncData {
         key: &str,
         kind: &str,
     ) {
+        use horizon_world::tag_layers::TagLayers;
         let Some(names) = Self::registry_names(builtin, dynamic, key) else {
             return;
         };
-        let mut files: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        let mut raw: HashMap<String, TagLayers> = HashMap::new();
         let mut own = BTreeMap::new();
         walk(&root.join("tags").join(kind), &mut own, false);
         for (name, value) in own {
-            Self::add_tag_values(files.entry(qualified(&name)).or_default(), &value);
+            raw.entry(qualified(&name)).or_default().push(&value);
         }
         for (id, packs) in overlay.tag_kind(kind) {
             for bytes in packs {
                 if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-                    Self::add_tag_values(files.entry(id.clone()).or_default(), &value);
+                    raw.entry(id.clone()).or_default().push(&value);
                 }
             }
         }
-        let mut entries = Vec::new();
-        for name in files.keys() {
-            let mut ids = Vec::new();
-            let mut seen = HashSet::new();
-            Self::expand_pack_tag(&files, name, &names, &mut ids, &mut seen);
-            entries.push(TagEntry {
-                name: name.clone(),
-                ids,
-            });
-        }
+        let resolved: BTreeMap<_, _> = TagLayers::resolve_all(raw, |id| names.contains_key(id))
+            .into_iter()
+            .collect();
+        let entries: Vec<_> = resolved
+            .into_iter()
+            .map(|(name, members)| TagEntry {
+                name,
+                ids: members
+                    .iter()
+                    .filter_map(|member| names.get(member.as_str()).copied())
+                    .collect(),
+            })
+            .collect();
         tags.registries.retain(|r| r.registry != key);
         if !entries.is_empty() {
             tags.registries.push(RegistryTags {
                 registry: key.into(),
                 tags: entries,
             });
-        }
-    }
-
-    /// A tag file's values, after `"replace": true` empties the earlier
-    /// ones. A `remove` list follows the values, and a `{"id", "remove":
-    /// true}` entry in `values` removes in order (`TagLoader.EntryWithSource`).
-    fn add_tag_values(entries: &mut Vec<Value>, json: &Value) {
-        if json["replace"].as_bool() == Some(true) {
-            entries.clear();
-        }
-        if let Some(values) = json["values"].as_array() {
-            entries.extend(values.iter().cloned());
-        }
-        if let Some(remove) = json["remove"].as_array() {
-            for r in remove {
-                let mut removal = r.clone();
-                if let Some(obj) = removal.as_object_mut() {
-                    obj.insert("remove".into(), Value::Bool(true));
-                } else {
-                    let id = r.as_str().map(str::to_owned).unwrap_or_default();
-                    removal = serde_json::json!({"id": id, "remove": true});
-                }
-                entries.push(removal);
-            }
-        }
-    }
-
-    /// A tag's entries as registry ids, nested tags expanded once.
-    fn expand_pack_tag(
-        files: &BTreeMap<String, Vec<Value>>,
-        tag: &str,
-        names: &HashMap<&str, i32>,
-        out: &mut Vec<i32>,
-        seen: &mut HashSet<String>,
-    ) {
-        fn resolve(
-            files: &BTreeMap<String, Vec<Value>>,
-            tag: &str,
-            names: &HashMap<&str, i32>,
-            active: &mut HashSet<String>,
-            cache: &mut BTreeMap<String, Vec<i32>>,
-        ) -> Vec<i32> {
-            if let Some(hit) = cache.get(tag) {
-                return hit.clone();
-            }
-            if !active.insert(tag.to_owned()) {
-                return Vec::new();
-            }
-            let mut out = Vec::new();
-            for value in files.get(tag).into_iter().flatten() {
-                let Some(id) = horizon_world::tag_layers::entry_id(value) else {
-                    continue;
-                };
-                let removes = value["remove"].as_bool() == Some(true);
-                let members = match id.strip_prefix('#') {
-                    Some(reference) => resolve(files, &qualified(reference), names, active, cache),
-                    None => names
-                        .get(qualified(id).as_str())
-                        .copied()
-                        .into_iter()
-                        .collect(),
-                };
-                for member in members {
-                    if removes {
-                        out.retain(|kept| *kept != member);
-                    } else if !out.contains(&member) {
-                        out.push(member);
-                    }
-                }
-            }
-            active.remove(tag);
-            cache.insert(tag.to_owned(), out.clone());
-            out
-        }
-        for id in resolve(files, tag, names, seen, &mut BTreeMap::new()) {
-            if !out.contains(&id) {
-                out.push(id);
-            }
         }
     }
 
@@ -1215,22 +1143,105 @@ mod tests {
         assert_eq!(tags.registries[0].tags[0].ids, [1]);
     }
 
+    /// #20838 `TagLoader.build`: a pack's block tag naming a block the
+    /// registry doesn't have fails to load and is sent empty, the root's
+    /// stone included; an optional missing block adds nothing.
+    #[test]
+    fn pack_tag_missing_a_required_block_is_sent_empty() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("tags/block/mineable")).unwrap();
+        std::fs::write(
+            root.path().join("tags/block/mineable/pickaxe.json"),
+            r#"{"values":["minecraft:stone"]}"#,
+        )
+        .unwrap();
+        let files = vec![
+            (
+                "tags/minecraft:block/mineable/pickaxe".to_owned(),
+                vec![br#"{"values":["minecraft:not_a_block"]}"#.to_vec()],
+            ),
+            (
+                "tags/minecraft:block/climbable".to_owned(),
+                vec![br#"{"values":["minecraft:dirt",{"id":"minecraft:not_a_block","required":false}]}"#.to_vec()],
+            ),
+        ];
+        let builtin = Builtin {
+            registries: HashMap::from([(
+                "minecraft:block".to_owned(),
+                horizon_protocol::registry::Ids::from_names(vec![
+                    "minecraft:stone".into(),
+                    "minecraft:dirt".into(),
+                ]),
+            )]),
+        };
+        let mut tags = UpdateTags {
+            registries: Vec::new(),
+        };
+        SyncData::merge_registry_tags(
+            &mut tags,
+            root.path(),
+            &horizon_world::loot::PackOverlay::new(&files),
+            &builtin,
+            &Dynamic::default(),
+            "minecraft:block",
+            "block",
+        );
+        let sent = |tag: &str| {
+            tags.registries[0]
+                .tags
+                .iter()
+                .find(|t| t.name == tag)
+                .map(|t| t.ids.clone())
+        };
+        assert_eq!(sent("minecraft:mineable/pickaxe"), Some(vec![]));
+        assert_eq!(sent("minecraft:climbable"), Some(vec![1]));
+    }
+
     #[test]
     fn included_child_can_be_removed_again() {
         let names = HashMap::from([("test:one", 1)]);
-        let files = BTreeMap::from([
+        let root = tempfile::tempdir().unwrap();
+        let files = vec![
             (
-                "test:parent".into(),
+                "tags/test:dialog/parent".to_owned(),
                 vec![
-                    serde_json::json!("#test:child"),
-                    serde_json::json!({"id":"#test:child","remove":true}),
+                    br##"{"values":["#test:child",{"id":"#test:child","remove":true}]}"##.to_vec(),
                 ],
             ),
-            ("test:child".into(), vec![serde_json::json!("test:one")]),
-        ]);
+            (
+                "tags/test:dialog/child".to_owned(),
+                vec![br#"{"values":["test:one"]}"#.to_vec()],
+            ),
+        ];
+        let dynamic = Dynamic {
+            registries: HashMap::from([(
+                "minecraft:dialog".into(),
+                vec![("test:zero".into(), None), ("test:one".into(), None)],
+            )]),
+            ..Default::default()
+        };
+        let mut tags = UpdateTags {
+            registries: Vec::new(),
+        };
+        SyncData::merge_registry_tags(
+            &mut tags,
+            root.path(),
+            &horizon_world::loot::PackOverlay::new(&files),
+            &Builtin::default(),
+            &dynamic,
+            "minecraft:dialog",
+            "dialog",
+        );
+        let sent = |tag: &str| {
+            tags.registries[0]
+                .tags
+                .iter()
+                .find(|t| t.name == tag)
+                .map(|t| t.ids.clone())
+        };
+        assert_eq!(sent("test:parent"), Some(vec![]));
+        assert_eq!(sent("test:child"), Some(vec![1]));
         let mut out = Vec::new();
-        SyncData::expand_pack_tag(&files, "test:parent", &names, &mut out, &mut HashSet::new());
-        assert!(out.is_empty());
         let files = BTreeMap::from([
             (
                 "parent".into(),

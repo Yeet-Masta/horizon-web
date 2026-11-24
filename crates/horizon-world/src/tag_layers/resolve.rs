@@ -1,17 +1,25 @@
-use super::TagLayers;
+use super::{Entry, TagLayers};
 use std::{borrow::Cow, collections::HashMap};
 
 impl TagLayers {
-    /// Resolve layered tags once in dependency order. Vanilla 26.3's
-    /// `DependencySorter.orderByDependencies` uses `isCyclic` to avoid
-    /// cycle-closing edges. `TagLoader.build` publishes only successful
-    /// `tryBuildTag` results, so a missing required target fails its tag.
-    /// As in `loot/tags.rs`, a cycle or dependency on one builds an empty
-    /// list here. Unknown tag names contribute no entries.
+    /// `TagLoader.build`: resolve one registry's layered tags once, in
+    /// dependency order (`DependencySorter.orderByDependencies`, which uses
+    /// `isCyclic` to avoid cycle-closing edges). `TagLoader.tryBuildTag`
+    /// fails a tag when one of its entries is missing and required
+    /// (`TagEntry.build` returns `!required`): a `#tag` that isn't defined or
+    /// failed itself, or an element `known` doesn't have
+    /// (`ElementLookup.fromFrozenRegistry`). `TagLoader.build` publishes only
+    /// the tags that built, so a failed tag resolves to no members here, as
+    /// the registry binds it after the reload. A missing optional entry adds
+    /// nothing, and a removal never fails its tag. As in `loot/tags.rs`, a
+    /// cycle fails every tag on it.
     ///
     /// Graph traversal is O(V + E), plus the work of applying members in
     /// entry order for successfully built tags.
-    pub fn resolve_all(raw: HashMap<String, Self>) -> HashMap<String, Vec<String>> {
+    pub fn resolve_all(
+        raw: HashMap<String, Self>,
+        known: impl Fn(&str) -> bool,
+    ) -> HashMap<String, Vec<String>> {
         let (names, layers): (Vec<_>, Vec<_>) = raw.into_iter().unzip();
         let index: HashMap<_, _> = names
             .iter()
@@ -38,19 +46,36 @@ impl TagLayers {
                 }
                 continue;
             };
-            if dependencies[tag]
+            let missing: Vec<&str> = layers[tag]
+                .0
                 .iter()
-                .any(|&child| child == tag || failed[child])
-            {
+                .filter(|entry| entry.required && !entry.remove)
+                .map(|Entry { id, .. }| id.as_str())
+                .filter(|id| match id.strip_prefix('#') {
+                    Some(name) => index
+                        .get(name)
+                        .is_none_or(|&child| child == tag || failed[child]),
+                    None => !known(id),
+                })
+                .collect();
+            if !missing.is_empty() {
+                log::error!(
+                    "Couldn't load tag {} as it is missing following references: {}",
+                    names[tag],
+                    missing.join(", ")
+                );
                 failed[tag] = true;
                 continue;
             }
-            resolved[tag] = layers[tag].build_ordered(|name| {
-                let members = index
-                    .get(name)
-                    .map_or(&[][..], |&id| resolved[id].as_slice());
-                members.iter().map(|id| Cow::Borrowed(id.as_str()))
-            });
+            resolved[tag] = layers[tag].build_ordered(
+                |name| {
+                    let members = index
+                        .get(name)
+                        .map_or(&[][..], |&id| resolved[id].as_slice());
+                    members.iter().map(|id| Cow::Borrowed(id.as_str()))
+                },
+                &known,
+            );
         }
 
         names.into_iter().zip(resolved).collect()
@@ -123,25 +148,28 @@ mod tests {
 
     #[test]
     fn cycle_rejects_its_tags_and_dependents_but_keeps_unrelated_tags() {
-        let resolved = TagLayers::resolve_all(HashMap::from([
-            (
-                "minecraft:a".into(),
-                layers(json!(["minecraft:stick", "#b"])),
-            ),
-            (
-                "minecraft:b".into(),
-                layers(json!(["minecraft:dirt", "#a"])),
-            ),
-            (
-                "minecraft:c".into(),
-                layers(json!(["minecraft:apple", "#a"])),
-            ),
-            ("minecraft:d".into(), layers(json!(["minecraft:stone"]))),
-            (
-                "minecraft:e".into(),
-                layers(json!(["minecraft:sand", "#c"])),
-            ),
-        ]));
+        let resolved = TagLayers::resolve_all(
+            HashMap::from([
+                (
+                    "minecraft:a".into(),
+                    layers(json!(["minecraft:stick", "#b"])),
+                ),
+                (
+                    "minecraft:b".into(),
+                    layers(json!(["minecraft:dirt", "#a"])),
+                ),
+                (
+                    "minecraft:c".into(),
+                    layers(json!(["minecraft:apple", "#a"])),
+                ),
+                ("minecraft:d".into(), layers(json!(["minecraft:stone"]))),
+                (
+                    "minecraft:e".into(),
+                    layers(json!(["minecraft:sand", "#c"])),
+                ),
+            ]),
+            |_| true,
+        );
         for id in ["minecraft:a", "minecraft:b", "minecraft:c", "minecraft:e"] {
             assert!(resolved[id].is_empty(), "{id}");
         }
@@ -150,26 +178,78 @@ mod tests {
 
     #[test]
     fn self_reference_rejects_its_tag() {
-        let resolved = TagLayers::resolve_all(HashMap::from([(
-            "minecraft:a".into(),
-            layers(json!(["minecraft:stick", "#a"])),
-        )]));
+        let resolved = TagLayers::resolve_all(
+            HashMap::from([(
+                "minecraft:a".into(),
+                layers(json!(["minecraft:stick", "#a"])),
+            )]),
+            |_| true,
+        );
         assert!(resolved["minecraft:a"].is_empty());
     }
 
     #[test]
-    fn missing_and_empty_references_contribute_no_members() {
-        let resolved = TagLayers::resolve_all(HashMap::from([
-            ("minecraft:empty".into(), layers(json!([]))),
-            (
-                "minecraft:a".into(),
-                layers(json!(["stick", "#unknown", "#empty", "apple"])),
-            ),
-        ]));
+    fn optional_missing_and_empty_references_contribute_no_members() {
+        let resolved = TagLayers::resolve_all(
+            HashMap::from([
+                ("minecraft:empty".into(), layers(json!([]))),
+                (
+                    "minecraft:a".into(),
+                    layers(json!([
+                        "stick",
+                        {"id": "#unknown", "required": false},
+                        {"id": "not_an_item", "required": false},
+                        "#empty",
+                        "apple"
+                    ])),
+                ),
+            ]),
+            |id| id != "minecraft:not_an_item",
+        );
         assert_eq!(
             resolved["minecraft:a"],
             ["minecraft:stick", "minecraft:apple"]
         );
+    }
+
+    #[test]
+    fn missing_required_reference_fails_the_tag_and_tags_requiring_it() {
+        let mut removes_missing = layers(json!(["stone"]));
+        removes_missing.push(&json!({"values": [], "remove": ["not_a_block", "#typo"]}));
+        let resolved = TagLayers::resolve_all(
+            HashMap::from([
+                (
+                    "minecraft:mineable/pickaxe".into(),
+                    layers(json!(["stone", "not_a_block"])),
+                ),
+                (
+                    "minecraft:typo_ref".into(),
+                    layers(json!(["dirt", "#typo"])),
+                ),
+                (
+                    "minecraft:requires_failed".into(),
+                    layers(json!(["dirt", "#mineable/pickaxe"])),
+                ),
+                (
+                    "minecraft:optional_failed".into(),
+                    layers(json!([
+                        "dirt",
+                        {"id": "#mineable/pickaxe", "required": false}
+                    ])),
+                ),
+                ("minecraft:removes_missing".into(), removes_missing),
+            ]),
+            |id| id != "minecraft:not_a_block",
+        );
+        for id in [
+            "minecraft:mineable/pickaxe",
+            "minecraft:typo_ref",
+            "minecraft:requires_failed",
+        ] {
+            assert!(resolved[id].is_empty(), "{id}");
+        }
+        assert_eq!(resolved["minecraft:optional_failed"], ["minecraft:dirt"]);
+        assert_eq!(resolved["minecraft:removes_missing"], ["minecraft:stone"]);
     }
 
     #[test]
@@ -186,7 +266,8 @@ mod tests {
             })
             .collect();
 
-        let resolved = work_budget::with_limit(4 * TAGS * TAGS, || TagLayers::resolve_all(tags));
+        let resolved =
+            work_budget::with_limit(4 * TAGS * TAGS, || TagLayers::resolve_all(tags, |_| true));
         assert_eq!(resolved.len(), TAGS);
         assert!(resolved.values().all(Vec::is_empty));
     }
@@ -216,7 +297,7 @@ mod tests {
         );
 
         let resolved = work_budget::with_limit(4 * (tags.len() + 4 * DEPTH), || {
-            TagLayers::resolve_all(tags)
+            TagLayers::resolve_all(tags, |_| true)
         });
         assert_eq!(
             resolved["test:join/0"],

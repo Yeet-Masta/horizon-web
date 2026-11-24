@@ -742,7 +742,52 @@ pub(crate) fn load_tag_lists(
             raw.entry(id.to_owned()).or_default().push(&v);
         }
     }
-    Ok(TagLayers::resolve_all(raw))
+    let known = frozen_registry_ids(root, kind);
+    Ok(TagLayers::resolve_all(raw, |id| {
+        known.as_ref().is_none_or(|ids| ids.contains(id))
+    }))
+}
+/// The ids of the built-in registry `kind`'s tags name, which a tag's
+/// elements are checked against (`ElementLookup.fromFrozenRegistry`): the
+/// blocks, items and fluids of `command-registries.json`, which content mods'
+/// join, and the entity types of `entity-types.json`, which holds the mods'
+/// too. None for a data-driven registry, or a root without the export: then
+/// every element is taken.
+fn frozen_registry_ids(root: &Path, kind: &str) -> Option<HashSet<String>> {
+    let qualify = |id: &str| {
+        if id.contains(':') {
+            id.to_owned()
+        } else {
+            format!("minecraft:{id}")
+        }
+    };
+    if kind == "entity_type"
+        && let Ok(bytes) = fs::read(root.join("entity-types.json"))
+    {
+        let rows: HashMap<String, serde::de::IgnoredAny> = serde_json::from_slice(&bytes)
+            .inspect_err(|e| log::warn!("Horizon: entity-types.json is unreadable: {e}"))
+            .ok()?;
+        return Some(rows.keys().map(|id| qualify(id)).collect());
+    }
+    if !matches!(kind, "block" | "item" | "fluid" | "entity_type") {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Export<'a> {
+        #[serde(borrow, default)]
+        by_registry: HashMap<String, &'a serde_json::value::RawValue>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Ids {
+        ids: Vec<String>,
+    }
+    let bytes = fs::read(root.join("command-registries.json")).ok()?;
+    let export: Export = serde_json::from_slice(&bytes)
+        .inspect_err(|e| log::warn!("Horizon: command-registries.json is unreadable: {e}"))
+        .ok()?;
+    let ids: Ids =
+        serde_json::from_str(export.by_registry.get(&format!("minecraft:{kind}"))?.get()).ok()?;
+    Some(ids.ids.iter().map(|id| qualify(id)).collect())
 }
 /// An entity type id or `#tag` as the set of entity type ids it names.
 fn entity_spec(tags: &HashMap<String, HashSet<String>>, spec: &str) -> HashSet<String> {

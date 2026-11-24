@@ -361,12 +361,14 @@ impl Enchantments {
                 raw_tags.entry(id.clone()).or_default().push(&v);
             }
         }
-        let tags: HashMap<String, Vec<Arc<str>>> = TagLayers::resolve_all(raw_tags)
+        // The enchantments are a data-driven registry: only the `#tag`
+        // references are checked, not the elements.
+        let tags: HashMap<String, Vec<Arc<str>>> = TagLayers::resolve_all(raw_tags, |_| true)
             .into_iter()
             .map(|(id, members)| (id, members.into_iter().map(Arc::from).collect()))
             .collect();
         let unordered = |raw| {
-            TagLayers::resolve_all(raw)
+            TagLayers::resolve_all(raw, |_| true)
                 .into_iter()
                 .map(|(id, members)| (id, members.into_iter().collect()))
                 .collect::<HashMap<String, HashSet<String>>>()

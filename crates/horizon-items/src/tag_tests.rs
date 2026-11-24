@@ -120,6 +120,43 @@ fn item_tag_diamond_resolves_past_the_old_depth_limit() {
     );
 }
 
+/// #20838 `TagLoader.build`: a world pack's block tag naming a block the
+/// registry doesn't have fails to load and is left empty, the game's own
+/// stone with it; another tag of the same registry still loads.
+#[test]
+fn pack_block_tag_missing_a_required_block_is_left_empty() {
+    let root = std::env::temp_dir().join(format!("horizon-tag-required-{}", std::process::id()));
+    let tags = root.join("data/minecraft/tags/block/mineable");
+    fs::create_dir_all(&tags).unwrap();
+    fs::write(
+        tags.join("pickaxe.json"),
+        r#"{"values":["minecraft:stone"]}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("command-registries.json"),
+        json!({"by_registry": {"minecraft:block": {"ids": ["minecraft:stone", "minecraft:oak_log"]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let files = [
+        tag(
+            "block",
+            "minecraft:mineable/pickaxe",
+            vec![json!({"values": ["minecraft:not_a_block"]})],
+        ),
+        tag(
+            "block",
+            "minecraft:logs",
+            vec![json!({"values": ["oak_log"]})],
+        ),
+    ];
+    let loaded = load_tag_lists(&root, "block", &PackOverlay::new(&files)).unwrap();
+    fs::remove_dir_all(&root).unwrap();
+    assert!(loaded["minecraft:mineable/pickaxe"].is_empty());
+    assert_eq!(loaded["minecraft:logs"], ["minecraft:oak_log"]);
+}
+
 fn load_enchantments(fixture: &str, files: &[(String, Vec<Vec<u8>>)]) -> Enchantments {
     let root = std::env::temp_dir().join(format!(
         "horizon-enchantment-tags-{fixture}-{}",
