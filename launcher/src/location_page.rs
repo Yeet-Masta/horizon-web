@@ -47,6 +47,25 @@ fn environment_blocked() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
 }
 
+pub(super) fn move_hint() -> Option<&'static str> {
+    (!environment_blocked()).then(|| tr("To move these files, see Settings > Data folder."))
+}
+
+pub(super) fn data_path(label: &'static str, path: &std::path::Path) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_baseline()
+        .gap(px(6.))
+        .child(label)
+        .child(
+            div()
+                .min_w_0()
+                .font_family(theme::MONO)
+                .child(path.display().to_string()),
+        )
+}
+
 impl Launcher {
     fn location_busy(&self) -> bool {
         self.installing.is_some()

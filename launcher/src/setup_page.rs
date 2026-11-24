@@ -1,18 +1,19 @@
 //! The Windows setup window: `horizon-launcher-setup.exe` installs, `horizon-launcher.exe
 //! uninstall` removes. The launcher's own sky and plates (docs/design-system.md, "Night"); the
 //! work is `horizon_launcher::installer`, on a thread, reported over a channel.
-use crate::glass_ui;
 use crate::scene;
 use crate::shell::{c, text};
 use crate::sky::Sky;
 use crate::theme::{self, night, Theme};
 use crate::titlebar;
 use crate::Kind;
+use crate::{glass_ui, location_page};
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClickEvent, Context, Div, PathPromptOptions, Render,
     Task, Window, WindowBounds, WindowOptions,
 };
-use horizon_launcher::backend::Settings;
+use horizon_launcher::backend::{self, Settings};
+use horizon_launcher::data_location::Roots;
 use horizon_launcher::i18n::{self, tr};
 use horizon_launcher::installer::{self, Mode, Options, Step};
 use std::sync::mpsc::{channel, Receiver};
@@ -43,6 +44,7 @@ pub struct Setup {
     /// frame.
     settings_stamp: Option<(std::time::SystemTime, u64)>,
     options: Options,
+    data_roots: Option<Roots>,
     /// An install is already there: the button says Update.
     update: bool,
     stage: Stage,
@@ -79,6 +81,14 @@ fn step_text(step: Step) -> String {
     }
 }
 
+fn setup_data_roots() -> Roots {
+    Roots {
+        launcher: backend::data_dir(),
+        game: backend::game_home(),
+        build: backend::build_dir(),
+    }
+}
+
 impl Setup {
     fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let settings = Settings::load();
@@ -93,6 +103,7 @@ impl Setup {
             sky_wake: None,
             settings_stamp: Self::settings_stamp(),
             options: Options::new(),
+            data_roots: (mode == Mode::Install).then(setup_data_roots),
             update: installer::installed().is_some(),
             stage: Stage::Welcome,
             rx: None,
@@ -101,8 +112,7 @@ impl Setup {
 
     /// The settings file's write time and size, to notice a change made in the launcher.
     fn settings_stamp() -> Option<(std::time::SystemTime, u64)> {
-        let meta =
-            std::fs::metadata(horizon_launcher::backend::data_dir().join("settings.json")).ok()?;
+        let meta = std::fs::metadata(backend::data_dir().join("settings.json")).ok()?;
         Some((meta.modified().ok()?, meta.len()))
     }
 
@@ -282,6 +292,24 @@ impl Setup {
                             .to_string(),
                     ))
                     .child(self.folder_row(cx))
+                    .children(self.data_roots.as_ref().map(|roots| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(text(night::CAPTION, c(n.muted)).child(tr("Data folder")))
+                            .children([
+                                (tr("Game downloads and launcher data"), &roots.launcher),
+                                (tr("Game saves and instances"), &roots.game),
+                                (tr("Native-mod builds and compiler"), &roots.build),
+                            ].into_iter().map(|(label, path)| {
+                                text(night::CAPTION, c(n.ink_soft))
+                                    .child(location_page::data_path(label, path))
+                            }))
+                            .children(location_page::move_hint().map(|hint| {
+                                text(night::CAPTION, c(n.muted)).child(hint)
+                            }))
+                    }))
                     .child(self.toggle(
                         "desktop",
                         self.options.desktop,
@@ -477,5 +505,69 @@ impl Render for Setup {
                     .child(card),
             )
             .children(titlebar::resize_handles(window))
+    }
+}
+
+#[cfg(test)]
+mod data_folder_tests {
+    use super::*;
+    use std::{env, fs, path::PathBuf, process::Command};
+
+    #[test]
+    fn setup_reads_distinct_configured_data_roots() {
+        const CHILD: &str = "HORIZON_SETUP_DATA_TEST_CHILD";
+        const LOCATION_FILE: &str = "HORIZON_LAUNCHER_LOCATION_FILE";
+        if env::var_os(CHILD).is_some() {
+            let roots = horizon_launcher::data_location::configured_roots()
+                .unwrap()
+                .unwrap();
+            assert_ne!(roots.launcher, roots.build);
+            assert_eq!(setup_data_roots(), roots);
+            return;
+        }
+
+        let tool_safe = |path: &std::path::Path| {
+            path.is_absolute()
+                && path
+                    .to_str()
+                    .is_some_and(|s| s.is_ascii() && !s.bytes().any(|b| b.is_ascii_whitespace()))
+        };
+        let temp = env::temp_dir().canonicalize().unwrap();
+        let base = if tool_safe(&temp) {
+            temp
+        } else {
+            // A Windows profile can put TEMP under a path the build tools cannot use.
+            env::var_os("ProgramData")
+                .map(PathBuf::from)
+                .filter(|path| tool_safe(path))
+                .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        };
+        let scratch = tempfile::tempdir_in(base).unwrap();
+        let roots = Roots {
+            launcher: scratch.path().join("launcher"),
+            game: scratch.path().join("game"),
+            build: scratch.path().join("build"),
+        };
+        for path in [&roots.launcher, &roots.game, &roots.build] {
+            fs::create_dir(path).unwrap();
+        }
+        let config = serde_json::json!({ "version": 1, "roots": roots });
+        let pointer = scratch.path().join("location.json");
+        fs::write(&pointer, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        // The location is cached per process. CI also sets home overrides for other tests.
+        let result = Command::new(env::current_exe().unwrap())
+            .args([
+                "--include-ignored",
+                "--exact",
+                "setup_page::data_folder_tests::setup_reads_distinct_configured_data_roots",
+            ])
+            .env(CHILD, "1")
+            .env(LOCATION_FILE, pointer)
+            .env_remove("HORIZON_LAUNCHER_HOME")
+            .env_remove("HORIZON_HOME")
+            .status()
+            .unwrap();
+        assert!(result.success());
     }
 }

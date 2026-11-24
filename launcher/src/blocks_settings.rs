@@ -351,6 +351,11 @@ impl Launcher {
                 .children(name.map(|name| div().font_weight(FontWeight::BOLD).child(name)))
                 .child(tr("These mods are programs that run inside your game. Like any program you install, they can read and change your files. Allow them only if you trust who made them."))
                 .children(horizon_launcher::rust_toolchain::installed().is_none().then(|| trf("Horizon will first download a compiler ({size}) to build them.", &[("size", &size)])))
+                .children(bytes.is_some().then(|| {
+                    div().flex().flex_col().gap(px(4.))
+                        .child(crate::location_page::data_path(tr("Build data"), &backend::build_dir()))
+                        .children(crate::location_page::move_hint())
+                }))
                 .child(tr("You can take this permission back in Settings > Storage."))
                 .children(self.consent_error.clone().map(|error| div().text_color(t.danger).child(error)))
                 .children(bytes.is_none().then(|| div().text_color(t.danger).child(tr("Native mods can't be built on this computer, so they can't be allowed here."))))
