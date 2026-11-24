@@ -4,7 +4,7 @@
 use super::{Guest, Hub};
 use crate::{
     chunk::Chunk,
-    lan::{terrain_view, viewed_levels::send::Runs},
+    lan::{Body, terrain_view, viewed_levels::send::Runs},
     world::World,
 };
 use horizon_protocol::{
@@ -44,11 +44,16 @@ impl Hub {
     }
 
     /// `body`, a play clientbound packet, to each of `holders`.
-    fn send_to_holders(&self, holders: &[(usize, Option<Level>)], body: &[u8]) {
+    pub(super) fn send_to_holders(&self, holders: &[(usize, Option<Level>)], body: &[u8]) {
+        let direct = holders.iter().filter(|(_, level)| level.is_none()).count();
+        let shared = (direct >= 2).then(|| Body::shared(body.to_vec()));
         for &(i, level) in holders {
             let g = &self.guests[i];
             match level {
-                None => g.sender.send(body.to_vec()),
+                None => match &shared {
+                    Some(body) => g.sender.send_many([body.clone()]),
+                    None => g.sender.send(body.to_vec()),
+                },
                 Some(level) => {
                     let mut runs = Runs::new(level);
                     runs.push(body);

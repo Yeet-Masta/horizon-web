@@ -1278,5 +1278,13 @@
     "path": "crates/horizon-world/tests/it/world_io.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-world.txt: microbenchmark; run with --ignored --nocapture. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-client-lib",
+    "target": "lib",
+    "test": "lan::hub::tests::block_send_bench::block_fanout_benchmark",
+    "path": "crates/horizon-client/src/lan/hub/tests/block_send_bench.rs",
+    "reason": "timing",
+    "rationale": "Opt-in measurement, not an ordinary daily correctness check: timing. Run by hand on an idle machine with HORIZON_BLOCK_FANOUT_BENCH=1 and the optimized profile; all assertions remain in the test."
   }
 ]

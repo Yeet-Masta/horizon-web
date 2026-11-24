@@ -1,3 +1,4 @@
+mod block_send_bench;
 mod bundle_sound_tests;
 mod cave_air_tests;
 mod chunk_ready_tests;
@@ -22,6 +23,160 @@ mod terrain_send_bench;
 mod terrain_view_tests;
 use super::*;
 use crate::fast_hash::FxHashSet;
+use crate::lan::{Body, Holding, Joined, PlayerSender, flush_all};
+use std::sync::{Arc, atomic::Ordering};
+
+fn add_broadcast_test_guest(
+    hub: &mut Hub,
+    conn: u32,
+) -> std::sync::mpsc::Receiver<crate::lan::Out> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut guest = Guest::new(
+        Joined {
+            conn,
+            uuid: u128::from(conn),
+            name: format!("Player{conn}"),
+            properties: Vec::new(),
+            info: horizon_protocol::packets::configuration::ClientInformation::new(8),
+            brand: "vanilla".into(),
+            sender: PlayerSender::new(tx, Arc::default()),
+            latency: Arc::default(),
+            address: "127.0.0.1:25565".parse().unwrap(),
+            expected: false,
+        },
+        conn as i32,
+        [0.5, 64.0, 0.5],
+        8,
+    );
+    guest.placed = true;
+    guest.dimension = "minecraft:overworld".into();
+    hub.guests.push(guest);
+    rx
+}
+
+/// Direct holders share one encoded body, while a singleton keeps the owned path.
+#[test]
+fn direct_block_broadcasts_share_body_and_charge_each_sender() {
+    let (mut hub, _first) = hub_with_a_guest();
+    let _second = add_broadcast_test_guest(&mut hub, 2);
+
+    let body = vec![1, 2, 3, 4];
+    let holders = [(0, None), (1, None)];
+    let holding = Holding::start();
+    hub.send_to_holders(&holders, &body);
+    let first = hub.guests[0].sender.held_bodies();
+    let second = hub.guests[1].sender.held_bodies();
+    assert!(matches!((&first[..], &second[..]),
+        ([Body::Shared(a)], [Body::Shared(b)]) if Arc::ptr_eq(a, b)));
+    let first_charge = hub.guests[0].sender.pending.load(Ordering::Relaxed);
+    let second_charge = hub.guests[1].sender.pending.load(Ordering::Relaxed);
+    assert_eq!(first_charge, second_charge);
+    assert!(first_charge > 0);
+    drop(holding);
+
+    let (hub, _first) = hub_with_a_guest();
+    let holding = Holding::start();
+    hub.send_to_holders(&[(0, None)], &body);
+    let singleton = hub.guests[0].sender.held_bodies();
+    assert!(matches!(&singleton[..], [Body::Owned(bytes)] if bytes == &body));
+    drop(holding);
+}
+
+/// A direct and viewed holder keep their own wire representation and packet order.
+#[test]
+fn block_broadcast_keeps_viewed_level_wrapping_separate() {
+    let (mut hub, direct_rx) = hub_with_a_guest();
+    let viewed_rx = add_broadcast_test_guest(&mut hub, 2);
+    let body = horizon_protocol::packets::play::Clientbound::BlockUpdate(
+        horizon_protocol::packets::play::BlockUpdate {
+            pos: [1, 64, 3],
+            state: 7,
+        },
+    )
+    .encode();
+    let level = horizon_protocol::viewed_levels::Level::Index(2);
+    let holding = Holding::start();
+    hub.send_to_holders(&[(0, None), (1, Some(level))], &body);
+    flush_all(hub.guests.iter().map(|g| &g.sender));
+    drop(holding);
+
+    let crate::lan::Out::Packets(direct) = direct_rx.try_recv().unwrap() else {
+        panic!("direct holder packet");
+    };
+    assert_eq!(direct, std::slice::from_ref(&body));
+    let crate::lan::Out::Packets(viewed) = viewed_rx.try_recv().unwrap() else {
+        panic!("viewed holder packet");
+    };
+    assert_eq!(viewed.len(), 1);
+    let mut reader = horizon_protocol::buf::Reader::new(&viewed[0]);
+    let id = reader.varint().unwrap();
+    let horizon_protocol::packets::play::Clientbound::CustomPayload(payload) =
+        horizon_protocol::packets::play::Clientbound::decode(id, reader.rest()).unwrap()
+    else {
+        panic!("viewed holder wrapper");
+    };
+    assert_eq!(payload.channel, horizon_protocol::viewed_levels::CHANNEL);
+    let horizon_protocol::viewed_levels::Message::Run {
+        level: got,
+        packets,
+    } = horizon_protocol::viewed_levels::Message::decode_in(
+        &payload.data,
+        horizon_protocol::viewed_levels::REVISION_3,
+    )
+    .unwrap()
+    else {
+        panic!("viewed holder run");
+    };
+    assert_eq!(got, level);
+    assert_eq!(
+        packets,
+        vec![(
+            horizon_protocol::ids::play::clientbound::BLOCK_UPDATE,
+            &body[1..],
+        )]
+    );
+}
+
+/// A light update reaches every direct holder with identical wire bytes.
+#[test]
+fn light_broadcast_reaches_direct_holders_once_in_order() {
+    let (mut hub, first_rx) = hub_with_a_guest();
+    let second_rx = add_broadcast_test_guest(&mut hub, 2);
+    for i in 0..hub.guests.len() {
+        hub.guests.update(i, |g| {
+            g.sent_chunks.insert((0, 0));
+        });
+    }
+    let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
+    let mut chunk = Chunk::empty(0, 0);
+    chunk.lit = true;
+    world.chunks.insert((0, 0), Arc::new(chunk));
+    world.light_log = Some(
+        [((0, 0), crate::section_mask::SectionMask::single(2))]
+            .into_iter()
+            .collect(),
+    );
+
+    hub.broadcast_light_changes(&mut world);
+
+    let packet = |rx: &std::sync::mpsc::Receiver<crate::lan::Out>| {
+        let crate::lan::Out::Packet(body) = rx.try_recv().unwrap() else {
+            panic!("light update");
+        };
+        let mut reader = horizon_protocol::buf::Reader::new(&body);
+        let id = reader.varint().unwrap();
+        assert!(matches!(
+            horizon_protocol::packets::play::Clientbound::decode(id, reader.rest()),
+            Ok(horizon_protocol::packets::play::Clientbound::LightUpdate(_))
+        ));
+        body
+    };
+    let first = packet(&first_rx);
+    let second = packet(&second_rx);
+    assert_eq!(first, second);
+    assert!(first_rx.try_recv().is_err());
+    assert!(second_rx.try_recv().is_err());
+}
 
 /// Queued one-shot fields wait out a change nobody sees, go in one built tag to
 /// every viewer, and are not sent again; a column sent whole doesn't lose them.

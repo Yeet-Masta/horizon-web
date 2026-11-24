@@ -570,6 +570,11 @@ impl PlayerSender {
             self.pending.load(Ordering::Relaxed),
         )
     }
+    /// The bodies held by this sender during a test tick, before the channel path flattens them.
+    #[cfg(test)]
+    pub(crate) fn held_bodies(&self) -> Vec<Body> {
+        self.held().clone()
+    }
     /// Several packets in order, as [`Self::send`] each: under one lock
     /// while the tick holds them. Shared bodies stay shared up to the wire.
     pub fn send_many<B: Into<Body>>(&self, bodies: impl IntoIterator<Item = B>) {
