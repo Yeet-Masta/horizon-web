@@ -18,6 +18,26 @@ data folder in `run/<home key>/game/`; installed versions remain intact. Opening
 world to other machines can still require an initial Windows Firewall permission.
 The launcher does not create firewall rules or change network-profile settings.
 
+## Find your best graphics settings
+
+From the title screen, open **Options → Video Settings → Graphics Benchmark**.
+**Find my best settings** samples seven fixed workloads (dense and far terrain,
+entities, block entities, particles and weather, a resource pack, and inventory
+over a world). **Run thorough benchmark** samples each workload twice for longer.
+Both compare frame rate, 1% lows, and loading time. Leave Horizon at the title
+while it measures: another world or game can distort the comparison.
+
+The benchmark opens a separate worker window using a temporary world and its own
+settings. If a trial crashes or times out, Horizon skips that combination. If you
+close Horizon or it crashes, the next title screen resumes where it stopped.
+Saved results are local to the instance, GPU, driver and game build. After an
+update, run again to get a current recommendation.
+
+Review the results and changed settings, then choose **Apply recommended
+settings**. Nothing changes until you apply. A new graphics API or worker count
+takes effect the next time you start the game. **Undo benchmark settings** restores
+the previous settings if they have not been manually changed since applying.
+
 ## musl Linux: manual installation
 
 On x86-64 musl distributions, download `horizon-linux-musl-x86_64.tar.gz` from the

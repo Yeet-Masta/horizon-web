@@ -2703,3 +2703,4 @@ horizon-client game::xp_repair_ratio_tests::the_ratio_a_part_answers_scales_the_
 horizon-client game::zombie_villagers::tests::conversions_preserve_body_equipment lib daily resources
 horizon-client game::runtime_levels_tests::a_reset_of_the_vanilla_levels_is_refused_until_the_mod_can_hold_the_place_and_nobody_is_inside lib daily resources
 horizon-client game::runtime_levels_tests::a_reset_regenerates_the_vanilla_levels_from_the_new_seed_and_keeps_the_world_border lib daily resources
+horizon-client game::control::tests::benchmark_smoke_counts_each_burst_before_the_particle_tick lib daily resources

@@ -81,6 +81,7 @@ use window_handler::ClientQuit;
 // `Action` here is the title screen's buttons (`title::Action`).
 use self::api_values::TryIntoApi;
 pub(crate) use api_values::{block_jump_factor, block_speed_factor, is_ladder};
+pub(crate) use graphics_tuning::exit_if_supervisor_is_gone;
 use horizon_client::actions::Action as Mapping;
 use horizon_client::spans::{startup, time as span};
 use horizon_client::{

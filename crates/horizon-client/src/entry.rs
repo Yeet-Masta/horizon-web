@@ -24,6 +24,7 @@ impl Startup {
 pub fn prepare() -> Startup {
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     horizon_mod_package::holder::enter();
+    game::exit_if_supervisor_is_gone();
     let result: crate::Result<_> = (|| {
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command.args(std::env::args_os().skip(1));

@@ -485,6 +485,13 @@ impl Game<'_> {
             return;
         }
         horizon_client::spans::time("server_packs", || self.tick_server_packs());
+        if self.title.is_some()
+            && self.options.is_client_start()
+            && self.options.benchmark.is_none()
+            && !self.options.offscreen
+        {
+            super::graphics_tuning::ready_at_title(&self.options.resources, &self.settings);
+        }
         horizon_client::spans::time("control", || self.poll_control(event_loop));
         if self.pending_save.is_some() {
             return;

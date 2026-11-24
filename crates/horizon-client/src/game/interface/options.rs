@@ -180,6 +180,11 @@ impl Game<'_> {
     }
     pub(super) fn draw_options(&mut self, batch: &mut HudBatch) {
         self.watch_pack_folder();
+        let tuning =
+            (self.title.is_some() && self.options.benchmark.is_none() && !self.options.offscreen)
+                .then(|| super::graphics_tuning::view(&self.settings))
+                .flatten();
+        self.ui.options.set_graphics_benchmark(tuning);
         let context = self.controller_settings_context();
         if self.ui.options.controller_open() {
             self.ui.options.set_controller_context(context);
@@ -377,6 +382,15 @@ impl Game<'_> {
         for e in events {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
+                Event::GraphicsBenchmark(action) => {
+                    // The title remains interactive after resource loading hands it off to Game.
+                    if self.title.is_some()
+                        && super::graphics_tuning::action(action, &mut self.settings)
+                    {
+                        self.settings.save(&Self::options_path());
+                        self.apply_settings();
+                    }
+                }
                 Event::DebugEntriesChanged => self.debug_entries.invalidate(),
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
@@ -791,6 +805,11 @@ impl Game<'_> {
             .settings
             .horizon
             .battery_limit(limit, self.title.is_none(), self.focused);
+        let limit = if self.title.is_some() && super::graphics_tuning::running() {
+            limit.min(8)
+        } else {
+            limit
+        };
         // A native mod may only lower it (`native_framerate_limit`).
         let mut hooked = limit;
         self.native_framerate_limit(

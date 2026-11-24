@@ -1729,6 +1729,8 @@ pub enum Event {
     Close,
     /// Settings changed: apply and save them.
     Changed,
+    /// A player explicitly requested a local graphics benchmark action.
+    GraphicsBenchmark(crate::graphics_ui::BenchmarkAction),
     /// The reduced-debug-info option rebuilt the debug entry list.
     DebugEntriesChanged,
     /// A slider is being dragged: apply settings live but defer saving.
@@ -2503,6 +2505,14 @@ impl OptionsUi {
     /// that is partly hidden scrolls all into view. How far it moved down, when it moved.
     pub fn reveal(&mut self, s: &Settings, size: (f32, f32), rect: [f32; 4]) -> Option<f32> {
         self.shell_mut()?.reveal(s, size, rect)
+    }
+    pub fn set_graphics_benchmark(
+        &mut self,
+        view: Option<std::sync::Arc<crate::graphics_ui::BenchmarkView>>,
+    ) {
+        if horizon_extras() {
+            self.graphics.screen.benchmark = view;
+        }
     }
     /// Whether a video settings screen is open, Horizon's or vanilla's: the fullscreen mode
     /// waits for it to close, and Ctrl with the wheel steps the GUI scale.
@@ -7776,6 +7786,8 @@ mod tests {
                     Item::Vanilla(o) => format!("{o:?}"),
                     Item::Horizon(h) => format!("graphics:{h:?}"),
                     Item::Extra(e) => format!("extra:{e:?}"),
+                    // Benchmark actions and measurements are not settings.
+                    Item::Benchmark(_) => continue,
                 };
                 graphics_rows.insert(id.clone());
                 put(id, "Graphics");

@@ -1343,7 +1343,10 @@ impl Graphics {
         text
     }
     pub fn save(&self, dir: &Path) {
-        let _ = fs::write(dir.join(FILE), self.serialize());
+        let _ = self.try_save(dir);
+    }
+    pub fn try_save(&self, dir: &Path) -> std::io::Result<()> {
+        fs::write(dir.join(FILE), self.serialize())
     }
     /// Paper white, in nits: the player's, or on Auto the desktop's SDR white as the
     /// system `reported` it for the renderer's display, else 203 (BT.2408's reference white).
