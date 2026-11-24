@@ -10118,6 +10118,79 @@ CHECKS += ['cart_portal_rider']
 CHECK_FNS.update(cart_portal_rider=check_cart_portal_rider)
 
 
+def check_boat_end_portal(host, guest, out):
+    """#17485: a mounted boat falling faster than its box is tall must sweep the End portal."""
+    home = 'execute in minecraft:overworld run'
+    tag = 'boat_end_portal'
+    result = {}
+    spots = apart(host, guest)
+    for label, player, other in (('host', host, guest), ('guest', guest, host)):
+        x, ground, z = spots[label]
+        y, portal_y = 220, 183
+        for cmd in (
+            f'fill {x - 2} {y - 1} {z - 1} {x + 2} {y - 1} {z + 4} packed_ice',
+            f'fill {x - 2} {portal_y - 3} {z - 1} {x + 2} {portal_y - 3} {z + 26} stone',
+            # At this height the boat falls from y=183.88 to y=182.16 in one tick.
+            # Neither endpoint overlaps the portal's 6/16..12/16 inside shape.
+            f'fill {x - 2} {portal_y} {z + 5} {x + 2} {portal_y} {z + 26} end_portal',
+            f'tp @s {x + 0.5} {y} {z + 0.5} 0 0',
+            f'summon oak_boat {x + 0.5} {y} {z + 2.5} {{Tags:["{tag}"]}}',
+        ):
+            player('command', command=cmd)
+        player.wait(25)
+        try:
+            assert player.raw('block', x, portal_y, z + 5)['block'] == 'minecraft:end_portal'
+            boat = board(player, 'oak_boat', (x + 0.5, y, z + 2.5))
+
+            def boat_status():
+                status = player('status')
+                at = next((o['position'] for o in status['objects'] if o['id'] == boat['id']), None)
+                return status.get('riding'), at
+
+            player.raw('key', 'w', 'down')
+            try:
+                # Paddle off the runway, then coast through the portal below it.
+                for _ in range(60):
+                    player.wait(2)
+                    if player('state').get('dimension') == END:
+                        break
+                    _, at = boat_status()
+                    if at is not None and at[2] > z + 6:
+                        break
+                else:
+                    raise AssertionError(f'{label}: boat did not leave the runway: {boat_status()}')
+            finally:
+                player.raw('key', 'w', 'up')
+
+            there = wait_dimension(player, END, 600)
+            assert there.get('dimension') == END, f'{label}: boat did not enter the End: {boat_status()}'
+            for _ in range(30):
+                player.wait(20)
+                riding, at = boat_status()
+                if riding == boat['id'] and at is not None:
+                    break
+            assert riding == boat['id'] and at is not None, f'{label}: lost boat {boat["id"]} in the End'
+            rider = pos_of(player)
+            assert math.dist(at, rider) < 3, f'{label}: boat is not under its rider: {at}, {rider}'
+            assert other('state').get('dimension') == OVERWORLD
+            player.shot(out, 'boat-end-portal')
+            result[label] = {'riding': riding, 'boat': at, 'player': rider}
+        finally:
+            back_to_game(player)
+            player('command', command=f'kill @e[tag={tag}]')
+            player('command', command=f'{home} kill @e[tag={tag}]')
+            for level, last_z in ((y - 1, z + 4), (portal_y, z + 26), (portal_y - 3, z + 26)):
+                player('command', command=f'{home} fill {x - 2} {level} {z - 1} {x + 2} {level} {last_z} air')
+            player('command', command=f'{home} tp @s {x + 0.5} {ground} {z + 0.5}')
+            wait_dimension(player, OVERWORLD, 600)
+            player.wait(20)
+    return result
+
+
+CHECKS += ['boat_end_portal']
+CHECK_FNS.update(boat_end_portal=check_boat_end_portal)
+
+
 def check_recipe_removal(host, guest, out):
     """ServerRecipeBook.removeRecipes sends ClientboundRecipeBookRemovePacket to the player:
     the open book updates immediately, reopening keeps it empty, and later grants still arrive."""

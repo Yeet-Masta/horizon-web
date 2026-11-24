@@ -116,6 +116,10 @@ pub(super) struct Portals {
     pub(super) entities: HashMap<u32, PortalState>,
     /// Positions before this tick's moves, by entity id.
     pub(super) before: FxHashMap<u32, Vec3>,
+    /// End portal contacts on accepted boat packet moves, before the entity
+    /// tick snapshots the boats' positions. Kept until the normal portal pass
+    /// so those contacts don't advance the portal processor a tick early.
+    boat_end_contacts: FxHashMap<u32, (Dim, BlockPos)>,
     arrivals: Vec<Arrival>,
     /// The vehicles server players ride that went through a portal this
     /// tick, in their level, with their entry: they carry their riders
@@ -1196,6 +1200,43 @@ impl Game<'_> {
             self.find_portals(Some(ridden));
         }
     }
+    /// `Entity.checkInsideBlocks` for a boat driven by `handleMoveVehicle`:
+    /// the server resolves its move and then snaps an accepted packet to its
+    /// target. Both segments can cross the thin portal between tick snapshots.
+    pub(super) fn record_boat_end_portal_contact(
+        &mut self,
+        id: u32,
+        from: Vec3,
+        reached: Vec3,
+        to: Vec3,
+        bounds: Aabb,
+    ) {
+        if (from == reached && reached == to) || self.portals.boat_end_contacts.contains_key(&id) {
+            return;
+        }
+        let mut sections = std::mem::take(&mut self.portals.sections);
+        let entry = self
+            .swept_portal_box(
+                from,
+                reached,
+                bounds.move_by(reached.subtract(to)),
+                &mut sections,
+            )
+            .or_else(|| {
+                if reached != to {
+                    self.swept_portal_box(reached, to, bounds, &mut sections)
+                } else {
+                    None
+                }
+            });
+        self.portals.sections = sections;
+        if let Some(pos) = entry
+            && self.is_end_portal(self.world.block(pos.x, pos.y, pos.z))
+        {
+            self.portals.boat_end_contacts.insert(id, (self.dim, pos));
+        }
+    }
+
     fn find_portals(&mut self, only: Option<&[u32]>) {
         if self.remote.is_some() {
             return;
@@ -1234,9 +1275,14 @@ impl Game<'_> {
         }
         let mut inside: Vec<(u32, BlockPos, i32)> = Vec::new();
         let mut portal_sections = std::mem::take(&mut self.portals.sections);
+        let dim = self.dim;
+        let keep_other_contacts = |id: &u32, contact: &mut (Dim, BlockPos)| {
+            contact.0 != dim || (only.is_none() && ridden.contains(id))
+        };
         // No loaded section has a portal state in its palette (nearly always): no
         // sweep below can meet a portal block, so the walk would find nothing.
         if !self.level_may_hold_portal(&mut portal_sections) {
+            self.portals.boat_end_contacts.retain(keep_other_contacts);
             self.portals.sections = portal_sections;
             return;
         }
@@ -1270,11 +1316,19 @@ impl Game<'_> {
             let Some(bounds) = entity.portal_bounds(to) else {
                 continue;
             };
-            if let Some(pos) = self.swept_portal_box(from, to, bounds, &mut portal_sections) {
+            let entry = self
+                .swept_portal_box(from, to, bounds, &mut portal_sections)
+                .or_else(|| {
+                    let &(contact_dim, pos) = self.portals.boat_end_contacts.get(&id)?;
+                    (contact_dim == dim && self.is_end_portal(self.world.block(pos.x, pos.y, pos.z)))
+                        .then_some(pos)
+                });
+            if let Some(pos) = entry {
                 inside.push((id, pos, self.dimension_changing_delay(id)));
             }
         });
         self.portals.sections = portal_sections;
+        self.portals.boat_end_contacts.retain(keep_other_contacts);
         for (id, pos, delay) in inside {
             self.portals
                 .entities

@@ -751,6 +751,7 @@ impl Game<'_> {
             b.yaw = p.yaw;
             b.on_ground = p.on_ground;
         });
+        self.record_boat_end_portal_contact(id, old, reached, target, moved_box);
         // handleMoveVehicle's `vehicle.move` counts the fall
         // (AbstractBoat.checkFallDamage); the server's baseTick resets it in
         // water (updateFluidInteraction), which this boat's skipped tick

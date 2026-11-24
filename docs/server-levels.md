@@ -94,10 +94,12 @@ block the save.
 
 ## What's checked
 
-`python3 tools/lan_e2e.py --check portals --check levels`:
+`python3 tools/lan_e2e.py --check portals --check levels --check boat_end_portal`:
 
 - `portals`: the guest goes to the Nether through a portal while the host stays. The host then goes
   to the End while the guest is in the Nether, so three levels run at once, and both come back.
+- `boat_end_portal`: the host and then the guest paddle a boat off a ledge. The boat crosses the
+  thin End portal between its two movement endpoints, and each rider arrives still in its boat.
 - `levels`, with the host and the guest each in a level of its own:
   - `execute in the_nether run tp` moves the guest alone. From the Nether, `execute in overworld` and
     `execute at` the host change and test blocks in the host's level.
