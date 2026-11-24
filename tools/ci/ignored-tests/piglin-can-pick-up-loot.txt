@@ -1,0 +1,1 @@
+horizon-client game::piglin_admire_tests::piglin_without_can_pick_up_loot_leaves_gold lib daily resources

@@ -119,6 +119,37 @@ fn piglin_admire_hit_keeps_baby_gold_and_cancels_adult_barter() {
     });
 }
 
+/// `Piglin.wantsToPickUp`: a piglin saved with `CanPickUpLoot:0b` leaves gold on the ground.
+#[test]
+#[ignore = "daily"]
+fn piglin_without_can_pick_up_loot_leaves_gold() {
+    mod_platform::testing::with_mods(Vec::new().into(), || {
+        with_game(|g| {
+            g.build_registries();
+            g.set_allow_commands(true);
+            g.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            for (nbt, takes) in [("CanPickUpLoot:0b,", false), ("", true)] {
+                g.mobs.clear();
+                g.dropped.clear();
+                let cmd =
+                    format!("summon minecraft:piglin 0 100 0 {{{nbt}IsImmuneToZombification:1b}}");
+                assert!(g.run_command(&cmd));
+                g.mobs[0].extra.set_main_hand(None);
+                let id = g.mobs[0].id;
+                g.creatures.ticked.insert(id);
+                let gold = ItemStack::new("minecraft:gold_ingot", 1);
+                g.spawn_item(gold, [0.0, 100.0, 0.0], [0.0; 3], 0);
+                g.piglin_pickups();
+                assert_eq!(item_stack(&g.mobs[0], OFFHAND).is_some(), takes, "{nbt}");
+                assert_eq!(g.dropped.is_empty(), takes, "{nbt}");
+            }
+        })
+    });
+}
+
 /// A piglin picks up a wanted item within reach even without line of sight (#20557).
 #[test]
 #[ignore = "daily"]

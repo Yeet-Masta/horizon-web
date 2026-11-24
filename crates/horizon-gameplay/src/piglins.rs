@@ -96,9 +96,12 @@ pub fn piglin_can_add<L: PiglinLevel + ?Sized>(l: &L, m: &Mob, stack: &ItemStack
 pub fn piglin_max_stack<L: PiglinLevel + ?Sized>(l: &L, item: &str) -> u32 {
     l.world_items().get(item).map_or(64, |i| i.max_stack)
 }
-/// `PiglinAi.wantsToPickup`: babies ignore their own item tag, but can
-/// pick up currency and other loved items just like adults.
+/// `Piglin.wantsToPickUp` (`canPickUpLoot`) and `PiglinAi.wantsToPickup`: babies ignore
+/// their own item tag, but can pick up currency and other loved items just like adults.
 pub fn piglin_wants<L: PiglinLevel + ?Sized>(l: &L, m: &Mob, stack: &ItemStack) -> bool {
+    if !m.can_pick_up_loot() {
+        return false;
+    }
     let item = &*stack.item;
     if m.is_baby() && l.item_in_tag("minecraft:ignored_by_piglin_babies", item)
         || l.item_in_tag("minecraft:piglin_repellents", item)
