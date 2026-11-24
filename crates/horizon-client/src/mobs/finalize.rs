@@ -2150,7 +2150,7 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             S::Camel | S::CamelHusk => {
                 let now = self.level.game_time();
                 m.extra.pose_change_tick = (now - 52 - 1).max(0);
-                super::camel::stand_up_instantly(m);
+                super::camel::reset_pose_to_full_stand(m);
                 self.horse(m, g)
             }
             S::Goat => {

@@ -857,9 +857,16 @@ pub fn ridden_step(m: &mut Mob, context: &LoopContext) {
     if super::camel::is_camel(m.species()) {
         // Camel.tickRidden / getRiddenInput: forward stands it up once a pose
         // transition is over; no input while sitting; the jump is a dash.
+        // `standUp`: its sound and its game event reach the server's level;
+        // the rider's client copy stands up too, but a client level's
+        // `playSound(null, ...)` and `gameEvent` do nothing (the rider hears
+        // the server's sound once).
         if r.forward > 0.0 && super::camel::sitting(m) && !super::camel::in_transition(m) {
             let mut ev = Vec::new();
             super::camel::stand_up(m, &mut ev);
+            if !m.extra.client_side {
+                m.outbox.append(&mut ev);
+            }
         }
         if super::camel::refuse_to_move(m) {
             m.ai.xxa = 0.0;

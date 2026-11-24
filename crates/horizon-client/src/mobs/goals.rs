@@ -2237,6 +2237,11 @@ impl Goal for Tempt {
         }
     }
 }
+
+mod brain_look;
+
+pub use brain_look::BrainLookAround;
+
 fn look_angles(look: [f64; 3]) -> (f64, f64) {
     let yaw = (-look[0]).atan2(look[2]).to_degrees();
     let pitch = (-look[1]).asin().to_degrees();
