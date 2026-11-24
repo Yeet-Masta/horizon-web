@@ -213,15 +213,33 @@ class SyncTests(unittest.TestCase):
             self.assertFalse((lang / "de_de.json").exists())
             self.assertFalse(review.exists())
 
-    def test_an_export_nested_too_deep_for_the_parser_fails_naming_its_language(self):
+    def test_an_export_nested_too_deep_for_the_tool_fails_naming_its_language(self):
+        # Valid JSON past the tool's own limit, and the unterminated brackets `json` used to run out of stack on:
+        # both are the tool's refusal, not the interpreter's.
+        depth = crowdin_import.MAX_NESTING + 1
+        for body in (b"[" * depth + b"]" * depth, b"[" * 100_000):
+            with self.subTest(bytes=len(body)), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                export.mkdir()
+                (export / "es-ES.json").write_bytes(body)
+                code, _, err = run("--translations", export, "--approved", root / "approved",
+                                   "--lang", lang, "--review", review)
+                self.assertEqual(code, 1)
+                self.assertIn("es_es (export/es-ES.json): not JSON: nested too deep", err)
+
+    def test_a_bracket_in_a_translation_is_not_nesting(self):
+        # At a limit of 1 the flat map is still taken, while a scanner that counted the brackets inside the
+        # translation would measure 2 and refuse it.
         with tempfile.TemporaryDirectory() as tmp:
             root, lang, review, export = self.fixture(tmp)
-            export.mkdir()
-            (export / "es-ES.json").write_bytes(b"[" * 100_000)
-            code, _, err = run("--translations", export, "--approved", root / "approved",
-                               "--lang", lang, "--review", review)
-            self.assertEqual(code, 1)
-            self.assertIn("es_es (export/es-ES.json): not JSON: nested too deep", err)
+            write(export, "es-ES.json", {"horizon.a": "Manzana [1]", "horizon.b": "Plátano %s",
+                                         "horizon.c": "Cereza"})
+            with mock.patch.object(crowdin_import, "MAX_NESTING", 1):
+                code, _, err = run("--translations", export, "--approved", root / "approved",
+                                   "--lang", lang, "--review", review)
+            self.assertEqual(code, 0, err)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries["horizon.a"], "Manzana [1]")
 
     def test_an_unknown_or_doubled_language_in_either_folder_fails_before_anything_is_written(self):
         cases = {  # file name, folder, what the message says

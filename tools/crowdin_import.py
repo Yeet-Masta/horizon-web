@@ -202,6 +202,12 @@ MAX_EXPORT_BYTES = 4 * 1024 * 1024
 MAX_TEXT_CHARS = 4096
 
 
+# The deepest `[`/`{` nesting an export may have. Crowdin's export is a flat map of key to text, so
+# anything past this is not a translation but input the parser should never descend into; the import
+# refuses it itself, as `json` only refused it while its stack ran out (Python 3.14 and later do not).
+MAX_NESTING = 64
+
+
 class ExportError(Exception):
     """An export the import cannot trust: the run stops with exit code 1, writing nothing."""
 
@@ -224,6 +230,28 @@ def unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return entries
 
 
+def deepest_nesting(body: str) -> int:
+    """How deeply `[` and `{` nest in `body`, a bracket inside a string not counted."""
+    deepest = depth = 0
+    quoted = escaped = False
+    for character in body:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif character in "]}":
+            depth -= 1
+    return deepest
+
+
 def read_export(code: str, path: Path, wanted: set[str]) -> dict[str, str]:
     """One exported language, kept to the keys in `wanted` (the English file's), or ExportError:
     larger than MAX_EXPORT_BYTES (it reads no more than that), not a flat map of key to text, a key
@@ -240,11 +268,13 @@ def read_export(code: str, path: Path, wanted: set[str]) -> dict[str, str]:
     del data
     if not body.strip():
         return {}
+    if deepest_nesting(body) > MAX_NESTING:
+        raise ExportError(code, path, "not JSON: nested too deep")
     try:
         entries = json.loads(body, object_pairs_hook=unique_keys)
     except ValueError as error:  # JSONDecodeError is one
         raise ExportError(code, path, f"not JSON: {error}") from None
-    except RecursionError:
+    except RecursionError:  # an interpreter that descends into the nesting before this check can see it
         raise ExportError(code, path, "not JSON: nested too deep") from None
     if entries == []:
         return {}  # Crowdin writes an empty object as `[]`, as PHP does

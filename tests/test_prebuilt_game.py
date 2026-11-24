@@ -29,8 +29,9 @@ def tar_members(archive: bytes) -> list[tuple]:
 
 
 # Packing the Linux fixture (`SdkAssetTests.out`) runs a process pool, and Python can't start one on Windows while
-# `sys.platform` says "linux" (it takes the POSIX spawn path). CI runs these on Linux, where the fixture is native.
-packs_the_linux_fixture = unittest.skipIf(os.name == "nt", "packs the Linux fixture through a process pool")
+# `sys.platform` says "linux" (it takes the POSIX spawn path). The fixture's `.so` names and Linux target triple are
+# also only what the tool expects on Linux. CI runs these on Linux, where the fixture is native.
+packs_the_linux_fixture = unittest.skipUnless(sys.platform.startswith("linux"), "packs the Linux fixture")
 
 
 def write_build_data(root: Path, identity: dict | None = None, commit: str = COMMIT) -> None:
@@ -982,6 +983,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
+# `start` bundles the installation into a Horizon.app and probes it on macOS, which the stubbed `subprocess.run`
+# these tests give it cannot answer; every other platform takes the plain executable's path.
+@unittest.skipIf(sys.platform == "darwin", "start bundles and probes a Horizon.app on macOS")
 class SmokeStartTests(unittest.TestCase):
     def test_only_expected_missing_resources_exit_is_accepted_and_homes_are_scratch(self):
         from types import SimpleNamespace
