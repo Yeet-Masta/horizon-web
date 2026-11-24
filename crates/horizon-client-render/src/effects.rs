@@ -579,17 +579,20 @@ impl PlayerEffects {
         }
         out
     }
-    /// `Player.getDestroySpeed` effect factors (haste/conduit, mining fatigue).
-    pub fn mining_speed_factor(&self) -> f32 {
-        let mut f = 1.0;
+    /// `Player.getDestroySpeed`'s haste factor: `1 + (amplifier + 1) * 0.2`
+    /// for the higher of haste and conduit power
+    /// (`MobEffectUtil.getDigSpeedAmplification`), 1 without either.
+    pub fn haste_mining_factor(&self) -> f32 {
         let haste = self.amplifier("haste").max(self.amplifier("conduit_power"));
-        if let Some(a) = haste {
-            f *= 1.0 + (a + 1) as f32 * 0.2;
-        }
-        if let Some(a) = self.amplifier("mining_fatigue") {
-            f *= horizon_core::jmath::pow(0.3, f64::from(a + 1)) as f32;
-        }
-        f
+        haste.map_or(1.0, |a| 1.0 + (a + 1) as f32 * 0.2)
+    }
+    /// `Player.getDestroySpeed`'s mining fatigue scale:
+    /// `(float) Math.pow(0.3, amplifier + 1)`, 1 without it. Vanilla applies it
+    /// to the speed after the haste factor, not multiplied into it.
+    pub fn mining_fatigue_scale(&self) -> f32 {
+        self.amplifier("mining_fatigue").map_or(1.0, |a| {
+            horizon_core::jmath::pow(0.3, f64::from(a + 1)) as f32
+        })
     }
 }
 /// Effect and equipment facts the movement and damage kernels query.
@@ -974,7 +977,7 @@ mod tests {
         assert_eq!(lasting.len(), 2);
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new("haste", 100, 1));
-        assert!((fx.mining_speed_factor() - 1.4).abs() < 1e-6);
+        assert!((fx.haste_mining_factor() - 1.4).abs() < 1e-6);
         assert_eq!(fx.modifiers().len(), 1);
     }
 

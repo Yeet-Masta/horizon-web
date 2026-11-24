@@ -544,7 +544,8 @@ impl Game<'_> {
             } else {
                 0.0
             },
-            effects: self.potions.effects.mining_speed_factor(),
+            haste: self.potions.effects.haste_mining_factor(),
+            mining_fatigue: self.potions.effects.mining_fatigue_scale(),
             block_break_speed,
             submerged_mining_speed: self
                 .mining_eyes_in_water()

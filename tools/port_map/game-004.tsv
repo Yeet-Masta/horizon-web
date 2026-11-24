@@ -26,7 +26,7 @@ MobEffectInstance.hashCode	skip:java		value hash
 MobEffectInstance.BlendState.setImmediate	port	crates/horizon-world/src/status_effect.rs::EffectInstance::skip_blending	factor and previous frame jump to 1 or 0 at once; the restore on login or a dimension change never calls it, so a restored nausea or darkness still fades in from 0
 MobEffectInstance.BlendState.getFactor	port	crates/horizon-client/src/game/interface/fov.rs::Game::nausea_blend	lerp of the previous and current factor; darkness has its own in sculk.rs::Game::darkness_blend
 MobEffectInstance.Details.create	skip:java		record constructor for the codec
-MobEffectUtil.hasDigSpeed	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::mining_speed_factor	haste or conduit power, also read for the arm swing duration in first_person.rs
+MobEffectUtil.hasDigSpeed	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::haste_mining_factor	haste or conduit power, also read for the arm swing duration in first_person.rs
 MobEffectUtil.hasWaterBreathing	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::status	water_breathing flag is water breathing or conduit power; breath of the nautilus is its own flag read with it
 MobEffectUtil.shouldEffectsRefillAirsupply	inline	crates/horizon-client/src/motion/environment.rs::MotionWorld::tick_environment_damage	air refills unless only breath of the nautilus is active
 OozingMobEffect.onMobRemoved	inline	crates/horizon-client/src/game/items/potions.rs::Game::effects_on_death	oozing branch: two slimes, fewer when slimes within 2 blocks fill max_entity_cramming

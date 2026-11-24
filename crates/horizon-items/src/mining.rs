@@ -19,8 +19,13 @@ pub struct DestroySpeedModifiers {
     /// above one. Vanilla reads it only then, so a caller whose attribute reads
     /// have side effects (a dirty instance recomputes) may leave it 0 otherwise.
     pub mining_efficiency: f32,
-    /// The haste (or conduit power) and mining fatigue factor, 1 without either.
-    pub effects: f32,
+    /// The haste (or conduit power) factor, `1 + (amplifier + 1) * 0.2`; 1
+    /// without either.
+    pub haste: f32,
+    /// The mining fatigue scale, `(float) Math.pow(0.3, amplifier + 1)`; 1
+    /// without it. Vanilla multiplies the speed by haste and then by this, each
+    /// rounded to float, so the two are kept apart rather than multiplied first.
+    pub mining_fatigue: f32,
     /// `Attributes.BLOCK_BREAK_SPEED`.
     pub block_break_speed: f32,
     /// `Attributes.SUBMERGED_MINING_SPEED` while the eyes are in water
@@ -35,7 +40,8 @@ impl Default for DestroySpeedModifiers {
     fn default() -> Self {
         Self {
             mining_efficiency: 0.0,
-            effects: 1.0,
+            haste: 1.0,
+            mining_fatigue: 1.0,
             block_break_speed: 1.0,
             submerged_mining_speed: None,
             on_ground: true,
@@ -50,7 +56,8 @@ pub fn destroy_speed(tool_speed: f32, player: &DestroySpeedModifiers) -> f32 {
     if speed > 1.0 {
         speed += player.mining_efficiency;
     }
-    speed *= player.effects;
+    speed *= player.haste;
+    speed *= player.mining_fatigue;
     speed *= player.block_break_speed;
     if let Some(submerged) = player.submerged_mining_speed {
         speed *= submerged;
@@ -135,7 +142,7 @@ mod tests {
         // Bedrock, even with efficiency V and haste II.
         let fast = DestroySpeedModifiers {
             mining_efficiency: 26.0,
-            effects: 1.4,
+            haste: 1.4,
             ..Default::default()
         };
         assert_eq!(destroy_progress(-1.0, true, destroy_speed(8.0, &fast)), 0.0);
@@ -171,7 +178,7 @@ mod tests {
     fn effects_attributes_water_and_air_multiply_in_order() {
         let diamond = 8.0;
         let haste_ii = DestroySpeedModifiers {
-            effects: 1.4,
+            haste: 1.4,
             ..Default::default()
         };
         assert_eq!(destroy_speed(diamond, &haste_ii), 8.0 * 1.4);
@@ -201,6 +208,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(destroy_speed(diamond, &falling), 1.6);
+    }
+
+    /// Haste then mining fatigue, each rounded to float as vanilla's
+    /// `speed *= ...` lines do, not their product: a diamond shovel with
+    /// efficiency IV (8 + 17 = 25), Haste I and Mining Fatigue I digs gravel
+    /// (0.6) in 2 ticks, where `25 * (1.2 * 0.3)` = 9 would take 3.
+    #[test]
+    fn haste_then_mining_fatigue_round_one_after_the_other() {
+        let player = DestroySpeedModifiers {
+            mining_efficiency: 17.0,
+            haste: 1.2,
+            mining_fatigue: 0.3,
+            ..Default::default()
+        };
+        let speed = destroy_speed(8.0, &player);
+        // Java: `(25F * 1.2F) * 0.3F`.
+        assert_eq!(speed.to_bits(), 0x4110_0001, "{speed}");
+        assert_eq!(ticks(destroy_progress(0.6, true, speed)), 2);
     }
 
     /// The held stack's own tool rules decide the speed and the harvest.
