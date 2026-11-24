@@ -176,6 +176,9 @@ seed = ""                    # empty: a random seed on the first start
 game_mode = "survival"
 difficulty = "easy"
 hardcore = false
+level_type = "minecraft:normal"  # a new world's preset: minecraft:flat, large_biomes, amplified, single_biome_surface
+generator_settings = "{}"    # a JSON object; minecraft:flat reads its layers and biome from it
+generate_structures = true
 
 # Any other server.properties key, spelled as vanilla spells it:
 [properties]
@@ -823,7 +826,7 @@ docker run -d --name horizon -p 25565:25565 --stop-timeout 180 \
 - `HORIZON_EULA=true` accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA) for this server. Without it
   the container stops and says why.
 - The first start writes `/data/server.toml` from `HORIZON_EULA`, `HORIZON_WORLD`, `HORIZON_SEED`,
-  `HORIZON_PORT`, `HORIZON_WHITELIST`, `HORIZON_PLAYERS`, `HORIZON_OP` and `HORIZON_ONLINE`. Later starts use
+  `HORIZON_LEVEL_TYPE`, `HORIZON_GENERATOR_SETTINGS`, `HORIZON_PORT`, `HORIZON_WHITELIST`, `HORIZON_PLAYERS`, `HORIZON_OP` and `HORIZON_ONLINE`. Later starts use
   the file.
 - The mounted folder must come from release v2026.10.17.07 or newer (see step 2).
 - Manage it with `docker exec horizon horizon-server status` (and `cmd`, `backup`, `logs`, ...).

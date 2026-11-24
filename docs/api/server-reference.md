@@ -13,8 +13,8 @@ horizon-server: host a Horizon (Minecraft Java Edition 26.3) server
 Usage: horizon-server [--dir DIR] <command>
 
   init        Set up a server here: the EULA, the world, the port, who may join (asks, or takes flags:
-              --eula --world NAME --seed SEED --port N --whitelist/--no-whitelist --player NAME... --op NAME
-              --offline --yes)
+              --eula --world NAME --seed SEED --level-type ID --generator-settings JSON|@FILE --port N
+              --whitelist/--no-whitelist --player NAME... --op NAME --offline --yes)
   run         Run the server in the foreground; type console commands, Ctrl-C stops it cleanly. It
               restarts the game if it crashes.
   start       Run the server in the background, or resume a stopped supervisor (output goes to logs/supervisor.log)
@@ -107,6 +107,9 @@ Horizon server settings (docs/server.md). The server writes them into server.pro
 | `game_mode` | `"survival"` | `gamemode` | survival, creative, adventure or spectator |
 | `difficulty` | `"easy"` | `difficulty` | peaceful, easy, normal or hard |
 | `hardcore` | `false` | `hardcore` | one life: a player who dies becomes a spectator |
+| `level_type` | `"minecraft:normal"` | `level-type` | a new world's preset: minecraft:flat, large_biomes, amplified, single_biome_surface |
+| `generator_settings` | `"{}"` | `generator-settings` | a JSON object; minecraft:flat reads its layers and biome from it |
+| `generate_structures` | `true` | `generate-structures` | villages, temples, strongholds and the like in a new world |
 
 ### `[properties]`
 
