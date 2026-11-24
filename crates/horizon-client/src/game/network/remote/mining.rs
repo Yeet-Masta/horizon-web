@@ -66,7 +66,15 @@ impl Game<'_> {
             self.mining = None;
             return true;
         }
+        // startDestroyBlock refuses a block outside the border before its creative branch, and
+        // continueDestroyBlock's creative break needs isWithinBounds too.
+        let within = self
+            .border
+            .contains(f64::from(hit.pos[0]), f64::from(hit.pos[2]));
         if self.creative {
+            if !within {
+                return false;
+            }
             if self.veto_mining_prediction(hit.pos, hit.face, true, 1.0) {
                 return false;
             }
@@ -105,6 +113,12 @@ impl Game<'_> {
         // when the server is done too (arismoko/horizon#1254).
         let progress = self.destroy_progress(hit.pos);
         if !same || start {
+            // MultiPlayerGameMode.startDestroyBlock: outside the border the
+            // client never starts (or predicts) a break, so it sends no
+            // packet and does not swing.
+            if !within {
+                return false;
+            }
             let proposed = if progress >= 1.0 { 1.0 } else { 0.0 };
             if self.veto_mining_prediction(hit.pos, hit.face, true, proposed) {
                 return false;

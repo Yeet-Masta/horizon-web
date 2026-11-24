@@ -69,11 +69,16 @@ mod play {
 }
 enum S { PlayerAction(play::PlayerAction) }
 fn face_direction(face: u8) -> u8 { face }
+/// WorldBorder.isWithinBounds for a square border of half-width `half` at the origin.
+struct Border { half: f64 }
+impl Border {
+    fn contains(&self, x: f64, z: f64) -> bool { x.abs() < self.half && z.abs() < self.half }
+}
 struct Game {
     remote: Option<Remote>, mining: Option<Mining>, creative: bool,
     world: World, res: Resources, player: Option<Player>, audio: Audio,
     hit: Hit, sequence: i32, packets: Vec<play::PlayerAction>, restricted: bool,
-    veto: bool,
+    veto: bool, border: Border,
 }
 impl Game {
     fn main_hand_key(&self) -> String { String::new() }
@@ -88,7 +93,7 @@ impl Game {
             player: Some(Player { ground: Ground { on_ground: true } }),
             audio: Audio { played: Vec::new() },
             hit: Hit { pos: [0, 64, 0], face: 1 }, sequence: 0, packets: vec![],
-            restricted: false, veto: false,
+            restricted: false, veto: false, border: Border { half: 1.0e6 },
         }
     }
     fn pick(&self) -> Option<Hit> { Some(self.hit) }
@@ -226,6 +231,19 @@ fn main() {
         assert!(game.audio.played.is_empty());
         assert!(game.mining.is_none());
         assert!(game.remote.as_ref().unwrap().destroying.is_none());
+    }
+    // A block outside the world border: startDestroyBlock returns false before
+    // its creative branch, so neither mode predicts, sends or swings (#19898).
+    for creative in [false, true] {
+        let mut game = Game::new(1.0, 1.0, creative);
+        game.border = Border { half: 8.0 };
+        game.hit.pos = [20, 64, 0];
+        assert!(!game.remote_mining(true));
+        assert!(!game.remote_mining(false));
+        assert!(game.world.broken.is_empty());
+        assert!(game.packets.is_empty());
+        assert!(game.audio.played.is_empty());
+        assert!(game.mining.is_none());
     }
 }
 '''.replace("METHOD", source[start:end].replace("pub(super) fn", "fn").replace("_body(", "("))
