@@ -6,11 +6,16 @@
 //!
 //! The workload replays `SaveDir`'s writer (`write_region_records`): each round
 //! writes a batch of chunks with `RegionFile::write`, then `sync`s each region
-//! once, and its chunks count as acknowledged. Records name their chunk and a
-//! version and change size, so chunks move between sectors; a second region
-//! starts halfway through. After every call the harness reads the files back
-//! and keeps the 512-byte sectors that changed, so a cut can fall after any
-//! call, even between a chunk's sectors and the header pointing to them.
+//! once, and its chunks count as acknowledged. `sync`'s own steps are recorded
+//! in the order it takes them: the chunk sectors synced, the folder synced for
+//! a file made since its last sync, then the header written and synced. That
+//! order is written down here, not observed, so this checks what it leaves on
+//! the disk; `region.rs`'s own tests check that `sync` keeps it. Records name
+//! their chunk and a version and change size, so chunks move between sectors;
+//! a second region starts halfway through. After every call the harness reads
+//! the files back and keeps the 512-byte sectors that changed, so a cut can
+//! fall after any call, even between a chunk's sectors and the header pointing
+//! to them.
 //!
 //! A cut keeps what the last sync made durable; every unit changed since then
 //! independently takes any of its versions since that sync (the synced one
@@ -21,7 +26,7 @@
 //! - `pages`: 4 KiB pages, each kept or not whole (reordering only);
 //! - `torn`: 512-byte sectors, so a page can also be cut short;
 //! - `dir`: `torn`, and a file made since its folder was last synced may be
-//!   gone (neither `RegionFile` nor `SaveDir` syncs the folder).
+//!   gone (`RegionFile` syncs the folder at a new file's first `sync`).
 //!
 //! Then `RegionFile::open` reads every acknowledged chunk back. Its last
 //! acknowledged version or a later one, with the payload that version was
@@ -162,6 +167,8 @@ struct FileState {
     durable: Vec<u8>,
     /// Each unit's versions since the last sync, the durable one first.
     versions: BTreeMap<usize, Vec<Vec<u8>>>,
+    /// Made by the calls replayed so far.
+    made: bool,
     /// Its folder was synced after it was made.
     named: bool,
 }
@@ -191,6 +198,7 @@ fn crash(
         match event {
             Event::Changed { file, sectors, len } => {
                 let state = &mut files[*file];
+                state.made = true;
                 state.current.resize(*len, 0);
                 let mut touched = Vec::new();
                 for (s, bytes) in sectors {
@@ -221,7 +229,10 @@ fn crash(
                 state.durable = state.current.clone();
                 state.versions.clear();
             }
-            Event::FolderSynced => files.iter_mut().for_each(|f| f.named = true),
+            Event::FolderSynced => files
+                .iter_mut()
+                .filter(|f| f.made)
+                .for_each(|f| f.named = true),
             Event::Acknowledged(chunks) => acknowledged.extend(chunks.iter().copied()),
         }
     }
@@ -314,7 +325,8 @@ fn check_bounds(chunks: usize) -> io::Result<()> {
 }
 
 /// The workload: `rounds` batches written and synced region by region, as `SaveDir` does.
-/// With `sync_folder`, the folder is synced after each region file is made, which `SaveDir` doesn't do.
+/// With `sync_folder`, the folder is also synced as soon as each region file is made, before its
+/// first `sync` syncs it.
 fn workload(
     dir: &Path,
     seed: u64,
@@ -326,6 +338,8 @@ fn workload(
     let mut recorder = Recorder::default();
     let mut versions: HashMap<(i32, i32), u32> = HashMap::new();
     let mut regions: BTreeMap<(i32, i32), RegionFile> = BTreeMap::new();
+    // The regions made since their last `sync`: that sync syncs their folder.
+    let mut unnamed = std::collections::BTreeSet::new();
     for round in 0..rounds {
         // The second region (x 32..64) joins halfway through.
         let pool = chunks / (1 + usize::from(round < rounds / 2));
@@ -348,6 +362,7 @@ fn workload(
                 Entry::Occupied(region) => region.into_mut(),
                 Entry::Vacant(slot) => {
                     let region = slot.insert(RegionFile::open_writable(&path, true)?);
+                    unnamed.insert((rx, rz));
                     recorder.changed(&path)?;
                     if sync_folder {
                         horizon_world::fs_sync::sync_dir(dir)?;
@@ -378,7 +393,15 @@ fn workload(
                 recorder.changed(&path)?;
                 done.push((key, *version));
             }
+            // `RegionFile::sync`'s steps, in its order: the sectors the writes
+            // changed synced, the folder synced if the file is new, then the
+            // staged header written and synced.
+            recorder.synced(&path);
+            if unnamed.remove(&(rx, rz)) {
+                recorder.folder_synced();
+            }
             region.sync()?;
+            recorder.changed(&path)?;
             recorder.synced(&path);
         }
         recorder.acknowledged(done);
@@ -468,6 +491,26 @@ mod tests {
             let (images, acknowledged) = crash(&recorder, cut, Model::Ordered, &mut Rng(1));
             let outcome = check(&recorder, &images, &acknowledged, &dir.join("crashed")).unwrap();
             assert_eq!(outcome, Outcome::default(), "cut after {cut} calls");
+        }
+    }
+
+    /// Replayed in `RegionFile::sync`'s order (a batch's sectors synced before
+    /// the header that names them, the old sectors freed only after it), no
+    /// cut under any model, the folder synced only by `RegionFile`, loses an
+    /// acknowledged chunk or reads another chunk's record.
+    #[test]
+    fn the_region_file_loses_nothing_at_any_cut() {
+        let (recorder, dir) = run(13);
+        for model in [Model::Pages, Model::Torn, Model::Dir] {
+            let mut rng = Rng(7);
+            for cut in 0..=recorder.events.len() {
+                for _ in 0..4 {
+                    let (images, acknowledged) = crash(&recorder, cut, model, &mut rng);
+                    let outcome =
+                        check(&recorder, &images, &acknowledged, &dir.join("crashed")).unwrap();
+                    assert_eq!(outcome, Outcome::default(), "cut after {cut} calls");
+                }
+            }
         }
     }
 
