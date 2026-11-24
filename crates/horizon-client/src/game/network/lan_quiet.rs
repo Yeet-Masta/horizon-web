@@ -4,8 +4,10 @@
 //! permission level, at the time it runs) with its output suppressed, as
 //! vanilla's functions run (`CommandSourceStack.withSuppressedOutput`): no
 //! feedback and no failure in anyone's chat. A batch waits in a queue and runs
-//! [`PER_TICK`] lines a player a tick, so a mod can't flood a server; each
-//! finished batch is one line in the server's log.
+//! [`PER_TICK`] lines a player a tick, so a mod can't flood a server. Each
+//! payload counts as one command for the spam throttler (`detect_rate_spam`),
+//! and finished batches reach the server's log as at most one line a second
+//! for each player.
 use super::{Game, lan_actions::GuestCommand};
 use horizon_protocol::quiet;
 use std::collections::{HashMap, VecDeque};
@@ -16,6 +18,7 @@ pub(super) const PENDING: usize = 4096;
 pub(super) const PER_TICK: usize = 64;
 
 /// A batch waiting to run.
+#[derive(Default)]
 pub(super) struct QuietBatch {
     conn: u32,
     mod_id: String,
@@ -58,6 +61,13 @@ impl Game<'_> {
         if batch.lines.is_empty() {
             return;
         }
+        // A payload counts as one command, as a chat command does: the lines of one payload
+        // (at most `quiet::MAX_LINES`) are a mod's one burst, but payloads in a stream are
+        // spam, and a guest who is not an operator is kicked as for chat commands.
+        self.detect_rate_spam(conn, true);
+        let Some(host) = self.lan.as_mut() else {
+            return;
+        };
         let waiting: usize = host
             .quiet
             .iter()
@@ -104,7 +114,10 @@ impl Game<'_> {
                         .hub
                         .guest(conn)
                         .map_or(String::new(), |g| g.name.clone());
-                    super::dedicated::log("INFO", &summary(&name, &batch));
+                    let log = &mut host.play.entry(conn).or_default().quiet_log;
+                    if let Some(line) = log.finish(std::time::Instant::now(), &name, &batch) {
+                        super::dedicated::log("INFO", &line);
+                    }
                 }
                 continue;
             }
@@ -162,14 +175,71 @@ impl Game<'_> {
     }
 }
 
+/// A player's finished batches, folded into the log lines the server writes.
+#[derive(Default)]
+pub(super) struct QuietLog {
+    last: Option<std::time::Instant>,
+    batches: usize,
+    /// The folded batches' counts, under the first one's mod.
+    folded: QuietBatch,
+    /// Another mod's batch was folded into the same line.
+    several_mods: bool,
+}
+
+impl QuietLog {
+    /// The log line is written synchronously on the game thread, so a player's batches are
+    /// folded into one line a second.
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Adds a finished batch; the line to log when the last one is a second old, else None
+    /// (the batch is counted in the next line).
+    fn finish(&mut self, now: std::time::Instant, name: &str, b: &QuietBatch) -> Option<String> {
+        let f = &mut self.folded;
+        if self.batches == 0 {
+            f.mod_id.clone_from(&b.mod_id);
+        } else if f.mod_id != b.mod_id {
+            self.several_mods = true;
+        }
+        self.batches += 1;
+        f.ran += b.ran;
+        f.failed += b.failed;
+        f.dropped += b.dropped;
+        if self.last.is_some_and(|t| now.duration_since(t) < Self::EVERY) {
+            return None;
+        }
+        self.last = Some(now);
+        let line = self.summary(name);
+        *self = QuietLog {
+            last: self.last,
+            ..QuietLog::default()
+        };
+        Some(line)
+    }
+
+    /// The folded batches' line in the server's log.
+    fn summary(&self, name: &str) -> String {
+        let f = &self.folded;
+        let mut line = if self.several_mods {
+            log_line(name, "several mods", f.ran, f.failed, f.dropped)
+        } else {
+            summary(name, f)
+        };
+        if self.batches > 1 {
+            line += &format!(" ({} batches)", self.batches);
+        }
+        line
+    }
+}
+
 /// The batch's line in the server's log.
 fn summary(name: &str, b: &QuietBatch) -> String {
-    let mut line = format!(
-        "{name} ran {} quiet command(s) from mod {}: {} failed",
-        b.ran, b.mod_id, b.failed
-    );
-    if b.dropped > 0 {
-        line += &format!(", {} dropped (more than {PENDING} waiting)", b.dropped);
+    log_line(name, &format!("mod {}", b.mod_id), b.ran, b.failed, b.dropped)
+}
+
+fn log_line(name: &str, source: &str, ran: usize, failed: usize, dropped: usize) -> String {
+    let mut line = format!("{name} ran {ran} quiet command(s) from {source}: {failed} failed");
+    if dropped > 0 {
+        line += &format!(", {dropped} dropped (more than {PENDING} waiting)");
     }
     line
 }
@@ -178,21 +248,83 @@ fn summary(name: &str, b: &QuietBatch) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_log_line_counts_the_batch() {
-        let b = QuietBatch {
+    fn batch(ran: usize, failed: usize, dropped: usize) -> QuietBatch {
+        QuietBatch {
             conn: 1,
             mod_id: "orbital".into(),
             lines: VecDeque::new(),
-            ran: 12,
-            failed: 3,
-            dropped: 0,
-        };
+            ran,
+            failed,
+            dropped,
+        }
+    }
+
+    #[test]
+    fn the_log_line_counts_the_batch() {
+        let now = std::time::Instant::now();
         assert_eq!(
-            summary("Alex", &b),
+            QuietLog::default()
+                .finish(now, "Alex", &batch(12, 3, 0))
+                .unwrap(),
             "Alex ran 12 quiet command(s) from mod orbital: 3 failed"
         );
-        let b = QuietBatch { dropped: 5, ..b };
-        assert!(summary("Alex", &b).ends_with(", 5 dropped (more than 4096 waiting)"));
+        let line = QuietLog::default()
+            .finish(now, "Alex", &batch(12, 3, 5))
+            .unwrap();
+        assert!(line.ends_with(", 5 dropped (more than 4096 waiting)"));
+    }
+
+    /// A player finishing a batch every tick writes one line a second, and the next line
+    /// carries what the quiet ones counted.
+    #[test]
+    fn batches_in_one_second_make_one_log_line() {
+        let start = std::time::Instant::now();
+        let mut log = QuietLog::default();
+        let mut lines = Vec::new();
+        for tick in 0..50u32 {
+            let now = start + std::time::Duration::from_millis(50 * u64::from(tick));
+            lines.extend(log.finish(now, "Alex", &batch(1, 0, 0)));
+        }
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        let later = start + std::time::Duration::from_secs(10);
+        let line = log.finish(later, "Alex", &batch(1, 1, 0)).unwrap();
+        assert_eq!(
+            line,
+            "Alex ran 10 quiet command(s) from mod orbital: 1 failed (10 batches)"
+        );
+    }
+
+    /// A line folded from two mods' batches credits neither alone.
+    #[test]
+    fn batches_of_two_mods_make_a_line_from_several_mods() {
+        let start = std::time::Instant::now();
+        let mut log = QuietLog::default();
+        assert!(log.finish(start, "Alex", &batch(1, 0, 0)).is_some());
+        let other = QuietBatch {
+            mod_id: "minimap".into(),
+            ..batch(2, 0, 0)
+        };
+        assert!(log.finish(start, "Alex", &other).is_none());
+        let later = start + std::time::Duration::from_secs(2);
+        assert_eq!(
+            log.finish(later, "Alex", &batch(1, 0, 0)).unwrap(),
+            "Alex ran 3 quiet command(s) from several mods: 0 failed (2 batches)"
+        );
+    }
+
+    /// Each payload is one command for the spam throttler, as a chat command is, however many
+    /// lines it holds.
+    #[test]
+    #[ignore = "daily"]
+    fn a_payload_counts_as_one_command_for_the_spam_throttler() {
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            let lines: Vec<String> = (0..64).map(|_| "say hi".into()).collect();
+            let payloads = quiet::encode("orbital", &lines);
+            assert_eq!(payloads.len(), 1);
+            for n in 1..=3 {
+                game.guest_quiet_commands(12, &payloads[0]);
+                assert_eq!(game.lan.as_ref().unwrap().play[&12].command_spam, 20 * n);
+            }
+        });
     }
 }
