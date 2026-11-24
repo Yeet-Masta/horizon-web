@@ -4604,7 +4604,7 @@ fn write_old_record(save: &SaveDir, folder: &str, tag: Tag) {
         Folder::Entities => &save.entity_regions,
         Folder::Poi => &save.poi_regions,
     };
-    super::write_region_records(&save.root, cache, folder, &[((0, 0), &record)]).unwrap();
+    super::write_region_records(&save.root, cache, folder, None, &[((0, 0), &record)]).unwrap();
 }
 
 #[test]
@@ -4747,6 +4747,7 @@ fn old_chunks_are_found_in_the_saved_records_and_old_poi_upgrade() {
         &nether.root,
         &nether.regions,
         "region",
+        None,
         &[((1, 0), &current)],
     )
     .unwrap();

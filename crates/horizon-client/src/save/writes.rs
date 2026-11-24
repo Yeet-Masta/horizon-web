@@ -100,6 +100,7 @@ impl SaveDir {
         );
         let pending = self.pending.clone();
         let outstanding = self.outstanding.clone();
+        let backend = self.backend.clone();
         // Encoding a record can enter a wasm mod, which needs the guest stack.
         let thread = horizon_guest_stack::spawn("horizon-region-writer".into(), move || {
             let mut buffer: std::collections::VecDeque<WriteBatch> =
@@ -134,10 +135,13 @@ impl SaveDir {
                 let resolved: Vec<_> = batch
                     .iter()
                     .filter(|(k, _, seq)| newest(k, *seq))
-                    .filter_map(|(k, r, _)| Some((*k, resolve_poi(&root, cache, *k, r)?)))
+                    .filter_map(|(k, r, _)| {
+                        Some((*k, resolve_poi(&root, cache, backend.as_deref(), *k, r)?))
+                    })
                     .collect();
                 let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
-                let result = write_region_records(&root, cache, folder, &records);
+                let result =
+                    write_region_records(&root, cache, folder, backend.as_deref(), &records);
                 if let Err(e) = &result {
                     let message = format!("failed to write {folder} files: {e}");
                     log::warn!("Horizon: {message}");
