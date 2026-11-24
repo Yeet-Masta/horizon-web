@@ -65,27 +65,40 @@ fn thunder_strike_column(ticks: &mut Ticks, cx: i32, cz: i32) -> (i32, i32) {
     (r.x, r.z)
 }
 
-/// The players `findLightningTargetAround` may strike in the column at `x`,
-/// `z` whose top is `top`: the block of each of `players` that is alive
-/// (`isAlive`: spectators too), 3 blocks around the column, no lower than 3
-/// below its top, under open sky (`sees_sky`). `players` are the level's
+/// The block an entity's feet are in (`Entity.blockPosition`).
+fn block_position(p: Vec3) -> [i32; 3] {
+    [
+        p.x.floor() as i32,
+        p.y.floor() as i32,
+        p.z.floor() as i32,
+    ]
+}
+
+/// `findLightningTargetAround`'s search box:
+/// `AABB.encapsulatingFullBlocks(center, center.atY(level.getMaxY() + 1)).inflate(3)`,
+/// with `center` the column's motion-blocking top and `max_y` the level's
+/// highest block Y (`Level.getMaxY`). It spans `[x - 3, x + 4)`, `[top - 3,
+/// max_y + 5)` and `[z - 3, z + 4)`.
+fn lightning_search_box([x, top, z]: [i32; 3], max_y: i32) -> Aabb {
+    Aabb::new(
+        Vec3::new(f64::from(x - 3), f64::from(top - 3), f64::from(z - 3)),
+        Vec3::new(f64::from(x + 4), f64::from(max_y + 5), f64::from(z + 4)),
+    )
+}
+
+/// The players `findLightningTargetAround` may strike: each of `players` that
+/// is alive (`isAlive`: spectators too), whose box meets `search`, under open
+/// sky at its block position (`sees_sky`). `players` are the level's
 /// (`level_players_iter`): a server has none of its own.
 fn players_to_strike(
     players: impl IntoIterator<Item = super::natural_spawning::LevelPlayer>,
-    [x, top, z]: [i32; 3],
+    search: Aabb,
     sees_sky: impl Fn([i32; 3]) -> bool,
 ) -> Vec<[i32; 3]> {
     players
         .into_iter()
-        .filter(|p| p.alive)
-        .map(|p| {
-            [
-                p.position.x.floor() as i32,
-                p.position.y.floor() as i32,
-                p.position.z.floor() as i32,
-            ]
-        })
-        .filter(|p| (p[0] - x).abs() <= 3 && (p[2] - z).abs() <= 3 && p[1] >= top - 3)
+        .filter(|p| p.alive && search.intersects(p.bounds))
+        .map(|p| block_position(p.position))
         .filter(|p| sees_sky(*p))
         .collect()
 }
@@ -253,27 +266,30 @@ impl Game<'_> {
             return Some(rod);
         }
         let sees_sky = |g: &Self, p: [i32; 3]| g.world.light(p[0], p[1], p[2]) >> 4 == 15;
+        let search = lightning_search_box([x, top.y, z], self.world.top_y() - 1);
         let mut candidates: Vec<[i32; 3]> = self
             .mobs
             .iter()
-            .filter(|m| m.alive())
-            .map(|m| {
-                [
-                    m.position.x.floor() as i32,
-                    m.position.y.floor() as i32,
-                    m.position.z.floor() as i32,
-                ]
-            })
-            .filter(|p| (p[0] - x).abs() <= 3 && (p[2] - z).abs() <= 3 && p[1] >= top.y - 3)
+            .filter(|m| m.alive() && search.intersects(m.bounds()))
+            .map(|m| block_position(m.position))
             .filter(|p| sees_sky(self, *p))
             .collect();
         // The players are living entities too: every one in the level, as a
         // server has no player of its own, only the ones it serves.
         candidates.extend(players_to_strike(
             self.level_players_iter(),
-            [x, top.y, z],
+            search,
             |p| sees_sky(self, p),
         ));
+        // `ArmorStand extends LivingEntity`: `getEntitiesOfClass` includes a
+        // stand in the box like any other living entity.
+        candidates.extend(
+            self.armor_stands
+                .iter()
+                .filter(|s| s.health > 0.0 && search.intersects(s.bounds()))
+                .map(|s| block_position(s.position))
+                .filter(|p| sees_sky(self, *p)),
+        );
         if !candidates.is_empty() {
             let i = self
                 .world
@@ -888,6 +904,7 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_client::entities::ArmorStand;
     use horizon_client::mobs::{Anim, Brain, Mob, MobType, Part, Species};
     use horizon_core::geometry::Vec3;
     use mod_api::{self, ServerHost};
@@ -998,12 +1015,13 @@ mod tests {
         assert!(!in_viewer_box(bolt, [15.5, 64.0, 0.0]));
     }
 
-    /// `findLightningTargetAround` picks among the living entities in the
-    /// column, players included. A server has no player of its own, so a
-    /// player it serves, standing in the open beside the column, must be a
-    /// target, or natural lightning never strikes a player there. A dead one,
-    /// one under a roof, one 4 blocks off and one more than 3 below the
-    /// column's top are not.
+    /// `findLightningTargetAround` picks among the living entities whose box
+    /// meets its search box, players included. A server has no player of its
+    /// own, so a player it serves, standing in the open beside the column,
+    /// must be a target, or natural lightning never strikes a player there.
+    /// A dead one, one under a roof, one whose box stays 4 blocks off and one
+    /// whose box stays more than 3 below the column's top are not; one whose
+    /// centre is outside but whose box reaches into the search box is.
     #[test]
     fn lightning_can_strike_the_players_a_server_serves() {
         use super::super::natural_spawning::LevelPlayer;
@@ -1012,7 +1030,12 @@ mod tests {
             LevelPlayer {
                 uuid: 1,
                 position,
-                bounds: Aabb::new(position, position),
+                // A player's 0.6 x 1.8 box, so the test can tell a box from
+                // its centre.
+                bounds: Aabb::new(
+                    Vec3::new(x - 0.3, y, 0.2),
+                    Vec3::new(x + 0.3, y + 1.8, 0.8),
+                ),
                 alive,
                 creative: false,
                 spectator: false,
@@ -1020,19 +1043,53 @@ mod tests {
         };
         // The column at (0, 0) tops out at 64; a roof covers (1, 64, 0).
         let open = |p: [i32; 3]| p != [1, 64, 0];
-        let column = [0, 64, 0];
+        let search = lightning_search_box([0, 64, 0], 319);
         assert_eq!(
-            players_to_strike([served(2.5, 64.0, true)], column, open),
+            players_to_strike([served(2.5, 64.0, true)], search, open),
             vec![[2, 64, 0]]
+        );
+        // 4.2 is more than 3 blocks from the column, but the player's box
+        // starts at 3.9, inside `[x - 3, x + 4)`.
+        assert_eq!(
+            players_to_strike([served(4.2, 64.0, true)], search, open),
+            vec![[4, 64, 0]]
         );
         let players = [
             served(2.5, 64.0, false),
             served(1.5, 64.0, true),
             served(4.5, 64.0, true),
-            served(0.5, 60.0, true),
+            served(0.5, 58.0, true),
             served(-2.5, 61.0, true),
+            // Feet below `top - 3`, but the box reaches up to 61.8, into
+            // the search box.
+            served(0.5, 60.0, true),
         ];
-        assert_eq!(players_to_strike(players, column, open), vec![[-3, 61, 0]]);
+        assert_eq!(
+            players_to_strike(players, search, open),
+            vec![[-3, 61, 0], [0, 60, 0]]
+        );
+    }
+
+    /// A stand is a `LivingEntity`: `findLightningTargetAround` includes it,
+    /// and its box decides, not its centre. Place one whose centre is 3.7
+    /// blocks from the column but whose box still reaches into the search
+    /// box; the bolt must land on the stand's block, not the column top.
+    #[test]
+    #[ignore = "daily"]
+    fn lightning_targets_an_armor_stand_by_its_box() {
+        let mut resources = None;
+        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        // A one-block column at (8, 8) tops out at 64.
+        game.world.set(8, 63, 8, stone).unwrap();
+        game.armor_stands
+            .push(ArmorStand::new(1, Vec3::new(11.7, 64.0, 8.5), 0.0));
+        assert_eq!(game.lightning_target(8, 8), Some([11, 64, 8]));
     }
 
     #[test]
