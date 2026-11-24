@@ -658,8 +658,8 @@ struct WorldCore {
 }
 
 struct WorldRest {
-    items: Items,
-    recipes: Recipes,
+    items: Arc<Items>,
+    recipes: Arc<Recipes>,
     transformers: horizon_client::block_transform::Transformers,
     mob_types: HashMap<String, Arc<MobType>>,
     mob_data: horizon_client::mobs::MobData,
@@ -679,7 +679,7 @@ struct WorldRest {
     player_type: Option<Arc<horizon_client::mobs::MobType>>,
     /// `SpinAttackEffectModel` (Riptide's spinning boxes).
     spin_attack: Option<horizon_client::mobs::Part>,
-    stations: horizon_client::stations::StationData,
+    stations: Arc<horizon_client::stations::StationData>,
 }
 
 /// The content tables a world's data packs change, loaded when the world
