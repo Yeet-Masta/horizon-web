@@ -156,7 +156,7 @@ pub(super) struct Fight {
     /// `player_killed_entity` trigger's `killing_blow`): its damage type and
     /// whether a player was behind it.
     last_blow: Option<(DamageKind, bool)>,
-    dirty: bool,
+    pub(super) dirty: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Respawn {
@@ -1238,6 +1238,14 @@ impl Game<'_> {
             fight.crystals_placed = true;
             fight.needs_scan = false;
         }
+        if let Some(Tag::IntArray(v)) = data.and_then(|d| d.get("horizon_pending_gateways")) {
+            self.end.pending_gateways = v
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|b| [b[0], b[1], b[2]])
+                .collect();
+        }
         self.fight = fight;
     }
     fn end_portal_active(&self) -> bool {
@@ -1265,6 +1273,18 @@ impl Game<'_> {
         ];
         if let Some(p) = f.exit_portal {
             data.push(("exit_portal_location", Tag::IntArray(p.to_vec())));
+        }
+        if !self.end.pending_gateways.is_empty() {
+            data.push((
+                "horizon_pending_gateways",
+                Tag::IntArray(
+                    self.end
+                        .pending_gateways
+                        .iter()
+                        .flat_map(|p| [p[0], p[1], p[2]])
+                        .collect(),
+                ),
+            ));
         }
         if let Some(u) = f.dragon_uuid {
             data.push(("dragon_uuid", Tag::IntArray(u.to_vec())));

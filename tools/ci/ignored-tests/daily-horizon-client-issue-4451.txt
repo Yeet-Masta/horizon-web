@@ -560,6 +560,7 @@ horizon-client game::end::tests::a_pearl_reads_its_end_gateway_cooldown_and_refu
 horizon-client game::end::tests::an_entity_keeps_its_motion_through_a_gateway lib daily resources
 horizon-client game::end::ticking_tests::a_ticking_gateway_counts_its_age_in_its_block_entity lib daily resources
 horizon-client game::end::ticking_tests::items_past_the_simulation_distance_enter_no_end_gateway lib daily resources
+horizon-client game::end::pending_gateway_tests::a_queued_gateway_survives_a_save_and_is_placed_whole_only_in_the_end lib daily resources
 horizon-client game::enderman::occupancy_tests::a_carried_block_is_not_placed_into_an_entity lib daily resources
 horizon-client game::enderman_hurt_teleport_tests::a_shulker_bullets_hit_teleports_an_open_shulker_before_it_returns lib daily resources
 horizon-client game::enderman_hurt_teleport_tests::a_teleporting_shulker_leaves_its_rider_behind lib daily resources
