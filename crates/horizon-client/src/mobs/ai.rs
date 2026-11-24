@@ -3887,11 +3887,11 @@ pub fn custom_travel(
 /// `Entity.applyEffectsFromBlocks` for the flowers that give an effect:
 /// `WitherRoseBlock.entityInside` (wither for 40 ticks on a living mob that
 /// can take it, not in peaceful) and `EyeblossomBlock.entityInside` (poison
-/// for 25 ticks on a bee, when the open flower attracts bees). The blocks are
-/// the ones the mob's box passes through along this tick's move, as
-/// `Entity.checkInsideBlocks` sweeps it, so a mob falling past a flower is
-/// inside it on the way.
-fn flower_contact_effects(m: &mut Mob, w: &MobWorld) {
+/// for 25 ticks on a bee, when the open flower attracts bees, not in
+/// peaceful). The blocks are the ones the mob's box passes through along this
+/// tick's move, as `Entity.checkInsideBlocks` sweeps it, so a mob falling past
+/// a flower is inside it on the way.
+pub(crate) fn flower_contact_effects(m: &mut Mob, w: &MobWorld) {
     if !m.alive()
         || ((w.difficulty.base == 0 || m.invulnerable_flag) && m.species() != Species::Bee)
     {
@@ -3918,7 +3918,8 @@ fn flower_contact_effects(m: &mut Mob, w: &MobWorld) {
                     }
                 }
                 "minecraft:open_eyeblossom"
-                    if m.species() == Species::Bee
+                    if w.difficulty.base != 0
+                        && m.species() == Species::Bee
                         && super::bee::attracts_bees(w, [p.x, p.y, p.z])
                         && !m.has_effect("minecraft:poison") =>
                 {

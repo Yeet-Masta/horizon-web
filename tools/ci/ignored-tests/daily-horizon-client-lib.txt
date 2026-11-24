@@ -168,6 +168,7 @@ horizon-client-lib mobs::armadillo::tests::a_baby_follows_only_adults_its_sensor
 horizon-client-lib mobs::armadillo::tests::a_baby_stays_when_the_adult_is_within_five_blocks lib daily resources
 horizon-client-lib mobs::armadillo::tests::a_tempted_baby_comes_closer_than_an_adult lib daily resources
 horizon-client-lib mobs::armadillo::tests::two_armadillos_in_love_make_a_baby lib daily resources
+horizon-client-lib mobs::bee::eyeblossom_poison_tests::a_bee_in_an_open_eyeblossom_is_poisoned_except_on_peaceful lib daily resources
 horizon-client-lib mobs::bee::tests::a_bee_sparks_a_crop_before_growing_it lib daily resources
 horizon-client-lib mobs::bee::tests::a_bee_sting_asks_for_ten_seconds_of_poison_on_normal lib daily resources
 horizon-client-lib mobs::bee::tests::peaceful_ends_a_bees_anger_at_the_player lib daily resources

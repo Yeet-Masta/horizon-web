@@ -1532,3 +1532,7 @@ mod tests {
         assert_eq!(saved.get("angry_at"), None, "no target, no key");
     }
 }
+
+#[cfg(test)]
+#[path = "eyeblossom_poison_tests.rs"]
+mod eyeblossom_poison_tests;

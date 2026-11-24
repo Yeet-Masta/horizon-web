@@ -461,6 +461,54 @@ impl Game<'_> {
         });
         let _ = self.process_level_events();
     }
+    /// `NoteBlock.triggerEvent`: a NOTE particle above the block, coloured by
+    /// the note (`note / 24.0` in the x speed).
+    pub(super) fn note_particle(&mut self, pos: BlockPos, state: BlockStateId) {
+        let note = self
+            .pack
+            .assets
+            .registry
+            .state(state)
+            .and_then(|s| s.properties.get("note")?.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        self.particles.add(
+            &ParticleOptions::simple(ParticleType::Note),
+            [
+                f64::from(pos.x) + 0.5,
+                f64::from(pos.y) + 1.2,
+                f64::from(pos.z) + 0.5,
+            ],
+            [note / 24.0, 0.0, 0.0],
+        );
+    }
+    /// `EyeblossomBlock.Type.spawnTransformParticle`: a `TrailParticleOption`
+    /// sent from the block's centre towards `target` (`ServerLevel.sendParticles`
+    /// of one particle, to every player within 32 blocks).
+    pub(super) fn trail_particle(
+        &mut self,
+        pos: BlockPos,
+        target: [f64; 3],
+        color: u32,
+        duration: i32,
+    ) {
+        let at = [
+            f64::from(pos.x) + 0.5,
+            f64::from(pos.y) + 0.5,
+            f64::from(pos.z) + 0.5,
+        ];
+        let options = ParticleOptions::trail(target, color, duration);
+        self.particles.add(&options, at, [0.0; 3]);
+        self.lan_send_particles(super::lan_particles::QueuedParticle {
+            dimension: self.dim.id(),
+            options: options.into(),
+            state: None,
+            at,
+            spread: [0.0; 3],
+            speed: [0.0; 3],
+            count: 1,
+            randomization: 0,
+        });
+    }
 }
 
 #[cfg(test)]

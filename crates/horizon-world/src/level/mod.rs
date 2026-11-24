@@ -447,6 +447,15 @@ pub enum LevelEvent {
         event: &'static str,
         state: Option<BlockStateId>,
     },
+    /// `Level.sendParticles` of one `TrailParticleOption` from the block's
+    /// centre (`Vec3.atCenterOf(pos)`) towards `target`, drawn for `duration`
+    /// ticks in `color` (RGB).
+    TrailParticle {
+        pos: BlockPos,
+        target: [f64; 3],
+        color: u32,
+        duration: i32,
+    },
 }
 
 /// What spreads from one block to another (`LevelAccess::allow_spread`).

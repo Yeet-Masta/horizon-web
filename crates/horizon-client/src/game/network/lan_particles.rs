@@ -394,7 +394,7 @@ impl Game<'_> {
     /// `ParticleTypes.STREAM_CODEC`'s value for `options`: the type's
     /// network id and the data it carries (`state` for the block particles).
     /// None while not serving, or for a particle whose data isn't sent from
-    /// here (items, trails).
+    /// here (items).
     pub(super) fn network_particle(
         &self,
         options: &ParticleOptions,
@@ -1329,6 +1329,39 @@ pub(in crate::game) mod tests {
         assert_eq!(
             p.particle.data,
             Some(ParticleData::Color(0xFFFF_0000u32 as i32))
+        );
+    }
+
+    /// `EyeblossomBlock.Type.spawnTransformParticle`'s `TrailParticleOption`:
+    /// the one packet carries the target, the type's colour and the duration,
+    /// with no spread and no speed.
+    #[test]
+    fn trail_particles_carry_their_target_colour_and_duration() {
+        // `Particle::read` reads a trail's data from its pinned id, 59.
+        let mut names = vec!["minecraft:empty".to_string(); 59];
+        names.push("minecraft:trail".to_string());
+        let (hub, rx_near, rx_far) = test_hub("TrailTest", names, None);
+
+        let at = [0.5, 64.5, 0.5];
+        let target = [
+            0.806_652_791_887_043_2,
+            66.159_363_459_920_83,
+            0.988_928_599_005_058_9,
+        ];
+        let options = ParticleOptions::trail(target, 16_545_810, 24);
+        send_hub_level_particles(&hub, &options, at, [0.0; 3], 0.0, 1, None);
+
+        assert!(rx_far.try_recv().is_err(), "only players within 32 blocks");
+        let p = level_particles(&rx_near);
+        assert_eq!(p.count, 1, "one particle");
+        assert_eq!(p.dist, [0.0; 3]);
+        assert_eq!(p.max_speed, [0.0; 3]);
+        assert_eq!(p.randomization, 0, "DEFAULT");
+        assert_eq!(p.pos, at);
+        assert_eq!(p.particle.id, 59);
+        assert_eq!(
+            p.particle.data,
+            Some(ParticleData::Trail(target, 16_545_810, 24))
         );
     }
 }

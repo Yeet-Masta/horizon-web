@@ -3817,25 +3817,14 @@ impl Game<'_> {
                     pos,
                     state,
                     kind: "note_particle",
-                } => {
-                    use horizon_client::particles::{ParticleOptions, ParticleType};
-                    let note = self
-                        .pack
-                        .assets
-                        .registry
-                        .state(state)
-                        .and_then(|s| s.properties.get("note")?.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    self.particles.add(
-                        &ParticleOptions::simple(ParticleType::Note),
-                        [
-                            f64::from(pos.x) + 0.5,
-                            f64::from(pos.y) + 1.2,
-                            f64::from(pos.z) + 0.5,
-                        ],
-                        [note / 24.0, 0.0, 0.0],
-                    );
-                }
+                } => self.note_particle(pos, state),
+                // EyeblossomBlock.Type.spawnTransformParticle.
+                LevelEvent::TrailParticle {
+                    pos,
+                    target,
+                    color,
+                    duration,
+                } => self.trail_particle(pos, target, color, duration),
                 // NoteBlock.getCustomSoundId: the skull above's note block sound,
                 // played at volume 3 (vanilla's pitch for a head is 1).
                 LevelEvent::BlockEvent {

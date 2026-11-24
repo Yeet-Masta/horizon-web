@@ -6,6 +6,10 @@ use crate::registry::BlockStateId;
 use horizon_core::{position::BlockPos, random::RandomSource};
 use std::sync::Arc;
 
+/// `EyeblossomBlock.Type.OPEN` and `CLOSED`'s `particleColor`.
+const EYEBLOSSOM_OPEN_COLOR: u32 = 16_545_810;
+const EYEBLOSSOM_CLOSED_COLOR: u32 = 6_250_335;
+
 /// `BlockScanUtils.findBlocks` order: sections by x, z, y; blocks by y, z, x.
 pub(crate) fn box_scan_order(min: BlockPos, max: BlockPos) -> Vec<BlockPos> {
     let mut out = Vec::new();
@@ -59,11 +63,32 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             pitch,
         });
     }
-    /// `EyeblossomBlock.Type.spawnTransformParticle`: four random draws.
-    fn eyeblossom_particle_draws(&mut self) {
-        for _ in 0..4 {
-            self.random().next_double();
-        }
+    /// `EyeblossomBlock.Type.spawnTransformParticle`: four random draws for a
+    /// lifetime and a velocity, then one trail particle from the block's
+    /// centre towards `start + velocity * lifetime`, coloured by the type the
+    /// block becomes (`open`).
+    fn eyeblossom_particle(&mut self, pos: BlockPos, open: bool) {
+        let lifetime = 0.5 + self.random().next_double();
+        let velocity = [
+            self.random().next_double() - 0.5,
+            self.random().next_double() + 1.0,
+            self.random().next_double() - 0.5,
+        ];
+        let target = [
+            f64::from(pos.x) + 0.5 + velocity[0] * lifetime,
+            f64::from(pos.y) + 0.5 + velocity[1] * lifetime,
+            f64::from(pos.z) + 0.5 + velocity[2] * lifetime,
+        ];
+        self.emit(LevelEvent::TrailParticle {
+            pos,
+            target,
+            color: if open {
+                EYEBLOSSOM_OPEN_COLOR
+            } else {
+                EYEBLOSSOM_CLOSED_COLOR
+            },
+            duration: (20.0 * lifetime) as i32,
+        });
     }
     /// `EyeblossomBlock.tryChangingState`; `long` picks the random-tick sound.
     pub(crate) fn eyeblossom_tick(&mut self, state: BlockStateId, pos: BlockPos, long: bool) {
@@ -85,7 +110,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         };
         self.set_block_and_update(pos, next);
         self.game_event(pos, "minecraft:block_change");
-        self.eyeblossom_particle_draws();
+        self.eyeblossom_particle(pos, !open);
         let min = pos.offset(-3, -2, -3);
         let max = pos.offset(3, 2, 3);
         let block = b.block(state);
@@ -133,7 +158,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             return;
         };
         self.set_block_and_update(pos, next);
-        self.eyeblossom_particle_draws();
+        self.eyeblossom_particle(pos, !open);
         let sound = if open {
             "minecraft:block.eyeblossom.close_long"
         } else {
