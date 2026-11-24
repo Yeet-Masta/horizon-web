@@ -607,7 +607,7 @@ impl Launcher {
         }
         // A Play that waited for its version, or for another start (a pre-launch command's
         // Stop among it) to finish, starts as soon as nothing else is starting.
-        self.start_queued_play();
+        changed |= self.start_queued_play();
         if changed {
             cx.notify();
         }

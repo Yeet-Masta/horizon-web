@@ -125,6 +125,12 @@ impl Launcher {
                 3,
                 actions,
             ))
+            .children(self.prepare_notice(cx).map(|notice| notice.mt(px(12.))))
+            .children(
+                self.client_error
+                    .clone()
+                    .map(|error| play_notice(error).mt(px(12.))),
+            )
     }
 
     /// The edition switch over the rail, in the top bar where Horizon's mark was: Horizon's mark
@@ -734,6 +740,10 @@ impl Launcher {
                 let main = match (&update, press) {
                     (None, PlayPress::Play) if build_first => {
                         main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            if this.play_blocked_by_migration() {
+                                cx.notify();
+                                return;
+                            }
                             this.play_after_build = this.selected_instance().map(|i| i.id.clone());
                             if this.settings.native_mods_allowed_at.is_some() {
                                 this.build_native();
@@ -766,11 +776,7 @@ impl Launcher {
                     (None, PlayPress::PrepareThenPlay) => {
                         main.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.picker.open = false;
-                            this.play_when_prepared = this
-                                .selected()
-                                .cloned()
-                                .zip(this.selected_instance().map(|i| i.id.clone()));
-                            this.prepare(backend::MinecraftFrom::Install);
+                            this.prepare_and_play();
                             cx.notify();
                         }))
                     }
@@ -1243,6 +1249,28 @@ impl Launcher {
     }
 }
 
+pub(super) fn play_notice(message: String) -> Div {
+    crate::glass::plate(radius::PANEL)
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .p(px(16.))
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .child(ui::icon("information-circle", 18., ui::danger()))
+                .child(
+                    ui::text(14., FontWeight::NORMAL, ink::FULL)
+                        .flex_1()
+                        .min_w_0()
+                        .debug_selector(|| "home-play-notice-message".into())
+                        .child(message),
+                ),
+        )
+}
+
 /// Right padding for the invite code text field. In English ("Join"), the button is ~58 px wide,
 /// so 84 px leaves a clean margin from the button placed at right: 8 px. In locales with longer
 /// labels (French "Rejoindre", German "Beitreten", Ukrainian "Приєднатися"), the button is wider;
@@ -1369,6 +1397,25 @@ fn wait_for_mod_scan(running: bool, pending: bool) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(debug_assertions)]
+    #[gpui::test]
+    async fn play_notice_wraps_long_errors(cx: &mut gpui::TestAppContext) {
+        struct ErrorNotice;
+
+        impl Render for ErrorNotice {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(300.)).child(play_notice(
+                    "Could not read the instance settings. Check the file permissions and retry saving your settings.".into(),
+                ))
+            }
+        }
+
+        let (_, window) = cx.add_window_view(|_, _| ErrorNotice);
+        let message = window.debug_bounds("home-play-notice-message").unwrap();
+        assert!(message.right() <= px(300.));
+        assert!(message.size.height > px(20.), "the error wraps");
+    }
+
     #[test]
     fn a_pending_scan_delays_play_but_keeps_stop_available() {
         assert!(wait_for_mod_scan(false, true));
@@ -1451,6 +1498,10 @@ mod tests {
     }
 
     #[test]
+    /// Right padding for the invite code text field. In English ("Join"), the button is ~58 px wide,
+    /// so 84 px leaves a clean margin from the button placed at right: 8 px. In locales with longer
+    /// labels (French "Rejoindre", German "Beitreten", Ukrainian "Приєднатися"), the button is wider;
+    /// expand the field's padding so the button never overlaps the entered text or placeholder (#9507).
     fn friend_code_padding_right_clears_localized_join_button() {
         for label in [
             "Join",

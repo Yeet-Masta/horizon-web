@@ -27,6 +27,14 @@ pub fn ports_dir() -> PathBuf {
     backend::game_home().join("ports")
 }
 
+/// Stage downloads in the system temp folder so relocation never copies them.
+pub fn downloads() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix("horizon-modpack-download-")
+        .tempdir()
+        .map_err(|e| e.to_string())
+}
+
 /// A pack's folder name: its name in lowercase words joined by dashes.
 pub fn slug(name: &str) -> String {
     let words: Vec<String> = name
@@ -392,7 +400,8 @@ pub(crate) fn read_listed(work: PathBuf) -> Result<Listed, String> {
     Ok(Listed { slug, title, work })
 }
 
-/// Missing pack roots are empty. Checked callers preserve errors for every candidate directory.
+/// Missing pack roots are empty. A directory belongs to the scan once it has a manifest.
+/// Use symlink metadata so a dangling manifest link still reaches the reader and reports an error.
 pub(crate) fn pack_folders(
     dir: &Path,
 ) -> Result<impl Iterator<Item = Result<PathBuf, String>> + '_, String> {
@@ -408,9 +417,15 @@ pub(crate) fn pack_folders(
         };
         let path = entry.path();
         match fs::metadata(&path) {
-            Ok(meta) if !meta.is_dir() => None,
+            Ok(meta) if !meta.is_dir() => return None,
+            Ok(_) => {}
+            Err(e) => return Some(Err(format!("{}: {e}", path.display()))),
+        }
+        let manifest = path.join("pack.json");
+        match fs::symlink_metadata(&manifest) {
             Ok(_) => Some(Ok(path)),
-            Err(e) => Some(Err(format!("{}: {e}", path.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(Err(format!("{}: {e}", manifest.display()))),
         }
     }))
 }
@@ -682,6 +697,39 @@ pub(crate) mod tests {
             "CurseForge  ·  Minecraft 1.21.1  ·  neoforge 21.1.133"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn downloads_use_separate_temporary_folders_and_clean_up_on_drop() {
+        let first = downloads().unwrap();
+        let second = downloads().unwrap();
+        assert_eq!(first.path().parent(), Some(std::env::temp_dir().as_path()));
+        assert_ne!(first.path(), second.path());
+        let finished = first.path().to_owned();
+        fs::write(finished.join("pack.mrpack"), b"download").unwrap();
+        drop(first);
+        assert!(!finished.exists());
+        assert!(second.path().is_dir(), "another download stays active");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_pack_scan_reports_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("pack");
+        fs::create_dir(&work).unwrap();
+        let manifest = work.join("pack.json");
+        symlink(work.join("missing.json"), &manifest).unwrap();
+        let error = listed_checked_in(root.path()).err().unwrap();
+        assert!(error.contains(&manifest.display().to_string()), "{error}");
+
+        fs::remove_file(manifest).unwrap();
+        let dangling = root.path().join("dangling");
+        symlink(root.path().join("missing"), &dangling).unwrap();
+        let error = listed_checked_in(root.path()).err().unwrap();
+        assert!(error.contains(&dangling.display().to_string()), "{error}");
     }
 
     #[test]

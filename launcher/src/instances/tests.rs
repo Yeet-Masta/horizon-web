@@ -463,7 +463,14 @@ fn migration_leaves_both_files_untouched_when_version_or_instance_data_cannot_be
     // Joined part by part: the errors name the path with the platform's separators.
     let port = game.join("ports").join("family-pack").join("pack.json");
     let registry = game.join("horizon-packs").join("quiet").join("pack.json");
+    put(&game.join("ports/downloads/old.mrpack"), "legacy download");
+    fs::create_dir_all(game.join("horizon-packs/unfinished")).unwrap();
+    fs::create_dir_all(game.join("instances/empty")).unwrap();
     put(&port, "broken Java pack");
+    assert!(modpacks::listed_checked_in(&game.join("ports"))
+        .err()
+        .unwrap()
+        .contains(&port.display().to_string()));
     assert!(absorb_held_selection()
         .unwrap_err()
         .contains(&port.display().to_string()));
@@ -475,7 +482,14 @@ fn migration_leaves_both_files_untouched_when_version_or_instance_data_cannot_be
         ..Default::default()
     };
     put(&port, &serde_json::to_string(&manifest).unwrap());
-    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    let listed = modpacks::listed_checked_in(&game.join("ports")).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].slug, "family-pack");
+
+    put(&registry, "broken registry pack");
+    assert!(registry_pack::list_checked_in(&game.join("horizon-packs"))
+        .unwrap_err()
+        .contains(&registry.display().to_string()));
     assert!(absorb_held_selection()
         .unwrap_err()
         .contains(&registry.display().to_string()));
@@ -486,6 +500,9 @@ fn migration_leaves_both_files_untouched_when_version_or_instance_data_cannot_be
         &registry,
         r#"{"id":"quiet","name":"Quiet","version":"1.0","sha256":"00","mods":[]}"#,
     );
+    let listed = registry_pack::list_checked_in(&game.join("horizon-packs")).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "quiet");
     absorb_held_selection().unwrap();
     assert!(backend::Settings::load().instance_versions_migrated);
     for id in ["port:family-pack", "pack:quiet"] {

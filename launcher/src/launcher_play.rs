@@ -274,6 +274,27 @@ impl Launcher {
         }
     }
 
+    pub(super) fn prepare_and_play(&mut self) {
+        if self.play_blocked_by_migration() {
+            return;
+        }
+        let Some((tag, instance)) = self
+            .selected()
+            .cloned()
+            .zip(self.selected_instance().map(|i| i.id.clone()))
+        else {
+            return;
+        };
+        self.client_error = None;
+        if self.prepare_version(tag.clone(), backend::MinecraftFrom::Install) {
+            self.play_when_prepared = Some((tag, instance));
+        } else if !self.preparing && self.prepare_error.is_none() {
+            self.client_error = Some(
+                tr("Wait for the version's download to finish, then press Play again.").into(),
+            );
+        }
+    }
+
     /// [`Self::prepare`] for `tag` rather than the selected version. False when it didn't start:
     /// another job owns the preparation or its files, or the version is gone.
     pub(crate) fn prepare_version(&mut self, tag: String, from: backend::MinecraftFrom) -> bool {
@@ -363,6 +384,9 @@ impl Launcher {
             self.start_java(instance, server);
             return;
         }
+        if self.play_blocked_by_migration() {
+            return;
+        }
         let tag = match instance.resolve_version(None) {
             Ok(tag) => tag,
             Err(e) => {
@@ -370,7 +394,14 @@ impl Launcher {
                 return;
             }
         };
-        if !self.version_still_installed(&tag) || !self.can_start(&tag) {
+        if !self.version_still_installed(&tag) {
+            return;
+        }
+        if !self.can_start(&tag) {
+            if !self.preparing && self.client.is_none() && self.starting_client.is_none() {
+                self.client_error =
+                    Some(tr("This version needs to be prepared before it can play.").into());
+            }
             return;
         }
         self.starting_pack = None;
@@ -462,32 +493,43 @@ impl Launcher {
     /// Starts Play's request after its version was prepared, once nothing else is starting:
     /// a start whose pre-launch command still runs owns the window's Stop (Windows), and the
     /// queued Play waits rather than taking the Stop over.
-    pub(crate) fn start_queued_play(&mut self) {
+    pub(crate) fn start_queued_play(&mut self) -> bool {
         let start_busy = self.preparing
             || self.pre_launch_stoppable()
             || self.starting_client.is_some()
             || self.client.is_some();
-        let Some((tag, instance)) = take_queued_play(&mut self.play_when_prepared, start_busy)
-        else {
-            return;
+        let install_overlaps = |tag: &str| {
+            let base = backend::prepared_in(tag);
+            self.installing
+                .as_ref()
+                .is_some_and(|(install, _)| prepare_overlaps_install(tag, &base, install))
+                || self
+                    .install_queue
+                    .iter()
+                    .any(|request| prepare_overlaps_install(tag, &base, &request.release.tag))
         };
-        // The files Prepare just checked may already be scheduled for replacement.
-        let base = backend::prepared_in(&tag);
-        if self
-            .installing
-            .as_ref()
-            .is_some_and(|(install, _)| prepare_overlaps_install(&tag, &base, install))
-            || self
-                .install_queue
-                .iter()
-                .any(|request| prepare_overlaps_install(&tag, &base, &request.release.tag))
-        {
-            return;
+        match take_queued_play(
+            &mut self.play_when_prepared,
+            start_busy,
+            install_overlaps,
+            backend::check_prepared,
+        ) {
+            None => return false,
+            Some(QueuedPlay::Start(tag, instance)) => {
+                self.starting_pack = None;
+                self.start_client(tag, Some(instance));
+            }
+            Some(QueuedPlay::MissingFiles(tag)) => {
+                if self.version_still_installed(&tag) {
+                    self.prepare_error = Some(trf(
+                        "The prepared files for {version} are missing. Prepare this version again to play.",
+                        &[("version", &self.version_name(&tag))],
+                    ));
+                    self.prepare_fix = None;
+                }
+            }
         }
-        if backend::check_prepared(&tag) {
-            self.starting_pack = None;
-            self.start_client(tag, Some(instance));
-        }
+        true
     }
 
     /// Whether a server's Join starts the selected instance now: a Java instance too, as Play
@@ -499,11 +541,21 @@ impl Launcher {
         }
     }
 
+    /// If migration could not save a pin, starting Latest could upgrade a held world.
+    pub(super) fn play_blocked_by_migration(&mut self) -> bool {
+        if self.settings.instance_versions_migrated {
+            return false;
+        }
+        self.settings_save_error.get_or_insert_with(|| {
+            tr("Retry saving the instance settings before playing Horizon.").into()
+        });
+        true
+    }
+
     /// Starts the game: the session first (a network round trip when the token needs
     /// renewing), then `drain` starts the process when it arrives.
     pub(crate) fn start_client(&mut self, tag: String, instance_id: Option<String>) {
-        // If the migration could not save a pin, starting Latest could upgrade a held world.
-        if !self.settings.instance_versions_migrated || !self.version_still_installed(&tag) {
+        if self.play_blocked_by_migration() || !self.version_still_installed(&tag) {
             self.starting_pack = None;
             self.joining = None;
             self.quick_play = None;
@@ -761,23 +813,35 @@ fn take_next_install(
     queue.remove(next)
 }
 
-/// Takes the Play that waited for its version to be prepared, unless another start is under
-/// way: then it stays queued for [`Launcher::start_queued_play`] to try again.
+#[derive(Debug, PartialEq)]
+enum QueuedPlay {
+    Start(String, String),
+    MissingFiles(String),
+}
+
+/// Keep the request while another start or an install owns the files it needs.
 fn take_queued_play(
     queued: &mut Option<(String, String)>,
     start_busy: bool,
-) -> Option<(String, String)> {
-    if start_busy {
+    install_overlaps: impl FnOnce(&str) -> bool,
+    check_prepared: impl FnOnce(&str) -> bool,
+) -> Option<QueuedPlay> {
+    if start_busy || install_overlaps(&queued.as_ref()?.0) {
         return None;
     }
-    queued.take()
+    let (tag, instance) = queued.take()?;
+    Some(if check_prepared(&tag) {
+        QueuedPlay::Start(tag, instance)
+    } else {
+        QueuedPlay::MissingFiles(tag)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         clear_install_error_for, enqueue_install, take_next_install, take_queued_play,
-        InstallSource, QueuedInstall, Release, VecDeque,
+        InstallSource, QueuedInstall, QueuedPlay, Release, VecDeque,
     };
 
     fn queued() -> Option<(String, String)> {
@@ -863,13 +927,37 @@ mod tests {
     #[test]
     fn a_queued_play_waits_for_a_pre_launch_command_to_finish() {
         let mut waiting = queued();
-        assert_eq!(take_queued_play(&mut waiting, true), None);
         assert_eq!(
-            waiting,
-            queued(),
-            "a queued Play is kept while another start holds the Stop"
+            take_queued_play(&mut waiting, true, |_| false, |_| true),
+            None
         );
-        assert_eq!(take_queued_play(&mut waiting, false), queued());
-        assert_eq!(waiting, None, "once no start holds the Stop, it is taken");
+        assert_eq!(waiting, queued());
+        let (tag, instance) = queued().unwrap();
+        assert_eq!(
+            take_queued_play(&mut waiting, false, |_| false, |_| true),
+            Some(QueuedPlay::Start(tag, instance))
+        );
+        assert_eq!(waiting, None);
+    }
+
+    #[test]
+    fn a_queued_play_waits_for_replacement_before_reporting_missing_files() {
+        let mut waiting = queued();
+        let (tag, _) = queued().unwrap();
+        assert_eq!(
+            take_queued_play(
+                &mut waiting,
+                false,
+                |requested| requested == tag,
+                |_| panic!("an install still owns the version's files"),
+            ),
+            None
+        );
+        assert_eq!(waiting, queued());
+        assert_eq!(
+            take_queued_play(&mut waiting, false, |_| false, |_| false),
+            Some(QueuedPlay::MissingFiles(tag))
+        );
+        assert_eq!(waiting, None);
     }
 }

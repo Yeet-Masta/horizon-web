@@ -320,11 +320,7 @@ impl Launcher {
             PlayPress::PrepareThenPlay => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.picker.open = false;
-                    this.play_when_prepared = this
-                        .selected()
-                        .cloned()
-                        .zip(this.selected_instance().map(|i| i.id.clone()));
-                    this.prepare(backend::MinecraftFrom::Install);
+                    this.prepare_and_play();
                     cx.notify();
                 }))
             }

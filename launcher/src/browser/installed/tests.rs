@@ -178,7 +178,16 @@ fn installs_with_dependencies_then_updates_and_removes() {
 #[test]
 fn resource_pack_update_reviews_the_version_it_will_install() {
     let dir = tempfile::tempdir().unwrap();
-    let home = dir.path();
+    let ports = dir.path().join("ports");
+    let work = ports.join("cozy");
+    fs::create_dir_all(&work).unwrap();
+    fs::create_dir_all(ports.join("downloads")).unwrap();
+    let manifest = horizon_port_pack::import::Pack {
+        name: "Cozy".into(),
+        ..Default::default()
+    };
+    horizon_port_pack::pipeline::write_json(&work.join("pack.json"), &manifest).unwrap();
+    let home = &work.join("home");
     let mut fake = Fake::default();
     fake.add(project("pack", Kind::ResourcePack));
     fake.release("pack", "1", &[], b"original", false);
@@ -245,6 +254,10 @@ fn resource_pack_update_reviews_the_version_it_will_install() {
         .remove(0);
     assert_eq!(latest.number, "4");
     assert_eq!(fs::read(home.join(&latest.file)).unwrap(), b"plain");
+    assert!(!home.join("mods").exists());
+    let listed = crate::modpacks::listed_checked_in(&ports).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].work, work);
 }
 
 #[test]

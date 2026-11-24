@@ -810,8 +810,9 @@ impl Launcher {
         }
         self.mods_check(to_check);
         if done {
-            // A data pack put into a world shows in its list on Home.
+            // Home may already have read these lists before the browser installed a pack.
             self.world_packs.reread();
+            self.game_packs.stale();
         }
         for l in loaded {
             self.mods_loaded(l);
@@ -1275,7 +1276,11 @@ impl Launcher {
             InstallRequest::Installed(..) => None,
         };
         self.mods.message = None;
-        self.mods.busy = Some((id.clone(), format!("Asking {}…", source.label()), 0.));
+        self.mods.busy = Some((
+            id.clone(),
+            trf("Asking {source}…", &[("source", source.label())]),
+            0.,
+        ));
         self.mods.updates.remove(&(source, id.clone()));
         let everything = self.mods.everything || self.mods.browse.filters.other_version();
         // A modpack is ported for the selected version as soon as it is imported.
@@ -1361,8 +1366,8 @@ impl Launcher {
                         ));
                     }
                     if modpack {
-                        let folder = modpacks::ports_dir().join("downloads");
-                        let file = installed::fetch_modpack(&*source, &p, &folder, &|f| {
+                        let folder = modpacks::downloads()?;
+                        let file = installed::fetch_modpack(&*source, &p, folder.path(), &|f| {
                             progress(&p.title, f)
                         })?;
                         let log = |line: String| progress(&line, 1.);

@@ -410,7 +410,7 @@ impl Launcher {
             .flex_col()
             .gap(px(28.))
             .child(banner)
-            .children(self.prepare_notice(cx));
+            .children((!t.glass).then(|| self.prepare_notice(cx)).flatten());
         // Home's Stable Update failed, its one retry included: its offer is gone until the list
         // is read again, so Home says why.
         let stable_failed = self.install_error.as_ref().filter(|(tag, _)| {
@@ -435,8 +435,8 @@ impl Launcher {
         } else {
             page.child(self.home_tabs(rows, cx))
         };
-        if let Some(e) = self.client_error.clone() {
-            page = page.child(notice(e, &t));
+        if !t.glass {
+            page = page.children(self.client_error.clone().map(|error| notice(error, &t)));
         }
         page
     }
@@ -445,7 +445,7 @@ impl Launcher {
     /// while the window was open, or Download from Mojang when the Minecraft folders lack a
     /// library of the game. An instance whose pinned version isn't installed (and isn't
     /// installing) gets the same notice without a press first: it never plays another version.
-    fn prepare_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
+    pub(super) fn prepare_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let installing = self.installing.as_ref().map(|(tag, _)| tag.as_str());
         let pin = self
@@ -484,7 +484,11 @@ impl Launcher {
             ),
             None => None,
         };
-        Some(notice(error, &t).children(action.map(|a| a.bg(t.plate))))
+        Some(if t.glass {
+            glass_home::play_notice(error).children(action.map(|a| div().child(a)))
+        } else {
+            notice(error, &t).children(action.map(|a| a.bg(t.plate)))
+        })
     }
 
     /// The selected instance's graphics API notice (`backend::api_fallback`): the launcher switched

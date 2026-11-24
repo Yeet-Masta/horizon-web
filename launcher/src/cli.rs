@@ -2571,9 +2571,13 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 return Ok(());
             }
             if p.kind == Kind::Modpack {
-                let folder = modpacks::ports_dir().join("downloads");
-                let file =
-                    installed::fetch_modpack(&*source, &p, &folder, &progress(p.title.clone()))?;
+                let folder = modpacks::downloads()?;
+                let file = installed::fetch_modpack(
+                    &*source,
+                    &p,
+                    folder.path(),
+                    &progress(p.title.clone()),
+                )?;
                 let log = &|line: String| eprintln!("{line}");
                 let resources = backend::resolve_version(None)
                     .ok()
