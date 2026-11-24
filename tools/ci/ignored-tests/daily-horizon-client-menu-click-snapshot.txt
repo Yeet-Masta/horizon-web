@@ -1,0 +1,1 @@
+horizon-client game::remote::tests::stock_click_predictions_match_loopback_packets_with_or_without_listener lib daily resources

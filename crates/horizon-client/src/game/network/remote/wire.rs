@@ -35,6 +35,9 @@ impl Game<'_> {
     pub(super) fn send_play_body(&self, packet: S) -> bool {
         let queued = self.remote.is_some() && !self.client_packet_send_canceled(&packet);
         if let (true, Some(r)) = (queued, &self.remote) {
+            if let S::ContainerClick(click) = &packet {
+                self.observe_container_click(click, &r.builtin);
+            }
             r.session.send(packet);
         }
         queued

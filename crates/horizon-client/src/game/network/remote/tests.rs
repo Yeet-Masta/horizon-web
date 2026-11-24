@@ -1224,6 +1224,177 @@ fn an_empty_hand_right_click_on_the_crafting_result_is_sent() {
 
 #[test]
 #[ignore = "daily"]
+fn stock_click_predictions_match_loopback_packets_with_or_without_listener() {
+    use super::super::native_entity_refs::tests::with_client_game;
+    use horizon_client::menu::Input;
+    use horizon_core::nbt::Tag;
+    use horizon_protocol::{
+        item::Stack,
+        packets::play::{self, Clientbound as C, Serverbound as S},
+    };
+    use mod_api::{
+        ClientHost, ContainerClickSentEvent, ContainerClickSnapshot, Hooks, ModEntry,
+        PredictedClickStack,
+    };
+    use mod_platform::testing::with_mods;
+    use std::sync::{Arc, Mutex};
+
+    struct Observe(Arc<Mutex<Vec<ContainerClickSnapshot>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Observe {
+        fn container_click_sent(
+            &self,
+            _: &dyn ClientHost,
+            event: &mut ContainerClickSentEvent<'_>,
+        ) {
+            self.0.lock().unwrap().push(event.click.clone());
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let drive = |mods| {
+        let mut received = Vec::new();
+        let mut expected_observation = Vec::new();
+        with_mods(mods, || {
+            with_client_game(|game| {
+                let (mut reader, _writer) = connect_menu_test(game);
+                spawn_menu_test(game);
+                // The stock player inventory is a real menu, even though the
+                // server did not open a window or send a title.
+                game.screen = super::Screen::Inventory;
+                assert_eq!(game.remote_menu().0, 0);
+                let stone = game.item_id("minecraft:stone");
+                let dirt = game.item_id("minecraft:dirt");
+                assert_ne!(stone, dirt);
+                game.handle_packet(C::SetPlayerInventory(play::SetPlayerInventory {
+                    slot: 0,
+                    item: Some(Stack::new(stone, 5)),
+                }))
+                .unwrap();
+                game.handle_packet(C::SetCursorItem(play::SetCursorItem {
+                    item: Some(Stack::new(dirt, 3)),
+                }))
+                .unwrap();
+                game.remote.as_mut().unwrap().state_id = 17;
+
+                assert!(!game.click_open_inventory(Some(999), 0, Input::Pickup));
+                assert!(game.click_open_inventory(Some(0), 0, Input::Pickup));
+                game.throw_click(true, Input::Pickup);
+                game.throw_click(false, Input::Throw);
+                game.throw_click(false, Input::Pickup);
+                assert!(game.click_open_inventory(Some(0), 0, Input::Pickup));
+
+                let chest = game
+                    .remote
+                    .as_ref()
+                    .unwrap()
+                    .builtin
+                    .get("minecraft:menu")
+                    .unwrap()
+                    .id("minecraft:generic_9x3")
+                    .unwrap();
+                game.handle_packet(C::OpenScreen(play::OpenScreen {
+                    container: 7,
+                    menu: chest,
+                    title: Tag::String("Chest".into()),
+                }))
+                .unwrap();
+                game.handle_packet(C::ContainerSetSlot(play::ContainerSetSlot {
+                    container: 7,
+                    state: 23,
+                    slot: 2,
+                    item: Some(Stack::new(stone, 6)),
+                }))
+                .unwrap();
+                game.handle_packet(C::SetCursorItem(play::SetCursorItem { item: None }))
+                    .unwrap();
+                assert!(game.click_open_inventory(Some(302), 1, Input::Pickup));
+
+                let resolve = |item, count| {
+                    let name = match item {
+                        id if id == stone => "minecraft:stone",
+                        id if id == dirt => "minecraft:dirt",
+                        _ => panic!("unexpected item id {item}"),
+                    };
+                    PredictedClickStack::new(Some(name.into()), count)
+                };
+                let stone = |count| resolve(stone, count);
+                let dirt = |count| resolve(dirt, count);
+                let expected = [
+                    ContainerClickSnapshot::new(
+                        0,
+                        17,
+                        36,
+                        0,
+                        0,
+                        vec![(36, Some(dirt(3)))],
+                        Some(stone(5)),
+                    ),
+                    ContainerClickSnapshot::new(0, 17, -999, 1, 0, vec![], Some(stone(4))),
+                    ContainerClickSnapshot::new(0, 17, -999, 0, 4, vec![], Some(stone(4))),
+                    ContainerClickSnapshot::new(0, 17, -999, 0, 0, vec![], None),
+                    ContainerClickSnapshot::new(0, 17, 36, 0, 0, vec![(36, None)], Some(dirt(3))),
+                    ContainerClickSnapshot::new(
+                        7,
+                        23,
+                        2,
+                        1,
+                        0,
+                        vec![(2, Some(stone(3)))],
+                        Some(stone(3)),
+                    ),
+                ];
+                for predicted in &expected {
+                    let (frame, sent) = (0..32)
+                        .find_map(|_| {
+                            let (id, body) = reader.recv().unwrap();
+                            match S::decode(id, &body).unwrap() {
+                                S::ContainerClick(click) => Some(((id, body), click)),
+                                _ => None,
+                            }
+                        })
+                        .expect("stock click never reached the loopback");
+                    let resolve_stack =
+                        |stack: horizon_protocol::item::Hashed| resolve(stack.item, stack.count);
+                    let prediction = ContainerClickSnapshot::new(
+                        sent.container,
+                        sent.state,
+                        sent.slot,
+                        sent.button,
+                        sent.input,
+                        sent.changed
+                            .into_iter()
+                            .map(|(slot, stack)| (slot, stack.map(resolve_stack)))
+                            .collect(),
+                        sent.carried.map(resolve_stack),
+                    );
+                    assert_eq!(&prediction, predicted);
+                    expected_observation.push(prediction);
+                    received.push(frame);
+                }
+                reader
+                    .set_read_timeout(Some(std::time::Duration::from_millis(20)))
+                    .unwrap();
+                assert!(reader.recv().unwrap_err().is_timed_out());
+            });
+        });
+        (received, expected_observation)
+    };
+    let (baseline, _) = drive(Vec::new().into());
+    assert!(seen.lock().unwrap().is_empty());
+    let (observed, expected_observation) = drive(
+        vec![ModEntry::new(
+            "click_test",
+            Box::new(Observe(Arc::clone(&seen))),
+        )]
+        .into(),
+    );
+    assert_eq!(observed, baseline);
+    assert_eq!(*seen.lock().unwrap(), expected_observation);
+}
+
+#[test]
+#[ignore = "daily"]
 fn client_menu_reads_follow_packets_and_lifetimes() {
     use super::super::{
         Screen, execution_role::ExecutionRole, native_entity_refs::tests::with_game,
@@ -4887,9 +5058,17 @@ fn an_unfocused_window_waits_for_the_loading_screen_to_pause() {
             .start_client_load(0, Reason::Other);
         game.focus_lost = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         game.pause_if_inactive();
-        assert_eq!(game.screen, crate::game::Screen::Playing, "loading screen up");
+        assert_eq!(
+            game.screen,
+            crate::game::Screen::Playing,
+            "loading screen up"
+        );
         game.remote.as_mut().unwrap().level_load.finish();
         game.pause_if_inactive();
-        assert_eq!(game.screen, crate::game::Screen::Paused, "loading screen closed");
+        assert_eq!(
+            game.screen,
+            crate::game::Screen::Paused,
+            "loading screen closed"
+        );
     });
 }

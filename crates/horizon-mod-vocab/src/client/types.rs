@@ -96,6 +96,69 @@ pub enum MappingError {
     },
 }
 
+/// Identity and count of a nonempty stack in the client's container prediction.
+/// Component hashes are intentionally not exposed.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct PredictedClickStack {
+    /// Namespaced item name from the connection registry, or `None` for an unknown id.
+    pub item: Option<String>,
+    /// The exact count sent in the prediction.
+    pub count: i32,
+}
+
+impl PredictedClickStack {
+    /// Construct the identity and count of a predicted stack.
+    pub fn new(item: Option<String>, count: i32) -> Self {
+        Self { item, count }
+    }
+}
+
+/// The local prediction sent for one container click, not the server's reply.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct ContainerClickSnapshot {
+    /// The wire container id; `0` is the player's own inventory.
+    pub container: i32,
+    /// The wire state id (menu revision) the click answers.
+    pub state: i32,
+    /// The clicked menu slot, or `-999` for a click outside the window.
+    pub slot: i16,
+    /// The wire button, whose meaning depends on the input type.
+    pub button: i8,
+    /// The wire input ordinal: pickup (0), quick move (1), swap (2), clone (3),
+    /// throw (4), quick craft (5), or pickup all (6).
+    pub input: i32,
+    /// Changed menu slots in wire order, with their stacks after this click.
+    /// `None` for a slot means it was emptied.
+    pub changed: Vec<(i16, Option<PredictedClickStack>)>,
+    /// The stack on the cursor after the click, or `None` if empty.
+    pub carried: Option<PredictedClickStack>,
+}
+
+impl ContainerClickSnapshot {
+    /// Construct a snapshot of one outgoing click.
+    pub fn new(
+        container: i32,
+        state: i32,
+        slot: i16,
+        button: i8,
+        input: i32,
+        changed: Vec<(i16, Option<PredictedClickStack>)>,
+        carried: Option<PredictedClickStack>,
+    ) -> Self {
+        Self {
+            container,
+            state,
+            slot,
+            button,
+            input,
+            changed,
+            carried,
+        }
+    }
+}
+
 /// The metadata of a server play packet observed by `Hooks::client_packet`.
 ///
 /// Fields beyond the type id are exposed only for custom payloads. This is
