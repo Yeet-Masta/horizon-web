@@ -282,6 +282,9 @@ class ReleaseTrainTests(unittest.TestCase):
         self.assertTrue(train.player_facing("crates/horizon-prepare/src/lib.rs", "launcher"))
         self.assertFalse(train.player_facing("launcher/links.json", "launcher"))
         self.assertFalse(train.player_facing("crates/horizon-client/src/game.rs", "launcher"))
+        self.assertFalse(train.player_facing("crates/horizon-mod-api-gen/dispatch-tests/src/fixtures/api/DragonPhase.rs", "launcher"))
+        self.assertFalse(train.player_facing("crates/horizon-mod-api-gen/dispatch-tests/src/fixtures/api/DragonPhase.rs", "game"))
+        self.assertTrue(train.player_facing("crates/horizon-mod-api-gen/src/build.rs", "launcher"))
 
     def test_the_exporters_are_those_horizon_prepare_names(self):
         found = train.exporters()

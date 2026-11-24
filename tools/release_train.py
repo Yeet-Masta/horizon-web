@@ -183,7 +183,7 @@ def exporters():
 
 def player_facing(path, kind, exporter_paths=frozenset()):
     """Whether a change to path ships to players in a release of this kind."""
-    if path.endswith(".md") or re.match(r"(crates|launcher)/([\w-]+/)?(examples|tests|benches)/", path):
+    if path.endswith(".md") or re.match(r"(crates|launcher)/([\w-]+/)?(examples|tests|[\w-]+-tests|benches)/", path):
         return False
     if kind == "launcher":
         return any(path.startswith(p) for p in LAUNCHER_RELEASE_PATHS) and not any(path.startswith(p) for p in LAUNCHER_IGNORED)
