@@ -2048,14 +2048,13 @@ impl Game<'_> {
     /// variant); the loot data of the game's resources decides, and without it
     /// the items' table engine (no entity) rolls it. Whether anything dropped.
     fn drop_gift_loot(&mut self, mob: u32, table: &'static str, at: [f64; 3]) -> bool {
-        use horizon_client::mobs::drops;
         use horizon_world::loot::EntityLootParams;
         let loot = self.server_loot.get();
         let this = self
             .mobs
             .iter()
             .find(|m| m.id == mob)
-            .map(|m| drops::loot_entity(m, None));
+            .map(|m| self.mob_loot_entity(m));
         let stacks = match (loot, this) {
             (Some(loot), Some(this)) if loot.has_table(table) => {
                 let params = EntityLootParams {

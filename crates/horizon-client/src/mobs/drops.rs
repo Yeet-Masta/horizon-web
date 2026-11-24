@@ -53,6 +53,10 @@ pub struct Death<'a> {
     /// The `doMobLoot` game rule.
     pub mob_drops: bool,
     pub world_seed: i64,
+    /// `ServerLevel.getRaidAt(blockPosition())` found an active raid: all a
+    /// dying raider's `hasRaid` reads at the roll, since `Raider.die` takes
+    /// it out of its own raid before `super.die` drops the loot.
+    pub raid_at: bool,
 }
 
 /// What a death's loot rolls with: the world's random sequences, the level's
@@ -450,6 +454,9 @@ pub fn loot_entity(m: &Mob, vehicle: Option<LootEntity>) -> LootEntity {
     }
     if is_raider(s) {
         e.captain = Some(raider::is_captain(m));
+        // Raider.hasRaid's `getCurrentRaid() != null`; the game adds the
+        // other half, an active raid at its block (`ServerLevel.getRaidAt`).
+        e.has_raid = raider::state(m).is_some_and(|s| s.raid_id.is_some());
     }
     if s == S::Frog {
         e.frog_variant = Some(
@@ -524,7 +531,10 @@ pub fn roll_death(m: &mut Mob, d: &Death, rolls: &mut dyn DeathRolls) -> Rolled 
     let mut out = Vec::new();
     let mut table_rolled = false;
     death_state(m);
-    let this = loot_entity(m, d.vehicle.clone());
+    let mut this = loot_entity(m, d.vehicle.clone());
+    if this.captain.is_some() {
+        this.has_raid = d.raid_at;
+    }
     let mut skulls = false;
     // Creeper.killedEntity: a charged creeper's victim drops its head.
     if let Some(source) = d.damage.as_ref().and_then(|x| x.source.as_ref())
@@ -886,6 +896,7 @@ mod death_loot_table_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let items = |seed: i64, own: bool| {
             let kind = crate::mobs::sensor_scan_tests::kind();
@@ -934,6 +945,7 @@ mod death_loot_table_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let kind = crate::mobs::sensor_scan_tests::kind();
         let mut m = Mob::new(1, kind, horizon_core::geometry::Vec3::ZERO, 0.0);
@@ -946,6 +958,65 @@ mod death_loot_table_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// `RaiderPredicate`'s `has_raid` defaults to false, so a captain-only
+    /// pool (the pillager's Ominous Bottle) rolls only when no active raid is
+    /// within 96 blocks of the dying captain. Its own raid doesn't count:
+    /// `Raider.die` leaves the raid before the loot is rolled.
+    #[test]
+    fn a_raid_captain_rolls_no_captain_loot_near_an_active_raid() {
+        let root = std::env::temp_dir().join(format!("drops-raid-captain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("data/minecraft/loot_table");
+        std::fs::create_dir_all(&dir).unwrap();
+        let table = r#"{"type":"minecraft:entity","pools":[{"rolls":1,
+            "condition":{"type":"minecraft:entity_properties","entity":"this",
+                "predicate":{"minecraft:type_specific/raider":{"is_captain":true}}},
+            "entries":[{"type":"minecraft:item","name":"minecraft:diamond"}]}]}"#;
+        std::fs::write(dir.join("captain.json"), table).unwrap();
+        std::fs::write(root.join("items.json"), "{}").unwrap();
+        let defaults = horizon_world::item_defaults::read(&root).unwrap();
+        let loot = LootData::load(&root, &PackOverlay::NONE, &defaults).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let diamonds = |raid_at: bool, raid_id: Option<i32>| {
+            let death = Death {
+                loot: &loot,
+                damage: None,
+                player: None,
+                player_killed: false,
+                luck: 0.0,
+                vehicle: None,
+                mob_drops: true,
+                world_seed: 0,
+                raid_at,
+            };
+            let mut kind = (*crate::mobs::sensor_scan_tests::kind()).clone();
+            kind.id = "minecraft:pillager".into();
+            kind.species = Species::Pillager;
+            let mut m = Mob::new(
+                1,
+                std::sync::Arc::new(kind),
+                horizon_core::geometry::Vec3::ZERO,
+                0.0,
+            );
+            m.extra.raider = Some(Box::default());
+            raider::state_mut(&mut m).patrol_leader = true;
+            raider::state_mut(&mut m).raid_id = raid_id;
+            raider::wear_banner(&mut m);
+            m.extra.death_loot_table = Some("minecraft:captain".into());
+            let mut sequences = RandomSequences::default();
+            let (out, _) = die(&mut m, &death, &mut sequences, &mut level_random(7));
+            out.iter()
+                .filter(|d| matches!(d, Drop::Item(s) if s.item == "minecraft:diamond"))
+                .count()
+        };
+        // A patrol or outpost captain, and a wave's captain far from its raid.
+        assert_eq!(diamonds(false, None), 1);
+        assert_eq!(diamonds(false, Some(3)), 1);
+        // A wave's captain at its raid, and a patrol captain inside one's radius.
+        assert_eq!(diamonds(true, Some(3)), 0);
+        assert_eq!(diamonds(true, None), 0);
     }
 
     /// A death drop splits at its own `max_stack_size` patch: 12 ender pearls
@@ -1018,6 +1089,7 @@ mod death_loot_table_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let run = |mut level_random: LegacyRandom, draws: bool| {
             let mut sequences = RandomSequences::default();
@@ -1061,6 +1133,7 @@ mod death_loot_table_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let run = |chosen: Option<f32>| {
             let kind = crate::mobs::sensor_scan_tests::kind();
@@ -1201,6 +1274,7 @@ mod slot_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let zombie = |helmet: bool| {
             let mut m = mob("minecraft:zombie", Species::Zombie);

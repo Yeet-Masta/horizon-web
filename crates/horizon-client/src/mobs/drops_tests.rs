@@ -61,6 +61,7 @@ fn death(loot: &LootData) -> Death<'_> {
         vehicle: None,
         mob_drops: true,
         world_seed: 0,
+        raid_at: false,
     }
 }
 

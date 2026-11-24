@@ -527,6 +527,7 @@ mod tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         m.extra.drop_chances = Some(Box::new([1.0; 8]));
         let (out, _) = drops::die(

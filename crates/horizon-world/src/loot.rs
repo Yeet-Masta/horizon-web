@@ -415,6 +415,9 @@ pub struct LootEntity {
     pub sheep: Option<(String, bool)>,
     /// A raider: whether it is a captain (wears the ominous banner).
     pub captain: Option<bool>,
+    /// A raider: `Raider.hasRaid`, it belongs to a raid or an active raid is
+    /// within 96 blocks of its block (`ServerLevel.getRaidAt`).
+    pub has_raid: bool,
     /// A frog's variant id (`minecraft:warm`).
     pub frog_variant: Option<String>,
     /// A chicken's variant id (`minecraft:warm`).
@@ -4539,9 +4542,9 @@ impl LootData {
             "minecraft:type_specific/cube_mob" => {
                 e.cube_size.is_some_and(|size| int_bounds(&v["size"], size))
             }
-            // RaiderPredicate: no raid is running here.
+            // RaiderPredicate.matches: both fields default to false.
             "minecraft:type_specific/raider" => e.captain.is_some_and(|captain| {
-                !v["has_raid"].as_bool().unwrap_or(false)
+                e.has_raid == v["has_raid"].as_bool().unwrap_or(false)
                     && captain == v["is_captain"].as_bool().unwrap_or(false)
             }),
             "minecraft:vehicle" => self.entity_matches(v, e.vehicle.as_deref()),

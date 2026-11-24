@@ -195,7 +195,7 @@ impl Game<'_> {
                     .mobs
                     .iter()
                     .find(|o| o.id == id)
-                    .map(|o| drops::loot_entity(o, None))
+                    .map(|o| self.mob_loot_entity(o))
                     // A charged creeper's blast kills after the creeper left the list.
                     .or_else(|| {
                         self.combat
@@ -248,6 +248,7 @@ impl Game<'_> {
                 .rules
                 .bool_at(horizon_client::gamerules::vanilla::MOB_DROPS),
             world_seed: self.level.seed,
+            raid_at: self.raid_at_mob(m),
         };
         let raider = horizon_client::mobs::raider::is_raider(m.species());
         let to_stack = |stack: &horizon_world::loot::LootStack| {

@@ -2758,6 +2758,7 @@ mod crossbow_tests {
             vehicle: None,
             mob_drops: true,
             world_seed: 0,
+            raid_at: false,
         };
         let mut apple = piglin();
         hold_in_offhand(
