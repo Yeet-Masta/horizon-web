@@ -1692,6 +1692,7 @@ horizon-client game::native_level_refs::tests::block_state_reads_stored_ids_and_
 horizon-client game::native_level_refs::tests::block_transform_preview_preserves_state_and_marks_simulation lib daily resources
 horizon-client game::native_level_refs::tests::bounds_reads_follow_the_level_without_loading_chunks lib daily resources
 horizon-client game::native_level_refs::tests::check_light_queues_the_cell_with_the_light_edits lib daily resources
+horizon-client game::native_level_refs::tests::chunk_ticket_diagnostics_distinguish_direct_sources_and_propagated_status lib daily resources
 horizon-client game::native_level_refs::tests::fluid_flow_reads_the_current_that_pushes_entities lib daily resources
 horizon-client game::native_level_refs::tests::fluid_queries_answer_vanilla_values_at_a_position lib daily resources
 horizon-client game::native_level_refs::tests::forced_chunk_changes_the_ticket_sources_and_the_saved_set lib daily resources

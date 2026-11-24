@@ -117,6 +117,22 @@ impl ModTickets {
     pub fn of_controller(&self, controller: u32) -> impl Iterator<Item = &ModTicket> {
         self.held.iter().filter(move |t| t.controller == controller)
     }
+    /// One controller slot per active persistent or transient ticket on `chunk`.
+    /// Tickets awaiting validation hold nothing and are not included.
+    pub fn controllers_at(&self, chunk: (i32, i32)) -> impl Iterator<Item = u32> + '_ {
+        let count = self.per_chunk.get(&chunk).map_or(0, |counts| counts.0);
+        self.held
+            .iter()
+            .filter(move |t| t.chunk == chunk)
+            .map(|t| t.controller)
+            .chain(
+                self.transient
+                    .iter()
+                    .filter(move |t| t.chunk == chunk)
+                    .map(|t| t.controller),
+            )
+            .take(count as usize)
+    }
     /// Every ticket to save, the loaded ones not yet validated included.
     pub fn to_save(&self) -> impl Iterator<Item = &ModTicket> {
         self.held.iter().chain(&self.loaded)

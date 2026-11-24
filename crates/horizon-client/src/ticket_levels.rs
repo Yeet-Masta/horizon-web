@@ -558,6 +558,65 @@ impl ChunkTickets {
     pub fn levels(&self) -> Levels {
         self.levels.clone()
     }
+    /// The last propagated loading level, with the FULL ring even when no listener is
+    /// recording level changes. The unrecorded map keeps every block-ticking chunk and
+    /// every direct FULL source. Any omitted level 33 is one step from a level 32.
+    pub fn loading_level(&self, x: i32, z: i32) -> u8 {
+        let Some(map) = self.levels.0.as_deref() else {
+            return UNLOADED;
+        };
+        let level = map.get(x, z).0;
+        if level <= FULL || self.recording {
+            return level;
+        }
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                if (dx != 0 || dz != 0)
+                    && map.get(x.saturating_add(dx), z.saturating_add(dz)).0 == BLOCK_TICKING
+                {
+                    return FULL;
+                }
+            }
+        }
+        UNLOADED
+    }
+
+    /// Visit direct scheduler tickets at this chunk. The player, dragon and viewed
+    /// areas use the inputs to the last propagation; portals use the live timed store.
+    /// The caller reads the owners of the forced chunks from streaming instead.
+    pub fn visit_direct_tickets(
+        &self,
+        chunk: (i32, i32),
+        mut visit: impl FnMut(&'static str, i32),
+    ) {
+        for ticket in self.portal.iter().filter(|ticket| ticket.chunk == chunk) {
+            visit("portal", ticket.level);
+        }
+        let Some(s) = &self.sources else {
+            return;
+        };
+        let (view, simulation, _) = reach(s, false);
+        let distance = |(x, z): (i32, i32)| x.abs_diff(chunk.0).max(z.abs_diff(chunk.1));
+        if s.players
+            .iter()
+            .any(|&player| distance(player) <= view as u32)
+        {
+            visit("player_loading", i32::from(ENTITY_TICKING));
+        }
+        if s.players.binary_search(&chunk).is_ok() {
+            visit("player_simulation", simulation);
+        }
+        if s.dragon == Some(chunk) {
+            visit("dragon", ARENA_LEVEL);
+        }
+        for area in s
+            .viewed
+            .iter()
+            .filter(|area| distance(area.center) <= area.radius as u32)
+        {
+            visit("viewed", area.level(0).0);
+        }
+    }
     /// A level's tickets as `TicketStorage.activateAllDeactivatedTickets`
     /// leaves its saved `PORTAL` ones: each keeps its level and the ticks it
     /// had left, as `addTicket` adds them in turn.

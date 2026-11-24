@@ -221,6 +221,16 @@ impl Parked {
         general.rows
     );
 
+    pub(super) fn resident_chunk_ticket_sources(
+        &self,
+        chunk: (i32, i32),
+    ) -> Option<(&ChunkTickets, &Streaming)> {
+        self.world
+            .chunks
+            .contains_key(&chunk)
+            .then_some((&self.tickets, &self.streaming))
+    }
+
     /// A write reached this level: it is not on its way out, and the idle count starts again
     /// (`close_idle_levels`). What the write left must not be dropped with a close already
     /// queued, and a level a mod keeps writing to is not closed every tick.

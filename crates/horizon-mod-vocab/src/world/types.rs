@@ -529,6 +529,40 @@ pub enum ChunkStatus {
     Full,
 }
 
+/// A resident chunk's full status (`ChunkHolder.getFullStatus`), determined by its
+/// propagated loading level, not its generation status or simulation level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum FullChunkStatus {
+    /// No ticket reaches the chunk at level 33 or below.
+    Inaccessible,
+    /// The loading level is 33.
+    Full,
+    /// The loading level is 32.
+    BlockTicking,
+    /// The loading level is 31 or lower.
+    EntityTicking,
+}
+
+/// One direct ticket reported by [`ChunkRef::tickets`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ChunkTicket {
+    /// The ticket type's name or a mod ticket controller's namespaced id.
+    pub kind: String,
+    /// The ticket's own level, before propagation. Lower is more active.
+    pub level: i32,
+}
+
+impl ChunkTicket {
+    /// A diagnostic ticket of `kind` with the given base `level`.
+    pub fn new(kind: String, level: i32) -> Self {
+        Self { kind, level }
+    }
+}
+
 /// A chunk's ticket level (`ChunkLevel`), as the server holds it: how much of
 /// the level the chunk is kept alive for. Lower is more active. Horizon keeps
 /// no level for a chunk partway through generating, so past `FULL` a chunk is
