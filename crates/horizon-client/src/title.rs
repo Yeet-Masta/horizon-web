@@ -471,6 +471,9 @@ pub struct Title {
     credits_button: Cell<[f32; 4]>,
     /// `Minecraft.allowsMultiplayer()` once the account's attributes are known.
     pub allows_multiplayer: bool,
+    /// `TitleScreen.getMultiplayerDisabledReason` (a key), read with
+    /// `allows_multiplayer`: the tooltip of the greyed Multiplayer and Realms buttons.
+    multiplayer_disabled: &'static str,
     /// The ban screens `Gui.addInitialScreens` queued, shown once the title is up.
     ban_queue: std::collections::VecDeque<crate::ban_notice::Notice>,
     /// A ban notice's three buttons as last drawn (`ConfirmLinkScreen`'s row).
@@ -943,6 +946,7 @@ impl Title {
             warning_check: Cell::new([0.0; 4]),
             credits_button: Cell::new([0.0; 4]),
             allows_multiplayer: true,
+            multiplayer_disabled: "title.multiplayer.disabled",
             ban_queue: Default::default(),
             ban_buttons: Cell::new([(0.0, 0.0); 3]),
             backup: None,
@@ -2279,7 +2283,12 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             5 => icon("gui.friends.open.narration"),
             6 => icon("options.language.narration"),
             7 => icon("accessibility.onboarding.accessibility.button.narration"),
-            _ => Narratable::button(b.label.clone(), rect, b.enabled),
+            // `Tooltip.updateNarration`: the reason multiplayer is off, as a hint.
+            _ => match self.button_tooltip(b.id) {
+                Some(tooltip) => Narratable::button(b.label.clone(), rect, b.enabled)
+                    .hint(narration_text(tooltip, &[])),
+                None => Narratable::button(b.label.clone(), rect, b.enabled),
+            },
         };
         // TitleScreen.init adds the icon row after Minecraft Realms and before
         // Options... and Quit Game, which Horizon draws first.
@@ -2293,9 +2302,12 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
     /// The `Tooltip` vanilla sets on a button of the open screen, as its key:
     /// `CommonButtons.language` and `accessibility` on the title's icon row and
     /// the onboarding screen, and `FriendsButton` while friends are available
-    /// (always, for Horizon's Join a Friend).
+    /// (always, for Horizon's Join a Friend), and
+    /// `TitleScreen.createNormalMenuOptions`' reason on Multiplayer and Minecraft
+    /// Realms while multiplayer is off (drawn on the disabled buttons too).
     fn button_tooltip(&self, id: u8) -> Option<&'static str> {
         match (&self.mode, id) {
+            (Mode::Main, 4 | 8) if !self.allows_multiplayer => Some(self.multiplayer_disabled),
             (Mode::Main, 9) => Some("horizon.pages.mods.tooltip"),
             (Mode::Main, 5) => Some("gui.friends.open.tooltip"),
             (Mode::Main, 6) | (Mode::Onboarding(_), onboarding::LANGUAGE) => {
@@ -3768,6 +3780,9 @@ Would you like to enable the Narrator or visit the Accessibility Settings?",
             return;
         };
         self.allows_multiplayer = status.allows_multiplayer();
+        if let Some(reason) = status.multiplayer_disabled_reason() {
+            self.multiplayer_disabled = reason;
+        }
         // `Minecraft`'s constructor: the account's `friendsPreferences` decide whether
         // the friends service starts (`Minecraft.friendsEnabled`).
         crate::social::init(
@@ -4195,8 +4210,18 @@ mod classic_tests {
                 .enabled
         };
         assert!(multiplayer(&title));
+        assert_eq!(title.button_tooltip(4), None);
         title.allows_multiplayer = false;
         assert!(!multiplayer(&title));
+        // TitleScreen.getMultiplayerDisabledReason's tooltip, on Multiplayer and Realms.
+        title.multiplayer_disabled = "title.multiplayer.disabled.banned.temporary";
+        for id in [4, 8] {
+            assert_eq!(
+                title.button_tooltip(id),
+                Some("title.multiplayer.disabled.banned.temporary")
+            );
+        }
+        assert_eq!(title.button_tooltip(1), None);
         // Gui.buildInitialScreens: each notice runs `next`, the last one opens the title.
         let ban = BanDetails {
             expires_ms: None,

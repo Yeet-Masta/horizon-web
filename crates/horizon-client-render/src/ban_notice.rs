@@ -79,6 +79,24 @@ impl AccountStatus {
             && self.properties.multiplayer_ban.is_none()
             && !self.actions.forced_name_change
     }
+    /// `TitleScreen.getMultiplayerDisabledReason`: the key of the tooltip on the
+    /// Multiplayer and Minecraft Realms buttons while multiplayer is off: the name
+    /// ban first, then a temporary or permanent multiplayer ban, else the generic one.
+    pub fn multiplayer_disabled_reason(&self) -> Option<&'static str> {
+        if self.allows_multiplayer() {
+            None
+        } else if self.actions.forced_name_change {
+            Some("title.multiplayer.disabled.banned.name")
+        } else if let Some(ban) = &self.properties.multiplayer_ban {
+            Some(if ban.expires_ms.is_some() {
+                "title.multiplayer.disabled.banned.temporary"
+            } else {
+                "title.multiplayer.disabled.banned.permanent"
+            })
+        } else {
+            Some("title.multiplayer.disabled")
+        }
+    }
 }
 
 /// One of the screens `Gui.addInitialScreens` adds.
@@ -434,6 +452,45 @@ mod tests {
             ..Default::default()
         };
         assert!(!no_servers.allows_multiplayer());
+    }
+
+    #[test]
+    fn multiplayer_disabled_reason_follows_the_title_screen() {
+        let ban = |expires_ms| BanDetails {
+            expires_ms,
+            reason: None,
+            reason_message: None,
+        };
+        let status = |servers_allowed, multiplayer_ban, forced_name_change| AccountStatus {
+            properties: UserProperties {
+                servers_allowed,
+                multiplayer_ban,
+                ..Default::default()
+            },
+            actions: ProfileActions {
+                forced_name_change,
+                using_banned_skin: false,
+            },
+        };
+        let reason = |s: AccountStatus| s.multiplayer_disabled_reason();
+        assert_eq!(reason(status(true, None, false)), None);
+        // The name ban wins over a multiplayer ban.
+        assert_eq!(
+            reason(status(true, Some(ban(None)), true)),
+            Some("title.multiplayer.disabled.banned.name")
+        );
+        assert_eq!(
+            reason(status(true, Some(ban(Some(EXPIRES))), false)),
+            Some("title.multiplayer.disabled.banned.temporary")
+        );
+        assert_eq!(
+            reason(status(true, Some(ban(None)), false)),
+            Some("title.multiplayer.disabled.banned.permanent")
+        );
+        assert_eq!(
+            reason(status(false, None, false)),
+            Some("title.multiplayer.disabled")
+        );
     }
 
     /// The message's component JSON: the keys and arguments, whatever language is loaded.
