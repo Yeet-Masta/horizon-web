@@ -1863,14 +1863,15 @@ mod tests {
         bytes
     }
 
-    /// The stack network threads get: 2 MiB. A Windows debug build's frames are larger than that
-    /// budget allows for `MAX_NESTING` levels (its release build fits, as Linux's builds do), so
-    /// there it gets 4 MiB.
-    const NETWORK_STACK: usize = if cfg!(all(windows, debug_assertions)) {
-        4
-    } else {
-        2
-    } << 20;
+    /// The stack network threads get: 2 MiB. The debug builds of Windows and of ARM64 targets have
+    /// frames larger than that budget allows for `MAX_NESTING` levels (their release builds fit, as
+    /// x86-64 Linux's builds do), so there it gets 4 MiB.
+    const NETWORK_STACK: usize =
+        if cfg!(all(any(windows, target_arch = "aarch64"), debug_assertions)) {
+            4
+        } else {
+            2
+        } << 20;
 
     /// Runs `f` on a thread with the network threads' stack.
     fn on_network_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
