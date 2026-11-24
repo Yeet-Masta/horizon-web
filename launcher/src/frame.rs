@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What a sidebar row says of its instance's game.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowPhase {
     Running,
     Starting,

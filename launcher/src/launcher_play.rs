@@ -433,6 +433,17 @@ impl Launcher {
         stop
     }
 
+    /// How the running or starting game relates to the currently selected instance.
+    pub(crate) fn selected_game_state(&self) -> SelectedGameState<'_> {
+        selected_game_state(
+            self.selected_instance().map(|i| i.id.as_str()),
+            self.client.is_some(),
+            self.client_run.as_ref(),
+            self.starting_client.is_some(),
+            self.starting_instance.as_deref(),
+        )
+    }
+
     /// Whether `tag` can start now ([`starts_now`]): prepared, no preparation under way, no game
     /// running or starting.
     pub(crate) fn can_start(&self, tag: &str) -> bool {

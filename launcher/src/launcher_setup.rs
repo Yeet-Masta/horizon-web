@@ -263,7 +263,6 @@ impl Launcher {
             list_hover: None,
             list_menu: None,
             home_strip: Default::default(),
-            client_since: None,
             instance_mods: Default::default(),
             mod_preview: Default::default(),
             project_icons: Default::default(),
