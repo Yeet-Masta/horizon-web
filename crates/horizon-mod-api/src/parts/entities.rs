@@ -203,4 +203,12 @@ impl EntitiesRegistrar for PartRegistrar {
             },
         );
     }
+
+    fn request_entity_tick_each(&mut self, entity: &str) {
+        self.entity_tick_each.push(Some(entity.into()));
+    }
+
+    fn request_entity_tick_each_entity(&mut self) {
+        self.entity_tick_each.push(None);
+    }
 }

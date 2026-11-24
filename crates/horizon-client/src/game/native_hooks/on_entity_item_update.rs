@@ -13,7 +13,7 @@ impl Game<'_> {
         // One read says whether any item part listens; with none, no stack is looked at.
         let update_hook =
             merging && mod_api::__private::has_part_hook(mod_api::HookId::OnEntityItemUpdate);
-        if round.listening() || update_hook {
+        if (round.listening() || update_hook) && !round.each("minecraft:item") {
             let ticking = self.entity_ticking_area();
             let mut i = 0;
             while let Some(item) = self.dropped.get(i) {

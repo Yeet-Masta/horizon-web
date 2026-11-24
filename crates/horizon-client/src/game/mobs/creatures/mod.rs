@@ -1287,6 +1287,10 @@ impl Game<'_> {
             while let Some(m) = self.mobs.get(i) {
                 let (x, z) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
                 if !blocked.contains(&m.id) && self.world.loaded(x, z) && ticking(x, z) {
+                    if round.each(&m.kind.id) {
+                        i += 1;
+                        continue;
+                    }
                     let (id, kind) = (m.id, super::native_ticks::TickKind::Mob(m.kind.clone()));
                     if self.native_tick_pre_batch(&mut round, id, kind) {
                         self.sync_sleeping_mob(i);
@@ -1379,7 +1383,7 @@ impl Game<'_> {
             laps: &mut laps,
             uuid,
             level_id,
-            round: &round,
+            round: &mut round,
         });
         if dispatch_panic.is_some() {
             // The aborted pass never applies retention, including previously

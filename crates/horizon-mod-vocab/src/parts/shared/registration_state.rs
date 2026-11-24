@@ -22,6 +22,9 @@ pub(crate) struct Installed {
     pub(crate) general_entity_types: Vec<crate::parts::entity_types::GeneralEntityTypeDeclaration>,
     pub(crate) spawn_placements: Vec<SpawnPlacementDeclaration>,
     pub(crate) entity_part_states: Vec<crate::entity::part_state::EntityPartStateDeclaration>,
+    /// Entity types requesting per-entity `entity_tick_pre`/`entity_tick_post` delivery
+    /// (`Some(kind)` for one type, `None` for every entity).
+    pub(crate) entity_tick_each: Vec<Option<Box<str>>>,
     pub(crate) biome_modifiers: Vec<BiomeModifierDeclaration>,
     pub(crate) biome_regions: Vec<BiomeRegionDeclaration>,
     pub(crate) datapack_registries:

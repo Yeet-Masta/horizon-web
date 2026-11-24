@@ -128,8 +128,13 @@ impl Game<'_> {
             horizon_client::entities::ObstacleGrid::new(self.item_entity_collisions());
         let mut nearby = Vec::new();
         let mut bubble_tops = Vec::new();
+        let each_item = round.each("minecraft:item");
+        let update_hook = each_item
+            && merging
+            && mod_api::__private::has_part_hook(mod_api::HookId::OnEntityItemUpdate);
         let mut moves = ahead::Moves::work_out(self, &items, &obstacles, round, |item| {
-            !self.joined_during_entity_pass(item.id)
+            !each_item
+                && !self.joined_during_entity_pass(item.id)
                 && ticking(
                     item.position.x.floor() as i32,
                     item.position.z.floor() as i32,
@@ -139,7 +144,8 @@ impl Game<'_> {
         // where it lay, for adding to the level once its own tick is done.
         let mut destroyed: Vec<(ItemStack, Vec3)> = Vec::new();
         let item_type = horizon_threads::work::entity_id("minecraft:item");
-        for i in 0..items.len() {
+        let original_len = items.len();
+        for i in 0..original_len {
             horizon_threads::work::set_entity(item_type);
             if removed[i] {
                 // Merged into an earlier item before its own tick: it never ticked.
@@ -158,6 +164,41 @@ impl Game<'_> {
                 || round.halted(items[i].id)
             {
                 continue;
+            }
+            let tick_item_id = items[i].id;
+            macro_rules! finish_each_item {
+                () => {
+                    if each_item {
+                        self.put_back_dropped(items);
+                        self.native_entity_tick_post(self.dim.id(), tick_item_id, "minecraft:item");
+                        items = self.dropped.lift();
+                        if items.len() > removed.len() {
+                            removed.resize(items.len(), false);
+                        }
+                    }
+                };
+            }
+            if each_item {
+                self.put_back_dropped(items);
+                let mut canceled = false;
+                self.native_entity_tick_pre(self.dim.id(), tick_item_id, "minecraft:item", &mut canceled);
+                let halted = !canceled
+                    && update_hook
+                    && self
+                        .dropped
+                        .iter()
+                        .position(|it| it.id == tick_item_id)
+                        .is_some_and(|idx| self.item_update_halts(idx));
+                if halted {
+                    self.native_entity_tick_post(self.dim.id(), tick_item_id, "minecraft:item");
+                }
+                items = self.dropped.lift();
+                if items.len() > removed.len() {
+                    removed.resize(items.len(), false);
+                }
+                if canceled || halted || i >= items.len() || items[i].id != tick_item_id {
+                    continue;
+                }
             }
             self.tick_saved_invulnerable_time(items[i].id);
             let item = &mut items[i];
@@ -227,11 +268,13 @@ impl Game<'_> {
                 removed[i] = true;
                 cells.remove(i, item.previous);
                 destroyed.extend(burning.spilled.into_iter().map(|s| (s, start)));
+                finish_each_item!();
                 continue;
             }
             if discarded {
                 removed[i] = true;
                 cells.remove(i, item.previous);
+                finish_each_item!();
                 continue;
             }
             if merging && !no_physics {
@@ -271,6 +314,7 @@ impl Game<'_> {
                 if !live {
                     removed[i] = true;
                     cells.remove(i, to);
+                    finish_each_item!();
                     continue;
                 }
             }
@@ -320,6 +364,7 @@ impl Game<'_> {
                     removed[i] = true;
                     cells.remove(i, at);
                     destroyed.extend(environment.spilled.into_iter().map(|s| (s, at)));
+                    finish_each_item!();
                     continue;
                 }
             }
@@ -365,11 +410,13 @@ impl Game<'_> {
             if !alive || removed[i] {
                 removed[i] = true;
                 cells.remove(i, item.position);
+                finish_each_item!();
                 continue;
             }
             if merging && let Some(original) = original {
                 original_moves.insert(item.id, original);
             }
+            finish_each_item!();
         }
         for pos in bubble_tops {
             self.bubble_column_particles(pos);

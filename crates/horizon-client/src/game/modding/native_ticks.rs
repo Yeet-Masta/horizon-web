@@ -34,6 +34,10 @@ pub(in crate::game) struct TickRound {
     /// Whether `entity_entering_section` is listened to on this server: each entity's position
     /// write is filed and told while its tick is still running.
     sections: bool,
+    /// Whether any mod requested per-entity Pre/Post delivery for at least one entity type.
+    each_any: bool,
+    /// Whether any mod requested per-entity Pre/Post delivery for every entity type.
+    each_all: bool,
     /// The entities the Pre let through, in order, for the Post.
     ticking: Vec<(u32, TickKind)>,
     /// The entities a Pre canceled.
@@ -47,6 +51,17 @@ impl TickRound {
     /// Whether a mod canceled the tick of entity `id`.
     pub(super) fn canceled(&self, id: u32) -> bool {
         !self.canceled.is_empty() && self.canceled.contains(&id)
+    }
+    /// Record that a per-entity Pre hook canceled entity `id`.
+    pub(super) fn cancel(&mut self, id: u32) {
+        self.canceled.push(id);
+    }
+    /// Whether entity type `kind` requested per-entity Pre/Post delivery right around its
+    /// own tick (`r.entity_tick_each(kind)` or `r.entity_tick_each_entity()`).
+    pub(super) fn each(&self, kind: &str) -> bool {
+        self.listening
+            && (self.each_all
+                || (self.each_any && mod_api::__private::entity_tick_each_for(kind)))
     }
     /// Whether a part ended the tick of item `id` (`on_entity_item_update`).
     pub(super) fn halted(&self, id: u32) -> bool {
@@ -85,9 +100,13 @@ impl Game<'_> {
         }
         let listening = server && listened;
         let sections = self.is_logical_server() && self.entity_section_scope().is_some();
+        let each_any = listening && mod_api::__private::entity_tick_each_any();
+        let each_all = each_any && mod_api::__private::entity_tick_each_all();
         TickRound {
             listening,
             sections,
+            each_any,
+            each_all,
             ticking: if listening || sections {
                 std::mem::take(&mut self.creatures.tick_buffer)
             } else {
@@ -195,5 +214,194 @@ mod tests {
         assert!(!quiet.listening());
         quiet.not_ticked(1);
         assert!(quiet.ticking.is_empty() && !quiet.canceled(1));
+    }
+
+    #[test]
+    fn entity_tick_each_fires_pre_and_post_around_each_listed_mob_in_order() {
+        if std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        use crate::game::api_values::install_parts;
+        use horizon_client::chunk::Chunk;
+        use horizon_client::mobs::Mob;
+        use horizon_core::geometry::Vec3;
+        use mod_api::{
+            EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Flow, Hooks,
+            ModEntry, Mods, Registrar, RegistrationContext, ServerHost,
+        };
+        use std::sync::{Arc, Mutex};
+
+        struct OrderMod {
+            all: bool,
+            log: Arc<Mutex<Vec<(u32, &'static str)>>>,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for OrderMod {
+            fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+                if self.all {
+                    r.entity_tick_each_entity();
+                } else {
+                    r.entity_tick_each("minecraft:zombie");
+                }
+            }
+            fn entity_tick_listened(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickListenedEvent,
+            ) {
+                event.listened = true;
+            }
+            fn entity_tick_pre(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickPreEvent<'_>,
+            ) -> Flow {
+                self.log.lock().unwrap().push((event.entity, "pre"));
+                Flow::Continue
+            }
+            fn entity_tick_post(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickPostEvent<'_>,
+            ) {
+                self.log.lock().unwrap().push((event.entity, "post"));
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "order_test",
+            Box::new(OrderMod {
+                all: false,
+                log: log.clone(),
+            }),
+        )]
+        .into();
+        mod_api::testing::with_parts_scope(|| {
+            mod_platform::testing::with_mods(mods.clone(), || {
+                let mut game = crate::game::native_machines::tests::server_game();
+                // The rounds run only on an authoritative server.
+                game.options.dedicated = Some(Vec::new());
+                install_parts(&mods).unwrap();
+                assert!(mod_api::__private::entity_tick_each_any());
+                assert!(!mod_api::__private::entity_tick_each_all());
+                assert!(mod_api::__private::entity_tick_each_for("minecraft:zombie"));
+                assert!(!mod_api::__private::entity_tick_each_for("minecraft:cow"));
+
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let zombie = game
+                    .res
+                    .mob_types()
+                    .get("minecraft:zombie")
+                    .unwrap()
+                    .clone();
+                game.mobs
+                    .push(Mob::new(201, zombie.clone(), Vec3::new(2.0, 64.0, 2.0), 0.0));
+                game.mobs
+                    .push(Mob::new(202, zombie, Vec3::new(4.0, 64.0, 2.0), 0.0));
+                for m in game.mobs.iter_mut() {
+                    m.invulnerable_time = 5;
+                }
+                game.tick_creatures().unwrap();
+
+                // Both mobs ran their whole tick (its first step counts this down),
+                // not a resumed half-tick after the Pre or Post yield.
+                for m in game.mobs.iter() {
+                    assert_eq!(m.invulnerable_time, 4, "mob {} did not tick", m.id);
+                }
+
+                assert_eq!(
+                    *log.lock().unwrap(),
+                    vec![(201, "pre"), (201, "post"), (202, "pre"), (202, "post")]
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn entity_tick_each_fires_post_when_burning_item_dies_on_early_exit() {
+        if std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        use crate::game::api_values::install_parts;
+        use horizon_client::chunk::Chunk;
+        use horizon_client::entities::ItemEntity;
+        use horizon_client::items::ItemStack;
+        use horizon_core::geometry::Vec3;
+        use mod_api::{
+            EntityTickListenedEvent, EntityTickPostEvent, EntityTickPreEvent, Flow, Hooks,
+            ModEntry, Mods, Registrar, RegistrationContext, ServerHost,
+        };
+        use std::sync::{Arc, Mutex};
+
+        struct ItemOrderMod {
+            log: Arc<Mutex<Vec<(u32, &'static str)>>>,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for ItemOrderMod {
+            fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
+                r.entity_tick_each("minecraft:item");
+            }
+            fn entity_tick_listened(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickListenedEvent,
+            ) {
+                event.listened = true;
+            }
+            fn entity_tick_pre(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickPreEvent<'_>,
+            ) -> Flow {
+                self.log.lock().unwrap().push((event.entity, "pre"));
+                Flow::Continue
+            }
+            fn entity_tick_post(
+                &self,
+                _host: &mut dyn ServerHost,
+                event: &mut EntityTickPostEvent<'_>,
+            ) {
+                self.log.lock().unwrap().push((event.entity, "post"));
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "item_burn_post_test",
+            Box::new(ItemOrderMod { log: log.clone() }),
+        )]
+        .into();
+        mod_api::testing::with_parts_scope(|| {
+            mod_platform::testing::with_mods(mods.clone(), || {
+                let mut game = crate::game::native_machines::tests::server_game();
+                // The rounds run only on an authoritative server.
+                game.options.dedicated = Some(Vec::new());
+                install_parts(&mods).unwrap();
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let mut item = ItemEntity::new(
+                    301,
+                    ItemStack::new("minecraft:stick", 1),
+                    Vec3::new(2.0, 64.0, 2.0),
+                    Vec3::ZERO,
+                    0.0,
+                );
+                item.health = 1;
+                item.fire_ticks = 20;
+                game.dropped.push(item);
+
+                game.tick_items();
+
+                assert!(
+                    game.dropped.iter().all(|it| it.id != 301),
+                    "burning item should be destroyed"
+                );
+                assert_eq!(*log.lock().unwrap(), vec![(301, "pre"), (301, "post")]);
+            });
+        });
     }
 }

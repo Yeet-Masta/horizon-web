@@ -84,7 +84,7 @@ pub(super) struct BorrowedMobTick<'a> {
     pub(super) laps: &'a mut horizon_client::spans::Laps,
     pub(super) uuid: Option<[i32; 4]>,
     pub(super) level_id: &'static str,
-    pub(super) round: &'a super::super::native_ticks::TickRound,
+    pub(super) round: &'a mut super::super::native_ticks::TickRound,
 }
 impl Game<'_> {
     pub(super) fn tick_borrowed_creatures(
@@ -169,9 +169,12 @@ impl Game<'_> {
         let mut resume_was_on_fire = false;
         let mut resume_sampled = None;
         let mut resume_guest = None;
+        let mut pre_done_for: Option<u32> = None;
         loop {
             let mut pause = None;
             let mut retry_rider = None;
+            let mut tick_pre_each: Option<(u32, Arc<horizon_client::mobs::MobType>)> = None;
+            let mut tick_post_each: Option<(u32, Arc<horizon_client::mobs::MobType>)> = None;
             // A mob's list is lifted while its world view is borrowed.  Once a
             // position write was captured, stop after this mob, restore the
             // list, and tell its writes while the live row is readable.
@@ -241,6 +244,19 @@ impl Game<'_> {
                         continue;
                     }
                     let (bx, bz) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
+                    let each_mob = round.each(&m.kind.id);
+                    if each_mob
+                        && !resuming
+                        && !retried
+                        && pre_done_for != Some(m.id)
+                        && !round.canceled(m.id)
+                        && base.world.loaded(bx, bz)
+                        && ticking(bx, bz)
+                    {
+                        tick_pre_each = Some((m.id, m.kind.clone()));
+                        break;
+                    }
+                    let post_each = each_mob.then(|| (m.id, m.kind.clone()));
                     if !resuming
                         && !retried
                         && m.species() == horizon_client::mobs::Species::Mannequin
@@ -735,12 +751,21 @@ impl Game<'_> {
                         from,
                     );
                     cursor += 1;
+                    if let Some(post) = post_each {
+                        tick_post_each = Some(post);
+                        break;
+                    }
                     if section_yield {
                         break;
                     }
                 }
             }
-            if pause.is_none() && retry_rider.is_none() && !section_yield {
+            if pause.is_none()
+                && retry_rider.is_none()
+                && !section_yield
+                && tick_pre_each.is_none()
+                && tick_post_each.is_none()
+            {
                 break;
             }
             // No MobWorld, DamageLevel or navigation loan crosses this boundary.
@@ -781,6 +806,21 @@ impl Game<'_> {
                     self.dismount_mob(id);
                 } else if let Some(decision) = pause.as_ref() {
                     self.apply_fox_consumption(decision);
+                } else if let Some((id, kind)) = tick_pre_each.take() {
+                    let mut canceled = false;
+                    self.native_entity_tick_pre(self.dim.id(), id, &kind.id, &mut canceled);
+                    if canceled {
+                        round.cancel(id);
+                    } else {
+                        pre_done_for = Some(id);
+                        if mod_api::__private::listened(mod_api::HookId::CanContinueSleeping)
+                            && let Some(idx) = self.mobs.iter().position(|m| m.id == id)
+                        {
+                            self.sync_sleeping_mob(idx);
+                        }
+                    }
+                } else if let Some((id, kind)) = tick_post_each.take() {
+                    self.native_entity_tick_post(self.dim.id(), id, &kind.id);
                 }
             }))
             .err();
@@ -850,7 +890,9 @@ impl Game<'_> {
                 path_writes.append(writes);
             }
             lent = horizon_client::health::LentLevel::take(&mut self.world);
-            resuming = retry_rider.is_none() && !section_yield;
+            // Only a consumption pause stopped a mob mid-tick: a per-entity Pre yields
+            // before the mob's tick starts and a Post after it ends, so neither resumes.
+            resuming = pause.is_some() && retry_rider.is_none() && !section_yield;
             retried_rider = retry_rider;
         }
         laps.lap("creature_loop");
