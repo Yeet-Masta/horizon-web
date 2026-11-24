@@ -10,6 +10,7 @@ pub mod durable;
 pub mod duration;
 pub mod eula;
 pub mod json;
+pub mod old_users;
 pub mod private_file;
 pub mod profiles;
 pub mod properties;

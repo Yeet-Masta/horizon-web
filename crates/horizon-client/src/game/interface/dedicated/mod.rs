@@ -1272,6 +1272,23 @@ impl Game<'_> {
                 "To change this, set \"online-mode\" to \"true\" in the server.properties file.",
             );
         }
+        // DedicatedServer.initServer's OldUsersConverter.convertOldUsers, in
+        // its order: user ban list, IP ban list, op list, whitelist. A failure
+        // leaves the old file for the next start, as vanilla's retries do
+        // (Horizon tries once).
+        use horizon_server_files::old_users;
+        if !old_users::convert_user_banlist(props.online_mode) {
+            log("WARN", "Could not convert banned-players.txt");
+        }
+        if !old_users::convert_ip_banlist() {
+            log("WARN", "Could not convert banned-ips.txt");
+        }
+        if !old_users::convert_ops_list(props.online_mode, props.op_permission_level) {
+            log("WARN", "Could not convert ops.txt");
+        }
+        if !old_users::convert_white_list(props.online_mode) {
+            log("WARN", "Could not convert white-list.txt");
+        }
         let mut lists = Lists::load();
         lists.use_whitelist = props.white_list;
         lists.enforce_whitelist = props.enforce_whitelist;

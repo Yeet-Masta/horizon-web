@@ -105,15 +105,15 @@ IpBanList.remove	port	crates/horizon-client/src/game/interface/dedicated/mod.rs:
 IpBanList.clear	skip:server		only the JSON-RPC ban API calls clear (MinecraftBanListServiceImpl); Horizon has no JSON-RPC server
 IpBanListEntry.createIpInfo	port	crates/horizon-server-files/src/user_lists.rs::BanEntry::from_json	reads the ip field of an entry
 IpBanListEntry.serialize	port	crates/horizon-server-files/src/user_lists.rs::BanEntry::serialize	writes the ip field and the ban fields
-OldUsersConverter.readOldListFormat	missing		the server reads `ops.json`, `whitelist.json` and `banned-players.json` (`game/interface/dedicated/mod.rs:439-441`); the pre-1.7 text lists have no reader
-OldUsersConverter.lookupPlayers	missing		part of the old list conversion, which has no counterpart: names are resolved by the json lists' own uuids
-OldUsersConverter.convertUserBanlist	missing		no conversion of an old `banned-players.txt`: the ban list is `banned-players.json` (`game/interface/dedicated/mod.rs:441`)
-OldUsersConverter.convertIpBanlist	missing		no conversion of an old `banned-ips.txt`
-OldUsersConverter.convertOpsList	missing		no conversion of an old `ops.txt`: the op list is `ops.json` (`game/interface/dedicated/mod.rs:439`)
-OldUsersConverter.convertWhiteList	missing		no conversion of an old `whitelist.txt`: the whitelist is `whitelist.json` (`game/interface/dedicated/mod.rs:440`)
+OldUsersConverter.readOldListFormat	port	crates/horizon-server-files/src/old_users.rs::read_old_list_format	the two ban lists' lines: comments and blanks skipped, | fields split with trailing empties dropped, keys lowercased
+OldUsersConverter.lookupPlayers	port	crates/horizon-server-files/src/old_users.rs::lookup_players	drops empty names and resolves each by name (offline profile or the services); gap: minor: a failed lookup is skipped as ProfileNotFoundException, and the nameToIdCache add is not done
+OldUsersConverter.convertUserBanlist	port	crates/horizon-server-files/src/old_users.rs::convert_user_banlist_in	at startup banned-players.txt merges into banned-players.json (created/source/expires/reason from the | fields) and is renamed .converted; gap: minor: no retries
+OldUsersConverter.convertIpBanlist	port	crates/horizon-server-files/src/old_users.rs::convert_ip_banlist_in	at startup (game/dedicated.rs run_dedicated_inner) banned-ips.txt merges into banned-ips.json and is renamed .converted; gap: minor: no retries
+OldUsersConverter.convertOpsList	port	crates/horizon-server-files/src/old_users.rs::convert_ops_list_in	at startup ops.txt merges into ops.json (level = op-permission-level, bypassesPlayerLimit false) and is renamed .converted; gap: minor: no retries
+OldUsersConverter.convertWhiteList	port	crates/horizon-server-files/src/old_users.rs::convert_white_list_in	at startup white-list.txt merges into whitelist.json and is renamed .converted; gap: minor: no retries
 OldUsersConverter.convertMobOwnerIfNecessary	missing		a name owner on an old tamed mob is not turned into a uuid; the datafix handles `OwnerUUID` only
 OldUsersConverter.convertPlayers	missing		old `world/players/*.dat` files are not moved into `playerdata`
 OldUsersConverter.ensureDirectoryExists	skip:other		helper of the file moves, which Horizon does not do
 OldUsersConverter.areOldUserlistsRemoved	missing		the server does not refuse to start while old list files are still there
-OldUsersConverter.renameOldFile	missing		nothing renames a converted file to `.converted`
+OldUsersConverter.renameOldFile	inline	crates/horizon-server-files/src/old_users.rs::convert	the rename to .converted is every conversion's last step, its failure ignored
 OldUsersConverter.parseDate	port	crates/horizon-server-files/src/user_lists.rs::parse_date	parses the ban date format

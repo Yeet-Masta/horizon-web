@@ -260,6 +260,23 @@ impl<T> BanEntry<T> {
             reason,
         }
     }
+    /// A ban as an old-format list line spells it: `created` is the file date,
+    /// or now when the line has none, as `BanListEntry`'s constructor stamps it.
+    pub fn with_created(
+        user: T,
+        created: Option<i64>,
+        source: Option<String>,
+        expires: Option<i64>,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            user,
+            created: created.unwrap_or_else(now_millis),
+            source: source.unwrap_or_else(|| "(Unknown)".into()),
+            expires,
+            reason,
+        }
+    }
     fn fields(user: T, o: &Json) -> Self {
         let date = |k: &str| {
             o.get(k)
