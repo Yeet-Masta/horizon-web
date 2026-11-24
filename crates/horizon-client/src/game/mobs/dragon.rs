@@ -146,8 +146,9 @@ pub(super) struct Fight {
     crystals_placed: bool,
     /// The respawn sequence (`DragonRespawnStage`) and its tick count.
     respawn: Option<(Respawn, i32)>,
-    /// The four crystals on the exit portal driving the respawn.
-    respawn_crystals: Vec<Vec3>,
+    /// `respawnCrystals`: the crystals on the exit portal driving the
+    /// respawn, as `EntityReference`s (their UUIDs).
+    respawn_crystals: Vec<RespawnCrystal>,
     /// The player behind the blast under way, whose `explosion` damage
     /// source names them: a crystal's (`EndCrystal.hurtServer`) or a large
     /// fireball's (`Explosion.getIndirectSourceEntity`, its owner).
@@ -164,6 +165,79 @@ enum Respawn {
     Preparing,
     Pillars,
     Summoning,
+}
+/// One of `EnderDragonFight.respawnCrystals`: an `EntityReference` to an end
+/// crystal, by its UUID. Files older Horizon builds wrote kept the crystal's
+/// block under `horizon_respawn_crystals` instead: such an entry is matched by
+/// position, and saved by the UUID of the crystal it finds there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RespawnCrystal {
+    Uuid([i32; 4]),
+    At(Vec3),
+}
+impl RespawnCrystal {
+    /// `EntityReference.getEntity`'s match: `uuid` is the crystal's own.
+    fn is(&self, c: &Crystal, uuid: Option<[i32; 4]>) -> bool {
+        match self {
+            Self::Uuid(u) => uuid == Some(*u),
+            Self::At(p) => p.distance_squared(c.position) < 0.01,
+        }
+    }
+}
+/// `EnderDragonFight.CODEC`'s `respawn_crystals` (`EntityReference.codec()`:
+/// each a UUID as 4 ints), then the blocks older Horizon builds saved under
+/// `horizon_respawn_crystals`.
+fn respawn_crystals_from_nbt(data: Option<&Tag>) -> Vec<RespawnCrystal> {
+    let mut list = Vec::new();
+    if let Some(Tag::List(v)) = data.and_then(|d| d.get("respawn_crystals")) {
+        list.extend(v.iter().filter_map(|t| match t {
+            Tag::IntArray(u) if u.len() == 4 => {
+                Some(RespawnCrystal::Uuid([u[0], u[1], u[2], u[3]]))
+            }
+            _ => None,
+        }));
+    }
+    if let Some(Tag::IntArray(v)) = data.and_then(|d| d.get("horizon_respawn_crystals")) {
+        list.extend(v.as_chunks::<3>().0.iter().map(|b| {
+            RespawnCrystal::At(Vec3::new(
+                f64::from(b[0]) + 0.5,
+                f64::from(b[1]),
+                f64::from(b[2]) + 0.5,
+            ))
+        }));
+    }
+    list
+}
+/// The fight's keys for its respawn crystals: `respawn_crystals` as
+/// `EnderDragonFight.CODEC` writes it (`optionalFieldOf(.., List.of())`
+/// leaves an empty list out), and the older blocks no loaded crystal stands
+/// on yet under `horizon_respawn_crystals`.
+fn respawn_crystals_to_nbt(list: &[RespawnCrystal]) -> Vec<(&'static str, Tag)> {
+    let uuids: Vec<Tag> = list
+        .iter()
+        .filter_map(|r| match r {
+            RespawnCrystal::Uuid(u) => Some(Tag::IntArray(u.to_vec())),
+            RespawnCrystal::At(_) => None,
+        })
+        .collect();
+    let blocks: Vec<i32> = list
+        .iter()
+        .filter_map(|r| match r {
+            RespawnCrystal::At(p) => {
+                Some([p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32])
+            }
+            RespawnCrystal::Uuid(_) => None,
+        })
+        .flatten()
+        .collect();
+    let mut out = Vec::new();
+    if !uuids.is_empty() {
+        out.push(("respawn_crystals", Tag::List(uuids)));
+    }
+    if !blocks.is_empty() {
+        out.push(("horizon_respawn_crystals", Tag::IntArray(blocks)));
+    }
+    out
 }
 impl Fight {
     /// `EnderDragonFight.tick`'s ticket condition: the fight's boss bar has a
@@ -1192,21 +1266,7 @@ impl Game<'_> {
                 }
                 _ => None,
             },
-            respawn_crystals: match data.and_then(|d| d.get("horizon_respawn_crystals")) {
-                Some(Tag::IntArray(v)) => v
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|b| {
-                        Vec3::new(
-                            f64::from(b[0]) + 0.5,
-                            f64::from(b[1]),
-                            f64::from(b[2]) + 0.5,
-                        )
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            },
+            respawn_crystals: respawn_crystals_from_nbt(data),
             exit_portal: match data.and_then(|d| d.get("exit_portal_location")) {
                 Some(Tag::IntArray(v)) if v.len() == 3 => Some([v[0], v[1], v[2]]),
                 _ => None,
@@ -1260,7 +1320,18 @@ impl Game<'_> {
         if !self.fight.loaded || !self.fight.dirty {
             return;
         }
-
+        // A crystal found where an older file put one is saved by its UUID.
+        for i in 0..self.fight.respawn_crystals.len() {
+            if let RespawnCrystal::At(p) = self.fight.respawn_crystals[i]
+                && let Some(id) = self
+                    .crystals
+                    .iter()
+                    .find(|c| c.position.distance_squared(p) < 0.01)
+                    .map(|c| c.id)
+            {
+                self.fight.respawn_crystals[i] = RespawnCrystal::Uuid(self.uuid_for(id));
+            }
+        }
         let f = &self.fight;
         let b = |v: bool| Tag::Byte(i8::from(v));
         let mut data = vec![
@@ -1291,16 +1362,8 @@ impl Game<'_> {
         }
         if let Some((stage, _)) = f.respawn {
             data.push(("respawn_stage", Tag::String(stage.name().into())));
-            data.push((
-                "horizon_respawn_crystals",
-                Tag::IntArray(
-                    f.respawn_crystals
-                        .iter()
-                        .flat_map(|p| [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32])
-                        .collect(),
-                ),
-            ));
         }
+        data.extend(respawn_crystals_to_nbt(&f.respawn_crystals));
         let tag = Tag::compound([
             ("data", Tag::compound(data)),
             ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
@@ -1562,12 +1625,7 @@ impl Game<'_> {
         }
         let c = self.crystals.remove(index);
         // Read before the blast, which can take other respawn crystals.
-        let respawn_crystal = self.fight.respawn.is_some()
-            && self
-                .fight
-                .respawn_crystals
-                .iter()
-                .any(|p| p.distance_squared(c.position) < 0.01);
+        let respawn_crystal = self.fight.respawn.is_some() && self.is_respawn_crystal(&c);
         if damage == CrystalDamage::Direct {
             let at = [c.position.x, c.position.y, c.position.z];
             // The blast's damage source carries the player, so the dragon
@@ -4356,12 +4414,7 @@ impl Game<'_> {
     pub(super) fn kill_crystal(&mut self, id: u32) {
         if let Some(i) = self.crystals.iter().position(|c| c.id == id) {
             let c = self.crystals[i].clone();
-            let respawn = self.fight.respawn.is_some()
-                && self
-                    .fight
-                    .respawn_crystals
-                    .iter()
-                    .any(|p| p.distance_squared(c.position) < 0.01);
+            let respawn = self.fight.respawn.is_some() && self.is_respawn_crystal(&c);
             self.crystal_destroyed(i, &c, None, respawn);
             self.crystals.retain(|crystal| crystal.id != id);
             self.entity_killed_event([c.position.x, c.position.y, c.position.z], false);
@@ -4418,7 +4471,7 @@ impl Game<'_> {
             // new AABB(center.relative(direction, 3)): the block cube.
             let cell = [origin[0] + d[0] * 3, origin[1] + 1, origin[2] + d[1] * 3];
             let lo = Vec3::new(f64::from(cell[0]), f64::from(cell[1]), f64::from(cell[2]));
-            let hits: Vec<Vec3> = self
+            let hits: Vec<u32> = self
                 .crystals
                 .iter()
                 .filter(|c| {
@@ -4430,7 +4483,7 @@ impl Game<'_> {
                         && p.z + 1.0 > lo.z
                         && p.z - 1.0 < lo.z + 1.0
                 })
-                .map(|c| c.position)
+                .map(|c| c.id)
                 .collect();
             if hits.is_empty() {
                 return;
@@ -4450,7 +4503,11 @@ impl Game<'_> {
         }
         let _ = self.place_podium(origin, false);
         self.fight.respawn = Some((Respawn::Start, 0));
-        self.fight.respawn_crystals = found;
+        // `EntityReference.of(crystal)`: each crystal by its UUID.
+        self.fight.respawn_crystals = found
+            .into_iter()
+            .map(|id| RespawnCrystal::Uuid(self.uuid_for(id)))
+            .collect();
         self.fight.dirty = true;
     }
     fn block_name_at(&self, p: [i32; 3]) -> std::sync::Arc<str> {
@@ -4460,10 +4517,20 @@ impl Game<'_> {
             .name
             .clone()
     }
+    /// `respawnCrystals.contains(EntityReference.of(crystal))`.
+    fn is_respawn_crystal(&self, c: &Crystal) -> bool {
+        let uuid = self.persist.uuids.get(&c.id).copied();
+        self.fight.respawn_crystals.iter().any(|r| r.is(c, uuid))
+    }
     fn respawn_beams(&mut self, target: Option<[i32; 3]>) {
-        let list = self.fight.respawn_crystals.clone();
+        let ids: Vec<u32> = self
+            .crystals
+            .iter()
+            .filter(|c| self.is_respawn_crystal(c))
+            .map(|c| c.id)
+            .collect();
         for c in &mut self.crystals {
-            if list.iter().any(|p| p.distance_squared(c.position) < 0.01) {
+            if ids.contains(&c.id) {
                 c.beam = target;
             }
         }
@@ -4487,11 +4554,8 @@ impl Game<'_> {
         let Some((stage, time)) = self.fight.respawn else {
             return;
         };
-        let alive = self.fight.respawn_crystals.iter().any(|p| {
-            self.crystals
-                .iter()
-                .any(|c| p.distance_squared(c.position) < 0.01)
-        });
+        // The references that still find their crystal.
+        let alive = self.crystals.iter().any(|c| self.is_respawn_crystal(c));
         if !alive {
             self.abort_respawn();
             return;
@@ -4734,11 +4798,11 @@ impl Game<'_> {
         self.reset_spike_crystals();
         self.fight.respawn = None;
         let list = std::mem::take(&mut self.fight.respawn_crystals);
-        for p in list {
+        for r in list {
             if let Some(i) = self
                 .crystals
                 .iter()
-                .position(|c| c.position.distance_squared(p) < 0.01)
+                .position(|c| r.is(c, self.persist.uuids.get(&c.id).copied()))
             {
                 let c = self.crystals.remove(i);
                 self.world.modified.insert((

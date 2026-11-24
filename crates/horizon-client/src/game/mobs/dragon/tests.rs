@@ -1415,3 +1415,37 @@ fn the_tracked_dragon_lists_its_data_defaults() {
         );
     });
 }
+
+/// `EnderDragonFight.CODEC` keeps the respawn's crystals as UUIDs under
+/// `respawn_crystals`: a vanilla file's list loads, and is written back in the
+/// same form, so a respawn in progress survives a move between the games.
+/// A Horizon file's older blocks are read too, and stay blocks until a crystal
+/// stands on them.
+#[test]
+fn respawn_crystals_load_and_save_as_vanilla_uuids() {
+    let uuids = [[1, 2, 3, 4], [-5, 6, -7, 8]];
+    let vanilla = Tag::compound([(
+        "respawn_crystals",
+        Tag::List(uuids.iter().map(|u| Tag::IntArray(u.to_vec())).collect()),
+    )]);
+    let loaded = respawn_crystals_from_nbt(Some(&vanilla));
+    assert_eq!(
+        loaded,
+        uuids.map(RespawnCrystal::Uuid).to_vec(),
+        "vanilla's respawn crystals"
+    );
+    let saved = respawn_crystals_to_nbt(&loaded);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0, "respawn_crystals");
+    assert_eq!(Some(&saved[0].1), vanilla.get("respawn_crystals"));
+
+    let older = Tag::compound([("horizon_respawn_crystals", Tag::IntArray(vec![3, 65, 0]))]);
+    let loaded = respawn_crystals_from_nbt(Some(&older));
+    assert_eq!(loaded, vec![RespawnCrystal::At(Vec3::new(3.5, 65.0, 0.5))]);
+    let saved = respawn_crystals_to_nbt(&loaded);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0, "horizon_respawn_crystals");
+    assert_eq!(saved[0].1, Tag::IntArray(vec![3, 65, 0]));
+    // No respawn: neither key, as vanilla leaves the empty list out.
+    assert!(respawn_crystals_to_nbt(&[]).is_empty());
+}
