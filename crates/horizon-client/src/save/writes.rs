@@ -68,9 +68,9 @@ impl SaveDir {
             } else {
                 0
             };
-            self.outstanding.chunks.fetch_add(chunks, Ordering::Relaxed);
+            self.outstanding.chunks.fetch_add(chunks, Ordering::Release);
             if writer.send.send((folder, batch)).is_err() {
-                self.outstanding.chunks.fetch_sub(chunks, Ordering::Relaxed);
+                self.outstanding.chunks.fetch_sub(chunks, Ordering::Release);
                 *self
                     .outstanding
                     .error
@@ -158,7 +158,7 @@ impl SaveDir {
                     }
                 }
                 if kind == Folder::Region {
-                    outstanding.chunks.fetch_sub(batch.len(), Ordering::Relaxed);
+                    outstanding.chunks.fetch_sub(batch.len(), Ordering::Release);
                 }
                 if let Ok(mut count) = outstanding.count.lock() {
                     *count -= batch_count;
@@ -185,9 +185,25 @@ impl SaveDir {
         }
         self.write_result()
     }
+    /// Wait until queued chunk writes drop below `limit` (or all writes finish).
+    pub(super) fn wait_for_chunk_writes_below(&self, limit: usize) -> Result<()> {
+        let mut count = self
+            .outstanding
+            .count
+            .lock()
+            .map_err(|_| "writer poisoned")?;
+        while *count > 0 && self.outstanding.chunks.load(Ordering::Acquire) >= limit {
+            count = self
+                .outstanding
+                .done
+                .wait(count)
+                .map_err(|_| "writer poisoned")?;
+        }
+        self.write_result()
+    }
     /// `ChunkMap.activeChunkWrites`: chunk records, excluding entity/POI IO.
     pub fn active_chunk_writes(&self) -> usize {
-        self.outstanding.chunks.load(Ordering::Relaxed)
+        self.outstanding.chunks.load(Ordering::Acquire)
     }
     /// Poll durability without holding up the event loop. Errors remain visible
     /// to every waiter, including a later synchronous shutdown.
