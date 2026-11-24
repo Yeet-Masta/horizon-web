@@ -167,14 +167,6 @@ fn frame(v: &Value) -> Frame {
     }
 }
 impl Tree {
-    /// `PlayerAdvancements.checkForAutomaticTriggers`: the advancements without criteria, which
-    /// nothing can grant: vanilla hands them over (and their rewards) as the progress loads.
-    pub fn automatic(&self) -> Vec<usize> {
-        (0..self.list.len())
-            .filter(|&i| self.list[i].criteria.is_empty())
-            .collect()
-    }
-
     /// [`Tree::load`], shared while anyone holds it: a server's advancement packets
     /// (`ServerAdvancements`) and its game's criteria read the same files, and each kept its own
     /// copy (7 MB). A world whose packs bring advancements gets its own ([`Tree::load_with`]).
@@ -467,9 +459,16 @@ impl InventoryIndex {
         out
     }
 }
+/// `Advancement.CODEC`: `None` for a file vanilla refuses to load (`CRITERIA_CODEC`, then
+/// `Advancement.validate`), which `SimpleJsonResourceReloadListener.scanDirectory` logs and skips.
 fn parse(id: &str, v: &Value) -> Option<Advancement> {
-    let criteria: Vec<Criterion> = v["criteria"]
-        .as_object()?
+    let criteria = v["criteria"].as_object()?;
+    // `CRITERIA_CODEC`: "Advancement criteria cannot be empty".
+    if criteria.is_empty() {
+        log::warn!("Couldn't parse data file '{id}': Advancement criteria cannot be empty");
+        return None;
+    }
+    let criteria: Vec<Criterion> = criteria
         .iter()
         .map(|(name, c)| Criterion {
             name: name.clone(),
@@ -479,21 +478,32 @@ fn parse(id: &str, v: &Value) -> Option<Advancement> {
             conditions: LazyJson::new(&c["conditions"]),
         })
         .collect();
-    let requirements = match v["requirements"].as_array() {
-        Some(r) => r
+    let requirements: Vec<Vec<String>> = match &v["requirements"] {
+        // AdvancementRequirements.allOf: every criterion.
+        Value::Null => criteria.iter().map(|c| vec![c.name.clone()]).collect(),
+        // `AdvancementRequirements.CODEC`: a list of lists of strings.
+        r => r
+            .as_array()?
             .iter()
             .map(|group| {
-                group
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|s| s.as_str().map(str::to_owned))
-                    .collect()
+                (group.as_array()?.iter())
+                    .map(|s| s.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
             })
-            .collect(),
-        // AdvancementRequirements.allOf: every criterion.
-        None => criteria.iter().map(|c| vec![c.name.clone()]).collect(),
+            .collect::<Option<_>>()?,
     };
+    // `AdvancementRequirements.validate`: the requirements name exactly the criteria defined.
+    let named: BTreeSet<&str> = requirements.iter().flatten().map(String::as_str).collect();
+    let defined: BTreeSet<&str> = criteria.iter().map(|c| c.name.as_str()).collect();
+    if named != defined {
+        log::warn!(
+            "Couldn't parse data file '{id}': Advancement completion requirements did not exactly \
+             match specified criteria. Missing: {:?}. Unknown: {:?}",
+            defined.difference(&named).collect::<Vec<_>>(),
+            named.difference(&defined).collect::<Vec<_>>()
+        );
+        return None;
+    }
     let d = &v["display"];
     let display = d.is_object().then(|| Display {
         icon: crate::crafting::recipe_result(&d["icon"])
@@ -506,6 +516,24 @@ fn parse(id: &str, v: &Value) -> Option<Advancement> {
         announce: d["announce_to_chat"].as_bool().unwrap_or(true),
         hidden: d["hidden"].as_bool().unwrap_or(false),
     });
+    let parent = v["parent"].as_str().map(|p| full(p).into_owned());
+    // `Advancement.validate`: only a root has a background, and a shown root must have one.
+    let background = display.as_ref().is_some_and(|d| d.background.is_some());
+    match (&parent, &display) {
+        (None, Some(_)) if !background => {
+            log::warn!(
+                "Couldn't parse data file '{id}': Visible advancement roots must have background"
+            );
+            return None;
+        }
+        (Some(_), _) if background => {
+            log::warn!(
+                "Couldn't parse data file '{id}': Only advancement roots can have background"
+            );
+            return None;
+        }
+        _ => {}
+    }
     let r = &v["rewards"];
     let strings = |v: &Value| -> Vec<String> {
         v.as_array()
@@ -516,7 +544,7 @@ fn parse(id: &str, v: &Value) -> Option<Advancement> {
     };
     Some(Advancement {
         id: id.to_owned(),
-        parent: v["parent"].as_str().map(|p| full(p).into_owned()),
+        parent,
         display,
         criteria,
         requirements,

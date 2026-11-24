@@ -1806,22 +1806,27 @@ fn advancement_data() -> std::path::PathBuf {
     ));
     let folder = root.join("data").join("minecraft").join("advancement");
     std::fs::create_dir_all(&folder).unwrap();
-    let display = |icon: &str, title: &str| {
-        format!(r#"{{"icon":{{"id":"{icon}"}},"title":"{title}","description":"{title}"}}"#)
+    // A root that shows needs a background (`Advancement.validate`).
+    let display = |icon: &str, title: &str, extra: &str| {
+        format!(r#"{{"icon":{{"id":"{icon}"}},"title":"{title}","description":"{title}"{extra}}}"#)
     };
     std::fs::write(
         folder.join("root.json"),
         format!(
-            r#"{{"display":{},"criteria":{{}}}}"#,
-            display("minecraft:stone", "Root")
+            r#"{{"display":{},"criteria":{{"done":{{"trigger":"minecraft:impossible"}}}}}}"#,
+            display(
+                "minecraft:stone",
+                "Root",
+                r#","background":"minecraft:gui/advancements/backgrounds/stone""#
+            )
         ),
     )
     .unwrap();
     std::fs::write(
         folder.join("task.json"),
         format!(
-            r#"{{"parent":"minecraft:root","display":{},"criteria":{{}}}}"#,
-            display("minecraft:dirt", "Task")
+            r#"{{"parent":"minecraft:root","display":{},"criteria":{{"done":{{"trigger":"minecraft:impossible"}}}}}}"#,
+            display("minecraft:dirt", "Task", "")
         ),
     )
     .unwrap();

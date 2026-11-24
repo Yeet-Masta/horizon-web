@@ -566,15 +566,9 @@ impl Game<'_> {
         let tree = self.adv.tree.clone();
         self.adv.progress = progress;
         self.ui.registries.advancements = tree.list.iter().map(|a| a.id.clone()).collect();
-        // `PlayerAdvancements.checkForAutomaticTriggers`: an advancement with no
-        // criteria is never done (`AdvancementRequirements.test` is false), but
-        // its rewards are granted as the progress loads. Vanilla's `award(holder, "")` finds no `""`
-        // criterion to grant and so returns without a toast or an announcement;
-        // the reward grant is the whole effect, and it happens again on the next
-        // load because there is no criterion to record it.
-        for index in tree.automatic() {
-            self.grant_rewards(&tree.list[index]);
-        }
+        // `PlayerAdvancements.checkForAutomaticTriggers` grants the rewards of advancements with
+        // no criteria, but `Advancement.CRITERIA_CODEC` refuses such a file, so no loaded tree
+        // has one (`advancements::parse`).
     }
     pub(super) fn save_advancements(&self) {
         if !self.adv.loaded || self.remote.is_some() || self.no_player_here() {

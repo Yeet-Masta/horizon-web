@@ -991,7 +991,8 @@ fn a_display_icon_keeps_its_components() {
                     "components": {"minecraft:enchantment_glint_override": true}
                 },
                 "title": "t",
-                "description": "d"
+                "description": "d",
+                "background": "minecraft:gui/advancements/backgrounds/stone"
             },
             "criteria": {"a": {"trigger": "minecraft:tick"}}
         }),
@@ -1001,27 +1002,37 @@ fn a_display_icon_keeps_its_components() {
     assert_eq!(&*icon.item, "minecraft:wooden_pickaxe");
     assert!(icon.has_foil(None), "the glint override survives the load");
 }
-/// `AdvancementRequirements.test` answers false with no requirement groups, so an advancement
-/// without criteria is never done by `isDone`; `PlayerAdvancements.checkForAutomaticTriggers`
-/// still grants its rewards as progress loads, and `Tree::automatic` is the list it walks.
+/// `Advancement.CODEC` refuses a file whose criteria are empty (`CRITERIA_CODEC`), a shown root
+/// without a background or a child with one (`Advancement.validate`), and requirements that don't
+/// name exactly the criteria defined (`AdvancementRequirements.validate`): vanilla never loads it.
 #[test]
-fn an_advancement_without_criteria_is_not_done_but_granted_automatically() {
-    let empty = parse("minecraft:free", &serde_json::json!({"criteria": {}})).unwrap();
-    assert!(!Progress::default().done(&empty), "no groups: not done");
-    let waiting = parse(
-        "minecraft:waits",
-        &serde_json::json!({"criteria": {"a": {"trigger": "minecraft:tick"}}}),
-    )
-    .unwrap();
-    assert!(!Progress::default().done(&waiting));
-    let tree = tree_of(&[
-        (
-            "minecraft:waits",
-            serde_json::json!({"criteria": {"a": {"trigger": "minecraft:tick"}}}),
-        ),
-        ("minecraft:free", serde_json::json!({"criteria": {}})),
-    ]);
-    assert_eq!(tree.automatic(), vec![1]);
+fn vanilla_refuses_advancements_its_codec_rejects() {
+    let tick = serde_json::json!({"a": {"trigger": "minecraft:tick"}});
+    let shown =
+        serde_json::json!({"icon": {"id": "minecraft:stone"}, "title": "t", "description": "d"});
+    let mut backed = shown.clone();
+    backed["background"] = "minecraft:gui/advancements/backgrounds/stone".into();
+    let refused = [
+        serde_json::json!({"criteria": {}, "rewards": {"experience": 100}}),
+        serde_json::json!({"criteria": tick, "display": shown}),
+        serde_json::json!({"parent": "minecraft:root", "criteria": tick, "display": backed}),
+        serde_json::json!({"criteria": tick, "requirements": [["a", "b"]]}),
+        serde_json::json!({"criteria": {"a": {"trigger": "minecraft:tick"}, "b": {"trigger": "minecraft:tick"}},
+            "requirements": [["a"]]}),
+        serde_json::json!({"criteria": tick, "requirements": []}),
+    ];
+    for v in refused {
+        assert!(parse("minecraft:t", &v).is_none(), "vanilla refuses {v}");
+    }
+    let loaded = [
+        serde_json::json!({"criteria": tick, "display": backed}),
+        serde_json::json!({"parent": "minecraft:root", "criteria": tick, "display": shown}),
+        serde_json::json!({"criteria": {"a": {"trigger": "minecraft:tick"}, "b": {"trigger": "minecraft:tick"}},
+            "requirements": [["a", "b"], []]}),
+    ];
+    for v in loaded {
+        assert!(parse("minecraft:t", &v).is_some(), "vanilla loads {v}");
+    }
 }
 #[test]
 fn layout_spreads_children_like_tree_node_position() {
@@ -1545,7 +1556,8 @@ fn simulate_progression_advancements() {
             &serde_json::json!({
                 "parent": parent,
                 "criteria": {"crit": {"trigger": "minecraft:tick"}},
-                "display": {"icon": {"id": "minecraft:stone"}, "title": "t", "description": "d"}
+                "display": {"icon": {"id": "minecraft:stone"}, "title": "t", "description": "d",
+                    "background": parent.is_none().then_some("minecraft:gui/advancements/backgrounds/stone")}
             }),
         )
         .unwrap();
@@ -1558,7 +1570,8 @@ fn simulate_progression_advancements() {
             &id,
             &serde_json::json!({
                 "criteria": {"crit": {"trigger": "minecraft:tick"}},
-                "display": {"icon": {"id": "minecraft:stone"}, "title": "t", "description": "d"}
+                "display": {"icon": {"id": "minecraft:stone"}, "title": "t", "description": "d",
+                    "background": "minecraft:gui/advancements/backgrounds/stone"}
             }),
         )
         .unwrap();
