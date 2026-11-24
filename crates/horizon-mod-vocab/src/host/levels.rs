@@ -1030,6 +1030,15 @@ pub trait LevelsBackendMut {
     #[access(WorldOnly)]
     fn level_remove_block(&mut self, level: LevelRef, pos: [i32; 3], moved: bool) -> bool;
     /// Side: server.
+    /// Remove the block entity at `pos` and keep its block (`Level.removeBlockEntity`). What
+    /// it stores (a chest's items, a sign's text) is discarded for good once the removal is
+    /// committed: nothing drops into the world, no neighbour is updated, and the block state
+    /// stays as it is. An open transaction puts it back on abort. True when one was removed;
+    /// false off the level in place, for a position that isn't loaded and for one without a
+    /// block entity, or with one out for its own tick.
+    #[access(WorldOnly)]
+    fn level_remove_block_entity(&mut self, level: LevelRef, pos: [i32; 3]) -> bool;
+    /// Side: server.
     /// Check the block light at `pos` again (`LevelLightEngine.checkBlock`), at the level's
     /// next light update, as an edit there is checked; checking the same position again before
     /// then queues nothing. A block declaring `dynamic_light` is asked `light_emission` again

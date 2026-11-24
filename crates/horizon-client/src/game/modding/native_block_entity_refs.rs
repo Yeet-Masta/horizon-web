@@ -121,6 +121,28 @@ impl Game<'_> {
         Some(found)
     }
 
+    /// `Level.removeBlockEntity` (`LevelChunk.removeBlockEntity`) in the level in place: the
+    /// block entity at `pos` goes with what the level keeps beside it (a hopper's cooldown, its
+    /// name, the tag it was loaded with, an end gateway's beam), and its block stays. What it
+    /// stores is gone for good once committed: no drops and no neighbour updates. An open
+    /// transaction puts it back on abort. False off the level in place, for a position that
+    /// isn't loaded, and without a block entity there.
+    pub(super) fn level_remove_block_entity(&mut self, level: LevelRef, pos: [i32; 3]) -> bool {
+        if !self.native_level_write_allowed(level, pos) || self.dim.key() != level.dimension() {
+            return false;
+        }
+        if loaded_block_entity(&self.world, pos).is_none() {
+            return false;
+        }
+        let key = (pos[0], pos[1], pos[2]);
+        self.journal_remove_block_entity(key);
+        self.hoppers.remove(&key);
+        self.world.block_names.remove(&key);
+        self.world.forget_block_entity_source(key);
+        self.be_anims.gateway_servers.remove(&pos);
+        true
+    }
+
     /// The data of the block entity at `pos`, as saved without identity or position
     /// metadata, for the hook that hears its block's removal: the entity is gone from
     /// the world by then, so it is read first. None for a block without one, or while
@@ -874,6 +896,181 @@ mod tests {
             assert_eq!(listed(game, [0, -100, 0], [16, -64, 16]), None, "below");
             assert!(listed(game, [0, 0, 0], [128, 1, 128]).is_some(), "8 by 8");
             assert_eq!(listed(game, [0, 0, 0], [129, 1, 128]), None, "9 by 8");
+        });
+    }
+
+    /// `LevelRef::remove_block_entity`: the chest's block entity goes and its block stays; an
+    /// aborted transaction puts it back with its items and identity, also under a state the
+    /// transaction turned it to, unless a block set in the transaction took its place, and an
+    /// end gateway's with its beam.
+    #[test]
+    #[ignore = "daily"]
+    fn removing_a_block_entity_keeps_its_block() {
+        use super::super::native_entity_refs::tests::with_game;
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level("minecraft:overworld").unwrap();
+            let chest = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:chest")
+                .unwrap();
+            let pos = [1, 64, 1];
+            game.world.set(1, 64, 1, chest).unwrap();
+            let mut items = vec![None; 27];
+            items[0] = Some(horizon_items::items::ItemStack::new("minecraft:diamond", 3));
+            game.world
+                .block_entities
+                .insert((1, 64, 1), BlockEntity::Chest(items));
+            game.world
+                .block_names
+                .insert((1, 64, 1), Tag::String("Loot".into()));
+
+            let _: Result<(), ()> = game.transaction(|game, _| {
+                assert!(game.level_remove_block_entity(level, pos));
+                assert!(game.block_entity(level, pos).is_none());
+                Err(())
+            });
+            assert!(game.block_entity(level, pos).is_some(), "the abort puts it back");
+            assert!(matches!(
+                game.world.block_entities.get(&(1, 64, 1)),
+                Some(BlockEntity::Chest(items)) if items[0].as_ref().is_some_and(|s| s.count == 3)
+            ));
+
+            // Removed and put back time and again, it keeps its identity.
+            let generation = game.world.block_entities.generation(&(1, 64, 1));
+            for _ in 0..3 {
+                let _: Result<(), ()> = game.transaction(|game, _| {
+                    assert!(game.level_remove_block_entity(level, pos));
+                    Err(())
+                });
+            }
+            assert_eq!(game.world.block_entities.generation(&(1, 64, 1)), generation);
+
+            // A block a mod set over it in the transaction stays, without the chest under it.
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .unwrap();
+            let _: Result<(), ()> = game.transaction(|game, _| {
+                assert!(game.level_remove_block_entity(level, pos));
+                assert_eq!(
+                    game.level_set_block(level, pos, stone, mod_api::BlockUpdateFlags::NONE),
+                    Ok(true)
+                );
+                Err(())
+            });
+            assert_eq!(game.world.block(1, 64, 1), stone);
+            assert!(game.world.block_entities.get(&(1, 64, 1)).is_none());
+            assert!(!game.world.block_names.contains_key(&(1, 64, 1)));
+            game.world.set(1, 64, 1, chest).unwrap();
+            let mut items = vec![None; 27];
+            items[0] = Some(horizon_items::items::ItemStack::new("minecraft:diamond", 3));
+            game.world
+                .block_entities
+                .insert((1, 64, 1), BlockEntity::Chest(items));
+            game.world
+                .block_names
+                .insert((1, 64, 1), Tag::String("Loot".into()));
+
+            // Stone and then a chest again: the new chest stays as it was placed, empty and
+            // unnamed, under its own identity.
+            let generation = game.world.block_entities.generation(&(1, 64, 1));
+            let _: Result<(), ()> = game.transaction(|game, _| {
+                assert!(game.level_remove_block_entity(level, pos));
+                for state in [stone, chest] {
+                    assert_eq!(
+                        game.level_set_block(level, pos, state, mod_api::BlockUpdateFlags::NONE),
+                        Ok(true)
+                    );
+                }
+                Err(())
+            });
+            assert_eq!(game.world.block(1, 64, 1), chest);
+            assert_ne!(game.world.block_entities.generation(&(1, 64, 1)), generation);
+            assert!(matches!(
+                game.world.block_entities.get(&(1, 64, 1)),
+                Some(BlockEntity::Chest(items)) if items.iter().all(Option::is_none)
+            ));
+            assert!(!game.world.block_names.contains_key(&(1, 64, 1)));
+
+            // A write that only turns the chest keeps its block: the abort puts the removed
+            // chest back with its items and identity, under the turned state.
+            let turned = game
+                .pack
+                .assets
+                .registry
+                .resolve(&horizon_world::chunk::BlockState {
+                    name: "minecraft:chest".into(),
+                    properties: [("facing".into(), "east".into())].into_iter().collect(),
+                })
+                .unwrap();
+            assert_ne!(turned, chest);
+            if let Some(BlockEntity::Chest(items)) = game.world.block_entities.get_mut(&(1, 64, 1))
+            {
+                items[0] = Some(horizon_items::items::ItemStack::new("minecraft:diamond", 3));
+            }
+            let generation = game.world.block_entities.generation(&(1, 64, 1));
+            let _: Result<(), ()> = game.transaction(|game, _| {
+                assert!(game.level_remove_block_entity(level, pos));
+                assert_eq!(
+                    game.level_set_block(level, pos, turned, mod_api::BlockUpdateFlags::NONE),
+                    Ok(true)
+                );
+                Err(())
+            });
+            assert_eq!(game.world.block(1, 64, 1), turned);
+            assert_eq!(
+                game.world.block_entities.generation(&(1, 64, 1)),
+                generation
+            );
+            assert!(matches!(
+                game.world.block_entities.get(&(1, 64, 1)),
+                Some(BlockEntity::Chest(items)) if items[0].as_ref().is_some_and(|s| s.count == 3)
+            ));
+            game.world.set(1, 64, 1, chest).unwrap();
+            game.world
+                .block_names
+                .insert((1, 64, 1), Tag::String("Loot".into()));
+
+            assert!(game.level_remove_block_entity(level, pos));
+            assert!(game.block_entity(level, pos).is_none());
+            assert!(!game.world.block_names.contains_key(&(1, 64, 1)));
+            assert_eq!(game.world.block(1, 64, 1), chest, "the block stays");
+            assert!(!game.level_remove_block_entity(level, pos), "nothing left there");
+            assert!(!game.level_remove_block_entity(level, [40, 64, 1]), "not loaded");
+
+            // An end gateway's beam goes with it, and an abort puts it back as it was.
+            let gateway = [3, 64, 3];
+            let state = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:end_gateway")
+                .unwrap();
+            game.world.set(3, 64, 3, state).unwrap();
+            game.world
+                .block_entities
+                .insert((3, 64, 3), BlockEntity::EndGateway(Default::default()));
+            let beam = horizon_client::block_entity_anim::EndGateway {
+                age: 150,
+                teleport_cooldown: 7,
+            };
+            game.be_anims.gateway_servers.insert(gateway, beam);
+            let _: Result<(), ()> = game.transaction(|game, _| {
+                assert!(game.level_remove_block_entity(level, gateway));
+                assert!(!game.be_anims.gateway_servers.contains_key(&gateway));
+                Err(())
+            });
+            assert_eq!(game.be_anims.gateway_servers.get(&gateway), Some(&beam));
+            assert!(game.level_remove_block_entity(level, gateway));
+            assert!(!game.be_anims.gateway_servers.contains_key(&gateway));
         });
     }
 

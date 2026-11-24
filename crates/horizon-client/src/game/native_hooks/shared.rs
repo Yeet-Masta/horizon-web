@@ -2157,8 +2157,12 @@ impl Game<'_> {
         {
             return false;
         }
+        let before = self.world.block(pos[0], pos[1], pos[2]);
         let changed =
             self.with_level(|_, level, ticks| level.native_set_block(ticks, pos, state, flags));
+        if changed {
+            self.note_unjournaled_block(pos, before, state);
+        }
         let _ = self.process_level_events();
         changed
     }

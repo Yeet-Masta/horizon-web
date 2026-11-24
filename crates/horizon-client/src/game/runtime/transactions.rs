@@ -27,7 +27,10 @@
 //! An entity added inside one goes at an abort, one removed is only marked until the root
 //! commit, and mods hear of joins and leaves at the root commit (`transactions/entities.rs`).
 use super::{BlockEntity, BlockStateId, Game, machines::HopperState};
+use horizon_client::block_entity_anim::EndGateway;
+use horizon_client::fast_hash::FxHashMap;
 use horizon_client::{items::ItemStack, world::BlockEntityExtras};
+use horizon_client_render::block_entities::TickerRegistration;
 use horizon_mod_runtime::attachments::{Attachments, Holder};
 use mod_api::{Transaction, TransactionLifecycle, TransactionSeal};
 use std::collections::HashMap;
@@ -100,6 +103,10 @@ pub(super) struct Level {
     /// The block entities this transaction removed (`journal_remove_block_entity`): an abort
     /// puts them back as `block_entities` keeps them.
     removed_block_entities: std::collections::HashSet<Pos>,
+    /// The positions where a block write this transaction doesn't keep put another block
+    /// (`LevelRef::set_block` stores at once): an abort leaves the block and a block entity that
+    /// write made there.
+    unjournaled_blocks: std::collections::HashSet<Pos>,
     /// Each item slot (block entity, slot) a slot-only write changed, as it was before this
     /// transaction first wrote it, for a block entity not kept whole in `block_entities`: a
     /// move through a container keeps the slot it touches, not the entity's whole saved data.
@@ -186,12 +193,21 @@ struct Kept {
     name: Option<horizon_core::nbt::Tag>,
     /// The container lock and loot table roll kept beside the model.
     extras: BlockEntityExtras,
+    /// An end gateway's beam age and teleport cooldown, kept beside the model
+    /// (`BeAnims::gateway_servers`).
+    gateway: Option<EndGateway>,
+    /// Its ticker as it stood, for an abort to put back.
+    ticker: TickerRegistration,
+    /// The block state at its position: an abort puts the block entity back only over the
+    /// same block.
+    block: BlockStateId,
 }
 
 impl Kept {
     fn capture(
         world: &horizon_client::world::World,
         hoppers: &HashMap<Pos, HopperState>,
+        gateways: &FxHashMap<[i32; 3], EndGateway>,
         pos: Pos,
     ) -> Self {
         Self {
@@ -201,6 +217,9 @@ impl Kept {
             hopper: hoppers.get(&pos).copied(),
             name: world.block_names.get(&pos).cloned(),
             extras: world.block_entity_extras(pos),
+            gateway: gateways.get(&[pos.0, pos.1, pos.2]).copied(),
+            ticker: world.block_entities.ticker_registration(&pos),
+            block: world.block(pos.0, pos.1, pos.2),
         }
     }
 }
@@ -495,6 +514,7 @@ impl Game<'_> {
                 outer
                     .removed_block_entities
                     .extend(level.removed_block_entities);
+                outer.unjournaled_blocks.extend(level.unjournaled_blocks);
                 for (pos, state) in level.blocks {
                     outer.blocks.entry(pos).or_insert(state);
                 }
@@ -655,26 +675,52 @@ impl Game<'_> {
         let Some(level) = self.transactions.last_mut() else {
             return;
         };
-        level
-            .block_entities
-            .entry(pos)
-            .or_insert_with(|| Kept::capture(&self.world, &self.hoppers, pos));
+        level.block_entities.entry(pos).or_insert_with(|| {
+            Kept::capture(
+                &self.world,
+                &self.hoppers,
+                &self.be_anims.gateway_servers,
+                pos,
+            )
+        });
     }
     /// Puts back the block entity at `pos` that a transaction removed, as `kept` holds it, with
-    /// its generation, where none stands there now.
+    /// its generation and ticker, where none stands there now.
     fn restore_removed_block_entity(&mut self, pos: Pos, kept: &Kept) {
-        let Some(entity) = &kept.entity else {
+        let (Some(entity), Some(generation)) = (&kept.entity, kept.generation) else {
             return;
         };
         if self.world.block_entities.get(&pos).is_some() {
             return;
         }
-        self.world.block_entities.insert(pos, entity.clone());
-        if let Some(generation) = kept.generation {
-            self.world
-                .block_entities
-                .restore_generation(pos, generation);
-            self.world.block_entities.reattach_retired(pos, generation);
+        self.world
+            .block_entities
+            .restore_removed(pos, entity.clone(), generation, kept.ticker);
+        self.world.block_entities.reattach_retired(pos, generation);
+    }
+    /// Whether `a` and `b` are states of one block (`BlockState.is(Block)`).
+    fn same_block(&self, a: BlockStateId, b: BlockStateId) -> bool {
+        let registry = &self.pack.assets.registry;
+        a == b
+            || matches!(
+                (registry.state(a), registry.state(b)),
+                (Some(a), Some(b)) if a.name == b.name
+            )
+    }
+    /// Notes that a block write the open transaction doesn't keep put another block at `pos`.
+    /// A write that changes only the state's properties (a chest turned) keeps the block, and
+    /// an abort still puts back the block entity the transaction removed there.
+    pub(in crate::game) fn note_unjournaled_block(
+        &mut self,
+        pos: [i32; 3],
+        before: BlockStateId,
+        after: BlockStateId,
+    ) {
+        if self.same_block(before, after) {
+            return;
+        }
+        if let Some(level) = self.transactions.last_mut() {
+            level.unjournaled_blocks.insert((pos[0], pos[1], pos[2]));
         }
     }
     /// Removes the block entity at `pos`, kept whole by the open transaction, which puts it back
@@ -1139,6 +1185,23 @@ impl Game<'_> {
         }
 
         for (pos, kept) in level.block_entities {
+            // A block write the transaction doesn't keep (`LevelRef::set_block` stores at once)
+            // put another block there: the old block entity and what it kept stay gone, as
+            // vanilla's `setBlock` drops a block entity its new block can't hold.
+            let block = match level.blocks.get(&pos) {
+                Some(&kept_block) => kept_block,
+                None => self.world.block(pos.0, pos.1, pos.2),
+            };
+            if kept.entity.is_some() && !self.same_block(kept.block, block) {
+                continue;
+            }
+            // Another block entity than the kept one, where such a write replaced the block (stone,
+            // then a chest again), is that write's: it and its own side data stay.
+            if level.unjournaled_blocks.contains(&pos)
+                && self.world.block_entities.generation(&pos) != kept.generation
+            {
+                continue;
+            }
             match (&kept.entity, self.world.block_entities.get_mut(&pos)) {
                 (Some(entity), Some(now)) => {
                     *now = entity.clone();
@@ -1163,6 +1226,11 @@ impl Game<'_> {
             match kept.hopper {
                 Some(hopper) => self.hoppers.insert(pos, hopper),
                 None => self.hoppers.remove(&pos),
+            };
+            let at = [pos.0, pos.1, pos.2];
+            match kept.gateway {
+                Some(gateway) => self.be_anims.gateway_servers.insert(at, gateway),
+                None => self.be_anims.gateway_servers.remove(&at),
             };
         }
         // After the whole entities: a slot kept here was kept before any whole capture of its
