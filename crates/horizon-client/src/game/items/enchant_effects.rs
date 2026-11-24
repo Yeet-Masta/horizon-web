@@ -601,6 +601,7 @@ impl Game<'_> {
             let (new, entity) = (!m.has_effect(id), m.id as i32);
             m.add_effect(id, ticks, amplifier);
             self.mod_effect_added(id, Some(entity), amplifier, new);
+            self.effect_added_detail(id, Some(entity), amplifier, ticks, new, "unknown");
         }
     }
     /// `minecraft:post_attack` explode effects on the attacker (wind burst):

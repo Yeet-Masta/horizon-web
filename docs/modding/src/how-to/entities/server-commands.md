@@ -309,3 +309,7 @@ server's names, tooltip keys, base limits and sort order, even without the serve
 installed locally. This replaces the previous server's inventory at connection startup.
 Vanilla clients do not receive this Horizon-specific metadata and can still send commands
 containing the token without local completion.
+
+## Console lines
+
+`console_command` hears every line the dedicated console or an RCON client is about to run, without its slash and before the line is read: `source` is `console` or `rcon`, and a cancel runs nothing and prints nothing. It is the place to keep a secret out of the command path. A command a mod runs itself with `run_command_with_output` is not heard.

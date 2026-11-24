@@ -207,6 +207,16 @@ impl Game<'_> {
                 host.hub
                     .set_game_mode(conn, to.id(), &self.world, Some(self.collision));
             }
+            // A spectator respawning stays one: no change, so no cause.
+            if !cancel && from != to {
+                self.native_player_game_mode_cause(mod_api::__private::PlayerGameModeCauseCall {
+                    player: uuid,
+                    name: &name,
+                    from,
+                    to,
+                    cause: "hardcore_death",
+                });
+            }
         }
         // PlayerList.respawn: `copyRespawnPosition` hands the new player the
         // old point through `setRespawnPosition`: none, or an Overworld forced

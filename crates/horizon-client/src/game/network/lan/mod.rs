@@ -3085,6 +3085,7 @@ impl Game<'_> {
                 return;
             }
         }
+        self.mods_place_joining_player(conn);
         // A server places each player in their own level (`PlayerList.placeNewPlayer`).
         let Some(host) = self.lan.as_mut() else {
             return;
@@ -3156,6 +3157,46 @@ impl Game<'_> {
         }
     }
 
+    /// `AsyncPlayerSpawnLocationEvent`: the mods may move a joining player, whose saved place is
+    /// read, before they are placed.
+    fn mods_place_joining_player(&mut self, conn: u32) {
+        if !mod_api::__private::listened(mod_api::HookId::PlayerSpawnLocation) {
+            return;
+        }
+        let Some((uuid, name, dim, mut position, mut yaw, mut pitch)) = self
+            .lan
+            .as_ref()
+            .and_then(|host| host.hub.guest(conn))
+            .map(|g| (g.uuid, g.name.clone(), super::Dim::from_id(&g.dimension), g.position, g.yaw, g.pitch))
+        else {
+            return;
+        };
+        let mut level = dim.level();
+        self.native_player_spawn_location(mod_api::__private::PlayerSpawnLocationCall {
+            player: uuid,
+            name: &name,
+            level: &mut level,
+            position: &mut position,
+            yaw: &mut yaw,
+            pitch: &mut pitch,
+        });
+        let Some(to) = super::Dim::from_level(level) else {
+            log::warn!("Horizon: a mod placed a joining player in a level the world does not have");
+            return;
+        };
+        if !position.iter().all(|v| v.is_finite()) || !yaw.is_finite() || !pitch.is_finite() {
+            return;
+        }
+        if let Some(host) = self.lan.as_mut() {
+            let _ = host.hub.update_guest(conn, |g| {
+                g.position = position;
+                g.previous_position = position;
+                (g.yaw, g.pitch) = (yaw, pitch);
+                g.head_yaw = yaw;
+                g.dimension = to.id().to_owned();
+            });
+        }
+    }
     /// Level events the game queued, for the guests (`process_level_events`).
     pub(super) fn lan_record_events(&mut self, events: &[horizon_world::level::LevelEvent]) {
         if self.audio.capture.is_none() {
@@ -6543,6 +6584,44 @@ mod merchant_packet_tests {
             let content = contents.last().expect("level-up take sends contents");
             assert_eq!(content.items[0].as_ref().unwrap().count, 4);
             assert_eq!(content.carried.as_ref().unwrap().count, 3);
+        });
+    }
+}
+
+#[cfg(test)]
+mod spawn_location_hook_tests {
+    use mod_api::{Hooks, ModEntry, PlayerSpawnLocationEvent, ServerHost};
+
+    /// Places every joining player at `1, 70, 2` facing 90 degrees.
+    struct Lobby;
+    #[mod_api::__subscriptions]
+    impl Hooks for Lobby {
+        fn player_spawn_location(
+            &self,
+            _: &mut dyn ServerHost,
+            event: &mut PlayerSpawnLocationEvent<'_>,
+        ) {
+            *event.position = [1.0, 70.0, 2.0];
+            event.yaw = 90.0;
+        }
+    }
+
+    /// A listener's position and look are what the joining guest is placed with, and the level
+    /// they were in stays.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_moves_a_joining_player_before_placement() {
+        let mods: mod_api::Mods = vec![ModEntry::new("lobby", Box::new(Lobby))].into();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_guest_turn_tests::with_guests(|game| {
+                game.mods_place_joining_player(13);
+                let g = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
+                assert_eq!(g.position, [1.0, 70.0, 2.0]);
+                assert_eq!(g.yaw, 90.0);
+                assert_eq!(g.dimension, "minecraft:overworld");
+                let other = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
+                assert_eq!(other.position, [3.0, 64.0, 5.0], "another guest is not moved");
+            });
         });
     }
 }

@@ -2056,11 +2056,26 @@ impl Game<'_> {
         out
     }
 
+    /// `ServerCommandEvent` / `RemoteServerCommandEvent`: the mods hear a console or RCON line
+    /// (the slash dropped) before it is read; false when one canceled it.
+    fn console_line_allowed(&mut self, line: &str) -> bool {
+        let mut canceled = false;
+        self.native_console_command(mod_api::__private::ConsoleCommandCall {
+            line,
+            source: if self.rcon_source { "rcon" } else { "console" },
+            canceled: &mut canceled,
+        });
+        !canceled
+    }
+
     /// DedicatedServer.handleConsoleInputs: one console line, run as the
     /// server (permission level 4). The dedicated-only commands are here;
     /// everything else goes to the game's dispatcher.
     fn console_command(&mut self, state: &mut ServerState, line: &str) {
         let line = line.strip_prefix('/').unwrap_or(line);
+        if !self.console_line_allowed(line) {
+            return;
+        }
         let mut words = line.split_whitespace();
         let Some(command) = words.next() else {
             return;
@@ -3651,5 +3666,53 @@ mod console_source_tests {
             failed.first().map(|t| t.plain()).as_deref(),
             Some("Invalid or unknown entity type 'minecraft:nothing'")
         );
+    }
+}
+
+#[cfg(test)]
+mod console_command_hook_tests {
+    use crate::game::native_entity_refs::tests::with_game;
+    use mod_api::{ConsoleCommandEvent, Flow, Hooks, ModEntry, ServerHost};
+    use std::sync::{Arc, Mutex};
+
+    /// Hears every console line and cancels the ones that start with `secret`.
+    struct Probe(Arc<Mutex<Vec<(String, String)>>>);
+    #[mod_api::__subscriptions]
+    impl Hooks for Probe {
+        fn console_command(&self, _: &mut dyn ServerHost, event: &mut ConsoleCommandEvent<'_>) -> Flow {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event.line.to_string(), event.source.to_string()));
+            if event.line.starts_with("secret") {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+    }
+
+    /// The console line without its slash is heard with its source, and a cancel stops it.
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_hears_and_cancels_a_console_line() {
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let mods: mod_api::Mods =
+            vec![ModEntry::new("console-probe", Box::new(Probe(Arc::clone(&heard))))].into();
+        mod_platform::testing::with_mods(mods, || {
+            with_game(|game| {
+                assert!(game.console_line_allowed("list"));
+                game.rcon_source = true;
+                assert!(!game.console_line_allowed("secret setkey 1"));
+                game.rcon_source = false;
+                assert_eq!(
+                    *heard.lock().unwrap(),
+                    [
+                        ("list".to_owned(), "console".to_owned()),
+                        ("secret setkey 1".to_owned(), "rcon".to_owned()),
+                    ]
+                );
+            });
+        });
     }
 }

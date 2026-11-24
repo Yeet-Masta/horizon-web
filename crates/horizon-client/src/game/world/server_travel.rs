@@ -90,6 +90,12 @@ pub(super) struct Trip {
     /// The level the player left for another one: the mods are told they
     /// changed dimension when the trip ends (`tell_mods_changed_dimension`).
     pub(super) left: Option<Dim>,
+    /// Where the player stood when the trip began: the teleport event's `from`, which the body's
+    /// position at arrival no longer is.
+    origin: [f64; 3],
+    /// The teleport cause the producer names (`end_portal`, `nether_portal`, `end_gateway`), or
+    /// none for a respawn, a command teleport and the credits, which are not these.
+    cause: Option<&'static str>,
 }
 
 /// A vehicle a player rides: an animal, a boat or a minecart. It travels
@@ -234,6 +240,16 @@ pub(super) struct TeleportNote {
 const WIDTH: f64 = 0.6;
 const HEIGHT: f64 = 1.8;
 
+impl Game<'_> {
+    /// Where the guest `conn` stands now, else `fallback`.
+    fn guest_position_or(&self, conn: u32, fallback: [f64; 3]) -> [f64; 3] {
+        self.lan
+            .as_ref()
+            .and_then(|h| h.hub.guests.iter().find(|g| g.conn == conn))
+            .map_or(fallback, |g| g.position)
+    }
+}
+
 impl Trip {
     pub(super) fn is(&self, conn: u32) -> bool {
         self.conn == conn
@@ -290,6 +306,8 @@ impl Game<'_> {
             hold: true,
             missing: None,
             left: None,
+            origin: self.guest_position_or(conn, [target.x, target.y, target.z]),
+            cause: None,
         });
     }
     /// A command hold follows the player where a mod sent them (`native_player_teleport` may
@@ -1015,6 +1033,15 @@ impl Game<'_> {
             placed: false,
             hold: false,
             left: Some(source),
+            origin: [from.x, from.y, from.z],
+            // The credits respawn is no teleport; the rest go through a portal.
+            cause: if credits_respawn {
+                None
+            } else if end {
+                Some("end_portal")
+            } else {
+                Some("nether_portal")
+            },
         });
         if let Err(e) = self.enter_level(source) {
             log::error!("could not reopen {}: {e}", source.id());
@@ -1042,6 +1069,8 @@ impl Game<'_> {
             placed: false,
             hold: false,
             left: None,
+            origin: self.guest_position_or(conn, [x as f64 + 0.5, y as f64, z as f64 + 0.5]),
+            cause: None,
         });
     }
 
@@ -1114,6 +1143,8 @@ impl Game<'_> {
             placed: false,
             hold: false,
             left: None,
+            origin: self.guest_position_or(conn, [x as f64 + 0.5, y as f64, z as f64 + 0.5]),
+            cause: None,
         });
     }
 
@@ -1152,6 +1183,7 @@ impl Game<'_> {
             return;
         }
         let at = [destination.x, destination.y, destination.z];
+        let origin = self.guest_position_or(conn, at);
         // Relative.union(DELTA, ROTATION).
         if let Some(host) = self.lan.as_mut() {
             host.hub.teleport_keeping_motion(i, at);
@@ -1176,6 +1208,8 @@ impl Game<'_> {
             placed: false,
             hold: false,
             left: None,
+            origin,
+            cause: Some("end_gateway"),
         });
     }
 
@@ -1391,6 +1425,11 @@ impl Game<'_> {
             if !trip.hold {
                 host.play.entry(trip.conn).or_default().portal.cooldown = 10;
             }
+            let (uuid, name) = {
+                let g = &host.hub.guests[i];
+                (g.uuid, g.name.clone())
+            };
+            let origin = trip.origin;
             host.hub.guests.update(i, |g| {
                 g.yaw = yaw;
                 if let Some(pitch) = pitch {
@@ -1407,6 +1446,18 @@ impl Game<'_> {
                 host.hub.land(i, at);
             } else {
                 host.hub.teleport(i, Some(at));
+            }
+            // PlayerTeleportEvent's cause for a portal or a gateway; a respawn, a command
+            // teleport and the credits are not these.
+            if let Some(cause) = trip.cause {
+                self.native_player_teleport_cause(mod_api::__private::PlayerTeleportCauseCall {
+                    player: uuid,
+                    name: &name,
+                    from: origin,
+                    to: at,
+                    dimension: trip.dim.id(),
+                    cause,
+                });
             }
             self.tell_mods_changed_dimension(trip.conn, trip.left, trip.dim);
         }
@@ -1504,10 +1555,10 @@ impl Game<'_> {
             } = note;
             // In place when it is their turn already (as_guest finds them swapped in).
             if self.lan_acting == Some(conn) {
-                self.native_player_teleported(uuid, &name, from, to, &dimension);
+                self.teleported_because(uuid, &name, from, to, &dimension, "command");
             } else {
                 self.as_guest(conn, |g| {
-                    g.native_player_teleported(uuid, &name, from, to, &dimension);
+                    g.teleported_because(uuid, &name, from, to, &dimension, "command");
                 });
             }
         }
@@ -1571,7 +1622,7 @@ impl Game<'_> {
                 g.trigger_dimension(source, t.dim, origin);
                 // The mods hear the teleport into another level, with the
                 // player's state swapped in.
-                g.native_player_teleported(uuid, &name, origin, t.at, t.dim.id());
+                g.teleported_because(uuid, &name, origin, t.at, t.dim.id(), "command");
             });
             self.server_trips.retain(|trip| !trip.is(t.conn));
             self.server_trips.push(Trip {
@@ -1595,6 +1646,8 @@ impl Game<'_> {
                 // its chunks load can strand this trip and freeze its damage cooldown indefinitely.
                 hold: true,
                 left: Some(source),
+                origin,
+                cause: None,
             });
             if let Err(e) = self.enter_level(source) {
                 log::error!("could not reopen {}: {e}", source.id());

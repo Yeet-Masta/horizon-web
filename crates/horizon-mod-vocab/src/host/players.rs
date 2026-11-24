@@ -489,6 +489,13 @@ pub trait PlayersBackend {
     /// None for stale, offline or unavailable players (including displaced outer players).
     #[access(WorldOnly)]
     fn player_game_mode(&self, player: PlayerRef) -> Option<GameMode>;
+    /// Side: server.
+    /// Whether other entities collide with and push the player (Paper's `Player.isCollidable`),
+    /// by the rule `EntitySelector.pushableBy` applies: a spectator never does, and neither does a
+    /// player on a team whose collision rule is `never`. The team's `pushOwnTeam` and
+    /// `pushOtherTeams` rules still count as collidable. `None` for a stale or unavailable player.
+    #[access(WorldOnly)]
+    fn player_is_collidable(&self, player: PlayerRef) -> Option<bool>;
     /// Side: both.
     /// `Player.isCreative`; Paper `HumanEntity#getGameMode`.
     #[access(WorldOnly)]
@@ -1587,4 +1594,39 @@ pub trait PlayersBackendMut {
     /// that is not finite.
     #[access(WorldOnly)]
     fn player_set_velocity(&mut self, player: PlayerRef, velocity: [f64; 3]) -> bool;
+    /// Side: server.
+    /// Offers the player a resource pack (`ClientboundResourcePackPushPacket` in play, Paper's
+    /// `Player.setResourcePack(url, hash, required, prompt)`). The pack's id is the name UUID of
+    /// `url`, as the server's own `resource-pack` setting makes it, so offering the same url again
+    /// replaces the pack. `sha1` is 40 hex digits, or empty when the client should compare nothing;
+    /// `required` makes the client refuse to stay without it; `prompt` is the plain text of the
+    /// confirmation screen. The answer comes back through `resource_pack_status`. False, with
+    /// nothing sent, for a stale, unavailable or fake player, an empty `url` or one longer than
+    /// 32767 characters, and a `sha1` that is neither empty nor 40 hex digits.
+    #[access(WorldOnly)]
+    fn player_send_resource_pack(
+        &mut self,
+        player: PlayerRef,
+        url: &str,
+        sha1: &str,
+        required: bool,
+        prompt: Option<&str>,
+    ) -> bool;
+    /// Side: server.
+    /// Sets how many chunks around the player the server sends and keeps them (Paper's
+    /// `Player.setViewDistance`), from 2 up to the server's view distance; a value outside is
+    /// clamped, as `ChunkMap.getPlayerViewDistance` clamps what a client asks for. Their chunks
+    /// follow from the next tick. The value lasts until the client sends its settings again or the
+    /// server's own view distance changes, which set it back to what the client asked for. False for
+    /// a stale, unavailable or fake player.
+    #[access(WorldOnly)]
+    fn player_set_view_distance(&mut self, player: PlayerRef, chunks: i32) -> bool;
+    /// Side: server.
+    /// Resolves the selector `token` (`@a`, `@e[type=villager]`, `@p`, a player name) as a command
+    /// the player ran would: `@s` and `@p` are them, a `distance` is from them (Paper's
+    /// `Server.selectEntities(sender, token)`). The token must be exactly one selector; the answer
+    /// is the entities it names now, possibly none. `None` for a token that does not parse, a
+    /// stale, unavailable or fake player and a client.
+    #[access(WorldOnly)]
+    fn player_select_entities(&mut self, player: PlayerRef, token: &str) -> Option<Vec<EntityRef>>;
 }

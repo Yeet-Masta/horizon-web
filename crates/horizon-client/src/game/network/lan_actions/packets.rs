@@ -1299,6 +1299,10 @@ impl Game<'_> {
                 });
             return;
         }
+        let (uuid, name, from, dimension) = {
+            let g = &host.hub.guests[gi];
+            (g.uuid, g.name.clone(), g.position, g.dimension.clone())
+        };
         host.hub.guests.update(gi, |g| {
             (g.yaw, g.pitch) = (yaw, pitch);
             // A new body there: no fall distance or motion carried over, but the
@@ -1306,6 +1310,14 @@ impl Game<'_> {
             g.new_body(true);
         });
         host.hub.teleport(gi, Some(at));
+        self.native_player_teleport_cause(mod_api::__private::PlayerTeleportCauseCall {
+            player: uuid,
+            name: &name,
+            from,
+            to: at,
+            dimension: &dimension,
+            cause: "spectate",
+        });
     }
 }
 

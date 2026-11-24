@@ -865,7 +865,7 @@ impl Game<'_> {
             self.send(Serverbound::ChangeGameMode(ChangeGameMode { mode }));
             return;
         }
-        if self.set_game_mode(mode) {
+        if self.set_game_mode_because(mode, "switcher") {
             let name = Text::translate(&format!("gameMode.{}", mode.name()), &[]);
             self.feedback(Text::translate("commands.gamemode.success.self", &[name]));
         }

@@ -6030,7 +6030,11 @@ impl Game<'_> {
                         self.spawn_mob_raw("minecraft:endermite", [from.x, from.y, from.z], false);
                     }
                     // ServerPlayer.teleport: removeVehicle before the placement.
+                    let origin = self.player.as_ref().map(|pl| [pl.position.x, pl.position.y, pl.position.z]);
                     section_steps::teleport_player(self, to);
+                    if let Some(origin) = origin {
+                        self.acting_teleport_cause(origin, "ender_pearl");
+                    }
                     self.hurt_player_by("minecraft:ender_pearl", damage);
                     self.audio.play(
                         "minecraft:entity.player.teleport",

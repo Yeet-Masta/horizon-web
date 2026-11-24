@@ -495,6 +495,7 @@ horizon-client game::debug_renderer_tests::debug_renderer_same_value_reduced_inf
 horizon-client game::debug_renderer_tests::debug_renderer_same_value_reduced_info_on_invalidates lib daily resources
 horizon-client game::debug_renderer_tests::debug_renderer_second_login_invalidates_first_world_view lib daily resources
 horizon-client game::debug_renderer_tests::the_renderer_list_refreshes_with_the_selection_and_leaves_nothing_behind lib daily resources
+horizon-client game::dedicated::console_command_hook_tests::a_mod_hears_and_cancels_a_console_line lib daily resources
 horizon-client game::dedicated::console_source_tests::the_console_runs_as_the_server_not_the_player_in_place lib daily resources
 horizon-client game::dedicated::management::tests::management_online_skips_fake_players_by_name_and_id lib daily resources
 horizon-client game::dedicated::missing_mods::tests::check_missing_mods_refuses_unless_allowed_and_writes_nothing lib daily resources
@@ -827,6 +828,7 @@ horizon-client game::lan::merchant_packet_tests::merchant_take_keeps_packet_snap
 horizon-client game::lan::mob_pickup_sync_tests::a_mob_pickup_reaches_guests_as_a_take lib daily resources
 horizon-client game::lan::mob_swing_sync_tests::an_off_hand_mob_swing_reaches_guests_as_the_off_hand lib daily resources
 horizon-client game::lan::owner_attachment_save_tests::an_autosave_writes_the_owners_live_attachments_to_the_file_it_loads lib daily resources
+horizon-client game::lan::spawn_location_hook_tests::a_mod_moves_a_joining_player_before_placement lib daily resources
 horizon-client game::lan::tests::a_guest_who_left_has_no_menu_owners lib daily resources
 horizon-client game::lan::tests::a_mod_changes_the_effect_particles_players_are_sent lib daily resources
 horizon-client game::lan::tests::a_mods_custom_name_and_its_visibility_are_sent lib daily resources
@@ -1166,6 +1168,11 @@ horizon-client game::native_components::item_resource_property_tests::effective_
 horizon-client game::native_components::item_resource_property_tests::item_resource_changed_defaults_and_consumption lib daily resources
 horizon-client game::native_config_files::tests::a_mod_saves_its_config_through_the_game_and_the_reload_hears_it lib daily resources
 horizon-client game::native_configs::tests::config_permissions_and_once_per_side_survive_two_worlds lib daily resources
+horizon-client game::native_core_api_tests::a_mod_offers_one_player_a_resource_pack lib daily resources
+horizon-client game::native_core_api_tests::a_mod_resolves_a_selector_for_a_player lib daily resources
+horizon-client game::native_core_api_tests::a_mod_sets_one_players_view_distance lib daily resources
+horizon-client game::native_core_api_tests::a_player_is_collidable_unless_spectator_or_on_a_never_team lib daily resources
+horizon-client game::native_core_api_tests::the_log_file_is_latest_log_in_the_logs_folder lib daily resources
 horizon-client game::native_custom_geometry::tests::a_partial_tint_alpha_matches_on_tinted_faces_only lib daily resources
 horizon-client game::native_custom_geometry::tests::draw_model_instances_bakes_overflow_after_the_instanced_prefix lib daily resources
 horizon-client game::native_custom_geometry::tests::draw_model_instances_matches_cpu_pixels lib daily resources
@@ -1505,6 +1512,7 @@ horizon-client game::native_hooks::death_source_tests::player_bow_death_retains_
 horizon-client game::native_hooks::death_source_tests::skeleton_arrow_death_credits_the_skeleton_not_the_player lib daily resources
 horizon-client game::native_hooks::death_source_tests::zombie_ai_melee_armor_hurt_retains_the_real_source lib daily resources
 horizon-client game::native_hooks::enchanted_block_loot::tests::a_listener_sets_the_level_a_block_table_reads lib daily resources
+horizon-client game::native_hooks::entity_damaged_detail_tests::tests::a_hit_on_an_armor_stand_names_its_type lib daily resources
 horizon-client game::native_hooks::entity_inside::entity_inside_tests::landing_writes_apply_at_the_batch_end lib daily resources
 horizon-client game::native_hooks::entity_inside::sweep_tests::a_killing_write_stops_the_flush lib daily resources
 horizon-client game::native_hooks::entity_inside::sweep_tests::a_killing_write_stops_the_items_flush lib daily resources
@@ -1543,6 +1551,7 @@ horizon-client game::native_hooks::living_death_post::tests::living_death_post_h
 horizon-client game::native_hooks::living_death_post::tests::living_drops_hears_a_killed_players_drops_with_generic_kill lib daily resources
 horizon-client game::native_hooks::living_death_post::tests::mob_died_is_heard_without_a_living_death_subscription lib daily resources
 horizon-client game::native_hooks::math::tests::game_host_math_profile_matches_platform_and_is_stable lib daily resources
+horizon-client game::native_hooks::mob_effect_added_detail_tests::tests::a_vanilla_effect_is_heard_with_duration_and_cause lib daily resources
 horizon-client game::native_hooks::mod_mismatch::tests::a_resolved_missing_mod_is_not_asked_about lib daily resources
 horizon-client game::native_hooks::mod_mismatch::tests::existing_lists_fire_on_client_and_dedicated_even_without_differences lib daily resources
 horizon-client game::native_hooks::on_block_placed_by_tests::block_items_notify_after_setup_and_before_consumption lib daily resources
@@ -1564,10 +1573,13 @@ horizon-client game::native_hooks::piston_push_reaction_tests::piston_push_react
 horizon-client game::native_hooks::piston_push_reaction_tests::piston_push_reaction_real_block_entity_payload_lifecycle lib daily resources
 horizon-client game::native_hooks::piston_push_reaction_tests::piston_push_reaction_unowned_vanilla_data_stays_refused lib daily resources
 horizon-client game::native_hooks::play_hit_sound_tests::play_hit_sound_helper_and_eight_mining_ticks lib daily resources
+horizon-client game::native_hooks::player_game_mode_cause_tests::tests::a_game_mode_change_names_its_cause lib daily resources
 horizon-client game::native_hooks::player_game_mode_changed::player_game_mode_changed_tests::a_listener_redirects_the_new_game_mode lib daily resources
 horizon-client game::native_hooks::player_game_mode_changed::player_game_mode_changed_tests::a_redirect_sends_its_mode_and_a_redirect_to_the_current_mode_sends_none lib daily resources
 horizon-client game::native_hooks::player_game_mode_changed::player_game_mode_changed_tests::the_second_listener_sees_the_first_listeners_write lib daily resources
 horizon-client game::native_hooks::player_heart_type::player_heart_type_tests::a_client_mod_changes_the_health_bars_hearts lib daily resources
+horizon-client game::native_hooks::player_teleport_cause_tests::tests::a_command_teleport_is_told_with_its_cause lib daily resources
+horizon-client game::native_hooks::player_teleport_cause_tests::tests::a_pearl_teleport_is_told_with_its_cause lib daily resources
 horizon-client game::native_hooks::register_enchantment_damage_effects::tests::custom_enchantment_changes_real_hit_damage_and_observes_hit_context lib daily resources
 horizon-client game::native_hooks::register_preset_editors::tests::preset_editor_test_mod_draws_and_edits_through_real_client_hooks lib daily resources
 horizon-client game::native_hooks::render_frame::tests::a_mod_map_presents_without_the_world_pass lib daily resources

@@ -1000,7 +1000,7 @@ impl Game<'_> {
         }
         let mut changed = false;
         self.native_as_player_handle(player, |game| {
-            changed = game.set_game_mode(mode);
+            changed = game.set_game_mode_because(mode, "plugin");
         }) && changed
     }
 

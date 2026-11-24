@@ -68,7 +68,7 @@ impl Game<'_> {
                     // `new MobEffectInstance(effect, duration, amplifier, false, particles)`.
                     let instance = EffectInstance::new(effect.id, duration, amplifier)
                         .with_flags(false, particles);
-                    self.for_player(t, |g| g.add_player_effect(instance))
+                    self.for_player(t, |g| g.add_player_effect_by(instance, "command"))
                         .unwrap_or(false)
                 }
                 Target::Mob(id) => {
@@ -101,6 +101,14 @@ impl Game<'_> {
                                     self.audio.play(sound, Some(at), 1.0, 1.0);
                                 }
                                 self.mod_effect_added(name, Some(id as i32), amplifier, new);
+                                self.effect_added_detail(
+                                    name,
+                                    Some(id as i32),
+                                    amplifier,
+                                    duration,
+                                    new,
+                                    "command",
+                                );
                                 changed
                             }
                             None => false,
