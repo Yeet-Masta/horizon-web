@@ -2545,10 +2545,14 @@ impl Game<'_> {
     /// DedicatedServerSettings.update: change one key and store the file.
     pub(super) fn store_property(&mut self, key: &str, value: String) {
         let path = PathBuf::from("server.properties");
-        if let Ok(p) = ServerProperties::from_file(&path, &mut SystemEntropy::default())
-            && let Ok(p) = p.update(key, value)
-        {
-            let _ = p.store(&path);
+        let result = ServerProperties::from_file(&path, &mut SystemEntropy::default())
+            .and_then(|p| p.update(key, value))
+            .and_then(|p| p.store(&path).map_err(|e| e.to_string()));
+        if let Err(e) = result {
+            log(
+                "WARN",
+                &format!("Failed to save '{key}' in {}: {e}", path.display()),
+            );
         }
     }
 

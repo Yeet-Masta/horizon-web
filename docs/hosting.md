@@ -151,6 +151,11 @@ command takes `--dir FOLDER` to work on a server folder from elsewhere.
 You edit one file. The server writes vanilla's `server.properties` from it before every start, so the game
 reads exactly what a vanilla server reads, and a vanilla server folder works as it is.
 
+Unlike vanilla's `Settings.loadFromFile`, the dedicated game treats `server.properties` as empty only
+when it is missing. If the file cannot be read for another reason, the game stops startup (including
+`--initSettings`) or skips saving a runtime setting instead of replacing the file with defaults. The
+error names the path so you can check the file and its permissions.
+
 ```toml
 [server]
 motd = "A Minecraft Server"

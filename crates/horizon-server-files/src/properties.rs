@@ -248,12 +248,20 @@ impl Reader {
 }
 
 impl ServerProperties {
-    /// DedicatedServerProperties.fromFile; a file that cannot be read is an
-    /// empty set (Settings.loadFromFile logs and continues).
+    /// `DedicatedServerProperties.fromFile`; unlike vanilla's `Settings.loadFromFile`,
+    /// only a missing file is empty. Do not let callers store defaults over unreadable settings.
     pub fn from_file(path: &std::path::Path, entropy: &mut dyn Entropy) -> Result<Self, String> {
         let p = match std::fs::read(path) {
             Ok(bytes) => Properties::load_file(&bytes).map_err(|e| e.to_string())?,
-            Err(_) => Properties::default(),
+            // `read` also returns NotFound for a dangling link; renaming over it would lose it.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(path)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Properties::default()
+            }
+            Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
         };
         Self::new(p, entropy)
     }
@@ -637,7 +645,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("server.properties");
-        let props = ServerProperties::new(Properties::default(), &mut Fixed).unwrap();
+        let props = ServerProperties::from_file(&path, &mut Fixed).unwrap();
         props.store(&path).unwrap();
         let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
