@@ -202,7 +202,7 @@ fn death_weapon_harming_potion_does_not_read_thrower_sword() {
         game.splash(&potion, at, Some(at), None, 3, &owner, true, Vec3::ZERO);
         let dead = game.mobs.iter().find(|mob| mob.id == 70).unwrap().clone();
         assert_eq!(dead.health, 0.0);
-        assert_eq!(dead.last_direct, Some("minecraft:splash_potion"));
+        assert_eq!(dead.last_direct.as_ref().and_then(|d| d.as_deref()), Some("minecraft:splash_potion"));
         assert_eq!(
             game.mob_damage_source(&dead),
             ("minecraft:indirect_magic", 11)
@@ -325,5 +325,50 @@ fn death_weapon_same_tick_stronger_arrow_replaces_weapon() {
             dead.health = 0.0;
             game.mob_died(&dead);
         });
+    });
+}
+
+/// `/damage <pig> 100 minecraft:trident by @s`: the player is both the direct
+/// and the causing entity, so the advancement and loot views name the player,
+/// not a trident that does not exist.
+#[test]
+#[ignore = "daily"]
+fn command_trident_by_its_player_keeps_the_player_as_direct() {
+    crate::game::native_entity_refs::tests::with_game(|game| {
+        use crate::game::commands::Target;
+        use horizon_client::motion::PlayerMotion;
+        game.build_registries();
+        game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+        let pig = game
+            .res
+            .mob_types()
+            .get("minecraft:pig")
+            .unwrap()
+            .clone();
+        game.mobs
+            .push(Mob::new(91, pig, Vec3::new(0.5, 64.0, 0.5), 0.0));
+        let hurt = game.hurt_target(
+            Target::Mob(91),
+            100.0,
+            "minecraft:trident",
+            Some(Target::Player),
+            None,
+            None,
+        );
+        assert!(hurt, "the command's hit lands");
+        let m = game.mobs.iter().find(|m| m.id == 91).unwrap();
+        assert_eq!(
+            m.last_direct.as_ref().and_then(|d| d.as_deref()),
+            Some("minecraft:player"),
+            "the command's `by` player is the direct entity"
+        );
+        let view = game.last_blow(m).unwrap();
+        assert_eq!(view.kind, "minecraft:trident");
+        assert_eq!(view.direct.as_ref().unwrap().kind, "minecraft:player");
+        assert_eq!(view.source.as_ref().unwrap().kind, "minecraft:player");
+        assert!(
+            view.is_direct,
+            "the player is both the direct and causing entity"
+        );
     });
 }

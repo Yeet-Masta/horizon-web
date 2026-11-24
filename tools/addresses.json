@@ -5,6 +5,7 @@
   ],
   "vanilla": {
     "aka.ms": "vanilla's help links (CommonLinks), opened on a click",
+    "bugs.mojang.com": "vanilla's bug tracker links (CommonLinks), opened on a click",
     "api.minecraftservices.com": "Minecraft services: profile, keys, certificates",
     "discovery.minecraftservices.com": "MinecraftServicesEnvironment.PROD's discovery document",
     "textures.minecraft.net": "skins and capes",

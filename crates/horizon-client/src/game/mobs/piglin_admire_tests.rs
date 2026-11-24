@@ -105,6 +105,7 @@ fn piglin_admire_hit_keeps_baby_gold_and_cancels_adult_barter() {
                 horizon_client::mobs::ai::after_hurt(
                     &mut g.mobs[0],
                     &horizon_client::mobs::Damage::player([1.0, 100.0, 0.0]),
+                    &horizon_client::health::Attack::default(),
                 );
                 let events = std::mem::take(&mut g.mobs[0].outbox);
                 g.handle_mob_events(events).unwrap();

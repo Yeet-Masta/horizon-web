@@ -10,7 +10,7 @@ use horizon_client::{
     mobs::{Damage, Mob, Species, Who, stuck::Stuck},
     motion::MotionEvent,
     particles::{ParticleOptions, ParticleType},
-    text::Text,
+    text::{ClickEvent, Style, Text},
 };
 use horizon_core::random::RandomSource;
 
@@ -697,10 +697,11 @@ impl Game<'_> {
                 let at = knock.fall_location.unwrap_or("generic");
                 return Text::translate(&format!("death.fell.accident.{at}"), &[me]);
             }
-            // CombatTracker.getMessageForAssistedFall: the attacker's item
-            // with a custom name gets the `.item` message.
+            // CombatTracker.getFallMessage compares display names: the attacker
+            // is the killer when the two names are equal, so two unnamed
+            // zombies are the same attacker.
             let (key, args) = match (&knock.attacker, &killer) {
-                (Some(a), k) if k.as_ref().is_none_or(|k| k.0 != a.0) => {
+                (Some(a), k) if k.as_ref().is_none_or(|k| k.1 != a.1) => {
                     horizon_client::scoreboard::death_message_args(
                         "death.fell.assist",
                         &me,
@@ -708,6 +709,8 @@ impl Game<'_> {
                         self.entry_item(knock).as_ref(),
                     )
                 }
+                // CombatTracker.getMessageForAssistedFall: the attacker's item
+                // with a custom name gets the `.item` message.
                 (_, Some(k)) => horizon_client::scoreboard::death_message_args(
                     "death.fell.finish",
                     &me,
@@ -720,9 +723,18 @@ impl Game<'_> {
         }
         let key = format!("death.attack.{}", def.0);
         if def.1 == "intentional_game_design" {
+            // CombatTracker.INTENTIONAL_GAME_DESIGN_STYLE: the bracketed link
+            // opens the bug tracker and shows its id.
             let link = Text::literal("[")
                 .append(Text::translate(&format!("{key}.link"), &[]))
-                .append(Text::literal("]"));
+                .append(Text::literal("]"))
+                .with_style(&Style {
+                    click: Some(ClickEvent::OpenUrl(
+                        "https://bugs.mojang.com/browse/MCPE-28723".into(),
+                    )),
+                    hover: Some(std::sync::Arc::new(Text::literal("MCPE-28723"))),
+                    ..Style::default()
+                });
             return Text::translate(&format!("{key}.message"), &[me, link]);
         }
         // `getLocalizedDeathMessage`: the causing entity's name, or the
@@ -854,6 +866,7 @@ impl Game<'_> {
                 let direct = match e.source.kind {
                     _ if attacker.is_some() => None,
                     DamageKind::Arrow => Some(Text::translate("entity.minecraft.arrow", &[])),
+                    DamageKind::Trident => Some(Text::translate("entity.minecraft.trident", &[])),
                     DamageKind::Fireworks => {
                         Some(Text::translate("entity.minecraft.firework_rocket", &[]))
                     }
@@ -1286,3 +1299,7 @@ mod zombie_ignite_tests;
 #[cfg(test)]
 #[path = "combat/bee_sting_tests.rs"]
 mod bee_sting_tests;
+
+#[cfg(test)]
+#[path = "combat/death_message_tests.rs"]
+mod death_message_tests;

@@ -601,9 +601,10 @@ impl NamedDamage {
     pub const IS_EXPLOSION: u32 = 1 << 8;
     pub const IS_FALL: u32 = 1 << 9;
     pub const BYPASSES_ENCHANTMENTS: u32 = 1 << 10;
+    pub const SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO: u32 = 1 << 11;
 
     /// Each flag with the damage tag it stands for.
-    const TAG_FLAGS: [(u32, &'static str); 11] = [
+    const TAG_FLAGS: [(u32, &'static str); 12] = [
         (Self::IS_FIRE, "minecraft:is_fire"),
         (Self::BYPASSES_ARMOR, "minecraft:bypasses_armor"),
         (Self::NO_KNOCKBACK, "minecraft:no_knockback"),
@@ -620,6 +621,10 @@ impl NamedDamage {
         (
             Self::BYPASSES_ENCHANTMENTS,
             "minecraft:bypasses_enchantments",
+        ),
+        (
+            Self::SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO,
+            "minecraft:sulfur_cube_with_block_immune_to",
         ),
     ];
 
@@ -668,6 +673,9 @@ pub enum DamageKind {
     /// `mob_attack_no_aggro`: a goat's ram, the one type in `#no_anger`.
     MobAttackNoAggro,
     Arrow,
+    /// `trident`: a thrown trident's hit (`DamageSources.trident`), which keeps
+    /// its own `death.attack.trident` ("impaled by").
+    Trident,
     Thrown,
     Fireball,
     Explosion,
@@ -777,12 +785,7 @@ pub struct Damage {
 }
 impl Damage {
     pub fn fall() -> Self {
-        Self {
-            kind: DamageKind::Fall,
-            attacker: None,
-            from: None,
-            attacker_species: None,
-        }
+        Self::of(DamageKind::Fall)
     }
     pub fn of(kind: DamageKind) -> Self {
         Self {
@@ -962,10 +965,45 @@ impl Damage {
         matches!(
             self.kind,
             DamageKind::Arrow
+                | DamageKind::Trident
                 | DamageKind::Thrown
                 | DamageKind::Fireball
                 | DamageKind::WindCharge
                 | DamageKind::WitherSkull
+        )
+    }
+    /// `#sulfur_cube_with_block_immune_to`: the damage a cube with a block
+    /// shrugs off and is only knocked about by.
+    pub fn sulfur_cube_with_block_immune_to(&self) -> bool {
+        if let DamageKind::Named(named) = self.kind {
+            return named.has(NamedDamage::SULFUR_CUBE_WITH_BLOCK_IMMUNE_TO);
+        }
+        matches!(
+            self.kind,
+            DamageKind::PlayerAttack
+                | DamageKind::MaceSmash
+                | DamageKind::Spear
+                | DamageKind::MobAttack
+                | DamageKind::MobAttackNoAggro
+                | DamageKind::Arrow
+                | DamageKind::Trident
+                | DamageKind::Thrown
+                | DamageKind::Explosion
+                | DamageKind::Fireworks
+                | DamageKind::Fall
+                | DamageKind::Sting
+                | DamageKind::Cactus
+                | DamageKind::Freeze
+                | DamageKind::SweetBerryBush
+                | DamageKind::HotFloor
+                | DamageKind::FallingAnvil
+                | DamageKind::FallingBlock
+                | DamageKind::FallingStalactite
+                | DamageKind::DryOut
+                | DamageKind::Spit
+                | DamageKind::Stalagmite
+                | DamageKind::SulfurCubeHot
+                | DamageKind::WindCharge
         )
     }
 }
@@ -1606,8 +1644,10 @@ pub struct Mob {
     pub accepted_hit: Option<std::sync::Arc<crate::health::AcceptedHit>>,
     pub death_canceled: bool,
     /// `DamageSource.getDirectEntity` of `last_damage` when [`Damage`] cannot name it (a
-    /// thrown potion, an area effect cloud): its entity type.
-    pub last_direct: Option<&'static str>,
+    /// thrown potion, an area effect cloud, a command's explicit direct entity): its entity
+    /// type, `Some(None)` for an explicitly absent direct entity, and `None` when the damage
+    /// type itself names the projectile.
+    pub last_direct: Option<Option<String>>,
     /// `LivingEntity.combatTracker`: the hits taken lately.
     pub combat: combat::Tracker,
     /// Set by `remove`: the mob disappears without dying (conversion, despawn, pickup).
@@ -4283,7 +4323,7 @@ impl Mob {
             };
             self.knockback(level, f64::from(0.4f32), dx, dz, &source, amount);
         }
-        ai::after_hurt(self, &source);
+        ai::after_hurt(self, &source, level.attack());
         if self.health <= 0.0 {
             self.health = 0.0;
             // `LivingEntity.hurtServer`: a killing blow is taken by a
@@ -4394,7 +4434,7 @@ impl Mob {
         }
 
         if hurt {
-            self.last_direct = Some(direct);
+            self.last_direct = Some(Some(direct.to_owned()));
         }
         hurt
     }
@@ -6239,7 +6279,10 @@ mod magic_absorb_tests {
         let mut m = Mob::new(1, kind(), Vec3::ZERO, 0.0);
         let thrown = Damage::indirect_magic(Some(Who::Player), [0.0, 1.0, 0.0]);
         assert!(m.damage_by(level, 1.0, thrown, "minecraft:splash_potion"));
-        assert_eq!(m.last_direct, Some("minecraft:splash_potion"));
+        assert_eq!(
+            m.last_direct.as_ref().and_then(|d| d.as_deref()),
+            Some("minecraft:splash_potion")
+        );
         let (last, _) = m.last_damage.unwrap();
         assert_eq!(last.kind, DamageKind::IndirectMagic);
         assert_eq!(last.attacker, Some(Who::Player));
@@ -6251,7 +6294,10 @@ mod magic_absorb_tests {
         let mut m = Mob::new(1, kind(), Vec3::ZERO, 0.0);
         let dispensed = Damage::indirect_magic(None, [0.0, 1.0, 0.0]);
         assert!(m.damage_by(level, 1.0, dispensed, "minecraft:area_effect_cloud"));
-        assert_eq!(m.last_direct, Some("minecraft:area_effect_cloud"));
+        assert_eq!(
+            m.last_direct.as_ref().and_then(|d| d.as_deref()),
+            Some("minecraft:area_effect_cloud")
+        );
         assert_eq!(m.ai.last_hurt_by_player, 0);
     }
 

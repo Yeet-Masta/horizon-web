@@ -792,20 +792,13 @@ impl Game<'_> {
                         attack.projectile = Some(t.id as i32);
                         attack.projectile_is_arrow = true;
                         Self::set_projectile_weapon(&mut attack, Some(&t.stack));
-                        let trident_source = DamageKind::Named(
-                            horizon_client::mobs::NamedDamage::registered(
-                                &self.health_resources.damage,
-                                "minecraft:trident",
-                            )
-                            .expect("registered vanilla trident damage"),
-                        );
                         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                             let from = Some([t.position.x, t.position.y, t.position.z]);
                             let hurt = m.damage_projectile(
                                 crate::game::entity::damage_level_of!(self, &attack),
                                 damage,
                                 Damage {
-                                    kind: trident_source,
+                                    kind: DamageKind::Trident,
                                     attacker: Some(Who::Player),
                                     from,
                                     attacker_species: None,

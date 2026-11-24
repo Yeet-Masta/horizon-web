@@ -663,6 +663,22 @@ mod burning_arrow_tests {
         m
     }
 
+    /// `#sulfur_cube_with_block_immune_to` holds `trident` as well as `arrow`:
+    /// a cube with a block is only knocked about by it.
+    #[test]
+    fn a_trident_only_knocks_a_cube_with_a_block() {
+        let mut m = cube(Some("minecraft:tnt"));
+        let health = m.health;
+        let mut level = crate::health::TestLevel::new(0);
+        assert!(!accepts_damage(
+            &mut m,
+            &mut level.level(),
+            &Damage::of(DamageKind::Trident),
+            4.0
+        ));
+        assert_eq!(m.health, health);
+    }
+
     #[test]
     fn a_burning_arrow_lights_the_long_fuse() {
         let mut m = cube(Some("minecraft:tnt"));
@@ -962,32 +978,7 @@ pub fn prime_with_fuse(m: &mut Mob, imminent: bool, fuse: i32) -> bool {
 /// `#sulfur_cube_with_block_immune_to`: the damage a cube with a block shrugs off and is only
 /// knocked by.
 pub fn immune_to(source: &Damage) -> bool {
-    matches!(
-        source.kind,
-        DamageKind::PlayerAttack
-            | DamageKind::MaceSmash
-            | DamageKind::Spear
-            | DamageKind::MobAttack
-            | DamageKind::MobAttackNoAggro
-            | DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Explosion
-            | DamageKind::Fireworks
-            | DamageKind::Fall
-            | DamageKind::Sting
-            | DamageKind::Cactus
-            | DamageKind::Freeze
-            | DamageKind::SweetBerryBush
-            | DamageKind::HotFloor
-            | DamageKind::FallingAnvil
-            | DamageKind::FallingBlock
-            | DamageKind::FallingStalactite
-            | DamageKind::DryOut
-            | DamageKind::Spit
-            | DamageKind::Stalagmite
-            | DamageKind::SulfurCubeHot
-            | DamageKind::WindCharge
-    )
+    source.sulfur_cube_with_block_immune_to()
 }
 /// `hurtServer`: fire or `#is_explosion` (a firework rocket's burst too)
 /// light an explosive cube; with a block it shrugs off blows, falls and

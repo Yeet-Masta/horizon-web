@@ -1,7 +1,7 @@
 //! Shulkers (`Shulker`): fixed to a block face, peeking out of their shell,
 //! firing homing bullets at players within 20 blocks, teleporting when
-//! their face is lost or when badly hurt, and shrugging off arrows while
-//! closed.
+//! their face is lost or when badly hurt, and shrugging off arrows (tridents
+//! too) while closed.
 use super::{
     Damage, Mob, MobEvent, MobWorld, Species, Who,
     anim::{Poses, State},
@@ -1311,7 +1311,8 @@ mod tests {
     }
 
     /// `Shulker.hurtServer` returns false for an `AbstractArrow` while
-    /// `isClosed` (raw peek 0). An open shell takes the same arrow.
+    /// `isClosed` (raw peek 0). A thrown trident is one. An open shell takes
+    /// the same arrow.
     #[test]
     fn a_closed_shell_refuses_an_arrow() {
         let mut fixture = crate::health::TestLevel::new(0);
@@ -1321,19 +1322,24 @@ mod tests {
             ..Default::default()
         };
         let mut level = fixture.level().attacked_by(&attack);
-        let source = Damage::of(super::super::DamageKind::Arrow);
-        let mut closed = shulker();
-        closed.extra.counter = 0;
-        let health = closed.health;
-        assert!(
-            !closed.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]),
-            "a closed shell rejects the arrow"
-        );
-        assert_eq!(closed.health, health);
-        let mut open = shulker();
-        open.extra.counter = 30;
-        assert!(open.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]));
-        assert!(open.health < health);
+        for kind in [
+            super::super::DamageKind::Arrow,
+            super::super::DamageKind::Trident,
+        ] {
+            let source = Damage::of(kind);
+            let mut closed = shulker();
+            closed.extra.counter = 0;
+            let health = closed.health;
+            assert!(
+                !closed.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]),
+                "a closed shell rejects {kind:?}"
+            );
+            assert_eq!(closed.health, health);
+            let mut open = shulker();
+            open.extra.counter = 30;
+            assert!(open.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]));
+            assert!(open.health < health);
+        }
     }
 
     #[test]

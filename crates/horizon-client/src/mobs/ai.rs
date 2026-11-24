@@ -3726,7 +3726,7 @@ pub fn accepts_damage(
         Species::Allay => !attack
             .player_uuid
             .is_some_and(|uuid| super::allay::is_liked_player(m, source.attacker, uuid)),
-        Species::Creaking => super::creaking::accepts_damage(m, source),
+        Species::Creaking => super::creaking::accepts_damage(m, source, attack),
         Species::Wither => super::wither::accepts(m, source, attack, false),
         Species::Warden => super::warden::accepts_damage(m, source),
         Species::Shulker => super::shulker::accepts(m, source, attack),
@@ -3765,11 +3765,11 @@ pub fn accepts_damage(
     }
 }
 /// Reactions after taking damage (sounds, anger).
-pub fn after_hurt(m: &mut Mob, source: &Damage) {
+pub fn after_hurt(m: &mut Mob, source: &Damage, attack: &crate::health::Attack) {
     m.ai.no_action_time = 0;
     match m.species() {
         Species::Armadillo => super::armadillo::after_hurt(m, source),
-        Species::Warden => super::warden::hurt(m, source),
+        Species::Warden => super::warden::hurt(m, source, attack),
         Species::Nautilus | Species::ZombieNautilus => super::nautilus::after_hurt(m, source),
         Species::Zombie
         | Species::Husk

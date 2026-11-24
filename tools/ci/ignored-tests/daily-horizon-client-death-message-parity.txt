@@ -1,0 +1,6 @@
+# Prepared-resource tests for #16576 (death-message-parity).
+# PACKAGE TEST TARGET daily REASON; exact logical libtest identities, sorted.
+horizon-client game::combat::death_message_tests::a_trident_kills_with_the_trident_message lib daily resources
+horizon-client game::combat::death_message_tests::the_bad_respawn_point_link_carries_its_click_and_hover lib daily resources
+horizon-client game::combat::death_message_tests::two_unnamed_zombies_are_the_same_attacker lib daily resources
+horizon-client game::creatures::death_weapon::review_tests::command_trident_by_its_player_keeps_the_player_as_direct lib daily resources
