@@ -62,7 +62,7 @@ AbstractArrow.resetPiercedEntities	inline	crates/horizon-client/src/arrows.rs::T
 AbstractArrow.doKnockback	port	crates/horizon-client/src/game/mobs/creatures/mod.rs::Game::projectile_hit	punch pushes along the flight, scaled by 0.6 and by knockback resistance
 AbstractArrow.findHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::entity_hit	box clip, then the margin test against the segment
 AbstractArrow.findHitEntities	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	gap: minor: only the nearest hit per tick is returned; a piercing arrow takes the rest on later ticks
-AbstractArrow.canHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	gap: minor: skips pierced entities here; the player canHarmPlayer rule is in creatures.rs tick_projectiles
+AbstractArrow.canHitEntity	port	crates/horizon-client/src/arrows.rs::Ticker::step_move_and_hit	the target search skips the entities a piercing arrow has gone through and, for a player owner and a player target, applies `Player.canHarmPlayer`; `Projectile::can_hit_entity` refuses the shooter
 AbstractArrow.readAdditionalSaveData	port	crates/horizon-client/src/entity_nbt.rs::arrow_from_nbt	shake, in ground, in block state, pickup and the arrow fields
 AbstractArrow.tryPickup	port	crates/horizon-client/src/arrows.rs::ArrowState::player_touch	disallowed, allowed (gives the pickup item) and creative only
 AbstractArrow.setFlag	port	crates/horizon-client/src/projectiles.rs::Projectile::set_critical	gap: minor: only the critical flag; the no-physics flag is a plain field

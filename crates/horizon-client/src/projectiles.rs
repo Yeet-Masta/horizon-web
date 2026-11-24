@@ -1395,7 +1395,7 @@ impl Projectile {
         let margin = self.hit_margin();
         let mut best: Option<(Who, Vec3, f64)> = None;
         for (who, b) in w.targets() {
-            if Some(*who) == self.collision_owner() && !self.left_owner {
+            if !self.target_allowed(*who) {
                 continue;
             }
             if let Some(at) = b.inflate(Vec3::new(margin, margin, margin)).clip(from, end) {
@@ -1714,6 +1714,25 @@ impl Projectile {
     fn hit_margin(&self) -> f64 {
         f64::from(((self.age as i32 - 2) as f32 / 20.0).clamp(0.0, 0.3))
     }
+    /// `Projectile.canHitEntity`: the shooter and the vehicle it rides are
+    /// refused until the projectile has left them. `AbstractArrow.canHitEntity`
+    /// adds one rule, `Player.canHarmPlayer` between a player shooter and a
+    /// player target; a projectile that is not an arrow has no such filter, so
+    /// it can hit an ally of its shooter.
+    pub fn can_hit_entity(
+        &self,
+        who: Who,
+        can_harm_player: impl FnOnce(Option<Who>, Who) -> bool,
+    ) -> bool {
+        if !self.left_owner && (Some(who) == self.owner || Some(who) == self.collision_owner()) {
+            return false;
+        }
+        self.arrow.is_none() || can_harm_player(self.owner, who)
+    }
+    /// `Projectile.canHitEntity` alone, for a non-arrow projectile's search.
+    fn target_allowed(&self, who: Who) -> bool {
+        self.can_hit_entity(who, |_, _| true)
+    }
     fn tick_inner(&mut self, w: &impl ProjectileWorld, impact: bool) -> (bool, Hit) {
         // `Entity.setOldPosAndRot` (the previous position and rotation the
         // renderer interpolates from), kept across the `impact` flag's arrival
@@ -1778,7 +1797,7 @@ impl Projectile {
         let margin = self.hit_margin();
         let mut best: Option<(Who, Vec3, f64)> = None;
         for (who, b) in w.targets() {
-            if Some(*who) == self.collision_owner() && !self.left_owner {
+            if !self.target_allowed(*who) {
                 continue;
             }
             let inflated = b.inflate(Vec3::new(margin, margin, margin));
@@ -3442,6 +3461,97 @@ mod arrow_color_tests {
             .potion_extra
             .push(("custom_color".into(), Tag::Int(0x8012_3456u32 as i32)));
         assert_eq!(color(&plain), 0x8012_3456u32 as i32);
+    }
+}
+
+#[cfg(test)]
+mod can_hit_entity_tests {
+    use super::*;
+
+    /// A world with one target and no block: the tick's hit search alone.
+    struct OneTarget {
+        targets: Vec<(Who, Aabb)>,
+    }
+    impl ProjectileWorld for OneTarget {
+        fn clip(&self, _: Vec3, _: Vec3) -> Option<(Vec3, [i32; 3], [i32; 3])> {
+            None
+        }
+        fn in_water(&self, _: Aabb) -> bool {
+            false
+        }
+        fn targets(&self) -> &[(Who, Aabb)] {
+            &self.targets
+        }
+    }
+    fn at(x: f64) -> Aabb {
+        Aabb::new(Vec3::new(x, 100.0, 0.0), Vec3::new(x + 0.2, 101.0, 1.0))
+    }
+    fn projectile(kind: ProjectileKind, owner: Option<Who>) -> Projectile {
+        let mut p = Projectile::new(kind, Vec3::new(0.0, 100.5, 0.5), owner);
+        p.velocity = Vec3::new(1.0, 0.0, 0.0);
+        p.age = 5;
+        p
+    }
+    fn arrow(owner: Option<Who>) -> Projectile {
+        projectile(
+            ProjectileKind::Arrow {
+                base_damage: 2.0,
+                critical: false,
+                effect: None,
+            },
+            owner,
+        )
+    }
+    #[test]
+    fn the_shooter_is_refused_until_the_projectile_has_left() {
+        let mut p = projectile(ProjectileKind::Snowball, Some(Who::Player));
+        assert!(
+            !p.can_hit_entity(Who::Player, |_, _| true),
+            "the shooter is not hit"
+        );
+        p.left_owner = true;
+        assert!(
+            p.can_hit_entity(Who::Player, |_, _| true),
+            "the shooter is hit once the projectile has left"
+        );
+    }
+    #[test]
+    fn an_arrow_refuses_a_player_its_owner_cannot_harm() {
+        // A guest shooter (`Who::Mob(5)`) against the host player: the owner
+        // skip does not apply, so only the arrow's player rule decides.
+        let p = arrow(Some(Who::Mob(5)));
+        assert!(
+            !p.can_hit_entity(Who::Player, |_, _| false),
+            "friendly fire off: a player target is refused"
+        );
+        assert!(
+            p.can_hit_entity(Who::Player, |_, _| true),
+            "friendly fire on: the player is a target"
+        );
+        // The rule only applies between players; it never refuses a mob.
+        assert!(
+            p.can_hit_entity(Who::Mob(7), |_, who| who != Who::Player),
+            "a mob target is not refused"
+        );
+    }
+    #[test]
+    fn a_non_arrow_projectile_hits_an_ally_of_its_shooter() {
+        // `Projectile.canHitEntity` has no team rule: a snowball flies into a
+        // teammate of the player who threw it.
+        let world = OneTarget {
+            targets: vec![(Who::Mob(7), at(0.4))],
+        };
+        let mut p = projectile(ProjectileKind::Snowball, Some(Who::Player));
+        assert!(
+            matches!(
+                p.tick(&world).1,
+                Hit::Entity {
+                    who: Who::Mob(7),
+                    ..
+                }
+            ),
+            "the ally is hit"
+        );
     }
 }
 crate::impl_joined!(Projectile);

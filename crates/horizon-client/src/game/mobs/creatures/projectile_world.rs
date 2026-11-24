@@ -112,3 +112,60 @@ impl ProjectileWorld for ProjWorld<'_, '_> {
         )
     }
 }
+
+impl Game<'_> {
+    /// `Entity.getTeam` of a player a projectile can name: the host under
+    /// `Who::Player`, a guest under its entity id. `None` for a mob, which
+    /// `AbstractArrow.canHitEntity` does not team-check.
+    fn player_team_of(&self, who: Who) -> Option<Option<&horizon_client::scoreboard::Team>> {
+        match who {
+            Who::Player => Some(self.player_team()),
+            Who::Mob(id) => self
+                .lan
+                .as_ref()
+                .and_then(|h| h.hub.guests.iter().find(|g| g.entity_id as u32 == id))
+                .map(|g| self.score.board.players_team(&g.name)),
+        }
+    }
+}
+
+impl horizon_client::arrows::CanHarmPlayer for Game<'_> {
+    /// `owner.canHarmPlayer(target)`, which a server player answers as
+    /// `ServerPlayer.canHarmPlayer`: the `pvp` game rule is on and the
+    /// shooter's team lets it hurt the target. Only an arrow whose owner and
+    /// target are both players reads the rule; a mob on the shooter's team is
+    /// still a target.
+    fn can_harm_player(&self, owner: Option<Who>, who: Who) -> bool {
+        let Some(owner) = owner else {
+            return true;
+        };
+        let (Some(owner_team), Some(target_team)) =
+            (self.player_team_of(owner), self.player_team_of(who))
+        else {
+            return true;
+        };
+        self.player_may_harm(owner_team, target_team)
+    }
+}
+
+#[cfg(test)]
+mod can_harm_player_tests {
+    use super::*;
+    use crate::game::game_tests::tests::server_game;
+    use horizon_client::arrows::CanHarmPlayer;
+    use horizon_client::gamerules::Value;
+
+    /// `ServerPlayer.canHarmPlayer` reads the `pvp` game rule: with it off, a
+    /// player's arrow passes through a player (here the shooter itself, once
+    /// the arrow has left it).
+    #[test]
+    #[ignore = "daily"]
+    fn an_arrow_between_players_follows_the_pvp_rule() {
+        let mut resources = None;
+        let mut game = server_game(&mut resources);
+        assert!(game.ui.rules.set("pvp", Value::Bool(false)));
+        assert!(!game.can_harm_player(Some(Who::Player), Who::Player));
+        assert!(game.ui.rules.set("pvp", Value::Bool(true)));
+        assert!(game.can_harm_player(Some(Who::Player), Who::Player));
+    }
+}

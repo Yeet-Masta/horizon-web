@@ -398,6 +398,8 @@ pub struct ArrowScene<'a, 'r> {
     /// The mod hooks a mob-owned arrow asks (`MobWorld::mob_hooks`).
     pub mob_hooks: Option<&'a dyn crate::mobs::MobHooks>,
     pub owners: &'a dyn OwnerLookup,
+    /// `AbstractArrow.canHitEntity`'s `Player.canHarmPlayer` rule.
+    pub can_harm_player: &'a dyn CanHarmPlayer,
 }
 /// `EntityReference.getEntity` for an owner the arrow only knows by UUID.
 pub trait OwnerLookup {
@@ -407,6 +409,18 @@ pub trait OwnerLookup {
 impl OwnerLookup for () {
     fn non_player_entity(&self, _: [i32; 4]) -> bool {
         false
+    }
+}
+/// `AbstractArrow.canHitEntity`'s `Player.canHarmPlayer`: whether an arrow
+/// whose owner and target are both players may strike `who`. Every other
+/// owner/target pair is allowed. `()` allows everyone, as a world with no
+/// teams does.
+pub trait CanHarmPlayer {
+    fn can_harm_player(&self, owner: Option<Who>, who: Who) -> bool;
+}
+impl CanHarmPlayer for () {
+    fn can_harm_player(&self, _: Option<Who>, _: Who) -> bool {
+        true
     }
 }
 impl ArrowScene<'_, '_> {
@@ -1000,8 +1014,13 @@ impl Ticker<'_, '_, '_, '_> {
         let mut best: Option<(Who, Vec3, f64)> = None;
         // ThrownTrident.findHitEntity: none once it has dealt damage.
         let targets = if self.st.dealt_damage { &[] } else { targets };
+        let scene = self.scene;
         for (who, b) in targets {
-            if Some(*who) == self.p.collision_owner() && !self.p.left_owner || !b.intersects(area) {
+            if !b.intersects(area)
+                || !self.p.can_hit_entity(*who, |owner, target| {
+                    scene.can_harm_player.can_harm_player(owner, target)
+                })
+            {
                 continue;
             }
             // canHitEntity: not an entity a piercing arrow has gone through.
