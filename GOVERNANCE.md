@@ -529,14 +529,14 @@ unable to act, and never puts an account that is tied to a person into anyone el
 
 | Account | Today | Can it be shared? | Plan |
 | --- | --- | --- | --- |
-| **GitHub organisation** (horizon-rust) | Two owners since 2026-11-11: the founder and rdbtCVS (P28); a `council` team holds CODEOWNERS (P35) and is the security managers (P36) | Yes: an organisation can have several owners | **Step 1:** a second owner from the council, chosen by a 2/3 poll in the council's first week, with two-factor authentication on. **Step 2:** a `council` team; CODEOWNERS reviews and the release tools' owner powers (`paused`, `/nightly remove`) move from the founder to that team |
+| **GitHub organisation** (horizon-rust) | Shared among council owners (including the founder, rdbtCVS and NikitaMGrimm); a `council` team holds CODEOWNERS (P35) and is the security managers (P36) | Yes: an organisation can have several owners | **Step 1:** a second owner from the council, chosen by a 2/3 poll in the council's first week, with two-factor authentication on. **Step 2:** a `council` team; CODEOWNERS reviews and the release tools' owner powers (`paused`, `/nightly remove`) move from the founder to that team |
 | **Discord server** | Owned by the founder | Partly: a server has exactly one owner; powers can be given through roles | **Step 1:** the 🏛️ Council role gets moderation and ban permissions; Kira applies the outcomes of passed polls, so nobody needs Manage Roles; two-factor authentication becomes required for moderation. Ownership itself stays with the founder until a legal entity exists |
 | **Kira** (bot application, Railway service) | The founder's Discord developer account and Railway | The bot: yes (a Discord developer team). Railway: adding members may need a paid plan | **Step 1:** a Discord developer team with two council members. Railway members once the council decides on money |
 | **Official server** (hosting panel) | The founder's account | Yes: panel sub-users | **Step 1:** sub-users for the Server and SMP lead and for one council member |
 | **Domains** (playhorizon.dev and the others) | The founder's registrar account | Not without moving it | Auto-renewal on, registered for several years ahead. They move only to a legal entity, if one is created |
 | **The Microsoft app approved by Mojang** (sign-in) | The founder's Azure app registration; Mojang approved it after his application | **No.** The approval was given on his application. Moving the app or adding owners would change who Mojang deals with, and we have found no documented way to transfer an approval | **Never moves** without Mojang's written agreement. The only change considered: a legal entity, if one is created, and only if Mojang agrees |
 | **Signing** (Apple developer certificate, release signing keys) | The founder's | The Apple certificate is in his legal name: no | The Apple certificate never moves. Release keys stay in GitHub's protected environments, and the council team approves their use from step 2 |
-| **Money** (sponsorship, donations) | Personal accounts of the founder | Through a fiscal host | Section 12 |
+| **Money** (sponsorship, donations) | [Open Collective](https://opencollective.com/horizonrust), fiscally hosted by [Open Source Collective](https://opencollective.com/opensource) | Yes: council-governed collective with public ledger | Section 12 |
 | **The founder's machines, AI accounts and password vault** | His | No | His own things: they never move. The project should depend on them less over time |
 
 **Order:** first the safety nets that remove a single point of failure (a second organisation owner, the bot's
@@ -546,10 +546,12 @@ and the founder carries it out.
 
 ## 12. Money
 
-*Placeholder: the options (Open Collective and others) are being researched.*
+Horizon manages its donations and sponsorships on [Open Collective](https://opencollective.com/horizonrust),
+fiscally hosted by [Open Source Collective](https://opencollective.com/opensource) (a 501(c)(6) non-profit
+fiscal host for open-source projects).
 
 - The council approves every expense by a **2/3 poll**.
-- **Every income and every expense is public.**
+- **Every income and every expense is public** on the Open Collective ledger.
 - Nobody votes on money paid to themselves.
 
 ## 13. Transparency
