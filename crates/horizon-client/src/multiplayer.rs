@@ -142,6 +142,8 @@ pub enum Screen {
     /// A page a crate registered at the title screen's Friends icon, as a form.
     Page(Form),
     Disconnected {
+        /// What the connection was doing when it ended: the title above the reason.
+        title: DisconnectTitle,
         /// The server's or a mod's reason, rendered in the player's language when drawn.
         reason: Text,
         /// Auto-reconnect's next attempt, until it is cancelled.
@@ -154,6 +156,49 @@ pub enum Screen {
     },
 }
 mod page;
+
+/// `DisconnectedScreen`'s title: which of vanilla's listeners saw the connection end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisconnectTitle {
+    /// `ClientCommonPacketListenerImpl.GENERIC_DISCONNECT_MESSAGE`: it ended after the login,
+    /// in configuration or play (`createDisconnectScreen`).
+    #[default]
+    Lost,
+    /// `CommonComponents.CONNECT_FAILED`: the join failed before the login finished.
+    ConnectFailed,
+    /// `CommonComponents.TRANSFER_CONNECT_FAILED`: as `ConnectFailed`, for a `/transfer`.
+    TransferFailed,
+    /// `QuickPlay.ERROR_TITLE`: quick play's connection could not be opened.
+    QuickPlayFailed,
+}
+impl DisconnectTitle {
+    /// The title vanilla gives a connection that ended at `reached`. `ConnectScreen.startConnecting`
+    /// picks the connect thread's title (a transfer's, else quick play's, else `CONNECT_FAILED`);
+    /// once the socket is open, `ClientHandshakePacketListenerImpl.onDisconnect` picks only between
+    /// the transfer's and `CONNECT_FAILED`; after `handleLoginFinished` it is the connection lost.
+    pub fn after(reached: crate::net::Reached, transferred: bool, quick_play: bool) -> Self {
+        use crate::net::Reached;
+        match reached {
+            Reached::LoggedIn => Self::Lost,
+            _ if transferred => Self::TransferFailed,
+            Reached::Connecting if quick_play => Self::QuickPlayFailed,
+            Reached::Connecting | Reached::Login => Self::ConnectFailed,
+        }
+    }
+    /// The title in the player's language.
+    pub fn text(self) -> String {
+        let (key, fallback) = match self {
+            Self::Lost => ("disconnect.lost", "Connection Lost"),
+            Self::ConnectFailed => ("connect.failed", "Failed to connect to the server"),
+            Self::TransferFailed => (
+                "connect.failed.transfer",
+                "Connection failed while transferring to the server",
+            ),
+            Self::QuickPlayFailed => ("quickplay.error.title", "Failed to Quick Play"),
+        };
+        crate::lang::get_or(key, fallback)
+    }
+}
 
 /// What the title screen's Friends icon opens: the page a crate registered there
 /// (`Place::Title`), else Join a Friend when an invite code can be joined. None: it is inactive.
@@ -960,12 +1005,9 @@ impl Screen {
                 get("horizon.multiplayer.join_friend", "Join a Friend"),
             ),
             // DisconnectedScreen: its title and the reason.
-            Self::Disconnected { reason, .. } => ScreenInfo::new(
+            Self::Disconnected { title, reason, .. } => ScreenInfo::new(
                 "multiplayer/disconnected",
-                join(&[
-                    &get("disconnect.lost", "Connection Lost"),
-                    &reason_plain(reason),
-                ]),
+                join(&[&title.text(), &reason_plain(reason)]),
             ),
         }
     }
@@ -1476,6 +1518,7 @@ impl Screen {
                 );
             }
             Self::Disconnected {
+                title,
                 reason,
                 retry,
                 lines,
@@ -1487,12 +1530,7 @@ impl Screen {
                 let wrapped = wrap(&reason, (w.ceil() - 50.0).max(1.0), atlas);
                 lines.set(wrapped.len());
                 let l = disconnected_layout(h, wrapped.len(), retry.is_some());
-                centered(
-                    batch,
-                    &crate::lang::get_or("disconnect.lost", "Connection Lost"),
-                    l.title,
-                    rgba(170, 170, 170, 255),
-                );
+                centered(batch, &title.text(), l.title, rgba(170, 170, 170, 255));
                 for (i, line) in wrapped.iter().enumerate() {
                     centered(batch, line, l.message + i as f32 * 9.0, u32::MAX);
                 }
@@ -2474,6 +2512,7 @@ mod tests {
         };
         assert_eq!(at(&friend, 427.0, 253.0), [(113.0, 177.0), (113.0, 201.0)]);
         let lost = Screen::Disconnected {
+            title: DisconnectTitle::Lost,
             reason: Text::empty(),
             retry: None,
             lines: std::cell::Cell::new(1),
@@ -3020,6 +3059,7 @@ mod tests {
         let saves =
             std::env::temp_dir().join(format!("horizon-mp-disconnect-back-{}", std::process::id()));
         let lost = |to_title| Screen::Disconnected {
+            title: DisconnectTitle::Lost,
             reason: Text::literal("Disconnected"),
             retry: None,
             lines: std::cell::Cell::new(1),
@@ -3048,6 +3088,7 @@ mod tests {
         );
         let ((), _missed) = crate::lang::scoped(language, || {
             let translated = Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason: Text::translate("mymod.kicked", &[]),
                 retry: None,
                 lines: std::cell::Cell::new(1),
@@ -3058,12 +3099,79 @@ mod tests {
                 "Connexion perdue. Expulsé par le mod"
             );
             let plain = Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason: Text::literal("You were kicked"),
                 retry: None,
                 lines: std::cell::Cell::new(1),
                 to_title: false,
             };
             assert_eq!(plain.narration().title, "Connexion perdue. You were kicked");
+        });
+    }
+
+    /// #20899: `DisconnectedScreen`'s title names where the connection ended. Before the
+    /// socket opens it is `ConnectScreen.startConnecting`'s title (a transfer's, quick play's or
+    /// `connect.failed`); during the login `ClientHandshakePacketListenerImpl.onDisconnect`'s
+    /// (a transfer's or `connect.failed`); after `handleLoginFinished` the connection is lost.
+    #[test]
+    fn the_disconnect_title_names_where_the_connection_ended() {
+        use crate::net::Reached;
+        // en_us.json of 26.3.
+        let english = crate::lang::Language::of(
+            "en_us",
+            [
+                ("disconnect.lost".into(), "Connection Lost".into()),
+                (
+                    "connect.failed".into(),
+                    "Failed to connect to the server".into(),
+                ),
+                (
+                    "connect.failed.transfer".into(),
+                    "Connection failed while transferring to the server".into(),
+                ),
+                (
+                    "quickplay.error.title".into(),
+                    "Failed to Quick Play".into(),
+                ),
+            ],
+        );
+        let ((), _missed) = crate::lang::scoped(english, || {
+            let narrated = |reached, transferred, quick_play| {
+                Screen::Disconnected {
+                    title: DisconnectTitle::after(reached, transferred, quick_play),
+                    reason: Text::literal("Server is full"),
+                    retry: None,
+                    lines: std::cell::Cell::new(1),
+                    to_title: false,
+                }
+                .narration()
+                .title
+            };
+            let failed = "Failed to connect to the server. Server is full";
+            let transfer = "Connection failed while transferring to the server. Server is full";
+            let lost = "Connection Lost. Server is full";
+            for (reached, transferred, quick_play, expected) in [
+                (Reached::Connecting, false, false, failed),
+                (Reached::Connecting, true, false, transfer),
+                (Reached::Connecting, true, true, transfer),
+                (
+                    Reached::Connecting,
+                    false,
+                    true,
+                    "Failed to Quick Play. Server is full",
+                ),
+                (Reached::Login, false, false, failed),
+                (Reached::Login, false, true, failed),
+                (Reached::Login, true, false, transfer),
+                (Reached::LoggedIn, false, false, lost),
+                (Reached::LoggedIn, true, true, lost),
+            ] {
+                assert_eq!(
+                    narrated(reached, transferred, quick_play),
+                    expected,
+                    "{reached:?}, transferred {transferred}, quick play {quick_play}"
+                );
+            }
         });
     }
 
@@ -3091,6 +3199,7 @@ mod tests {
             let reason = Text::translate("mymod.kicked", &[]);
             assert_eq!(reason.plain(), "Expulsé par le mod");
             Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason,
                 retry: None,
                 lines: std::cell::Cell::new(1),

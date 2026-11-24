@@ -457,7 +457,7 @@ pub(super) fn start_game<'a>(
                 game.options.server.clone().unwrap_or_default(),
                 game.options.player_name(),
             );
-            game.connect_server(&address, &name)?;
+            game.connect_quick_play(&address, &name)?;
             if let Some(report) = std::env::var_os("HORIZON_NET_REPORT") {
                 game.run_net_harness(report.as_ref())?;
                 return Ok(None);

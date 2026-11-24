@@ -103,8 +103,13 @@ impl Game<'_> {
                 cookies,
                 lan,
                 realm,
+                quick_play,
             }) => {
-                self.connect_server_with_options(&address, &name, cookies, lan, realm)?;
+                if quick_play {
+                    self.connect_quick_play(&address, &name)?;
+                } else {
+                    self.connect_server_with_options(&address, &name, cookies, lan, realm)?;
+                }
             }
             Some(PendingWorldEntry::StudioReplay(path)) => {
                 let path_str = path.to_string_lossy().to_string();

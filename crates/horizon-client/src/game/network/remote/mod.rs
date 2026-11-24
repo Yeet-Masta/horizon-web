@@ -513,6 +513,12 @@ pub(super) struct Remote {
     /// pack's), from their synced data; `None` when the server has none.
     pub(super) enchantments: Option<Arc<horizon_client::enchant::Enchantments>>,
     pub(super) joined: bool,
+    /// The connection follows a `/transfer` (`ConnectScreen.startConnecting` with a
+    /// `TransferState`): a failed join is titled `connect.failed.transfer`.
+    pub(super) transferred: bool,
+    /// Quick play opened the connection (`QuickPlay.joinMultiplayerWorld`): one that never
+    /// opens is titled `quickplay.error.title`.
+    pub(super) quick_play: bool,
     /// `ServerReconfigScreen` is up since this tick.
     pub(super) reconfiguring: Option<u64>,
     /// `handleLogin` ran: vanilla's `Minecraft.player` exists from then on,
@@ -887,6 +893,9 @@ impl Game<'_> {
     }
     pub(super) fn connect_server(&mut self, address: &str, name: &str) -> Result<()> {
         self.connect_server_body(address, name)
+    }
+    pub(super) fn connect_quick_play(&mut self, address: &str, name: &str) -> Result<()> {
+        self.connect_quick_play_body(address, name)
     }
     pub(super) fn connect_server_with_cookies(
         &mut self,

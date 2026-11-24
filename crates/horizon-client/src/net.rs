@@ -32,7 +32,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
     thread::JoinHandle,
     time::Duration,
@@ -248,6 +248,30 @@ pub struct Session {
     recorder: RecorderSlot,
     /// This connection's number, new for each one ([`Session::serial`]).
     serial: u64,
+    /// How far the connection got ([`Reached`]), set by its network thread.
+    reached: Arc<AtomicU8>,
+}
+
+/// How far a connection got before it ended; the disconnect screen's title says which
+/// listener saw the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reached {
+    /// Resolving the address or opening the socket: `ConnectScreen`'s connect thread.
+    Connecting,
+    /// The socket is open and the login has not finished: `ClientHandshakePacketListenerImpl`.
+    Login,
+    /// `ClientboundLoginFinishedPacket` came: the configuration and play listeners
+    /// (`ClientCommonPacketListenerImpl`).
+    LoggedIn,
+}
+impl Reached {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Connecting,
+            1 => Self::Login,
+            _ => Self::LoggedIn,
+        }
+    }
 }
 /// The next [`Session::serial`].
 static NEXT_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -261,6 +285,10 @@ impl Session {
     /// is kept by id goes when it changes (`horizon_hooks::players::PlayerModels::connection`).
     pub fn serial(&self) -> u64 {
         self.serial
+    }
+    /// How far the connection got: read after its `Event::Disconnected`, it says where it ended.
+    pub fn reached(&self) -> Reached {
+        Reached::from_u8(self.reached.load(Ordering::Acquire))
     }
     /// The negotiated wire release, once the connection has been established.
     pub fn server_version(&self) -> horizon_protocol::adapter::ServerVersion {
@@ -370,6 +398,8 @@ impl Session {
             far: Arc::new(crate::lod_net::Inbox::default()),
             recorder: Arc::new(Mutex::new(None)),
             serial: next_serial(),
+            // A recording plays from its world: what ends it ends a world, not a login.
+            reached: Arc::new(AtomicU8::new(Reached::LoggedIn as u8)),
         }
     }
     fn start(
@@ -406,6 +436,8 @@ impl Session {
         let thread_far = far.clone();
         let recorder = Arc::new(Mutex::new(None));
         let thread_recorder = recorder.clone();
+        let reached = Arc::new(AtomicU8::new(Reached::Connecting as u8));
+        let thread_reached = reached.clone();
         let (address_owned, name_owned) = (address.to_owned(), name.to_owned());
         // Payload handlers of wasm mods run on this thread (the client's network root).
         let thread = horizon_guest_stack::spawn("horizon-net".into(), move || {
@@ -429,6 +461,7 @@ impl Session {
                     lan,
                     &thread_recorder,
                     &thread_payloads,
+                    &thread_reached,
                 )
             });
             thread_payloads.close();
@@ -465,6 +498,7 @@ impl Session {
             far,
             recorder,
             serial: next_serial(),
+            reached,
         }
     }
     /// Validate an untrusted mod packet once, reserve its physical writer credit,
@@ -1030,6 +1064,7 @@ fn run(
     lan: bool,
     recorder: &RecorderSlot,
     payloads: &Arc<crate::raw_payloads::Transport>,
+    reached: &AtomicU8,
 ) -> Result<Reason, Reason> {
     let (host, port, mut c) = if let Some(pipe) = local {
         (address.to_owned(), 0, Connection::local(pipe))
@@ -1083,6 +1118,9 @@ fn run(
         }
         (host, port, c)
     };
+    // ConnectScreen's connect thread hands the open connection to
+    // ClientHandshakePacketListenerImpl: an end from here on is a failed login.
+    reached.store(Reached::Login as u8, Ordering::Release);
     *shared_counters.lock().unwrap() = Some(c.reader.counters.clone());
     let e = |e: horizon_protocol::Error| Reason::plain(connection_lost(e, lang));
     c.send(
@@ -1114,6 +1152,8 @@ fn run(
         match login::Clientbound::decode(id, &payload).map_err(e)? {
             login::Clientbound::Compression(p) => c.set_compression(p.threshold),
             login::Clientbound::LoginFinished(p) => {
+                // handleLoginFinished: the configuration listener takes over.
+                reached.store(Reached::LoggedIn as u8, Ordering::Release);
                 c.send(&login::Serverbound::LoginAcknowledged(Empty).encode())
                     .map_err(e)?;
                 break p.profile;
@@ -3444,6 +3484,7 @@ mod tests {
                 far: Arc::default(),
                 recorder: Arc::new(Mutex::new(None)),
                 serial: next_serial(),
+                reached: Arc::default(),
             };
             let started = std::time::Instant::now();
             if explicit_disconnect {
@@ -3857,6 +3898,7 @@ mod tests {
             far: Arc::default(),
             recorder: Arc::new(Mutex::new(None)),
             serial: next_serial(),
+            reached: Arc::default(),
         };
         let mut server = Connection::local(server);
         let payload = |size| {
@@ -3901,6 +3943,7 @@ mod tests {
             far: Arc::default(),
             recorder: Arc::new(Mutex::new(None)),
             serial: next_serial(),
+            reached: Arc::default(),
         };
         let (thread_writer, thread_configuring, thread_recorder) = (
             session.writer.clone(),
@@ -4203,6 +4246,7 @@ mod tests {
             far: Arc::default(),
             recorder: Arc::new(Mutex::new(None)),
             serial: next_serial(),
+            reached: Arc::default(),
         };
         let recorder = TestRecorder::default();
         session.start_recording(recorder.clone(), |_| {});
@@ -4949,5 +4993,86 @@ mod tests {
             assert!(thread.join().unwrap().is_err());
             std::fs::remove_dir_all(root).unwrap();
         });
+    }
+
+    /// The disconnect screen's title reads how far the connection got (#20899): an address
+    /// that never opens ends in `ConnectScreen`'s connect thread, a login kick in
+    /// `ClientHandshakePacketListenerImpl.onDisconnect`, and a kick in configuration, after
+    /// `handleLoginFinished`, in `ClientCommonPacketListenerImpl`.
+    #[test]
+    fn a_session_reports_how_far_it_got_before_it_ended() {
+        let (root, data) = empty_item_data("reached");
+        let ended = |session: &Session| loop {
+            let receipt = session
+                .events
+                .recv_timeout_owned(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("the session did not end"));
+            if let Event::Disconnected { .. } = receipt.into_parts().0 {
+                break session.reached();
+            }
+        };
+        let lang = Arc::new(Language::new());
+        let unparsable = Session::connect(
+            "",
+            "Probe",
+            None,
+            cfg::ClientInformation::new(2),
+            lang.clone(),
+            Arc::clone(&data),
+        );
+        assert_eq!(ended(&unparsable), Reached::Connecting);
+        let login = |finish: bool| {
+            let (client, server) = horizon_protocol::connection::Pipe::pair();
+            let session = Session::connect_local(
+                client,
+                "Probe",
+                None,
+                cfg::ClientInformation::new(2),
+                lang.clone(),
+                Arc::clone(&data),
+            );
+            let mut server = Connection::local(server);
+            server.recv().unwrap(); // the handshake
+            server.recv().unwrap(); // the login hello
+            if finish {
+                server
+                    .send(
+                        &login::Clientbound::LoginFinished(login::LoginFinished {
+                            profile: login::GameProfile {
+                                uuid: 1,
+                                name: "Probe".into(),
+                                properties: vec![],
+                            },
+                            session: 1,
+                        })
+                        .encode(),
+                    )
+                    .unwrap();
+                server.recv().unwrap(); // LoginAcknowledged
+                server
+                    .send(
+                        &cfg::Clientbound::Disconnect(cfg::Disconnect {
+                            reason: Tag::String("Not now".into()),
+                        })
+                        .encode(),
+                    )
+                    .unwrap();
+            } else {
+                server
+                    .send(
+                        &login::Clientbound::Disconnect(login::Disconnect {
+                            reason_json: r#"{"text":"Not white-listed"}"#.into(),
+                        })
+                        .encode(),
+                    )
+                    .unwrap();
+            }
+            let reached = ended(&session);
+            drop(server);
+            reached
+        };
+        assert_eq!(login(false), Reached::Login);
+        assert_eq!(login(true), Reached::LoggedIn);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

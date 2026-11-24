@@ -66,6 +66,7 @@ fn quick_play_server(saves: &std::path::Path, address: &str, name: String) -> Pe
         cookies: None,
         lan: false,
         realm: false,
+        quick_play: true,
     }
 }
 
@@ -274,6 +275,7 @@ impl StartupMenu {
                 cookies: None,
                 lan,
                 realm,
+                quick_play: false,
             },
             _ => return,
         };

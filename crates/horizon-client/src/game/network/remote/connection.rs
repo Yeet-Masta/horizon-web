@@ -78,6 +78,25 @@ impl Game<'_> {
     pub(super) fn connect_server_body(&mut self, address: &str, name: &str) -> Result<()> {
         self.connect_server_with_cookies(address, name, None)
     }
+    /// `QuickPlay.joinMultiplayerWorld`: `connect_server`, the connection marked as quick play's
+    /// for its disconnect screen's title (`ConnectScreen.startConnecting`'s `isQuickPlay`).
+    pub(super) fn connect_quick_play_body(&mut self, address: &str, name: &str) -> Result<()> {
+        if self.defer_world_entry(super::super::PendingWorldEntry::Server {
+            address: address.to_owned(),
+            name: name.to_owned(),
+            cookies: None,
+            lan: false,
+            realm: false,
+            quick_play: true,
+        })? {
+            return Ok(());
+        }
+        self.connect_server(address, name)?;
+        if let Some(remote) = self.remote.as_mut() {
+            remote.quick_play = true;
+        }
+        Ok(())
+    }
     /// `connect_server` carrying a transfer's stored server cookies
     /// (`TransferState`); None on an ordinary join.
     pub(super) fn connect_server_with_cookies_body(
@@ -107,6 +126,7 @@ impl Game<'_> {
             cookies: cookies.clone(),
             lan,
             realm,
+            quick_play: false,
         })? {
             return Ok(());
         }
@@ -338,6 +358,8 @@ impl Game<'_> {
             tags: None,
             enchantments: None,
             joined: false,
+            transferred,
+            quick_play: false,
             reconfiguring: None,
             logged_in: false,
             entity_id: 0,
@@ -590,6 +612,8 @@ impl Game<'_> {
             tags: None,
             enchantments: None,
             joined: false,
+            transferred: false,
+            quick_play: false,
             reconfiguring: None,
             logged_in: true,
             logged_out: false,
@@ -741,6 +765,14 @@ impl Game<'_> {
     }
 
     fn leave_server_with(&mut self, reason: Option<Text>, transferring: bool) -> Result<()> {
+        // DisconnectedScreen's title: where the connection was when it ended.
+        let ended = self.remote.as_ref().map_or_else(Default::default, |r| {
+            horizon_client::multiplayer::DisconnectTitle::after(
+                r.session.reached(),
+                r.transferred,
+                r.quick_play,
+            )
+        });
         self.interrupt_export_for_world_exit("export interrupted because the client disconnected");
         // A replay ends with the session it plays on: one that owns its session, left without
         // a reason, closes as Escape closes it, which leaves that session; otherwise the replay
@@ -882,6 +914,7 @@ impl Game<'_> {
         }
         title.mode = horizon_client::title::Mode::Multiplayer(match reason {
             Some(reason) => horizon_client::multiplayer::Screen::Disconnected {
+                title: ended,
                 reason,
                 retry: None,
                 lines: std::cell::Cell::new(1),
