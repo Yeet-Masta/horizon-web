@@ -12,7 +12,7 @@ use horizon_platform::server_files::properties::{
     DIFFICULTIES, GAME_MODES, ServerProperties, SystemEntropy,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io, path::Path};
 
 pub const FILE: &str = "server.toml";
 
@@ -1243,44 +1243,80 @@ fn replace_with(path: &Path, text: &str, mut before_publish: impl FnMut()) -> st
     }
 }
 
-/// Puts the staged file `tmp` at `path` only if nothing is there yet: `Ok(false)` when something
-/// is, and `tmp` is left for the caller to remove. A hard link fails when its name exists, where a
-/// rename would replace it. A file system without hard links gets the file created at `path` only
-/// if it is absent (`create_new`) and `tmp`'s text copied into it, so nothing there is replaced.
-fn publish_new(tmp: &Path, path: &Path) -> std::io::Result<bool> {
-    match std::fs::hard_link(tmp, path) {
+/// Publishes the complete staged file at `path` only if the name is free. If a file appeared
+/// there, returns `Ok(false)` and leaves `tmp` for the caller to remove.
+fn publish_new(tmp: &Path, path: &Path) -> io::Result<bool> {
+    let link_error = match std::fs::hard_link(tmp, path) {
         Ok(()) => {
             let _ = std::fs::remove_file(tmp);
-            Ok(true)
+            return Ok(true);
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(_) => {
-            let mut file = match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(file) => file,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-                Err(e) => return Err(e),
-            };
-            let copied = std::fs::File::open(tmp)
-                .and_then(|mut src| std::io::copy(&mut src, &mut file))
-                .and_then(|_| file.sync_all());
-            drop(file);
-            match copied {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(tmp);
-                    Ok(true)
-                }
-                // Only the file this call created is removed.
-                Err(e) => {
-                    let _ = std::fs::remove_file(path);
-                    Err(e)
-                }
-            }
+        Err(e) => e,
+    };
+    if link_error.kind() == io::ErrorKind::AlreadyExists {
+        return Ok(false);
+    }
+
+    // Some filesystems lack hard links. The fallback must still introduce the complete file in
+    // one step, since even a briefly empty server.toml can be read as defaults.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let published = rename_new(tmp, path);
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let published: io::Result<()> = Err(link_error);
+
+    match published {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn rename_new(tmp: &Path, path: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, tmp, CWD, path, RenameFlags::NOREPLACE).map_err(io::Error::from)
+}
+
+/// Moves between two names in the same directory, including on filesystems without hard links.
+#[cfg(windows)]
+fn rename_new(tmp: &Path, path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+    let from = windows_rename_path(tmp)?;
+    let to = windows_rename_path(path)?;
+    // SAFETY: both buffers are NUL-terminated and live for the call. Zero flags forbid
+    // replacement and cross-volume copying.
+    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_rename_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::Foundation::MAX_PATH;
+
+    // Canonicalization can require access to every ancestor on an SMB share, even when a rename
+    // in the target directory is permitted. Resolve the path lexically instead.
+    let path = std::path::absolute(path)?;
+    let mut wide: Vec<_> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // The legacy limit counts the terminating NUL. Existing verbatim paths already bypass it.
+    if wide.len() >= MAX_PATH as usize
+        && let Some(Component::Prefix(prefix)) = path.components().next()
+    {
+        match prefix.kind() {
+            Prefix::Disk(_) => drop(wide.splice(..0, r"\\?\".encode_utf16())),
+            Prefix::UNC(..) => drop(wide.splice(..2, r"\\?\UNC\".encode_utf16())),
+            _ => {}
         }
     }
+    wide.push(0);
+    Ok(wide)
 }
 
 /// Sets one typed setting in `server.toml` (`whitelist on`), keeping the owner's comments.
@@ -1454,6 +1490,81 @@ mod tests {
         // No temporary file of either attempt stays.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn exclusive_rename_publishes_the_staged_file_without_clobbering() {
+        let dir = std::env::temp_dir().join(format!("horizon-rename-new-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let staged = dir.join("staged.tmp");
+        let path = dir.join(FILE);
+        let first = b"[server]\nport = 25570\n";
+        let second = b"[server]\nport = 25571\n";
+
+        std::fs::write(&staged, first).unwrap();
+        rename_new(&staged, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        assert!(!staged.try_exists().unwrap());
+
+        std::fs::write(&staged, second).unwrap();
+        let error = rename_new(&staged, &path).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        assert_eq!(std::fs::read(&staged).unwrap(), second);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_rename_paths_support_long_drive_and_unc_paths() {
+        let suffix = format!("{}server.toml", r"directory\".repeat(30));
+        for (path, expected) in [
+            (r"C:\", r"\\?\C:\"),
+            (r"\\server\share\", r"\\?\UNC\server\share\"),
+            (r"\\?\UNC\server\share\", r"\\?\UNC\server\share\"),
+        ] {
+            let path = format!("{path}{suffix}");
+            let expected: Vec<_> = format!("{expected}{suffix}")
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            assert_eq!(windows_rename_path(Path::new(&path)).unwrap(), expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_publication_never_exposes_the_destination() {
+        use rustix::fs::inotify;
+        use std::mem::MaybeUninit;
+
+        let dir =
+            std::env::temp_dir().join(format!("horizon-publish-failure-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let watch = inotify::init(inotify::CreateFlags::NONBLOCK).unwrap();
+        inotify::add_watch(
+            &watch,
+            &dir,
+            inotify::WatchFlags::CREATE | inotify::WatchFlags::MOVED_TO,
+        )
+        .unwrap();
+
+        // A missing staged file forces both the hard link and the fallback to fail.
+        let path = dir.join(FILE);
+        let error = publish_new(&dir.join("missing.tmp"), &path).unwrap_err();
+        let mut buffer = [MaybeUninit::uninit(); 256];
+        let mut events = inotify::Reader::new(&watch, &mut buffer);
+        let event = events.next();
+        std::fs::remove_dir(&dir).unwrap();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        // A directory listing alone misses a file briefly created and then removed on error.
+        assert!(
+            matches!(event, Err(rustix::io::Errno::WOULDBLOCK)),
+            "{event:?}"
+        );
     }
 
     /// `server.toml` is checked as `config set` checks `backups.keep`: 0 would make the supervisor delete

@@ -2770,6 +2770,7 @@ dependencies = [
  "horizon-core",
  "horizon-platform",
  "horizon-server-files",
+ "rustix 1.1.6",
  "serde",
  "toml",
  "toml_edit",
