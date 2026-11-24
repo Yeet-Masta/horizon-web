@@ -167,6 +167,10 @@ pub fn register(d: &mut Dispatcher, root: usize) {
     for word in ["add", "remove"] {
         let w = d.literal(targets, word);
         let name = d.argument(w, "name", ArgType::Word);
+        // TagCommand: only `remove` completes from the targets' own tags.
+        if word == "remove" {
+            d.suggests(name, super::Suggests::EntityTags);
+        }
         d.executes(
             name,
             if word == "add" {

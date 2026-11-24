@@ -300,6 +300,8 @@ impl Game<'_> {
         if self.hanging_place_cancelled("minecraft:painting", pos) {
             return true;
         }
+        // The item's `entity_data` is a compound `Entity.load` reads, `Tags` included.
+        Self::normalize_loaded_tags(&mut raw);
         self.persist.raw.insert(candidate.id, raw);
         let (lo, hi) = candidate.bounds();
         let at = [

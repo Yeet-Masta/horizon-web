@@ -335,3 +335,28 @@ fn a_plain_players_tree_and_completions_leave_out_the_paths_they_may_not_run() {
         "with the level, the path parses and runs"
     );
 }
+
+/// `/execute run` parses `targets` into a child context. The server's `tag remove` completion
+/// resolves that context, so it offers the pigs' tags, not the root context's implied player.
+#[test]
+#[ignore = "daily"]
+fn a_guests_tag_remove_completes_from_the_parsed_targets() {
+    let mut resources = None;
+    let (mut game, rx) = game_with_guest(&mut resources, "Alex");
+    assert!(game.run_command(
+        "summon minecraft:pig 4.5 64 4.5 {UUID:[I;9,0,0,1],NoAI:1b,Tags:[\"b\",\"a\",\"aa\"]}"
+    ));
+    let uuid = game.lan.as_ref().unwrap().hub.guests[0].uuid;
+    {
+        let host = game.lan.as_mut().unwrap();
+        host.hub.ops.insert(uuid, 4);
+        host.hub.resend_commands();
+    }
+    let mut names = suggestions(
+        &mut game,
+        &rx,
+        "execute run tag @e[type=minecraft:pig,limit=1] remove ",
+    );
+    names.sort();
+    assert_eq!(names, ["a", "aa", "b"]);
+}

@@ -1,5 +1,30 @@
 use super::{args::*, vanilla, *};
 
+#[test]
+fn tag_remove_local_completion_does_not_wait_for_server() {
+    let mut tree = vanilla::game_dispatcher().clone();
+    let input = "tag @s remove ";
+    let registries = reg();
+    let parse = tree.parse(input, &registries);
+    let (_, suggestions, ask) = tree.client_suggestions_asking(&parse, input.len(), &registries);
+    assert!(!ask);
+    assert!(suggestions.is_empty());
+    let (parent, _, _) = parse.context.suggestion_context(input.len());
+    assert!(
+        tree.smart_usage(parent, registries.permission)
+            .iter()
+            .any(|(_, usage)| usage == "<name>")
+    );
+
+    let name = tree.nodes[parent].children[0];
+    tree.nodes[name].suggests = Some(Suggests::AskServer);
+    let parse = tree.parse(input, &registries);
+    assert!(
+        tree.client_suggestions_asking(&parse, input.len(), &registries)
+            .2
+    );
+}
+
 fn reg() -> Registries {
     let mut r = Registries {
         permission: 4,

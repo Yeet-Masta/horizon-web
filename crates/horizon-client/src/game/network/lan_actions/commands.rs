@@ -318,12 +318,10 @@ impl Game<'_> {
         let own_banned_ips = std::mem::replace(&mut reg.banned_ips, banned_ips);
         let own_whitelisted = std::mem::replace(&mut reg.whitelisted, whitelisted);
         let own_triggers = std::mem::replace(&mut reg.trigger_objectives, triggers);
-        let parse = d.parse(command, &self.ui.registries);
         // Commands.sendCommands prunes the tree a player's client completes from; the answer the
         // server sends follows the same test, so a child literal of a path the sender may not run
         // is not offered either (Bukkit hides it; brigadier alone lists every child).
-        let ((start, end), mut suggestions) =
-            d.client_suggestions(&parse, command.len(), &self.ui.registries);
+        let ((start, end), mut suggestions) = self.guest_command_suggestions(conn, &d, command);
         self.native_tab_complete(
             player_uuid,
             &player_name,

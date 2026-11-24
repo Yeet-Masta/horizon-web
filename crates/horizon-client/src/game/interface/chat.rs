@@ -10,7 +10,10 @@ use horizon_client::{
         Chat, ChatAbilities, ChatAction, ChatScreen, ChatSource, ChatVisibility, Commands,
         QUEUE_EXPAND_ID, SYSTEM_INDICATOR, normalize_chat_message,
     },
-    command::{ArgType, Dispatcher, MOD_COMMAND, Registries},
+    command::{
+        ArgType, Context, Dispatcher, MOD_COMMAND, Registries, Suggestion, SuggestionsBuilder,
+        Suggests,
+    },
     gamerules::GameRules,
     hud::HudBatch,
     screen_draw::Measure,
@@ -33,6 +36,21 @@ pub(super) fn chat_tree(
         Some(server) => &server.chat_tree,
         None => horizon_client::command::vanilla::game_dispatcher(),
     }
+}
+/// `SharedSuggestionProvider.suggest` of `TagCommand.getTags`: the tags
+/// `SharedSuggestionProvider.matchesSubStr` matches the word at `start`.
+pub(in crate::game) fn tag_suggestions(
+    command: &str,
+    start: usize,
+    tags: &[String],
+) -> Vec<Suggestion> {
+    let mut builder = SuggestionsBuilder::new(command, start);
+    builder.suggest_matching(
+        tags.iter()
+            .map(String::as_str)
+            .filter(|tag| tag.encode_utf16().count() <= 32767),
+    );
+    builder.out
 }
 /// The arguments of a typed `/profiler` the client answers itself: only when the chat tree's `profiler` is Horizon's, else the server or mod that owns the name runs it.
 fn horizon_profiler_args<'a>(
@@ -984,6 +1002,54 @@ impl Game<'_> {
                 uuid: remote.profile,
                 name: remote.profile_name.clone(),
             });
+    }
+    /// ServerCommandSuggestionsProvider: the completions of a guest's command.
+    /// `TagCommand`'s `tag remove` completes from `getTags`, the tags of the
+    /// parsed `targets`, which only the server can resolve and does as the
+    /// guest (`EntityArgument.getEntities(c, "targets")`).
+    pub(super) fn guest_command_suggestions(
+        &mut self,
+        conn: u32,
+        d: &Dispatcher,
+        command: &str,
+    ) -> ((usize, usize), Vec<Suggestion>) {
+        let parse = d.parse(command, &self.ui.registries);
+        let ((start, end), mut suggestions) =
+            d.client_suggestions(&parse, command.len(), &self.ui.registries);
+        let mut range = (start, end);
+        if matches!(
+            d.suggests_at(&parse, command.len(), self.ui.registries.permission),
+            Some(Suggests::EntityTags)
+        ) {
+            let (_, at, context) = parse.context.suggestion_context(command.len());
+            let at = at.min(command.len());
+            let tags = self
+                .as_guest(conn, |g| g.tag_suggestion_values(context))
+                .unwrap_or_default();
+            let tags = tag_suggestions(command, at, &tags);
+            if !tags.is_empty() {
+                suggestions.extend(tags);
+                // `Suggestions.merge`: the word the tags complete, not the
+                // empty range an answer-less local list leaves.
+                range = (at, command.len());
+            }
+        }
+        (range, suggestions)
+    }
+    /// `TagCommand.getTags`: every tag of the parsed `targets`, each once.
+    pub(in crate::game) fn tag_suggestion_values(&mut self, ctx: &Context) -> Vec<String> {
+        let Ok(targets) = self.entities(ctx, "targets", false) else {
+            return Vec::new();
+        };
+        let mut tags: Vec<String> = Vec::new();
+        for target in targets {
+            for tag in self.tags_of(target) {
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        tags
     }
     /// `ChatComponent.createScreen`: T or / opens the chat with the draft kept
     /// last time, when this method can restore it (a command draft only for

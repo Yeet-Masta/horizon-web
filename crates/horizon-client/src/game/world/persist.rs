@@ -1184,10 +1184,17 @@ impl Game<'_> {
             self.persist.unknown.entry(key).or_default().push(tag);
         }
     }
-
-    /// `Entity.load`: adopt the bounded TAG_LIST_CODEC input as a set.
-    /// Keep that adopted Mob state in the retained compound for commands and saves.
+    /// `Entity.load`: adopt the bounded TAG_LIST_CODEC input as a set
+    /// (`this.tags.clear(); input.read("Tags", TAG_LIST_CODEC).ifPresent(this.tags::addAll)`,
+    /// Entity.java:2230-2231, into the `Set<String> tags` of :286).
+    /// Keep that adopted state in the retained compound for commands and saves.
     pub(in crate::game) fn normalize_loaded_mob_tags(tag: &mut Tag) {
+        Self::normalize_loaded_tags(tag);
+    }
+
+    /// [`Self::normalize_loaded_mob_tags`] for every kind that keeps `Tags`, not
+    /// only a mob: the same `Entity.load` set for a retained raw compound.
+    pub(in crate::game) fn normalize_loaded_tags(tag: &mut Tag) {
         let Tag::Compound(raw) = tag else {
             return;
         };
@@ -1679,7 +1686,9 @@ impl Game<'_> {
             map.insert("TicksFrozen".into(), Tag::Int(ticks as i32));
         }
         if !map.is_empty() {
-            self.persist.raw.insert(id, Tag::Compound(map));
+            let mut kept = Tag::Compound(map);
+            Self::normalize_loaded_tags(&mut kept);
+            self.persist.raw.insert(id, kept);
         }
     }
     /// `Entity.isSilent`: mobs model it directly; other entities retain it
@@ -1708,6 +1717,7 @@ impl Game<'_> {
         if let Tag::Compound(c) = &mut tag {
             c.remove(&"Team".into());
         }
+        Self::normalize_loaded_tags(&mut tag);
         self.persist.raw.insert(id, tag);
     }
     /// The UUID entity `id` was loaded with, and the attachments `tag` saved under it.
