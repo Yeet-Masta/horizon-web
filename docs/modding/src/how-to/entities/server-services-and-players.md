@@ -381,6 +381,7 @@ For mods that copy or edit a player whole (a player-data sync, `/invsee`, `/ende
 |---|---|
 | `inventory_slots(host)` | The non-empty slots by `Inventory`'s numbers, lowest first: 0 to 35 the main inventory (0 to 8 the hotbar), 36 feet, 37 legs, 38 chest, 39 head, 40 off hand, 41 body, 42 saddle. `None` when no online player is behind the handle. |
 | `set_inventory_slot(host, slot, stack)` | `Inventory.setItem`: `None` empties the slot; there is no item check, so a worn slot takes any item. The client is sent the slot with the tick's inventory sync, and an open inventory menu shows the written stack. Returns `Result<(), PlayerDataRefusal>`; each refusal writes nothing: `Stale` (no online player), `Client`, `Dead`, `SlotOutOfRange { slot, last: 42 }` (never a panic) and `Stack(StackWriteError)` (a count or damage the item does not allow, an item the world lacks). |
+| `update_inventory_slot(host, slot, stack)` | The slot's own stack changed in place, as code edits it (an energy item charged in an armour slot): when the slot holds the same item, it takes `stack` with no equip sound and no equip game event, so a worn stack rewritten every tick is not heard each tick; attribute modifiers and the client's slot follow. Another item or an empty slot is an equip, written as `set_inventory_slot` writes it. Refuses as `set_inventory_slot` does. |
 | `ender_chest(host)` / `set_ender_chest_slot(host, slot, stack)` | The same pair for the 27 ender chest slots, 0 to 26, with `SlotOutOfRange { last: 26 }`; an open ender chest menu shows the written stack. |
 | `give_stack(host, stack)` | Gives one stack as `/give` does: matching stacks, then empty slots, and what does not fit is thrown from the player's eyes for that player alone, with no pickup delay. Refuses with `Stale`, `Client`, `Dead` or `Stack`, giving nothing. |
 | `persistent_data(host)` / `set_persistent_data(host, data)` | The compound mods keep on a player (NeoForge's `getPersistentData`), saved with the player under `NeoForgeData`; an empty compound removes it. It is never sent to a client and a change raises no notification. On a death respawn and on the first exit from the End only its `PlayerPersisted` sub-compound is carried over, whatever its type, and every other key is lost; dimension changes, later End exits and teleports keep all of it. Refuses with `Stale`, `Client`, `Dead` and `TooDeep` (data 512 levels deep or more in the player's file). For ports; new mods use attachments. |
@@ -391,8 +392,8 @@ A stack in an inventory slot, the ender chest or `give_stack` keeps all its comp
 Player inventory writes use vanilla numbers: 0 to 35 main (0 to 8 hotbar),
 36 to 39 armour feet to head, 40 offhand, 41 body, 42 saddle.
 `ItemPlace::PlayerSlot` uses 100 to 103 for armour and -106 for offhand.
-The inventory menu has no slot for body or saddle. All four player data writes
-(`set_inventory_slot`, `set_ender_chest_slot`, `give_stack`, `set_persistent_data`)
+The inventory menu has no slot for body or saddle. The player data writes
+(`set_inventory_slot` and `update_inventory_slot`, `set_ender_chest_slot`, `give_stack`, `set_persistent_data`)
 are undone by an open transaction abort; equipment effects and overflow drops
 wait for the outermost commit.
 

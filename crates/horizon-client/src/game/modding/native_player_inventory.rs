@@ -99,4 +99,87 @@ impl Game<'_> {
             Err(PlayerDataRefusal::Stale)
         }
     }
+
+    /// `PlayerRef::update_inventory_slot`: the slot's stack changed in place when it holds the
+    /// same item; else the write is `player_set_inventory_slot`'s.
+    pub(super) fn player_update_inventory_slot(
+        &mut self,
+        player: PlayerRef,
+        slot: u32,
+        stack: ItemStack,
+    ) -> Result<(), PlayerDataRefusal> {
+        self.player_write_gate(player)?;
+        let target = inventory_slot(slot).ok_or(PlayerDataRefusal::SlotOutOfRange {
+            slot,
+            last: SLOTS - 1,
+        })?;
+        let stack = Some(stack).filter(|s| s.count > 0);
+        let mut set = false;
+        let ran = self.native_as_player_handle(player, |game| {
+            let in_place = stack.as_ref().is_some_and(|new| {
+                game.slot_get(&target)
+                    .is_some_and(|old| old.count > 0 && old.item == new.item)
+            });
+            set = if in_place {
+                game.slot_set_in_place(&target, stack)
+            } else {
+                game.slot_set(&target, stack)
+            };
+            if set && game.player.is_some() {
+                game.after_commit(super::transactions::After::InventoryTrigger(player.uuid()));
+            }
+        });
+        if ran && set {
+            Ok(())
+        } else {
+            Err(PlayerDataRefusal::Stale)
+        }
+    }
+
+    /// Writes `stack` over the same item in `target` as code editing the slot's own stack does:
+    /// an equipment slot (`EntityEquipment.set`) plays no equip sound and posts no equip game
+    /// event, which are `setItemSlot`'s `onEquipItem`; armour's and the offhand's attribute
+    /// modifiers follow, at the root commit in a transaction. Any other slot is written as
+    /// `slot_set` writes it.
+    fn slot_set_in_place(&mut self, target: &Slot, stack: Option<ItemStack>) -> bool {
+        match target {
+            Slot::Armor(i) => {
+                if *i >= self.armor.len() {
+                    return false;
+                }
+                let uuid = self.journaled_actor();
+                self.armor[*i] = stack;
+                self.follow_equipment(uuid);
+            }
+            Slot::Offhand => {
+                let uuid = self.journaled_actor();
+                self.stop_use_replaced(crate::game::shield::OFFHAND_SLOT, stack.as_ref());
+                self.offhand = stack;
+                self.follow_equipment(uuid);
+            }
+            Slot::Equipment(i) => {
+                self.journaled_actor();
+                self.equipment.set(*i, stack);
+            }
+            other => return self.slot_set(other, stack),
+        }
+        true
+    }
+
+    /// The equipment attribute modifiers of player `uuid` follow a write in place: at once, or
+    /// at the root commit inside a transaction.
+    fn follow_equipment(&mut self, uuid: u128) {
+        if self.transactions.is_empty() {
+            self.apply_equipment();
+        } else {
+            self.after_commit(super::transactions::After::PlayerEquipment(uuid));
+        }
+    }
+
+    /// The acting player, journalled for the open transaction as `slot_set` does.
+    fn journaled_actor(&mut self) -> u128 {
+        let uuid = self.native_acting_id();
+        self.journal_player(uuid);
+        uuid
+    }
 }

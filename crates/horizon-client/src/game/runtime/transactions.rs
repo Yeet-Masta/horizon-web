@@ -295,6 +295,9 @@ pub(super) enum After {
     Effect(DeferredEffect),
     /// `Block.popResource`.
     Drop([i32; 3], ItemStack),
+    /// The equipment attribute modifiers of the player with this UUID, after a write in place
+    /// that skipped `onEquipItem` (`update_inventory_slot`).
+    PlayerEquipment(u128),
     /// `Player.drop(stack, false)` by the player with this UUID: what no longer fits.
     PlayerDrop(u128, ItemStack),
     GivePickup(u128, ItemStack),
@@ -1058,6 +1061,9 @@ impl Game<'_> {
                     g.player_equipped(&slot, stack.as_ref());
                     g.apply_equipment();
                 });
+            }
+            After::PlayerEquipment(uuid) => {
+                self.native_as_player(uuid, |g| g.apply_equipment());
             }
             After::PlayerDrop(uuid, stack) => {
                 // A player who left meanwhile drops nothing; their inventory had changed for good.

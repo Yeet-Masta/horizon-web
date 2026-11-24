@@ -1463,6 +1463,25 @@ pub trait PlayersBackendMut {
         stack: Option<ItemStack>,
     ) -> Result<(), PlayerDataRefusal>;
     /// Side: server.
+    /// The stack in inventory slot `slot` (`player_inventory_slots`' numbers) changed in place,
+    /// as vanilla's and NeoForge mods' code edits the slot's own stack (`ItemStack.set`,
+    /// `hurtAndBreak`, an energy item being charged in an armour slot): when the slot holds the
+    /// same item as `stack`, the slot takes `stack` with no equip sound and no equip game event,
+    /// those being `setItemSlot`'s `onEquipItem`, so a worn stack rewritten every tick is not
+    /// heard or felt by sculk sensors every tick; its attribute modifiers and the client's slot
+    /// follow as `player_set_inventory_slot`'s do. A slot that holds another item or nothing is
+    /// not a change in place: `stack` goes in as `player_set_inventory_slot` puts it, equip
+    /// sound and game event included. Refuses as `player_set_inventory_slot` does. An open
+    /// transaction journals this write; an abort restores the previous value, and the
+    /// equipment modifiers wait for the outermost commit.
+    #[access(WorldOnly)]
+    fn player_update_inventory_slot(
+        &mut self,
+        player: PlayerRef,
+        slot: u32,
+        stack: ItemStack,
+    ) -> Result<(), PlayerDataRefusal>;
+    /// Side: server.
     /// `PlayerEnderChestContainer.setItem(slot, stack)`: `stack` (None empties it) in ender
     /// chest slot `slot` (0 to 26). A player looking into their ender chest is sent the slot
     /// with the open menu's sync. Refuses as `player_set_inventory_slot` does, with
