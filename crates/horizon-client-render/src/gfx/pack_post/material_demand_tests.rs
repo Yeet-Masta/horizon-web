@@ -33,11 +33,13 @@ fn material_demand_follows_usable_bindings_and_custom_overrides() {
         "horizon-material-demand-bindings-{}",
         std::process::id()
     ));
+    let vertex = horizon_shaders::GbuffersInputs {
+        body: "hz_Vertex=vec4(0.0,0.0,0.0,1.0);".into(),
+        ..Default::default()
+    };
     let inputs = horizon_shaders::GameInputs {
-        terrain: Some(horizon_shaders::GbuffersInputs {
-            body: "hz_Vertex=vec4(0.0,0.0,0.0,1.0);".into(),
-            ..Default::default()
-        }),
+        terrain: Some(vertex.clone()),
+        sky: Some(vertex),
         ..Default::default()
     };
     let cases = [
@@ -90,6 +92,43 @@ fn material_demand_follows_usable_bindings_and_custom_overrides() {
             "",
             false,
         ),
+        // A post pass reads the atlas's normal or specular map through a texture of the `_n`
+        // or `_s` atlas resource: it needs the maps, under a name of the pack's own.
+        (
+            "post_atlas_normals",
+            "composite",
+            "uniform sampler2D atlasNormals;",
+            "texture2D(atlasNormals,vec2(0.3))",
+            "texture.composite.atlasNormals=minecraft:textures/atlas/blocks_n.png",
+            true,
+        ),
+        (
+            "post_atlas_specular",
+            "composite",
+            "uniform sampler2D atlasSpecular;",
+            "texture2D(atlasSpecular,vec2(0.3))",
+            "texture.composite.atlasSpecular=minecraft:textures/atlas/blocks_s.png",
+            true,
+        ),
+        // The sky passes draw no terrain, but read the atlas's normal map through a texture.
+        (
+            "sky_atlas_normals",
+            "gbuffers_skybasic",
+            "uniform sampler2D atlasNormals;",
+            "texture2D(atlasNormals,vec2(0.3))",
+            "texture.gbuffers.atlasNormals=minecraft:textures/atlas/blocks_n.png",
+            true,
+        ),
+        // Only the compute stage attached to `composite` reads the map; its fragment stage
+        // reads none (the `.csh` is written below).
+        (
+            "compute_atlas_normals",
+            "composite",
+            "",
+            "vec4(0.4)",
+            "texture.composite.atlasNormals=minecraft:textures/atlas/blocks_n.png",
+            true,
+        ),
         (
             "unusable",
             "gbuffers_terrain",
@@ -107,6 +146,15 @@ fn material_demand_follows_usable_bindings_and_custom_overrides() {
             "#version 120\nvoid main(){gl_Position=gl_Vertex;}\n",
         )
         .unwrap();
+        if case == "compute_atlas_normals" {
+            std::fs::write(
+                path.join("shaders/composite.csh"),
+                "#version 430\nlayout(local_size_x=1) in;\nconst ivec3 workGroups=ivec3(1,1,1);\n\
+                 uniform sampler2D atlasNormals;\nlayout(rgba8) writeonly uniform image2D colorimg5;\n\
+                 void main(){imageStore(colorimg5,ivec2(0),texture(atlasNormals,vec2(0.3)));}\n",
+            )
+            .unwrap();
+        }
         // Location 15 cannot be a colour attachment on this adapter. The GLSL still
         // translates, so this distinguishes authored demand from a usable renderer pass.
         let output = if case == "unusable" { 15 } else { 0 };

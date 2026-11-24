@@ -8,6 +8,11 @@ pub(super) enum Image {
     View(wgpu::TextureView),
     Lightmap,
     Atlas,
+    /// The block atlas's normal map (`textures/atlas/blocks_n.png`), the material maps of
+    /// the resource pack, as `normals` reads it in gbuffers programs.
+    AtlasNormals,
+    /// The block atlas's specular map (`textures/atlas/blocks_s.png`).
+    AtlasSpecular,
 }
 
 pub(super) struct PackTexture {
@@ -59,6 +64,10 @@ pub(super) fn upload(
                 let path = location.strip_prefix("minecraft:").unwrap_or(&location);
                 let image = if path.starts_with("dynamic/lightmap") {
                     Image::Lightmap
+                } else if path.starts_with("textures/atlas/blocks_n") {
+                    Image::AtlasNormals
+                } else if path.starts_with("textures/atlas/blocks_s") {
+                    Image::AtlasSpecular
                 } else if path.starts_with("textures/atlas/blocks") || path == "dynamic/atlas" {
                     Image::Atlas
                 } else {

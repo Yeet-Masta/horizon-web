@@ -163,6 +163,9 @@ struct Binding {
     /// Where this texture's sampler object is bound: the first texture of each kind binds it
     /// (`binding + 1`), the others share it (devices have as few as 16 sampler slots).
     sampler: u32,
+    /// A `texture.<stage>.<name>` of the atlas's normal or specular map: its pass reads the
+    /// material maps (`Pass::material_maps`) though it draws no geometry.
+    atlas_map: bool,
 }
 
 /// The sampler objects a pass binds, one slot per kind it uses.
@@ -1688,6 +1691,8 @@ fn bindings(
                 let src = match t.image {
                     pack_textures::Image::Lightmap => Source::Lightmap,
                     pack_textures::Image::Atlas => Source::Atlas,
+                    pack_textures::Image::AtlasNormals => Source::Normals,
+                    pack_textures::Image::AtlasSpecular => Source::Specular,
                     pack_textures::Image::View(_) => Source::Custom {
                         index: i,
                         blur: t.blur,
@@ -1816,6 +1821,7 @@ fn bindings(
             filtering,
             sampler,
             dimension,
+            atlas_map: custom.is_some() && matches!(src, Source::Normals | Source::Specular),
         });
     }
     let mut images = Vec::new();
@@ -2248,6 +2254,7 @@ fn build_pass(
         ));
     }
     let image_copies = image_copies(&samplers, &images);
+    let atlas_maps = samplers.iter().any(|s| s.atlas_map);
     Some(Pass {
         ubo: device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(&p.name),
@@ -2278,7 +2285,7 @@ fn build_pass(
         mipmaps: p.mipmaps,
         draw,
         atlas: geometry.and_then(|g| g.atlas.clone()),
-        material_maps: geometry.is_some_and(|g| g.material_maps),
+        material_maps: geometry.is_some_and(|g| g.material_maps) || atlas_maps,
         paged: false,
         ids: geometry.is_some_and(|g| g.ids.is_some()),
         groups: HashMap::new(),
@@ -2399,6 +2406,7 @@ fn build_compute(
     };
     let written = image_buffers(&images);
     let image_copies = image_copies(&samplers, &images);
+    let atlas_maps = samplers.iter().any(|s| s.atlas_map);
     let (before_colors, snapshots) = befores(&images);
     Some(Pass {
         ubo: device.create_buffer(&wgpu::BufferDescriptor {
@@ -2438,7 +2446,7 @@ fn build_compute(
         mipmaps: 0,
         draw: false,
         atlas: None,
-        material_maps: false,
+        material_maps: atlas_maps,
         paged: false,
         ids: false,
         groups: HashMap::new(),
@@ -5003,12 +5011,17 @@ impl PackPost {
     /// Whether a running pass can read resource-pack companion maps. Resolve this after
     /// pipeline fallback and texture overrides, independently of whether maps exist yet.
     pub fn needs_material_maps(&self) -> bool {
+        let sky = self
+            .sky
+            .iter()
+            .flat_map(|s| s.basic.iter().chain(&s.textured));
         let entities = self
             .entities
             .iter()
             .flat_map(|e| e.passes.iter().chain(&e.shadow).flatten());
         self.passes
             .iter()
+            .chain(sky)
             .chain(
                 [
                     &self.terrain,
@@ -5027,6 +5040,8 @@ impl PackPost {
             .chain(self.weather.iter().flatten())
             .chain(self.hand.iter().map(|h| &h.0))
             .chain(&self.shadow_comp)
+            // A pass's compute stages bind textures of their own.
+            .flat_map(|pass| std::iter::once(pass).chain(&pass.compute))
             .any(|pass| {
                 (pass.material_maps || pass.paged)
                     && pass
