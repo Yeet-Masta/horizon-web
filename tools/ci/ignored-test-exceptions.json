@@ -1242,10 +1242,26 @@
   {
     "package": "horizon-world",
     "target": "lib",
+    "test": "chunk::tests::benchmark_paletted_container_baseline",
+    "path": "crates/horizon-world/src/chunk/tests.rs",
+    "reason": "headless palette baseline; run with --ignored --nocapture",
+    "rationale": "Manual optimized timing on an idle host. Correctness comparisons run inside the benchmark, but timing is not a daily gate."
+  },
+  {
+    "package": "horizon-world",
+    "target": "lib",
     "test": "chunk::tests::benchmark_section_get_set",
     "path": "crates/horizon-world/src/chunk.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
     "rationale": "Opt-in measurement, not an ordinary daily correctness check: microbenchmark; run with --ignored --nocapture. Run by hand on an idle machine with the optimized profile and its explicitly requested inputs; all assertions remain in the test."
+  },
+  {
+    "package": "horizon-world",
+    "target": "lib",
+    "test": "level::fluids::tests::benchmark_lava_flood",
+    "path": "crates/horizon-world/src/level/fluids.rs",
+    "reason": "headless lava scene; run with --ignored --nocapture",
+    "rationale": "Manual optimized timing on an idle host. The scene checks spread and dispatch counts; timing is not a daily gate."
   },
   {
     "package": "horizon-world",

@@ -7,6 +7,9 @@ pub mod attribute_health;
 pub mod attribute_map;
 pub mod attribute_updates;
 pub mod attributes;
+#[cfg(test)]
+#[path = "../examples/support/bench_support.rs"]
+pub(crate) mod bench_support;
 pub mod block_collision;
 pub mod block_collision_scan;
 pub mod block_entities;

@@ -105,6 +105,50 @@ Besides the FPS table, `--table` then gives each scene's median frame CPU time (
 
 On Windows, run `python tools\perf_bench.py ...` the same way. Horizon's control endpoint there is a localhost TCP port, which the game writes to a `.json` file in the temporary folder. `--build` can point at an installed release (`%APPDATA%\horizon-launcher\versions\vX.Y.Z`, with `--resources` its `.local\horizon-client\26.3`), and the report then gives that release's version.
 
+## Headless engine baselines
+
+The legacy item/session, chunk palette, block-tag and tick scheduler examples
+measure individual engine paths, not server throughput or comparisons with
+vanilla. They use synthetic inputs and run without starting the game.
+Pass `--json --repeats 7` to save the samples, median and median absolute
+deviation (MAD). `mad_over_median` is a fraction: compare samples only when each
+timed series has at least five runs and is at or below `0.05`.
+
+```sh
+cargo build --locked --release -p horizon-protocol --example legacy_item_bench --example compression_bench
+cargo build --locked --release -p horizon-world --example palette_bench --example tag_lookup_bench
+cargo build --locked --release -p horizon-core --example level_ticks_bench
+bin=target/release/examples
+capture_dir=$(mktemp -d)
+"$bin/legacy_item_bench" --json --repeats 7
+for version in 1.20.3 current; do
+    "$bin/compression_bench" --make-capture "$version" "$capture_dir/$version.cap"
+    "$bin/compression_bench" --session "$version" --digest --json --repeats 7 "$capture_dir/$version.cap"
+done
+"$bin/palette_bench" --json --repeats 7
+"$bin/tag_lookup_bench" --json --repeats 7
+"$bin/level_ticks_bench" --json --repeats 7
+```
+
+`--digest` hashes the two output streams of a replay separately. Compare each
+version with itself before and after a change; generated legacy and current
+captures use different wire layouts. Existing bot captures record the adapted
+clientbound stream and must be replayed as `current`.
+
+The palette comparator and the lava-spread scene also run in the world crate's
+test binary. The latter drives scheduled fluid ticks plus lava random ticks;
+it isn't another isolated measurement of `Behaviours::tag`.
+
+```sh
+export HORIZON_BENCH_JSON=1 HORIZON_BENCH_REPEATS=7
+cargo test --locked --release -p horizon-world --lib chunk::tests::benchmark_paletted_container_baseline -- --ignored --exact --nocapture
+cargo test --locked --release -p horizon-world --lib level::fluids::tests::benchmark_lava_flood -- --ignored --exact --nocapture
+```
+
+For a before/after comparison, use the same input, release profile, allocator
+and CPU affinity. Run the programs one at a time on an idle machine. Recheck
+their output counts; a faster run that did less work is not a baseline.
+
 ## Frame pacing
 
 `tools/pacing_bench.py` measures smoothness rather than throughput: every frame of the sessions where players see

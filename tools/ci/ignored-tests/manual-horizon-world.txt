@@ -1,2 +1,4 @@
 # horizon-world's ignored tests that never run in the daily shards, and who runs them (README.md: `manual`).
 horizon-world world_io::benchmark_saving_into_a_full_region by-hand manual # microbenchmark; run with --ignored --nocapture
+horizon-world chunk::tests::benchmark_paletted_container_baseline by-hand manual # optimized headless timing baseline; see docs/benchmark.md
+horizon-world level::fluids::tests::benchmark_lava_flood by-hand manual # optimized headless lava scene timing; see docs/benchmark.md
