@@ -189,7 +189,6 @@ fn explicit_category_seed_does_not_advance_local_sound_random() {
     assert_eq!(capture[0].source, 8);
     assert_eq!(capture[0].position, [1.0; 3]);
     assert_eq!((capture[0].volume, capture[0].pitch), (0.5, 1.5));
-    assert!(audio.source_override.is_none());
     // A local request reserves one draw before dispatch, and playback reuses it.
     let seed = audio.next_sound_seed();
     assert_eq!(seed, expected.next_long());

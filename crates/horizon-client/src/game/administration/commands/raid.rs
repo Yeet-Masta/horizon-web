@@ -121,8 +121,14 @@ impl Game<'_> {
                 if matches!(kind, "local" | "\"local\"" | "'local'") {
                     let seed = self.world.random.next_long();
                     let at = [player.x + 5.0, player.y, player.z];
-                    self.audio
-                        .play_seeded("minecraft:event.raid.horn", Some(at), 2.0, 1.0, seed);
+                    self.audio.play_seeded(
+                        "minecraft:event.raid.horn",
+                        Some(at),
+                        2.0,
+                        1.0,
+                        seed,
+                        None,
+                    );
                 }
                 Ok(1)
             }

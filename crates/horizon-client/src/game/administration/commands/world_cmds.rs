@@ -14,6 +14,10 @@ use horizon_protocol::packets::play::{self, Clientbound as C};
 use horizon_world::attribute_map::ValueKind;
 use horizon_world::damage_source::Catalog as DamageCatalog;
 
+#[cfg(test)]
+#[path = "playsound_command_tests.rs"]
+mod playsound_command_tests;
+
 /// Queue bookkeeping for synchronous command damage, preserving prior requests
 /// and unrelated events. The existing game policy handles each extracted request.
 fn take_new_reinforcements(events: &mut Vec<MobEvent>, queued: usize) -> Vec<(u32, Who)> {
@@ -580,7 +584,15 @@ impl Game<'_> {
                     host.hub.send_to(conn, &packet);
                 }
             }
-            None => self.audio.play_on(source, sound, Some(at), volume, pitch),
+            None => {
+                // PlaySoundCommand sends one packet per target and never a
+                // level sound: this client's own player plays it from the
+                // same seed, and it is not captured for the guests.
+                let capture = self.audio.capture.take();
+                self.audio
+                    .play_seeded(sound, Some(at), volume, pitch, seed, Some(source));
+                self.audio.capture = capture;
+            }
         }
     }
     /// `StopSoundCommand`: each target's connection gets the packet; the

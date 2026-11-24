@@ -483,7 +483,9 @@ impl Game<'_> {
             let feet = [m.position.x, m.position.y, m.position.z];
             if !silent {
                 match seed {
-                    Some(seed) => self.audio.play_seeded(sound, Some(feet), 1.0, pitch, seed),
+                    Some(seed) => self
+                        .audio
+                        .play_seeded(sound, Some(feet), 1.0, pitch, seed, None),
                     None => self.audio.play(sound, Some(feet), 1.0, pitch),
                 }
             }

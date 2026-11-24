@@ -5,8 +5,10 @@ use horizon_core::random::RandomSource;
 use horizon_gameplay::commands::{entity::EntityRef, sound::SoundHost};
 
 impl SoundHost for Game<'_> {
-    fn player_in_place(&self) -> EntityRef {
-        entity_ref(Target::Player)
+    fn source_player(&self) -> Option<EntityRef> {
+        self.source_entity()
+            .filter(|t| t.is_player())
+            .map(entity_ref)
     }
     fn hears_sounds(&self, entity: EntityRef) -> bool {
         let t = target_of(entity);

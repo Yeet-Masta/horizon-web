@@ -10,8 +10,9 @@ use horizon_client::{
 
 /// What `/playsound` and `/stopsound` need from the game.
 pub trait SoundHost: EntityHost {
-    /// The player in place, who `/playsound` targets when it names no one.
-    fn player_in_place(&self) -> EntityRef;
+    /// `PlaySoundCommand.getCallingPlayerAsCollection(source.getPlayer())`: the source's
+    /// player, or none for the console, a command block or another entity.
+    fn source_player(&self) -> Option<EntityRef>;
     /// Whether the entity is a player who hears sounds in the source's level.
     fn hears_sounds(&self, entity: EntityRef) -> bool;
     /// One draw from the level random, the seed of a sound packet.
@@ -44,7 +45,7 @@ pub fn playsound(host: &mut dyn SoundHost, ctx: &Context) -> R<i32> {
     let targets = if ctx.get("targets").is_some() {
         host.select_entities(ctx, "targets", true)?
     } else {
-        vec![host.player_in_place()]
+        host.source_player().into_iter().collect()
     };
     let pos = host
         .position_arg(ctx, "pos")
