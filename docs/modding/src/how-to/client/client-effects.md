@@ -176,3 +176,18 @@ theirs, and nothing is sent. Rain and thunder count only in a dimension with wea
 keeps the level's value, and the others are clamped to 0..=1. The hook may run more than once a frame, so
 give the same answer each time. Only a client of a world (single player's included) asks it, never the game
 that ticks the world. NeoForge has no counterpart; Java mods change `ClientLevel` with a mixin.
+
+## Pausing and stopping sounds by source
+
+`ClientHost::sound_source_pause(source, paused)` pauses every sound of one `SoundSource` (`true`) or resumes them (`false`), for example to pause the game's music while a mod's own player runs:
+
+- The pause lasts until the source is resumed. The game's own pause and unpause, and a level change, leave a paused source paused.
+- The pause belongs to the client, not to the mod that asked for it. Every mod shares it and nothing counts the pauses: if two mods pause the music, the first one to resume it resumes it for both.
+- A sound of a paused source that starts meanwhile starts paused if it is streamed (music discs are) or looping, and so does any sound of `SoundSource::Music`, streamed or not. Paused music therefore keeps its track, and the music manager starts no other. A track that starts paused shows no Now Playing toast. On resume each sound plays on from where it was, and one that started while paused plays from its start.
+- Any other sound of a paused source doesn't start at all, as vanilla skips a sound whose volume is zero (music aside): a block breaking, a raindrop, a note block, or a mod's own one-shot from `play_local_sound`, whose `SoundRef` then reads `Stopped`. A paused sound keeps its channel until the resume, and channels are limited: held raindrops on a paused `SoundSource::Weather` would take them all within a minute, and then no sound of any source could start.
+- Only sounds played on that source are affected: `SoundSource::Master` pauses the sounds played on master, not every sound.
+- `SoundRef::state` reads a paused sound as `Playing`.
+
+`ClientHost::sound_source_stop(source)` stops every sound of the source, paused ones included, as `/stopsound @s <source>` does. A delayed sound that hasn't started yet is left alone. Stopping `SoundSource::Music` skips the current track: the music manager waits its usual delay, 5 seconds with Music Frequency set to Constant, and starts the next one.
+
+Both calls take `&self`, so any client hook can make them. They apply at the next audio update (once a client tick), before the `play_local_sound` plays asked for in the same tick: a sound played right after a stop of its source keeps playing, and one played on a paused source starts paused or not at all, as above. They act on this client's sounds; in splitscreen that is the calling player's, and the music is the first player's. Both return `false` on a server.

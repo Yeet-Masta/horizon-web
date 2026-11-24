@@ -5,7 +5,7 @@ use super::Game;
 use horizon_client::sound_engine::InstanceId;
 use horizon_core::identifier::Identifier;
 use mod_api::__private::game::*;
-use mod_api::{SoundPlay, SoundRef, SoundState};
+use mod_api::{SoundPlay, SoundRef, SoundSource, SoundState};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,6 +32,15 @@ impl Change {
     }
 }
 
+/// What a mod asked of every sound of one source, applied at the next audio update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceChange {
+    /// `sound_source_pause`: pause (true) or carry on (false).
+    Pause(bool),
+    /// `sound_source_stop`.
+    Stop,
+}
+
 /// Client mods' sounds: those asked for since the last audio update, the changes asked of
 /// them, and each started one's engine instance by its handle.
 pub(super) struct ModSounds {
@@ -47,6 +56,9 @@ pub(super) struct ModSounds {
     changes: RefCell<Vec<(u64, Change)>>,
     /// Each started sound's engine instance, until the engine lets it go.
     started: HashMap<u64, InstanceId>,
+    /// Pauses and stops of whole sources (`SoundSource` indices) asked for since the last
+    /// audio update, in order. A level change keeps them: a pause outlasts it.
+    sources: RefCell<Vec<(usize, SourceChange)>>,
 }
 impl Default for ModSounds {
     fn default() -> Self {
@@ -56,6 +68,7 @@ impl Default for ModSounds {
             pcm: RefCell::default(),
             changes: RefCell::default(),
             started: HashMap::new(),
+            sources: RefCell::default(),
         }
     }
 }
@@ -98,9 +111,17 @@ impl ModSounds {
 impl Game<'_> {
     /// Plays the sounds client mods asked for since the last update, then applies their stops
     /// and fades, and forgets the instances the engine let go. A play stopped (or faded to 0 at
-    /// once) before this update never reaches the engine. Called from the audio update
-    /// (`tick_sound_engine`), before the engine's own tick.
+    /// once) before this update never reaches the engine. Pauses and stops of whole sources
+    /// apply first: a sound asked for with them starts after the stop, and on a paused source
+    /// it starts paused or not at all (`SoundEngine::pause_source`). Called from the audio
+    /// update (`tick_sound_engine`), before the engine's own tick.
     pub(super) fn apply_mod_sounds(&mut self) {
+        for (source, change) in self.mod_sounds.sources.get_mut().drain(..) {
+            match change {
+                SourceChange::Pause(paused) => self.audio.pause_source(source, paused),
+                SourceChange::Stop => self.audio.stop_sounds(None, Some(source)),
+            }
+        }
         let sounds = &mut self.mod_sounds;
         let stopped: Vec<u64> = sounds
             .changes
@@ -224,6 +245,35 @@ impl Game<'_> {
             }
             _ => false,
         }
+    }
+    /// For a client mod: from the next audio update, every sound of `source` pauses (`paused`)
+    /// or carries on. The pause is the client's, shared by every mod, so any mod's carry-on ends
+    /// it; the game's own pause and resume leave a paused source paused, and so does a level
+    /// change. A streamed or looping sound of it that starts meanwhile, and any sound of music,
+    /// starts paused and keeps its channel, so paused music keeps its track and the music
+    /// manager starts no other (`MusicManager.tick` waits while its track `isActive`); any
+    /// other doesn't start, a mod's one-shot too, so held sounds can't use up the channels.
+    /// Carried on, each plays from where it was, one that started paused from its start. Only
+    /// the sounds played on that very source: `Master` is the sounds played on master, not every
+    /// sound. False on a server.
+    pub(super) fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool {
+        self.change_sound_source(source, SourceChange::Pause(paused))
+    }
+    /// For a client mod: at the next audio update, every sound of `source` playing stops, a
+    /// paused one too, as a stop-sound packet naming only the source stops them
+    /// (`SoundEngine.stop(null, source)`). A sound still waiting out a delay isn't playing yet
+    /// and is left. Stopping `Music` skips the track: the music manager waits its delay and
+    /// starts the next, as after `/stopsound`. False on a server.
+    pub(super) fn sound_source_stop(&self, source: SoundSource) -> bool {
+        self.change_sound_source(source, SourceChange::Stop)
+    }
+    fn change_sound_source(&self, source: SoundSource, change: SourceChange) -> bool {
+        if !self.native_window() {
+            return false;
+        }
+        let source = source.index();
+        self.mod_sounds.sources.borrow_mut().push((source, change));
+        true
     }
     /// For a client mod: every sound event the client's resources have
     /// (`SoundManager.getAvailableSounds`), sorted. It builds a new list each call: ask from
@@ -393,6 +443,42 @@ mod tests {
 
             let next = game.play_local_sound(&SoundPlay::ui(harp), 0).unwrap();
             assert!(next != stopped && next != queued, "a new handle");
+        });
+    }
+
+    /// A client mod's pause and stop of a whole source apply at the next audio update; the
+    /// pause outlasts a level change until the mod carries the source on, and a server refuses
+    /// both.
+    #[test]
+    #[ignore = "daily"]
+    fn a_client_mod_pauses_and_stops_a_sound_source() {
+        use horizon_client::sound_engine::MUSIC;
+        use mod_api::SoundSource;
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            assert!(game.sound_source_pause(SoundSource::Music, true));
+            assert!(!game.audio.engine.source_paused(MUSIC), "at the update");
+            game.tick_sound_engine();
+            assert!(game.audio.engine.source_paused(MUSIC));
+            game.stop_sounds_for_new_level();
+            game.tick_sound_engine();
+            assert!(
+                game.audio.engine.source_paused(MUSIC),
+                "a new level keeps it"
+            );
+            assert!(game.sound_source_pause(SoundSource::Music, false));
+            game.tick_sound_engine();
+            assert!(!game.audio.engine.source_paused(MUSIC));
+
+            game.audio.stopped.clear();
+            assert!(game.sound_source_stop(SoundSource::Records));
+            assert!(game.audio.stopped.is_empty(), "at the update");
+            game.tick_sound_engine();
+            assert_eq!(game.audio.stopped.get("record *"), Some(&1));
+
+            game.options.execution_role =
+                super::super::execution_role::ExecutionRole::DedicatedServer;
+            assert!(!game.sound_source_pause(SoundSource::Music, true));
+            assert!(!game.sound_source_stop(SoundSource::Music));
         });
     }
 }

@@ -1,0 +1,2 @@
+# A client mod's sound source pause and stop use prepared resources.
+horizon-client game::native_local_sounds::tests::a_client_mod_pauses_and_stops_a_sound_source lib daily resources

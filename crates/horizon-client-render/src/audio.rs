@@ -29,6 +29,8 @@ enum State {
     Playing,
     Paused,
     Stopped,
+    /// Initial, held for a source a client mod paused (`Backend::hold`): it starts paused.
+    Held,
 }
 /// An OpenAL source.
 struct Channel {
@@ -516,7 +518,7 @@ struct Decode {
 }
 /// Give a channel waiting on its sound the decoded samples and start it, as
 /// the buffer future attaching and playing the source. A source stopped or
-/// released meanwhile stays so.
+/// released meanwhile stays so, and a held one starts paused.
 fn attach(mixer: &Mutex<Mixer>, channel: ChannelId, samples: Samples, looping: bool) {
     attach_at(mixer, channel, samples, looping, 0);
 }
@@ -531,11 +533,15 @@ fn attach_at(
     if let Some(samples) = samples
         && let Ok(mut m) = mixer.lock()
         && let Some(c) = m.channels.get_mut(&channel)
-        && c.state == State::Initial
+        && matches!(c.state, State::Initial | State::Held)
     {
         c.samples = Some(samples);
         c.position = start as f64;
-        c.state = State::Playing;
+        c.state = if c.state == State::Held {
+            State::Paused
+        } else {
+            State::Playing
+        };
         c.looping |= looping;
     }
 }
@@ -752,6 +758,12 @@ impl MixerBackend {
     /// nothing marks two copies of one event. Two different events alike in all four (two
     /// players' steps on grass, side by side, within 150 ms) are heard once. That is accepted:
     /// at that distance and timing they sound like one; a doubled sound is the louder fault.
+    ///
+    /// A copy held for a source a client mod paused (`Backend::hold`), or paused since it started,
+    /// is not heard, so it never counts as the copy heard. A held copy still looks for one: when
+    /// another player's copy is heard it is dropped, or it would play the sound a second time
+    /// once its source carries on. It keeps its sound, and carried on (`unpause`) it counts as
+    /// started then, so another player's copy started just after is dropped.
     fn duplicate(&self, channel: ChannelId, (namespace, path): (&str, &str)) -> bool {
         // Alone: nobody else's copy, and no lock taken for it.
         if self.shares.load(std::sync::atomic::Ordering::Relaxed) == 0 {
@@ -775,6 +787,7 @@ impl MixerBackend {
             o.owner != self.owner
                 && o.world == world
                 && !o.relative
+                && !matches!(o.state, State::Held | State::Paused)
                 && o.started
                     .as_ref()
                     .is_some_and(|(k, t)| k == key && t.elapsed() < SAME_SOUND)
@@ -998,9 +1011,23 @@ impl Backend for MixerBackend {
     }
     fn unpause(&mut self, channel: ChannelId) {
         self.with(channel, |c| {
-            if c.state == State::Paused {
-                c.state = State::Playing;
+            match c.state {
+                State::Paused => c.state = State::Playing,
+                // Let go before its sound arrived: it plays when it does.
+                State::Held => c.state = State::Initial,
+                _ => return,
             }
+            // Heard from now on: another player's copy started just after is its twin.
+            if let Some((_, at)) = c.started.as_mut() {
+                *at = std::time::Instant::now();
+            }
+        });
+    }
+    fn hold(&mut self, channel: ChannelId) {
+        self.with(channel, |c| match c.state {
+            State::Playing => c.state = State::Paused,
+            State::Initial => c.state = State::Held,
+            _ => {}
         });
     }
     fn stopped(&mut self, channel: ChannelId) -> bool {
@@ -2333,9 +2360,14 @@ impl Audio {
             &mut self.backend,
         );
     }
-    /// `SoundManager.resume`.
+    /// `SoundManager.resume`: a source a client mod paused stays paused.
     pub fn resume(&mut self) {
         self.engine.resume(&mut self.backend);
+    }
+    /// A client mod's `sound_source_pause` (`SoundEngine::pause_source`): the sounds of one
+    /// `SoundSource` index pause, or carry on.
+    pub fn pause_source(&mut self, source: usize, paused: bool) {
+        self.engine.pause_source(source, paused, &mut self.backend);
     }
     /// `SoundManager.stop()`: every sound.
     pub fn stop_all(&mut self) {

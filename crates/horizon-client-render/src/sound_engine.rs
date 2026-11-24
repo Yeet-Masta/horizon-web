@@ -1044,6 +1044,19 @@ pub trait Backend {
     /// Whether the channel plays clearly through a mod's muffle (`Audio::muffle`): its sound
     /// event is one the mod exempted. A backend without a muffle ignores it.
     fn set_unmuffled(&mut self, _channel: ChannelId, _unmuffled: bool) {}
+    /// Pause a channel of a source a client mod paused (`SoundEngine::pause_source`): a playing
+    /// one pauses, and one whose sound has not started yet starts paused when it does, where
+    /// `pause` (`alSourcePause`) leaves an initial source to start playing. `unpause` lets it go.
+    fn hold(&mut self, channel: ChannelId) {
+        self.pause(channel);
+    }
+}
+/// The bit of a `SoundSource` index in a set of sources.
+fn source_bit(source: usize) -> u16 {
+    u32::try_from(source)
+        .ok()
+        .and_then(|shift| 1u16.checked_shl(shift))
+        .unwrap_or(0)
 }
 /// A `SoundEventListener.onPlaySound` call.
 #[derive(Clone, Debug, PartialEq)]
@@ -1125,6 +1138,10 @@ pub struct SoundEngine {
     /// sound hooks (`hooks`). Absent on a server, which has no sound.
     loop_context: Option<horizon_world::native_load_context::LoopContext>,
     unmuffled: Vec<String>,
+    /// The sources a client mod paused (`pause_source`), a bit each.
+    paused_sources: u16,
+    /// While the game is paused (`pause_all_except`), the sources it left playing, a bit each.
+    game_pause: Option<u16>,
 }
 fn handle_channel(h: &Handle) -> Option<ChannelId> {
     h.channel
@@ -1163,6 +1180,8 @@ impl SoundEngine {
             notifications: Vec::new(),
             loop_context: None,
             unmuffled: Vec::new(),
+            paused_sources: 0,
+            game_pause: None,
         }
     }
     /// Sound events exempt from muffling, including channels already playing.
@@ -1561,6 +1580,16 @@ impl SoundEngine {
             }
             silently = true;
         }
+        // Its source is paused (`pause_source`): only a stream, a loop or a sound of music starts,
+        // held below with its channel. Music starts even when a pack doesn't stream it, as vanilla
+        // starts music silently at no volume, so the music manager keeps its track. Any other
+        // sound doesn't start, as one at no volume doesn't, a mod's tickable one-shot or a note
+        // block (on records) too: held, its channel would stay taken until the resume, and rain
+        // every few ticks would take them all.
+        let lasting = sound.stream || instance.looping || source == MUSIC;
+        if !lasting && self.source_paused(source) {
+            return PlayResult::NotStarted;
+        }
         let position = instance.position;
         let looping = instance.looping && instance.delay <= 0;
         let unmuffled = self.unmuffled.contains(&instance.identifier);
@@ -1619,12 +1648,19 @@ impl SoundEngine {
             relative,
             unmuffled,
         );
+        // Its source is paused (`pause_source`): it starts paused, keeping its channel, and
+        // silently, as at no volume: the music manager shows no Now Playing toast for a track
+        // nobody hears.
+        let held = self.source_paused(source);
+        if held {
+            backend.hold(channel);
+        }
         backend.start(channel, &sound, looping);
         self.notify_source_started(id, channel, streaming);
         if tickable {
             self.ticking.push(id);
         }
-        if silently {
+        if silently || held {
             PlayResult::StartedSilently
         } else {
             PlayResult::Started
@@ -1859,6 +1895,7 @@ impl SoundEngine {
     }
     /// `pauseAllExcept`.
     pub fn pause_all_except(&mut self, sources: &[usize], backend: &mut impl Backend) {
+        self.game_pause = Some(sources.iter().fold(0, |set, &s| set | source_bit(s)));
         if !self.loaded {
             return;
         }
@@ -1871,14 +1908,70 @@ impl SoundEngine {
             }
         }
     }
-    /// `resume`.
+    /// `resume`, leaving the channels of a source a client mod paused (`pause_source`) paused.
     pub fn resume(&mut self, backend: &mut impl Backend) {
+        self.game_pause = None;
         if !self.loaded {
             return;
         }
-        let channels: Vec<ChannelId> = self.handles.values().filter_map(handle_channel).collect();
+        let kept: Vec<u64> = self
+            .instance_to_channel
+            .iter()
+            .filter(|(id, _)| {
+                self.instances
+                    .get(id)
+                    .is_some_and(|i| self.source_paused(i.source))
+            })
+            .map(|&(_, handle)| handle)
+            .collect();
+        let channels: Vec<ChannelId> = self
+            .handles
+            .iter()
+            .filter(|(handle, _)| !kept.contains(*handle))
+            .filter_map(|(_, h)| handle_channel(h))
+            .collect();
         for c in channels {
             backend.unpause(c);
+        }
+    }
+    /// Whether a client mod paused `source` (`pause_source`).
+    pub fn source_paused(&self, source: usize) -> bool {
+        self.paused_sources & source_bit(source) != 0
+    }
+    /// A client mod's `sound_source_pause`: every channel of `source` pauses (`paused`) or
+    /// carries on. One pause per source for the whole client, whichever mod asks: a carry-on
+    /// ends it for all. Until the source carries on, a streamed or looping sound of it that
+    /// starts, and any sound of music, starts paused (and silently) and keeps its channel, as
+    /// one paused while playing does, so it stays `is_active`: the music manager keeps a paused
+    /// track as its current one and picks no other (`MusicManager.tick`). Any other sound of it
+    /// doesn't start (`play_inner`): held, its channel would never end. Carrying on, each plays
+    /// on from where it was, one that started paused from its start; while the game's own pause
+    /// (`pause_all_except`) holds the source they wait for the game's `resume`, which in turn
+    /// leaves a paused source paused. Only the sounds played on that very source: `MASTER` is
+    /// the sounds played on master, as in `stop_matching`. The pause outlasts `stop_all` (a new
+    /// level, a device change, a reload).
+    pub fn pause_source(&mut self, source: usize, paused: bool, backend: &mut impl Backend) {
+        let bit = source_bit(source);
+        if paused {
+            self.paused_sources |= bit;
+        } else {
+            self.paused_sources &= !bit;
+        }
+        let held_by_game = self.game_pause.is_some_and(|spared| spared & bit == 0);
+        if !self.loaded || (!paused && held_by_game) {
+            return;
+        }
+        for (id, handle) in &self.instance_to_channel {
+            if self.instances.get(id).map_or(MASTER, |i| i.source) != source {
+                continue;
+            }
+            if let Some(c) = self.handles.get(handle).and_then(handle_channel) {
+                if paused {
+                    backend.hold(c);
+                } else {
+                    backend.unpause(c);
+                }
+            }
         }
     }
     /// Channels in use (static, streaming).
