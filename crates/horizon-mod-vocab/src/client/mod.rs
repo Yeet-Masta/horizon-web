@@ -61,6 +61,7 @@ pub mod particles;
 #[doc(hidden)]
 pub mod player_chat;
 pub(crate) mod posed_parts;
+pub(crate) mod recording;
 pub(crate) mod render_pipeline;
 pub(crate) mod replay;
 pub(crate) mod scene;

@@ -210,21 +210,11 @@ impl McprWriter {
     /// Create a new replay writer that writes packets to a temporary stream file
     /// and finalizes into `dest_path` when finished.
     ///
-    /// Any recording a crash left in the destination's folder is packaged first
-    /// (see [`recover_crashed_recordings`]).
+    /// A crash's leftovers in the destination's folder are not packaged here:
+    /// [`recover_crashed_recordings_in_background`] does that off the caller's thread.
     pub fn new(dest_path: PathBuf, metadata: Metadata) -> io::Result<Self> {
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
-            if !parent.as_os_str().is_empty() {
-                match recover_crashed_recordings(parent) {
-                    Ok(report) if !report.recovered.is_empty() => log::info!(
-                        "Studio: recovered {} recording(s) a crash left behind",
-                        report.recovered.len()
-                    ),
-                    Ok(_) => {}
-                    Err(e) => log::warn!("Studio: could not look for crashed recordings: {e}"),
-                }
-            }
         }
         let temp_tmcpr_path = sibling(&dest_path, "tmcpr.tmp");
         let temp_meta_path = metadata_beside(&temp_tmcpr_path);
@@ -1264,6 +1254,26 @@ pub fn recover_crashed_recordings(dir: &Path) -> io::Result<RecoveryReport> {
     Ok(report)
 }
 
+/// [`recover_crashed_recordings`] on a thread of its own, so starting a recording never waits
+/// for the packaging of older ones. Run it after the new stream exists: that stream is locked
+/// and carries this process's pid, so recovery leaves it (and any archive of this process still
+/// being finished) alone. What it does is logged.
+pub fn recover_crashed_recordings_in_background(dir: PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("Recording recovery".into())
+        .spawn(move || match recover_crashed_recordings(&dir) {
+            Ok(report) if !report.recovered.is_empty() => log::info!(
+                "Studio: recovered {} recording(s) a crash left behind",
+                report.recovered.len()
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("Studio: could not look for crashed recordings: {e}"),
+        });
+    if let Err(e) = spawned {
+        log::warn!("Studio: could not look for crashed recordings: {e}");
+    }
+}
+
 /// Whether the writer of `stream` may still be running.
 ///
 /// Err on the side of yes: packaging a live recording would take the stream from
@@ -1883,6 +1893,37 @@ mod tests {
         assert_eq!(first.payload, vec![10, 20]);
         assert_eq!(reader.next_packet().unwrap().unwrap().id, 0x02);
         assert_eq!(reader.next_packet().unwrap(), None);
+    }
+
+    /// Starting a recording packages the crash's leftovers on a thread of its own: the new
+    /// writer's stream is left alone, and the old one becomes a recording without the caller
+    /// waiting for it.
+    #[test]
+    fn leftovers_are_recovered_in_the_background_beside_a_new_recording() {
+        let scratch = Scratch::new("background");
+        let mut tmcpr = Vec::new();
+        frame(&mut tmcpr, 5, 1, &[0x01]);
+        let stream = leftover(&scratch, "old", None, &tmcpr);
+        let mut writer = McprWriter::new(scratch.0.join("new.mcpr"), Metadata::default()).unwrap();
+        writer.write_packet(0, 0x01, &[]).unwrap();
+        assert!(
+            stream.exists(),
+            "making a writer does not wait for recovery"
+        );
+
+        recover_crashed_recordings_in_background(scratch.0.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while stream.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!stream.exists(), "the leftover was recovered");
+        assert!(scratch.0.join("old.mcpr").exists());
+        assert!(
+            writer.stream_path().exists(),
+            "the live recording's stream was left alone"
+        );
+        writer.finish(1).unwrap();
+        assert!(scratch.0.join("new.mcpr").exists());
     }
 
     /// A leftover from before the sidecar existed is still packaged, with the

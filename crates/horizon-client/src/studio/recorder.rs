@@ -139,6 +139,10 @@ impl StudioRecorder {
         let (sender, receiver): (SyncSender<RecordCommand>, Receiver<RecordCommand>) =
             sync_channel(RECORD_QUEUE_PACKETS);
         let mut writer = McprWriter::new(dest_path.clone(), metadata)?;
+        // Older recordings a crash left are packaged beside this one, off the caller's thread.
+        if let Some(dir) = dest_path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            super::mcpr::recover_crashed_recordings_in_background(dir.to_path_buf());
+        }
 
         let worker_active = active.clone();
         let worker_count = packet_count.clone();

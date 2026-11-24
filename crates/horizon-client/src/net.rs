@@ -573,6 +573,25 @@ impl Session {
         let rec = self.recorder.lock().unwrap().take()?;
         Some(rec.stop())
     }
+    /// Stops recording like [`Self::stop_recording`], but the archive is finished on a thread
+    /// of its own: `finished` runs there with how that ended. Answers at once with the
+    /// recorder's status as it stopped (none: no recording).
+    pub fn stop_recording_in_background(
+        &self,
+        finished: impl FnOnce(std::io::Result<PathBuf>) + Send + 'static,
+    ) -> Option<RecorderStatus> {
+        let recorder = self.recorder.lock().unwrap().take()?;
+        let status = recorder.status();
+        // Should no thread start, `finished` is dropped unrun and the recorder finishes its
+        // archive right here as it drops.
+        let spawned = std::thread::Builder::new()
+            .name("Recording finalizer".into())
+            .spawn(move || finished(recorder.stop()));
+        if let Err(error) = spawned {
+            log::warn!("A recording's archive is finished on the calling thread: {error}");
+        }
+        Some(status)
+    }
     /// Whether recording is currently active.
     pub fn is_recording(&self) -> bool {
         self.recorder
@@ -4297,6 +4316,58 @@ mod tests {
         // The recorder is handed both; what a recording keeps is the recorder's choice.
         assert_eq!(recorder.decoded(), [pos_pkt, disc_pkt]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A recorder whose archive is done when the test says so.
+    struct SlowRecorder(std::sync::mpsc::Receiver<()>);
+    impl PacketRecorder for SlowRecorder {
+        fn is_active(&self) -> bool {
+            true
+        }
+        fn received(&self, _packet: &play::Clientbound, _id: i32, _payload: &[u8]) {}
+        fn record_packet(&self, _id: i32, _payload: &[u8]) {}
+        fn status(&self) -> RecorderStatus {
+            RecorderStatus {
+                active: true,
+                path: PathBuf::from("slow.mcpr"),
+                elapsed: Duration::ZERO,
+                packet_count: 0,
+                bytes_written: 0,
+                error: None,
+            }
+        }
+        fn stop(self: Box<Self>) -> std::io::Result<PathBuf> {
+            let _ = self.0.recv();
+            Ok(PathBuf::from("slow.mcpr"))
+        }
+    }
+
+    #[test]
+    fn stopping_in_the_background_answers_before_the_archive_is_finished() {
+        let session = Session::replay("StudioTester");
+        assert!(session.stop_recording_in_background(|_| {}).is_none());
+        let (release, archive_wait) = std::sync::mpsc::channel();
+        let (finished, written) = std::sync::mpsc::channel();
+        session.start_recording(SlowRecorder(archive_wait), |_| {});
+
+        let status = session
+            .stop_recording_in_background(move |result| finished.send(result).unwrap())
+            .expect("a recording was running");
+        // The call is back while the archive is still being written.
+        assert_eq!(status.path, PathBuf::from("slow.mcpr"));
+        assert!(!session.is_recording());
+        assert!(
+            written.try_recv().is_err(),
+            "the archive is not finished yet"
+        );
+
+        release.send(()).unwrap();
+        let path = written
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the archive finishes in the background")
+            .unwrap();
+        assert_eq!(path, PathBuf::from("slow.mcpr"));
+        assert!(session.stop_recording_in_background(|_| {}).is_none());
     }
 
     #[test]

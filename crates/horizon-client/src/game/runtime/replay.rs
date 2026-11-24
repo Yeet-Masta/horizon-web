@@ -12,7 +12,7 @@ use horizon_client::{
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 /// A recorded `PlayerPosition` that moves the local player relative to where it is (a rotation
@@ -65,6 +65,8 @@ pub(super) struct Replay {
     pub(super) seek_report: bool,
     /// The folder mods open recordings from by id; the game folder's `recordings/` when none.
     pub(super) recordings_dir: Option<PathBuf>,
+    /// The recording a mod's `recording_stop` ended, while its archive is being written.
+    pub(super) finalizing: Option<super::native_recording::Finalizing>,
 }
 
 impl Replay {
@@ -119,6 +121,26 @@ impl Replay {
     pub(super) fn player_alpha(&self) -> Option<f64> {
         self.playing()
             .then(|| (f64::from(self.virtual_tick_ms) / 50.0).clamp(0.0, 1.0))
+    }
+}
+
+/// Why `begin_studio_recording` started nothing.
+pub(super) enum StudioRecordError {
+    /// No world session to record.
+    NoSession,
+    /// A recording is already running.
+    Active,
+    /// The recording's file could not be created.
+    Disk(std::io::Error),
+}
+
+impl std::fmt::Display for StudioRecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSession => f.write_str("no active world session"),
+            Self::Active => f.write_str("recording already active"),
+            Self::Disk(error) => write!(f, "{error}"),
+        }
     }
 }
 
@@ -793,22 +815,32 @@ impl Game<'_> {
     }
 
     pub(super) fn start_studio_recording(&mut self, name: Option<&str>) -> Result<Value> {
+        // The typed name is only a prefix: the generator keeps letters, digits, `-` and `_`, so
+        // `../trip` can never leave the recordings folder.
+        let filename = horizon_client::studio::generate_recording_filename(name);
+        let dir = self.recordings_dir();
+        match self.begin_studio_recording(&dir, &filename) {
+            Ok(path) => Ok(json!({ "ok": true, "path": path.display().to_string() })),
+            Err(error) => Ok(json!({ "ok": false, "error": error.to_string() })),
+        }
+    }
+
+    /// Starts recording the session's packets into `dir/file_name`, the one way `/studio record`
+    /// and a mod's `recording_start` begin: the world's snapshot first, then what the session
+    /// receives. The file appears when the recording ends.
+    pub(super) fn begin_studio_recording(
+        &mut self,
+        dir: &Path,
+        file_name: &str,
+    ) -> std::result::Result<PathBuf, StudioRecordError> {
         let Some(r) = self.remote.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no active world session" }));
+            return Err(StudioRecordError::NoSession);
         };
         if r.session.is_recording() {
-            return Ok(json!({ "ok": false, "error": "recording already active" }));
+            return Err(StudioRecordError::Active);
         }
-        let _ = std::fs::create_dir_all("recordings");
-        let ts = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let filename = match name {
-            Some(n) if !n.is_empty() => format!("{}_{}.mcpr", n, ts),
-            _ => format!("recording_{}.mcpr", ts),
-        };
-        let path = PathBuf::from("recordings").join(filename);
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join(file_name);
         let server_address = if r.session.address.is_empty() {
             "local".to_owned()
         } else {
@@ -828,9 +860,9 @@ impl Game<'_> {
                 r.session.start_recording(recorder, |recorder| {
                     self.dump_world_snapshot_to_recorder(recorder);
                 });
-                Ok(json!({ "ok": true, "path": path.display().to_string() }))
+                Ok(path)
             }
-            Err(e) => Ok(json!({ "ok": false, "error": e.to_string() })),
+            Err(error) => Err(StudioRecordError::Disk(error)),
         }
     }
 

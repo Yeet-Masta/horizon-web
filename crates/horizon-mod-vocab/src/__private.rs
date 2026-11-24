@@ -305,6 +305,24 @@ pub mod built {
             ended,
         }
     }
+    /// The session's recording status, constructed by the game and only read by mods.
+    pub fn recording_status(
+        active: bool,
+        recording: String,
+        elapsed_ms: u64,
+        bytes: u64,
+        failed: bool,
+        finalizing: bool,
+    ) -> crate::RecordingStatus {
+        crate::RecordingStatus {
+            active,
+            recording,
+            elapsed_ms,
+            bytes,
+            failed,
+            finalizing,
+        }
+    }
     /// The mod export's status snapshot, constructed by the game.
     pub fn export_status(
         request: u32,

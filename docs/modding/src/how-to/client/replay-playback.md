@@ -1,8 +1,8 @@
 # Replay playback
 
-A client mod plays the recordings `/studio record` saves (`.mcpr` files in the game folder's `recordings/`) and
-drives their clock, as a replay editor does. Native and wasm mods use the same calls; a wasm mod needs no file
-access, because a recording is named by its **id**: its file name without `.mcpr` (`my_trip_1712000000` for
+A client mod plays the recordings `/studio record` saves (`.mcpr` files in the game folder's `recordings/`, which
+[a mod can record too](recording.md)) and drives their clock, as a replay editor does. Native and wasm mods use
+the same calls; a wasm mod needs no file access, because a recording is named by its **id**: its file name without `.mcpr` (`my_trip_1712000000` for
 `recordings/my_trip_1712000000.mcpr`). An id is never a path. One that is empty, longer than 250 bytes, holds a
 separator, a drive, `..` or a control character, ends in a dot or a space, or is a Windows device name (`CON`,
 `NUL`, `COM1`...) is `ReplayError::InvalidId`, refused before any file is looked at. One that names no regular file

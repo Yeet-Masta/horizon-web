@@ -218,7 +218,7 @@ fn replay_marker(marker: &Marker) -> ReplayMarker {
 
 impl Game<'_> {
     /// The recordings folder replays are opened from, the one `/studio record` writes to.
-    fn recordings_dir(&self) -> PathBuf {
+    pub(super) fn recordings_dir(&self) -> PathBuf {
         self.replay
             .recordings_dir
             .clone()
