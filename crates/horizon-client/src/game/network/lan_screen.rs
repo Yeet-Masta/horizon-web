@@ -166,10 +166,14 @@ impl WorldOptions {
         if remote || !ui::hovered(cursor, port.x, port.y, port.width, port.height) {
             return None;
         }
-        Some(match port_error(&port.value) {
+        Some(Self::port_message(port))
+    }
+    /// `setPortError`: the port box's tooltip, its error or what it is for.
+    fn port_message(port: &EditBox) -> Text {
+        match port_error(&port.value) {
             Some(key) => Text::translate(key, &[Text::literal("1024"), Text::literal("65535")]),
             None => Text::translate("lanServer.port", &[]),
-        })
+        }
     }
     fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -271,15 +275,142 @@ impl WorldOptions {
             Button::Lan => labelled("menu.multiplayerOptions.lan", on_off(self.lan)),
             Button::CommandAccess => labelled(
                 "options.worldOptions.guest.command_access",
-                on_off(self.guest_commands && self.lan && self.cheats),
+                on_off(self.shown_access()),
             ),
             Button::Force => labelled(
                 "options.worldOptions.guest.force_game_mode",
-                on_off(self.force || !self.lan || self.hardcore),
+                on_off(self.shown_force()),
             ),
             Button::Apply => Text::translate("menu.multiplayerOptions.applyChanges", &[]),
             Button::Cancel => Text::translate("gui.cancel", &[]),
         }
+    }
+    /// `updateGuestCommandAccessButton`: off without LAN or commands.
+    fn shown_access(&self) -> bool {
+        self.guest_commands && self.lan && self.cheats
+    }
+    /// `updateForceGameModeButton`: on in hardcore and without LAN, off
+    /// while guests have commands, else the chosen value.
+    fn shown_force(&self) -> bool {
+        if self.hardcore || !self.lan {
+            true
+        } else if self.shown_access() {
+            false
+        } else {
+            self.force
+        }
+    }
+    /// The translation key of the tooltip button `b` carries, the reason when
+    /// it is greyed out: `WorldOptionsScreen.updateButton` (game modes, Game
+    /// Rules), `createAllowCommandsButton`, the LAN switch's
+    /// `MultiplayerScope.getTooltip`, `updateGuestCommandAccessButton`,
+    /// `updateForceGameModeButton` and
+    /// `DifficultyButtons.updateDifficultyButtonsState`. The lock, Restrictions
+    /// and the footer have none. Horizon has no demo, so Allow Commands never
+    /// says `allow_commands.disabled.demo.tooltip`.
+    fn tooltip(&self, b: Button) -> Option<&'static str> {
+        // DifficultyButtons.updateDifficultyButtonsState: an operator, or the
+        // owner, sees the level's lock before hardcore; anyone else the
+        // operator reason. The tooltip goes once the button is active.
+        let difficulty = || {
+            Some(if self.remote && !self.gamemaster {
+                "options.worldOptions.difficulty.disabled.operator.tooltip"
+            } else if self.difficulty_locked {
+                "options.worldOptions.difficulty.disabled.locked.tooltip"
+            } else if self.hardcore {
+                "options.worldOptions.difficulty.disabled.hardcore.tooltip"
+            } else {
+                return None;
+            })
+        };
+        if self.remote {
+            return match b {
+                Button::Difficulty => difficulty(),
+                // updateButton with no server: hardcore is not known, the
+                // permission decides.
+                Button::GameRules => {
+                    (!self.gamemaster).then_some("editGamerule.inGame.disabled.tooltip")
+                }
+                _ => None,
+            };
+        }
+        Some(match b {
+            // updateButton(hardcoreTooltip, tooltip, disabledTooltip) from the
+            // wanted Allow Commands.
+            Button::DefaultMode | Button::PersonalMode if self.hardcore => {
+                "options.worldOptions.game_mode.disabled.tooltip"
+            }
+            Button::DefaultMode | Button::PersonalMode if !self.cheats => {
+                "options.worldOptions.game_mode.disabled.operator.tooltip"
+            }
+            Button::DefaultMode => "options.worldOptions.game_mode.tooltip",
+            Button::PersonalMode => "options.worldOptions.personal_game_mode.tooltip",
+            Button::Cheats if self.active(Button::Cheats) => {
+                "options.worldOptions.allow_commands.tooltip"
+            }
+            Button::Cheats => "options.worldOptions.allow_commands.disabled.tooltip",
+            Button::Difficulty => return difficulty(),
+            // updateButton(.., null, ..): no tooltip while it opens; the
+            // commands the player had when the screen opened decide.
+            Button::GameRules if self.hardcore => "editGamerule.inGame.disabled.hardcore.tooltip",
+            Button::GameRules if !self.initial.cheats => "editGamerule.inGame.disabled.tooltip",
+            Button::Lan if self.lan => "menu.multiplayerOptions.network.lan.tooltip",
+            Button::Lan => "menu.multiplayerOptions.network.off.tooltip",
+            Button::CommandAccess if !self.lan => {
+                "options.worldOptions.guest.command_access.disabled.scope.tooltip"
+            }
+            Button::CommandAccess if !self.cheats => {
+                "options.worldOptions.guest.command_access.disabled.commands.tooltip"
+            }
+            Button::CommandAccess => "options.worldOptions.guest.command_access.tooltip",
+            Button::Force if self.hardcore => {
+                "options.worldOptions.guest.force_game_mode.off.hardcore.tooltip"
+            }
+            Button::Force if !self.lan => {
+                "options.worldOptions.guest.force_game_mode.off.scope.tooltip"
+            }
+            Button::Force if self.shown_access() => {
+                "options.worldOptions.guest.force_game_mode.off.commands.tooltip"
+            }
+            Button::Force if self.force => "options.worldOptions.guest.force_game_mode.on.tooltip",
+            Button::Force => "options.worldOptions.guest.force_game_mode.off.tooltip",
+            _ => return None,
+        })
+    }
+    /// The tooltip on show and the widget it belongs to, and whether it shows
+    /// for the keyboard's focus rather than the pointer
+    /// (`WidgetTooltipHolder.refreshTooltipForNextRenderPass`: hovered, even
+    /// greyed out, inside the scroll area; or focused while the last input was
+    /// the keyboard).
+    fn widget_tooltip(
+        &self,
+        cursor: (f32, f32),
+        (w, h): (f32, f32),
+        keyboard: bool,
+    ) -> Option<(Text, [f32; 4], bool)> {
+        let port = [self.port.x, self.port.y, self.port.width, self.port.height];
+        let buttons = self.visible_buttons(w);
+        let key_tip = |b: Button| self.tooltip(b).map(|key| Text::translate(key, &[]));
+        if cursor.1 >= HEADER && cursor.1 < h - FOOTER {
+            if let Some(tip) = Self::port_tooltip(&self.port, cursor, self.remote) {
+                return Some((tip, port, false));
+            }
+            if let Some(&(b, bx, by, bw)) = buttons
+                .iter()
+                .find(|(_, bx, by, bw)| ui::hovered(cursor, *bx, *by, *bw, 20.0))
+            {
+                return key_tip(b).map(|tip| (tip, [bx, by, bw, 20.0], false));
+            }
+        }
+        if !keyboard {
+            return None;
+        }
+        if self.port.focused && !self.remote {
+            return Some((Self::port_message(&self.port), port, true));
+        }
+        let b = self.focused_button?;
+        let &(_, bx, by, bw) = buttons.iter().find(|e| e.0 == b)?;
+        key_tip(b).map(|tip| (tip, [bx, by, bw, 20.0], true))
     }
     /// What button `b` narrates: the switches are `CycleButton`s ("<name>:
     /// <value> button" and the value a click moves to), the lock a
@@ -303,8 +434,8 @@ impl WorldOptions {
             )
         };
         let cycle = |message: String, next: String| Narratable::cycle(message, next, rect, active);
-        let shown_access = self.guest_commands && self.lan && self.cheats;
-        let shown_force = self.force || !self.lan || self.hardcore;
+        let shown_access = self.shown_access();
+        let shown_force = self.shown_force();
         match b {
             Button::DefaultMode => {
                 let key = "options.worldOptions.game_mode";
@@ -632,6 +763,9 @@ impl Game<'_> {
         let mut port = EditBox::new(0.0, 0.0, 150.0, 20.0);
         port.message = super::screen_info::tr("lanServer.port", &[]);
         port.max_length = 5;
+        // The screen opens with nothing focused: the box shows its hint and
+        // takes no typing (or keyboard tooltip) until it is chosen.
+        port.focused = false;
         // The world is the server thread's when there is one.
         let state = match &self.integrated {
             Some(server) => match server.call(|g| g.server_options()) {
@@ -926,6 +1060,7 @@ impl Game<'_> {
                 super::screen_info::tr("options.worldOptions.title", &[]),
             )
         });
+        let keyboard = self.narration.input_type().is_keyboard();
         let atlas = &self.gui.atlas;
         let (w, h) = (batch.width, batch.height);
         // extractMenuBackground: the in-world background, the list
@@ -1094,14 +1229,21 @@ impl Game<'_> {
                 hover,
             );
         }
-        let tooltip = WorldOptions::port_tooltip(&o.port, cursor, o.remote);
+        let tooltip = active_screen
+            .then(|| o.widget_tooltip(cursor, (w, h), keyboard))
+            .flatten();
         if active_screen {
             self.draw_screen_phase(batch, horizon_client::screen_draw::RenderPhase::Foreground);
         }
-        // The widgets are drawn; the port box's tooltip goes over them.
-        if let Some(tip) = tooltip {
+        // The widgets are drawn; the tooltip goes over them.
+        if let Some((tip, rect, focused)) = tooltip {
             // Tooltip.splitTooltip: font.split(message, 170).
-            ui::tooltip(batch, atlas, &atlas.font.split(&tip, 170.0), cursor);
+            let lines = atlas.font.split(&tip, 170.0);
+            if focused {
+                ui::tooltip_focused(batch, atlas, &lines, rect);
+            } else {
+                ui::tooltip_menu(batch, atlas, &lines, cursor, rect);
+            }
         }
     }
 
@@ -1857,6 +1999,8 @@ mod tests {
                 force: false,
             },
         };
+        // As open_world_options: nothing focused.
+        o.port.focused = false;
         o.initial = o.snapshot();
         o
     }
@@ -2028,6 +2172,194 @@ mod tests {
         assert!(WorldOptions::port_tooltip(&port, (157.0, 101.0), false).is_none());
         assert!(WorldOptions::port_tooltip(&port, (159.0, 121.0), false).is_none());
         assert!(WorldOptions::port_tooltip(&port, (159.0, 101.0), true).is_none());
+    }
+
+    /// Every switch carries vanilla's tooltip, and a greyed-out one the reason
+    /// (`WorldOptionsScreen.updateButton`, `createAllowCommandsButton`,
+    /// `updateGuestCommandAccessButton`, `updateForceGameModeButton`,
+    /// `DifficultyButtons.updateDifficultyButtonsState`).
+    #[test]
+    fn each_button_explains_itself_and_why_it_is_greyed_out() {
+        let ow = "options.worldOptions.";
+        let tip = |o: &WorldOptions, b| o.tooltip(b).map(|k| k.strip_prefix(ow).unwrap_or(k));
+        // Commands on, LAN off.
+        let mut o = options(true, false);
+        assert_eq!(tip(&o, Button::DefaultMode), Some("game_mode.tooltip"));
+        assert_eq!(
+            tip(&o, Button::PersonalMode),
+            Some("personal_game_mode.tooltip")
+        );
+        assert_eq!(tip(&o, Button::Cheats), Some("allow_commands.tooltip"));
+        assert_eq!(tip(&o, Button::Difficulty), None);
+        assert_eq!(tip(&o, Button::GameRules), None);
+        assert_eq!(
+            tip(&o, Button::Lan),
+            Some("menu.multiplayerOptions.network.off.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::CommandAccess),
+            Some("guest.command_access.disabled.scope.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.off.scope.tooltip")
+        );
+        for b in [Button::Lock, Button::Restrictions, Button::Apply, Button::Cancel] {
+            assert_eq!(tip(&o, b), None, "{b:?}");
+        }
+        // LAN on: the switches say what they do, Force its value.
+        o.lan = true;
+        assert_eq!(
+            tip(&o, Button::Lan),
+            Some("menu.multiplayerOptions.network.lan.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::CommandAccess),
+            Some("guest.command_access.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.on.tooltip")
+        );
+        o.force = false;
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.off.tooltip")
+        );
+        o.guest_commands = true;
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.off.commands.tooltip")
+        );
+        // The Allow Commands switch turned off: the game modes and guests'
+        // commands lose them; Game Rules keeps the opening state.
+        o.cheats = false;
+        assert_eq!(
+            tip(&o, Button::DefaultMode),
+            Some("game_mode.disabled.operator.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::CommandAccess),
+            Some("guest.command_access.disabled.commands.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.off.tooltip")
+        );
+        assert_eq!(tip(&o, Button::GameRules), None);
+        let o = options(false, false);
+        assert_eq!(
+            tip(&o, Button::GameRules),
+            Some("editGamerule.inGame.disabled.tooltip")
+        );
+        // A locked level, then hardcore (the level's lock is named first).
+        let mut o = options(true, false);
+        o.difficulty_locked = true;
+        assert_eq!(
+            tip(&o, Button::Difficulty),
+            Some("difficulty.disabled.locked.tooltip")
+        );
+        let mut o = options(false, true);
+        o.lan = true;
+        assert_eq!(
+            tip(&o, Button::DefaultMode),
+            Some("game_mode.disabled.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Cheats),
+            Some("allow_commands.disabled.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Difficulty),
+            Some("difficulty.disabled.hardcore.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::GameRules),
+            Some("editGamerule.inGame.disabled.hardcore.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::Force),
+            Some("guest.force_game_mode.off.hardcore.tooltip")
+        );
+        // A hardcore owner with commands keeps Allow Commands.
+        assert_eq!(
+            tip(&options(true, true), Button::Cheats),
+            Some("allow_commands.tooltip")
+        );
+        // A guest without operator rights: difficulty and rules say why.
+        let mut o = options(false, false);
+        o.remote = true;
+        assert_eq!(
+            tip(&o, Button::Difficulty),
+            Some("difficulty.disabled.operator.tooltip")
+        );
+        assert_eq!(
+            tip(&o, Button::GameRules),
+            Some("editGamerule.inGame.disabled.tooltip")
+        );
+        o.gamemaster = true;
+        assert_eq!(tip(&o, Button::Difficulty), None);
+        assert_eq!(tip(&o, Button::GameRules), None);
+        o.hardcore = true;
+        assert_eq!(
+            tip(&o, Button::Difficulty),
+            Some("difficulty.disabled.hardcore.tooltip")
+        );
+        assert_eq!(tip(&o, Button::GameRules), None);
+    }
+
+    /// The tooltip follows the pointer onto greyed-out buttons, but only
+    /// between the separators; with the keyboard it follows the focus.
+    #[test]
+    fn a_hovered_or_keyboard_focused_widget_shows_its_tooltip() {
+        let size = (427.0, 240.0);
+        let key = |t: Option<(Text, [f32; 4], bool)>| {
+            t.and_then(|(t, rect, focused)| {
+                Some((t.translation_key()?.to_owned(), rect, focused))
+            })
+        };
+        let o = options(false, true);
+        // Difficulty at (217, 110), greyed out in hardcore.
+        assert_eq!(
+            key(o.widget_tooltip((220.0, 115.0), size, false)),
+            Some((
+                "options.worldOptions.difficulty.disabled.hardcore.tooltip".to_owned(),
+                [217.0, 110.0, 130.0, 20.0],
+                false
+            ))
+        );
+        // The lock beside it has none, and neither has the gap between rows.
+        assert!(o.widget_tooltip((350.0, 115.0), size, false).is_none());
+        assert!(o.widget_tooltip((220.0, 132.0), size, false).is_none());
+        // Scrolled under the header, Default Game Mode shows nothing.
+        let mut o = options(true, false);
+        o.scroll = 44.0;
+        assert!(o.widget_tooltip((100.0, 25.0), size, false).is_none());
+        // The keyboard's focus, with the pointer elsewhere.
+        o.focused_button = Some(Button::Cheats);
+        assert!(o.widget_tooltip((0.0, 0.0), size, false).is_none());
+        assert_eq!(
+            key(o.widget_tooltip((0.0, 0.0), size, true)),
+            Some((
+                "options.worldOptions.allow_commands.tooltip".to_owned(),
+                [59.0, 66.0, 150.0, 20.0],
+                true
+            ))
+        );
+    }
+
+    /// `updateForceGameModeButton` sets the switch off while guests have
+    /// commands, on with LAN off or in hardcore.
+    #[test]
+    fn force_game_mode_reads_off_while_guests_have_commands() {
+        let mut o = options(true, false);
+        assert!(o.shown_force());
+        o.lan = true;
+        assert!(o.shown_force());
+        o.guest_commands = true;
+        assert!(!o.shown_force());
+        o.cheats = false;
+        assert!(o.shown_force());
     }
 
     /// `WorldOptionsScreen.updatePortControlsState`: with LAN off the port box
