@@ -245,7 +245,7 @@ impl Game<'_> {
             p.fall_flying,
             p.pose == horizon_client::pose::Pose::Swimming,
         );
-        let climbing = p.last_climbable.is_some() && d.y > 0.0;
+        let on_climbable = self.player_on_climbable();
         let riding = self.riding.map(|id| {
             self.mobs
                 .iter()
@@ -287,8 +287,10 @@ impl Game<'_> {
                     self.award_custom_stat("walk_on_water_one_cm", horizontal)
                 }
             }
-            None if climbing => {
-                self.award_custom_stat("climb_one_cm", (d.y * 100.0).round() as i32)
+            None if on_climbable => {
+                if d.y > 0.0 {
+                    self.award_custom_stat("climb_one_cm", (d.y * 100.0).round() as i32);
+                }
             }
             None if on_ground => {
                 if horizontal > 0 {
@@ -612,5 +614,52 @@ mod tests {
             stats.take_dirty(),
             vec![("minecraft:custom".into(), "minecraft:play_time".into(), 0)]
         );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn movement_stats_uses_current_on_climbable_branch() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let scaffolding = game
+                .pack
+                .assets
+                .registry
+                .resolve(&horizon_world::chunk::BlockState {
+                    name: "minecraft:scaffolding".into(),
+                    properties: Default::default(),
+                })
+                .unwrap();
+            let air = game.res.facts().air;
+            game.world.set(0, 65, 0, scaffolding).unwrap();
+            {
+                let p = game.player.as_mut().unwrap();
+                p.position = horizon_core::geometry::Vec3::new(0.5, 65.0, 0.5);
+                p.ground.on_ground = true;
+                p.flying = false;
+                p.last_climbable = None;
+            }
+            // Walking horizontally inside scaffolding awards neither walk nor climb.
+            game.movement_stats(horizon_core::geometry::Vec3::new(1.0, 0.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:walk_one_cm"), 0);
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 0);
+
+            // Moving upward inside scaffolding awards climb_one_cm.
+            game.movement_stats(horizon_core::geometry::Vec3::new(0.0, 1.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 100);
+
+            // Leaving the climbable block while last_climbable is still set does not award climb.
+            game.world.set(0, 65, 0, air).unwrap();
+            {
+                let p = game.player.as_mut().unwrap();
+                p.ground.on_ground = false;
+                p.last_climbable = Some(horizon_core::position::BlockPos::new(0, 65, 0));
+            }
+            game.movement_stats(horizon_core::geometry::Vec3::new(0.0, 1.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 100);
+        });
     }
 }

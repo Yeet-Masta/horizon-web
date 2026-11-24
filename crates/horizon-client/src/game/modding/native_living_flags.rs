@@ -343,6 +343,24 @@ impl Game<'_> {
         };
         Some(climbing::on_climbable(&mut world, &self.motion.climbing).unwrap_or(false))
     }
+    /// `Player.onClimbable` at the current player's feet (never while flying).
+    pub(super) fn player_on_climbable(&self) -> bool {
+        let Some(p) = self.player.as_ref() else {
+            return false;
+        };
+        if p.flying {
+            return false;
+        }
+        let mut world = FlagClimbing {
+            world: &self.world,
+            context: &self.loop_context,
+            entity: self.native_acting_entity(),
+            position: BlockPos::containing(p.position),
+            spectator: p.spectator,
+            gliding: p.fall_flying,
+        };
+        climbing::on_climbable(&mut world, &self.motion.climbing).unwrap_or(false)
+    }
     /// The climbing decision for a mob currently lent out of the game's list.
     pub(super) fn native_mob_is_climbing(&self, mob: &horizon_client::mobs::Mob) -> bool {
         let mut world = FlagClimbing {
