@@ -1818,7 +1818,8 @@ impl Projectile {
         {
             self.position = at;
             self.touching_water = w.in_water(self.bounds());
-            let alive = self.position.y >= w.below_world_y() && self.age < 1200;
+            // No age limit: `DragonFireball` lives until it hits or leaves the world.
+            let alive = self.position.y >= w.below_world_y();
             return (alive, Hit::None);
         }
         // LlamaSpit never discards on an entity: `onHitEntity` only hurts, so
@@ -1866,10 +1867,7 @@ impl Projectile {
                 self.velocity.y * drag - self.get_gravity(),
                 self.velocity.z * drag,
             );
-            return (
-                self.position.y >= w.below_world_y() && self.age < 6000,
-                spit_hit,
-            );
+            return (self.position.y >= w.below_world_y(), spit_hit);
         }
         self.position = to;
         // `AbstractHurtingProjectile.tick` (fireballs and wind charges) eases towards the motion
@@ -1883,8 +1881,13 @@ impl Projectile {
         // it touches now, and their currents push it.
         self.touching_water = w.in_water(self.bounds());
         self.velocity = w.pushed_by_currents(self.bounds(), self.velocity);
-        let alive = self.position.y >= w.below_world_y()
-            && self.age < if self.is_fireball() { 1200 } else { 6000 };
+        // No kind counts its age: a projectile that meets nothing lives as long
+        // as its chunk does. `Entity.onBelowWorld` is the only removal here.
+        // Vanilla's `AbstractHurtingProjectile.tick` also discards when the
+        // owner is removed or the chunk is unloaded; `ProjectileWorld` offers no
+        // owner-alive or chunk-loaded answer to build that branch from, so the
+        // divergence is intended until #21117 carries it.
+        let alive = self.position.y >= w.below_world_y();
         (alive, Hit::None)
     }
     /// AbstractArrow.onHitEntity damage: ceil(speed * base) plus crit bonus.
@@ -2799,6 +2802,70 @@ mod tests {
         assert!((p.position.x - 1.0).abs() < 1e-9);
         assert_eq!(p.velocity.x.to_bits(), 0x3fef_ae14_8000_0000);
         assert!((p.velocity.y + 0.06).abs() < 1e-9);
+    }
+    /// Vanilla's projectile classes count no age: a fireball summoned with
+    /// `acceleration_power:0`, a `NoGravity` thrown item and a llama spit that
+    /// meet nothing live as long as their chunk does (#20710). `Entity.onBelowWorld`
+    /// is still a removal.
+    #[test]
+    fn a_projectile_that_meets_nothing_has_no_lifetime() {
+        let w = Empty(vec![]);
+        for kind in [
+            ProjectileKind::LargeFireball { power: 0 },
+            ProjectileKind::DragonFireball,
+            ProjectileKind::WitherSkull { dangerous: false },
+            ProjectileKind::WindCharge,
+            ProjectileKind::EnderPearl,
+            ProjectileKind::Snowball,
+            ProjectileKind::LlamaSpit,
+        ] {
+            let label = format!("{kind:?}");
+            let mut p = Projectile::new(kind, Vec3::new(0.5, 100.0, 0.5), None);
+            // Nothing brings it down and nothing is on its way: the motionless
+            // projectile of `/summon ... {NoGravity:1b,acceleration_power:0d}`.
+            p.no_gravity = true;
+            p.acceleration = 0.0;
+            for _ in 0..6001 {
+                let age = p.age;
+                assert!(p.tick(&w).0, "{label} discarded at age {age}");
+            }
+            assert_eq!(p.age, 6001, "{label}");
+        }
+        let mut below =
+            Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, -129.0, 0.5), None);
+        assert!(!below.tick(&w).0, "onBelowWorld still discards");
+    }
+    /// The DragonFireball owner-hit early return: a fireball whose ray meets
+    /// its own dragon does nothing and stays there (#20710). This is the one
+    /// branch whose age bound (1200) the change removed, so it gets its own
+    /// stay-alive: vanilla's `DragonFireball` never counts its age either.
+    /// After the early return the fireball sits on its dragon's inflated box,
+    /// where a ray has no entry to hit, so every tick re-pins one arrival: the
+    /// `control_a_dragon_fireball_stops_at_its_owner_and_flies_on` control above
+    /// already shows what one arrival does (stop, no hit, motion kept).
+    #[test]
+    fn a_dragon_fireball_parked_on_its_owner_has_no_lifetime() {
+        let boxed = |x: f64| Aabb::new(Vec3::new(x, 100.0, 0.0), Vec3::new(x + 0.2, 101.0, 1.0));
+        let mut p = Projectile::new(
+            ProjectileKind::DragonFireball,
+            Vec3::new(0.0, 100.5, 0.5),
+            Some(Who::Mob(7)),
+        );
+        p.left_owner = true;
+        // No wall behind: the fireball eases its motion every tick, and a wall
+        // would take a legitimate block impact sooner or later. `Empty` clips
+        // nothing, so the ray only ever meets its own dragon's box.
+        let w = Empty(vec![(Who::Mob(7), boxed(0.4))]);
+        for _ in 0..1201 {
+            p.position = Vec3::new(0.0, 100.5, 0.5);
+            p.velocity = Vec3::new(0.5, 0.0, 0.0);
+            let age = p.age;
+            assert!(
+                p.tick(&w).0,
+                "the fireball arriving at its owner discarded at age {age}"
+            );
+        }
+        assert_eq!(p.age, 1201);
     }
     #[test]
     fn arrow_damage_is_speed_times_base() {
