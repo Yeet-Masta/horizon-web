@@ -38,7 +38,11 @@ impl Game<'_> {
         }
         let (attack, use_item) = (self.left, self.right);
         input.tick(&mut RemoteInputWorld(self), attack, use_item);
-        self.remote_queued_keys();
+        // Minecraft.tick counts `missTime` down after `handleKeybinds`, so a miss's 10
+        // ticks start after this tick's attack.
+        if self.clicks.miss_time > 0 {
+            self.clicks.miss_time -= 1;
+        }
         if let Some(r) = self.remote.as_mut() {
             input.merge_queued(std::mem::take(&mut r.input));
             r.input = input;

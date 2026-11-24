@@ -16,10 +16,10 @@ fn counts(packets: &[String]) -> [usize; 3] {
     .map(|id| packets.iter().filter(|p| *p == id).count())
 }
 
-/// A player's burst between two ticks, keys and buttons: the number key selects at the tick's
-/// pick, the click punches, then the drop keys and the swap act in the order pressed, the first
-/// drop telling the server of the new slot (`ensureHasSentCarriedItem`). One press of each a tick
-/// for twenty ticks acts once a tick, on its own tick.
+/// A player's burst between two ticks, keys and buttons: as in vanilla's `Minecraft.handleKeybinds`,
+/// the number key selects first, the drop keys and the swap act next in the order pressed (the first
+/// drop telling the server of the new slot via `ensureHasSentCarriedItem`), and the click punches
+/// after them. One press of each a tick for twenty ticks acts once a tick, on its own tick.
 #[test]
 #[ignore = "daily"]
 fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
@@ -42,11 +42,11 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
         assert_eq!(
             sent(packets),
             [
-                "minecraft:punch",
                 "minecraft:set_carried_item",
                 "minecraft:player_action",
                 "minecraft:player_action",
-                "minecraft:player_action"
+                "minecraft:player_action",
+                "minecraft:punch",
             ]
         );
         assert_eq!(game.selected, 1);
@@ -58,9 +58,38 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
             game.remote_handle_input();
             assert_eq!(
                 sent(packets),
-                ["minecraft:punch", "minecraft:player_action"]
+                ["minecraft:player_action", "minecraft:punch"]
             );
         }
+    });
+}
+
+/// Number-key selection, swap (F) and drop (Q) act before attack/use in the same tick, matching
+/// vanilla's `Minecraft.handleKeybinds` order (`pick` -> number keys -> F/Q/E -> attack/use/pick).
+/// The swap goes out as pressed; the drop after it is the first to tell the server of the new slot.
+#[test]
+#[ignore = "daily"]
+fn swap_and_drop_run_before_attack() {
+    with_pressing_game(|game, packets, _| {
+        game.set_mode_id(1);
+        game.forced_hit = None;
+        game.inventory[1] = Some(ItemStack::new("minecraft:stone", 64));
+        game.play_mouse(MouseButton::Left, true).unwrap();
+        game.play_mouse(MouseButton::Left, false).unwrap();
+        game.key_pressed(KeyCode::Digit2, KeyCode::Digit2).unwrap();
+        game.key_pressed(KeyCode::KeyF, KeyCode::KeyF).unwrap();
+        game.key_pressed(KeyCode::KeyQ, KeyCode::KeyQ).unwrap();
+        game.remote_handle_input();
+        assert_eq!(
+            sent(packets),
+            [
+                "minecraft:player_action",
+                "minecraft:set_carried_item",
+                "minecraft:player_action",
+                "minecraft:punch",
+            ]
+        );
+        assert_eq!(game.selected, 1);
     });
 }
 

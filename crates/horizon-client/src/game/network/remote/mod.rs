@@ -2084,6 +2084,9 @@ impl horizon_client::interaction_input::InteractionWorld for RemoteInputWorld<'_
     fn pick_hit_result(&mut self) {
         self.0.pick_tick_targets();
     }
+    fn queued_keys(&mut self) {
+        self.0.remote_queued_keys();
+    }
     fn release_hit_result(&mut self) {
         self.0.release_tick_targets();
     }
