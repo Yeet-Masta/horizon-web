@@ -496,6 +496,7 @@ impl Game<'_> {
         if self.pending_save.is_some() {
             return;
         }
+        self.input_frame();
         horizon_client::spans::time("pads", || self.poll_pads(event_loop));
         self.settle_after_run(event_loop);
         self.pause_if_inactive();

@@ -14,7 +14,7 @@ use winit::keyboard::KeyCode;
 /// A game at play with no world: input reaches the mappings, as in `Screen::Playing`.
 use crate::game::execution_role::ExecutionRole;
 
-fn playing(test: impl FnOnce(&mut Game)) {
+pub(super) fn playing(test: impl FnOnce(&mut Game)) {
     let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
     let settings = Settings::default();
     let loaded = load_resources(
@@ -64,7 +64,7 @@ impl crate::game::event_loop::EventLoopCtl for NoEventLoop {
 }
 
 /// Hold `button` through the real press dispatcher, including its action ownership.
-fn pad_press(game: &mut Game, button: Button, action: &str) {
+pub(super) fn pad_press(game: &mut Game, button: Button, action: &str) {
     assert!(
         game.settings
             .controller

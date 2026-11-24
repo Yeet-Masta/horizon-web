@@ -14,11 +14,13 @@
 //!
 //! The platform registries (docs/layers.md, "Platform registries") have the same shape:
 //! [`settings`] for the settings each crate keeps in its own lines, [`pages`] for its settings
-//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text.
+//! pages, [`hud`] for what it draws on the HUD, [`lang`] for the lang files with its text,
+//! [`input`] for the factory of the game's input source.
 #![forbid(unsafe_code)]
 
 pub mod actions;
 pub mod hud;
+pub mod input;
 pub mod lang;
 pub mod mod_links;
 pub mod pages;

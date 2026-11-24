@@ -1,6 +1,7 @@
 //! Key and mouse mappings in play: toggled sneak and sprint, keys after rebinding, keys held
 //! across screens, the hotbar's wheel and bumper steps, and mouse buttons while playing.
 use super::*;
+use horizon_client::input_source::{Factory, InputHost, InputSource};
 use horizon_client::{held::HeldKeys, keymapping::ToggleKeys};
 use winit::keyboard::ModifiersState;
 
@@ -109,16 +110,15 @@ impl Game<'_> {
         if let Some(title) = &mut self.title {
             title.set_alt_down(state.alt_key());
         }
+        // Whether another device (the pad, or a registered source) still holds sneak or sprint.
+        let elsewhere = [self.input_holds("key.sneak"), self.input_holds("key.sprint")];
         horizon_client_input::modifiers::reconcile(
             self.modifiers,
             &mut self.physical_keys,
             &self.settings.keys,
             &mut self.toggles,
             [self.settings.toggle_crouch, self.settings.toggle_sprint],
-            [
-                self.pad.holds_action("key.sneak"),
-                self.pad.holds_action("key.sprint"),
-            ],
+            elsewhere,
         );
         self.sync_toggle(SNEAK);
         self.sync_toggle(SPRINT);
@@ -191,10 +191,13 @@ impl Game<'_> {
     /// Whether the other device still holds the sneak or sprint mapping `source` released.
     pub(super) fn toggle_held_elsewhere(&self, slot: usize, key: KeyCode, source: Source) -> bool {
         match source {
-            // A pad's toggle-sneak isn't holding it: it has no release that would end it.
+            // The built-in pad's toggle-sneak isn't holding it: it has no release that would end
+            // it. That setting is the pad's, so a registered source's hold always counts.
             Source::Keyboard => {
-                !(slot == SNEAK && self.settings.controller.toggle_sneak)
-                    && self.pad.holds_action(["key.sneak", "key.sprint"][slot])
+                let pad_latch = slot == SNEAK
+                    && self.settings.controller.toggle_sneak
+                    && self.input_source.is_none();
+                !pad_latch && self.input_holds(["key.sneak", "key.sprint"][slot])
             }
             Source::Pad => self.physical_keys.iter().any(|physical| {
                 self.settings
@@ -577,11 +580,44 @@ impl Game<'_> {
 
 /// The input source (docs/layers.md, "Controllers, splitscreen, replays and UI pages"): what
 /// gameplay asks of a device beyond the keyboard and mouse, and tells it. Gameplay calls these,
-/// never the controller modules; today `pad` answers.
+/// never the controller modules. A registered source answers (`input_source`); with none, the
+/// internal adapter, the `pad` modules, does until they leave the engine (spec #14205).
 impl Game<'_> {
+    /// Takes the source out for a call that needs it mutable beside the host (`self`). A panic in
+    /// the call isn't caught on this path (the crash handler ends the game), so the source is put
+    /// back only on return.
+    fn with_input_source<T>(
+        &mut self,
+        call: impl FnOnce(&mut dyn InputSource, &Self) -> T,
+    ) -> Option<T> {
+        let mut source = self.input_source.take()?;
+        let answer = call(source.as_mut(), self);
+        self.input_source = Some(source);
+        Some(answer)
+    }
+
+    /// Whether a registered source is left unread: a scripted run (`scripted_run`) drives
+    /// nothing, the source as the pads, so every question to it answers as an idle device's.
+    fn input_source_muted(&self) -> bool {
+        self.input_source.is_some() && self.scripted_run()
+    }
+
+    /// Once per frame, before the frame's input is read: the source's turn.
+    pub(super) fn input_frame(&mut self) {
+        if self.input_source_muted() {
+            return;
+        }
+        self.with_input_source(|source, host| source.frame(host));
+    }
+
     /// The analog move vector (`[left, forward]`, -1..1) while a device moves the player.
     pub(super) fn input_move(&self) -> Option<[f32; 2]> {
-        self.pad_move()
+        match &self.input_source {
+            // A scripted run moves the player only as its script says.
+            Some(_) if self.input_source_muted() => None,
+            Some(source) => source.move_vector(self),
+            None => self.pad_move(),
+        }
     }
 
     /// The gameplay tick's stick and its one-tick square-movement opt-out.
@@ -596,45 +632,86 @@ impl Game<'_> {
 
     /// Whether a device holds the key mapping named `mapping` (`key.use`).
     pub(super) fn input_holds(&self, mapping: &str) -> bool {
-        self.pad.holds_action(mapping)
+        match &self.input_source {
+            // A scripted run holds only what its script does.
+            Some(_) if self.input_source_muted() => false,
+            Some(source) => source.holds(mapping),
+            None => self.pad.holds_action(mapping),
+        }
     }
 
     /// Turns the view by what the devices give this frame (`Entity.turn`).
     pub(super) fn input_look(&mut self, seconds: f32) {
-        self.pad_look(seconds);
+        // A scripted run turns the view only as its script says.
+        if self.input_source_muted() {
+            return;
+        }
+        let seconds = seconds.min(horizon_client::input_source::LOOK_SECONDS_CAP);
+        match self.with_input_source(|source, host| source.look(host, seconds)) {
+            Some(Some([yaw, pitch])) => self.look_turn(yaw, pitch),
+            Some(None) => {}
+            None => self.pad_look(seconds),
+        }
     }
 
     /// The keyboard or mouse acted in play (a key or button pressed): it has control again, though
     /// only moving the mouse takes a pad out of use.
     pub(super) fn input_keyboard_used(&mut self) {
-        self.pad.keyboard_took_over = true;
+        if self.input_source_muted() {
+            return;
+        }
+        match &mut self.input_source {
+            Some(source) => source.keyboard_used(),
+            None => self.pad.keyboard_took_over = true,
+        }
     }
 
     /// Whether the pointer event being handled is one a device made (a pad's menu cursor
-    /// clicking), not the mouse's.
+    /// clicking, a source's, the keyboard's focus clicking a widget), not the mouse's.
     pub(super) fn input_made_pointer_event(&self) -> bool {
+        // The keyboard's menu focus marks its clicks with or without a source.
         self.pad.menu.synthetic
+            || match &self.input_source {
+                Some(_) if self.input_source_muted() => false,
+                Some(source) => source.made_pointer_event(),
+                None => false,
+            }
     }
 
     /// A new player entity took over (spawn, respawn, a server joined, a dimension change).
     pub(super) fn input_player_replaced(&mut self) {
-        self.pad_player_replaced();
+        match &mut self.input_source {
+            Some(source) => source.player_replaced(),
+            None => self.pad_player_replaced(),
+        }
     }
 
     /// Whether the drop about to happen is a device's whole-stack drop (it has no Control key to
     /// hold). Asking answers once.
     pub(super) fn input_takes_stack_drop(&mut self) -> bool {
-        std::mem::take(&mut self.pad.drop_stack)
+        if self.input_source_muted() {
+            return false;
+        }
+        match &mut self.input_source {
+            Some(source) => source.takes_stack_drop(),
+            None => std::mem::take(&mut self.pad.drop_stack),
+        }
     }
 
     /// The HUD starts a frame: what a device drew on the last one is gone.
     pub(super) fn input_hud_begin(&mut self) {
-        self.pad.guide_shown.clear();
+        match &mut self.input_source {
+            Some(source) => source.hud_begin(),
+            None => self.pad.guide_shown.clear(),
+        }
     }
 
     /// Something happened to the player that a device may let them feel.
     pub(super) fn input_feedback(&mut self, event: horizon_client::input_source::Feedback) {
-        self.pad_rumble(event.into());
+        match &mut self.input_source {
+            Some(source) => source.feedback(event),
+            None => self.pad_rumble(event.into()),
+        }
     }
 
     /// Whether `key` is held, a movement key by the analog move vector too: as the keys it holds
@@ -655,6 +732,43 @@ impl Game<'_> {
             KeyCode::KeyD => right,
             _ => false,
         }
+    }
+}
+
+/// A new game's input source, from the registered factory ([`input_source_for`]).
+pub(super) fn input_source(
+    role: super::execution_role::ExecutionRole,
+) -> Option<Box<dyn InputSource>> {
+    input_source_for(role, horizon_client::input_source::factory)
+}
+
+/// A new game's input source: its own, from the registered `factory`, for a player's game; none
+/// for a server's (the integrated server's thread, a dedicated server), which has no device. A
+/// server's game doesn't read the registry, so it doesn't seal it: a registration after a server
+/// started still counts for the players' games.
+pub(super) fn input_source_for<'a>(
+    role: super::execution_role::ExecutionRole,
+    factory: impl FnOnce() -> Option<&'a dyn Factory>,
+) -> Option<Box<dyn InputSource>> {
+    if !role.is_client() {
+        return None;
+    }
+    factory().map(|factory| factory.build())
+}
+
+/// What the engine offers an input source: the game it drives, read-only.
+impl InputHost for Game<'_> {
+    fn menu_open(&self) -> bool {
+        self.pad_in_menu()
+    }
+    fn focused(&self) -> bool {
+        self.focused
+    }
+    fn has_player(&self) -> bool {
+        self.player.is_some()
+    }
+    fn scoping(&self) -> bool {
+        Game::scoping(self)
     }
 }
 
