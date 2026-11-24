@@ -182,8 +182,56 @@ impl Drop for SessionLock {
     /// alone keeps the lock while any copy of the descriptor lives on, such as
     /// the one a process spawned on another thread holds until its `exec`.
     fn drop(&mut self) {
-        let _ = self.0.unlock();
+        let _ = unlock(&self.0);
     }
+}
+/// The lock vanilla's `DirectoryLock` takes, `FileChannel.tryLock()`, is a POSIX
+/// record lock (`fcntl`) on Unix. Rust's `File::try_lock` is `flock`, which Linux
+/// keeps apart from it: a world open in vanilla would open in Horizon and the
+/// reverse (#20841). Linux's open file description lock conflicts with Java's,
+/// and unlike a plain `fcntl` lock it belongs to the opened file, not the
+/// process, so a second [`SessionLock::acquire`] or an [`SessionLock::is_locked`]
+/// probe in this process still sees it, and closing the probe doesn't drop it.
+/// The `flock` is taken too, on the same descriptor: a Horizon built before this
+/// takes only that one, and the OFD lock alone would not see it.
+#[cfg(target_os = "linux")]
+fn whole_file_lock(file: &fs::File, kind: nix::libc::c_int) -> nix::Result<()> {
+    use nix::fcntl::{FcntlArg, fcntl};
+    use nix::libc;
+    let whole = libc::flock {
+        l_type: kind as libc::c_short,
+        l_whence: libc::SEEK_SET as libc::c_short,
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    fcntl(file, FcntlArg::F_OFD_SETLK(&whole)).map(drop)
+}
+#[cfg(target_os = "linux")]
+fn try_lock(file: &fs::File) -> std::result::Result<(), fs::TryLockError> {
+    use nix::errno::Errno;
+    match whole_file_lock(file, nix::libc::F_WRLCK) {
+        Ok(()) => {}
+        Err(Errno::EAGAIN | Errno::EACCES) => return Err(fs::TryLockError::WouldBlock),
+        Err(e) => return Err(fs::TryLockError::Error(e.into())),
+    }
+    file.try_lock().inspect_err(|_| {
+        let _ = whole_file_lock(file, nix::libc::F_UNLCK);
+    })
+}
+#[cfg(target_os = "linux")]
+fn unlock(file: &fs::File) -> std::io::Result<()> {
+    let ofd = whole_file_lock(file, nix::libc::F_UNLCK);
+    file.unlock()?;
+    Ok(ofd?)
+}
+#[cfg(not(target_os = "linux"))]
+fn try_lock(file: &fs::File) -> std::result::Result<(), fs::TryLockError> {
+    file.try_lock()
+}
+#[cfg(not(target_os = "linux"))]
+fn unlock(file: &fs::File) -> std::io::Result<()> {
+    file.unlock()
 }
 impl SessionLock {
     pub fn acquire(world: &Path) -> Result<Self> {
@@ -194,7 +242,7 @@ impl SessionLock {
             .create(true)
             .truncate(false)
             .open(world.join("session.lock"))?;
-        file.try_lock()
+        try_lock(&file)
             .map_err(|_| format!("{} is already open in another instance", world.display()))?;
         file.set_len(0)?;
         file.write_all(&[0x26, 0x03])?;
@@ -212,12 +260,12 @@ impl SessionLock {
             Ok(file) => file,
             Err(e) => return e.kind() == std::io::ErrorKind::PermissionDenied,
         };
-        match file.try_lock() {
+        match try_lock(&file) {
             Err(fs::TryLockError::WouldBlock) => true,
             Err(_) => false,
             // Take the probe's own lock back at once, as `SessionLock` does on drop.
             Ok(()) => {
-                let _ = file.unlock();
+                let _ = unlock(&file);
                 false
             }
         }
