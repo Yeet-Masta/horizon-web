@@ -180,7 +180,7 @@ impl Game<'_> {
         if target == Some(player) {
             return Err(err("commands.spectate.self", &[]));
         }
-        if !self.spectator() {
+        if !self.target_spectator(player) {
             return Err(tr_error(
                 "commands.spectate.not_spectator",
                 &[self.target_name(player)],
@@ -1272,3 +1272,7 @@ mod waypoint_icon_save_tests {
         assert_eq!(Game::waypoint_icon_from_saved(Some(&no_style)), None);
     }
 }
+
+#[cfg(test)]
+#[path = "spectate_tests.rs"]
+mod spectate_tests;
