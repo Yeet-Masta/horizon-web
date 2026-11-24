@@ -9,7 +9,7 @@ use horizon_protocol::packets::play::Serverbound as S;
 use mod_api::LocalRotationError;
 
 /// The server's side of the handshake up to play, as `client_targeting`'s test drives it.
-fn finish_login(server: &mut Connection) {
+pub(super) fn finish_login(server: &mut Connection) {
     use horizon_protocol::packets::{Empty, configuration as cfg, login};
     server.recv().unwrap(); // Intention.
     server.recv().unwrap(); // Hello.

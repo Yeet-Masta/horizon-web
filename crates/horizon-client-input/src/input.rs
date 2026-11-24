@@ -38,6 +38,15 @@ pub fn modify_input(input: [f32; 2], item_use: Option<f32>, sneaking: Option<f32
     if input[0] * input[0] + input[1] * input[1] == 0.0 {
         return input;
     }
+    square_movement(modify_input_linear(input, item_use, sneaking))
+}
+
+/// Apply the local player's speed multipliers without changing the stick's shape.
+pub fn modify_input_linear(
+    input: [f32; 2],
+    item_use: Option<f32>,
+    sneaking: Option<f32>,
+) -> [f32; 2] {
     let mut v = scale(input, 0.98);
     if let Some(multiplier) = item_use {
         v = scale(v, multiplier);
@@ -45,7 +54,7 @@ pub fn modify_input(input: [f32; 2], item_use: Option<f32>, sneaking: Option<f32
     if let Some(multiplier) = sneaking {
         v = scale(v, multiplier);
     }
-    square_movement(v)
+    v
 }
 
 fn square_movement(v: [f32; 2]) -> [f32; 2] {

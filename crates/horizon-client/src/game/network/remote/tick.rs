@@ -208,7 +208,6 @@ impl Game<'_> {
         // Player.tick's sleep counter (the darkening and the wake-up fade).
         self.sleep_timer =
             super::super::tick_sleep_timer(self.sleep_timer, self.sleeping.is_some());
-        let stick = self.pad_move();
         if self.player.is_none() {
             return Ok(());
         }
@@ -218,6 +217,12 @@ impl Game<'_> {
             .as_ref()
             .is_some_and(|r| r.level_load.is_active());
         let playing = self.screen == Screen::Playing && !loading && !self.dialog_open();
+        let external_server = self.input_is_external_multiplayer();
+        let (stick, bypass_square_movement) = if playing {
+            self.input_move_for_tick(external_server)
+        } else {
+            (None, false)
+        };
         let held = |action| playing && self.keys.held(action);
         let mut keys = Keys {
             forward: held(Action::Forward),
@@ -230,12 +235,12 @@ impl Game<'_> {
             sprint_suppressed: false,
             analog: None,
         }
-        .with_stick(stick.filter(|_| playing));
+        .with_stick(stick);
         // On a server (not this game's own server thread), the stick moves as the keys it sets do
         // (`KeyboardInput.tick`: 8 directions, full speed). The server only hears those keys
         // (`ServerboundPlayerInputPacket`), and an anticheat that predicts from them pulls back
         // a player moving at the stick's own angle and speed.
-        if self.integrated.is_none() && self.server_address().is_some() {
+        if external_server {
             keys.analog = None;
         }
         let keys = self.mod_movement_keys(keys);
@@ -254,6 +259,12 @@ impl Game<'_> {
         } else {
             Keys::default()
         };
+        // A later movement-input hook may replace the stick with keys or with its own axes.
+        // The opt-out belongs only to the analog direction selected by the controller hook.
+        let bypass_square_movement = bypass_square_movement
+            && !external_server
+            && keys.analog.is_some()
+            && keys.analog == stick;
         // The held lead's end eases from the look at the start of the tick
         // (`yRotO`/`xRotO`), as the local tick does; `tick` returns before it
         // reaches its own write when this window is a server client.
@@ -321,7 +332,7 @@ impl Game<'_> {
                         .map(|m| (m.id, m.bounds())),
                 );
             }
-            MotionWorld {
+            let mut motion = MotionWorld {
                 entities: &entity_collisions,
                 player,
                 scene: &mut self.world,
@@ -333,8 +344,12 @@ impl Game<'_> {
                 damage_hooks: &self.damage_hooks,
                 tag_items: None,
                 block_registries: None,
+            };
+            if bypass_square_movement {
+                motion.controlled_simulation_tick_with_linear_stick(keys, sprint_window)?;
+            } else {
+                motion.controlled_simulation_tick_with_sprint_window(keys, sprint_window)?;
             }
-            .controlled_simulation_tick_with_sprint_window(keys, sprint_window)?;
         } else {
             // LivingEntity.baseTick counts hurtTime down for a dead or riding
             // player too (controlled_simulation_tick does it otherwise): left

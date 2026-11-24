@@ -1205,6 +1205,80 @@ impl RecipeView {
     }
 }
 
+/// A native mod's `controller_move` answer for one local player tick.
+// no wire: native-only controller input hook.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ControllerMoveOverride {
+    /// `[left, forward]`, in gameplay coordinates. Non-finite answers are discarded; the
+    /// game limits the vector to unit length. Zero suppresses only this stick, not the keys.
+    pub direction: [f32; 2],
+    /// Keep the analog angle and magnitude instead of applying `LocalPlayer`'s square
+    /// movement transform. The normal 0.98, item-use and crouch multipliers still apply.
+    /// This has no effect on external servers, digital input or vehicle physics.
+    pub bypass_square_movement: bool,
+}
+
+impl ControllerMoveOverride {
+    /// Answer `controller_move` with a direction and whether to skip square movement.
+    pub fn new(direction: [f32; 2], bypass_square_movement: bool) -> Self {
+        Self {
+            direction,
+            bypass_square_movement,
+        }
+    }
+}
+
+/// Right-stick axes and game options before the native `controller_look` hook.
+// no wire: native-only controller input hook.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ControllerLookInput {
+    /// `[right, up]` in `[-1, 1]`, before the dead zone or inversion.
+    pub axes: [f32; 2],
+    /// Configured controller look dead zone.
+    pub deadzone: f32,
+    /// Applied controller look sensitivity on a 0–1 scale (0.5 is the default).
+    pub sensitivity: f32,
+    /// Whether the applied settings invert the horizontal axis.
+    pub invert_x: bool,
+    /// Whether the applied settings invert the vertical axis.
+    pub invert_y: bool,
+    /// Elapsed seconds for this frame, capped at 0.1 as in stock stick look.
+    pub frame_seconds: f32,
+    /// A spyglass in use in first person, the condition for stock scope slowdown.
+    pub first_person_scoping: bool,
+    /// Whether the player is connected to an external multiplayer server.
+    pub external_server: bool,
+}
+
+impl ControllerLookInput {
+    /// The game's sample passed to `controller_look`.
+    // hidden: the game constructs the call's read-only sample.
+    #[doc(hidden)]
+    pub fn from_game(
+        axes: [f32; 2],
+        deadzone: f32,
+        sensitivity: f32,
+        inverted: [bool; 2],
+        frame_seconds: f32,
+        first_person_scoping: bool,
+        external_server: bool,
+    ) -> Self {
+        let [invert_x, invert_y] = inverted;
+        Self {
+            axes,
+            deadzone,
+            sensitivity,
+            invert_x,
+            invert_y,
+            frame_seconds,
+            first_person_scoping,
+            external_server,
+        }
+    }
+}
+
 /// The zoom a native mod asks for (`zoom`): the factor (1 is none), eased through the
 /// field of view like the spyglass when `smooth`, and the scale of mouse turning.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -584,6 +584,16 @@ impl Game<'_> {
         self.pad_move()
     }
 
+    /// The gameplay tick's stick and its one-tick square-movement opt-out.
+    pub(super) fn input_move_for_tick(&self, external_server: bool) -> (Option<[f32; 2]>, bool) {
+        self.pad_move_for_tick(external_server)
+    }
+
+    /// Read the actual session, not the last server's reconnect address.
+    pub(super) fn input_is_external_multiplayer(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| r.external_server)
+    }
+
     /// Whether a device holds the key mapping named `mapping` (`key.use`).
     pub(super) fn input_holds(&self, mapping: &str) -> bool {
         self.pad.holds_action(mapping)

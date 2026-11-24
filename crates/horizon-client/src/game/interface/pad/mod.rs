@@ -23,6 +23,21 @@ use std::time::{Duration, Instant};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
+/// Only answers from mods are validated here. Widen before measuring so even very large finite
+/// axes keep their ratio instead of overflowing to infinity.
+fn bounded_move_override(direction: [f32; 2]) -> Option<[f32; 2]> {
+    let [left, forward] = direction.map(f64::from);
+    if !left.is_finite() || !forward.is_finite() {
+        return None;
+    }
+    let length_squared = left * left + forward * forward;
+    if length_squared <= 1.0 {
+        return Some(direction);
+    }
+    let length = length_squared.sqrt();
+    Some([(left / length) as f32, (forward / length) as f32])
+}
+
 pub(super) const HELP: &[&str] = &[
     "pad BUTTON down|up|tap         a virtual controller button (south east west north lb rb lt rt select start ls rs up down left right)",
     "pad stick left|right X Y       tilt a virtual stick (-1..1, up positive); 0 0 centres it",
@@ -461,7 +476,7 @@ impl Game<'_> {
         .into_iter()
         .enumerate()
         {
-            if gamepad::radial(*stick, deadzone) == [0.0; 2] {
+            if !self.pad_stick_held(i, *stick, deadzone) {
                 self.pad.blocked_sticks[i] = false;
             }
             if self.pad.blocked_sticks[i] || !self.pad_focused() {
@@ -542,6 +557,18 @@ impl Game<'_> {
         self.pad_button_logged(event_loop, button, down);
     }
 
+    fn pad_stick_held(&self, stick: usize, axes: [f32; 2], deadzone: f32) -> bool {
+        if gamepad::radial(axes, deadzone) != [0.0; 2] {
+            return true;
+        }
+        let hook_active = match stick {
+            0 => mod_api::__private::enabled_listened(mod_api::HookId::ControllerMove),
+            1 => mod_api::__private::enabled_listened(mod_api::HookId::ControllerLook),
+            _ => false,
+        };
+        hook_active && axes != [0.0; 2]
+    }
+
     /// End held actions and captures before another context receives input.
     fn pad_cancel_inputs(&mut self, event_loop: &dyn EventLoopCtl) {
         // Before the releases below: a cancelled press must not click, a cancelled trigger
@@ -552,10 +579,12 @@ impl Game<'_> {
         self.pad.radial.cancel();
         self.direct_craft_stop();
         let held_sticks = [
-            gamepad::radial(self.pad.state.left, self.settings.controller.move_deadzone)
-                != [0.0; 2],
-            gamepad::radial(self.pad.state.right, self.settings.controller.look_deadzone)
-                != [0.0; 2],
+            self.pad_stick_held(0, self.pad.state.left, self.settings.controller.move_deadzone),
+            self.pad_stick_held(
+                1,
+                self.pad.state.right,
+                self.settings.controller.look_deadzone,
+            ),
         ];
         for (blocked, held) in self.pad.blocked_sticks.iter_mut().zip(held_sticks) {
             *blocked |= held;
@@ -822,6 +851,13 @@ impl Game<'_> {
 
     /// The left stick as the move vector, while playing.
     pub(super) fn pad_move(&self) -> Option<[f32; 2]> {
+        gamepad::move_vector(
+            self.pad_move_axes()?,
+            self.settings.controller.move_deadzone,
+        )
+    }
+
+    fn pad_move_axes(&self) -> Option<[f32; 2]> {
         let settings = &self.settings.controller;
         if !settings.enabled
             || self.pad_in_menu()
@@ -830,7 +866,38 @@ impl Game<'_> {
         {
             return None;
         }
-        gamepad::move_vector(self.pad.state.left, settings.move_deadzone)
+        Some(self.pad.state.left)
+    }
+
+    /// Read only at the gameplay movement tick, not when a HUD or tutorial observes keys.
+    pub(super) fn pad_move_for_tick(&self, external_server: bool) -> (Option<[f32; 2]>, bool) {
+        let Some(axes) = self.pad_move_axes() else {
+            return (None, false);
+        };
+        let deadzone = self.settings.controller.move_deadzone;
+        if self.riding.is_none()
+            && axes != [0.0; 2]
+            && mod_api::__private::enabled_listened(mod_api::HookId::ControllerMove)
+            && axes.iter().all(|axis| axis.is_finite())
+        {
+            let mut movement = None;
+            self.native_controller_move(mod_api::__private::ControllerMoveCall {
+                axes,
+                deadzone,
+                frame_seconds: self.frame_ticks / 20.0,
+                external_server,
+                movement: &mut movement,
+            });
+            if let Some(movement) = movement
+                && let Some(direction) = bounded_move_override(movement.direction)
+            {
+                return (
+                    (direction != [0.0; 2]).then_some(direction),
+                    movement.bypass_square_movement,
+                );
+            }
+        }
+        (gamepad::move_vector(axes, deadzone), false)
     }
 
     /// The right stick turns the view, once per frame (`Entity.turn`).
@@ -846,12 +913,33 @@ impl Game<'_> {
         }
         // A long frame (a hitch) must not spin the view.
         let seconds = seconds.min(0.1);
-        let turn = gamepad::look_delta(
-            self.pad.state.right,
-            settings,
-            seconds,
-            self.camera_type.is_first_person() && self.scoping(),
-        );
+        let axes = self.pad.state.right;
+        let scoping = self.camera_type.is_first_person() && self.scoping();
+        let mut turn = None;
+        if axes != [0.0; 2]
+            && mod_api::__private::enabled_listened(mod_api::HookId::ControllerLook)
+            && axes.iter().all(|axis| axis.is_finite())
+        {
+            let input = mod_api::ControllerLookInput::from_game(
+                axes,
+                settings.look_deadzone,
+                settings.look_sensitivity,
+                [settings.invert_x, settings.invert_y],
+                seconds,
+                scoping,
+                self.input_is_external_multiplayer(),
+            );
+            self.native_controller_look(mod_api::__private::ControllerLookCall {
+                input: &input,
+                turn: &mut turn,
+            });
+        }
+        let turn = match turn {
+            Some([yaw, pitch]) if yaw.is_finite() && pitch.is_finite() => {
+                (yaw.clamp(-180.0, 180.0), pitch.clamp(-180.0, 180.0))
+            }
+            _ => gamepad::look_delta(axes, settings, seconds, scoping),
+        };
         // The cinematic camera eases the stick's turn in and out, as it does the mouse's.
         let (yaw, pitch) = self.pad.look.turn(turn, seconds, self.smooth_camera);
         if yaw == 0.0 && pitch == 0.0 {
@@ -1038,5 +1126,17 @@ impl Game<'_> {
                 Ok(json!({ "ok": true }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_move_override;
+
+    #[test]
+    fn finite_extreme_controller_override_keeps_its_ratio() {
+        let [x, y] = bounded_move_override([f32::MAX, f32::MAX / 2.0]).unwrap();
+        assert!((x * x + y * y - 1.0).abs() < f32::EPSILON);
+        assert_eq!(x, y * 2.0);
     }
 }

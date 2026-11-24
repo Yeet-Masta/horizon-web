@@ -184,6 +184,7 @@ impl Game<'_> {
         );
         let transferred = local.is_none() && cookies.is_some();
         self.server_packs_connect_for(local.is_none().then_some(address), user, cookies.is_some());
+        let external_server = local.is_none();
         let session = match local {
             Some(pipe) => Session::connect_local(
                 pipe,
@@ -312,6 +313,7 @@ impl Game<'_> {
             selector_metadata_supported: true,
             professions: self.client_professions()?,
             session,
+            external_server,
             brand: "unknown".into(),
             recipe_viewer: Default::default(),
             features: ["minecraft:vanilla".to_string()].into(),
@@ -568,6 +570,7 @@ impl Game<'_> {
             selector_metadata_supported: true,
             professions: self.client_professions()?,
             session,
+            external_server: false,
             brand: "horizon-studio".into(),
             recipe_viewer: Default::default(),
             features: ["minecraft:vanilla".to_string()].into(),

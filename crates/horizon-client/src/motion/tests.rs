@@ -3332,7 +3332,7 @@ fn stationary_replayed_tick_fast_path_matches_full_local_tick() {
     seed.client_side = true;
     for _ in 0..2 {
         mw!(&mut seed, &mut scene)
-            .local_tick(crate::sprint::Keys::default(), |world, _, _| {
+            .local_tick(crate::sprint::Keys::default(), false, |world, _, _| {
                 world.player.set_sprinting(false)
             })
             .unwrap();
@@ -3351,7 +3351,7 @@ fn stationary_replayed_tick_fast_path_matches_full_local_tick() {
         full.replaying = true;
         let full_before_events = full.events.len();
         mw!(&mut full, &mut scene_full)
-            .local_tick(crate::sprint::Keys::default(), |world, _, _| {
+            .local_tick(crate::sprint::Keys::default(), false, |world, _, _| {
                 world.player.set_sprinting(false)
             })
             .unwrap();
@@ -3431,7 +3431,7 @@ fn stationary_replayed_tick_fast_path_matches_full_local_tick() {
         .unwrap();
     full_bounce.replaying = true;
     mw!(&mut full_bounce, &mut scene_full)
-        .local_tick(crate::sprint::Keys::default(), |world, _, _| {
+        .local_tick(crate::sprint::Keys::default(), false, |world, _, _| {
             world.player.set_sprinting(false)
         })
         .unwrap();
@@ -3478,7 +3478,7 @@ fn stationary_server_travel_fast_path_matches_full_and_respects_bounciness() {
     let mut seed = PlayerMotion::new(resources, Vec3::new(20.5, 64.0, 20.5)).unwrap();
     for _ in 0..2 {
         mw!(&mut seed, &mut scene)
-            .local_tick(crate::sprint::Keys::default(), |world, _, _| {
+            .local_tick(crate::sprint::Keys::default(), false, |world, _, _| {
                 world.player.set_sprinting(false)
             })
             .unwrap();

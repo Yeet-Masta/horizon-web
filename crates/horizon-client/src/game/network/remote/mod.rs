@@ -486,6 +486,8 @@ enum OwnProfile {
 pub(super) struct Remote {
     pub(super) professions: Arc<horizon_client::mobs::villager::ResolvedProfessions>,
     pub session: Session,
+    /// A network session, not the integrated server's memory connection or a replay.
+    pub(super) external_server: bool,
     pub brand: String,
     pub(super) recipe_viewer: crate::game::recipe_book::ViewerChannels,
     /// This connection's configured feature flags, carried through reconfiguration.

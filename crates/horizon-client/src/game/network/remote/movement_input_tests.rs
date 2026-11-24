@@ -310,6 +310,9 @@ fn movement_input_disabled_listener_keeps_vanilla_keys() {
     );
 }
 
+#[path = "controller_stick_tests.rs"]
+mod controller_stick_tests;
+
 #[path = "local_rotation_tests.rs"]
 mod local_rotation_tests;
 
