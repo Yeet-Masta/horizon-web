@@ -33,6 +33,7 @@ use std::sync::{
 };
 
 mod carry;
+mod revised;
 pub use carry::Carried;
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -91,7 +92,7 @@ pub enum Ticking {
 
 #[derive(Default)]
 pub struct BlockEntities {
-    map: HashMap<Pos, BlockEntity>,
+    map: revised::Revised,
     generations: FxHashMap<Pos, u64>,
     on_load: std::collections::VecDeque<(Pos, u64)>,
     on_load_enabled: bool,
@@ -821,6 +822,11 @@ impl BlockEntities {
     pub fn get(&self, pos: &Pos) -> Option<&BlockEntity> {
         self.map.get(pos)
     }
+    /// What a save of the block entity at `pos` may key its output on: a new
+    /// value after every change, or chance of one (each `&mut` it lends).
+    pub fn revision(&self, pos: &Pos) -> Option<u64> {
+        self.map.revision(pos)
+    }
     pub fn get_mut(&mut self, pos: &Pos) -> Option<&mut BlockEntity> {
         self.wake(pos);
         let entity = self.map.get_mut(pos)?;
@@ -927,7 +933,7 @@ impl BlockEntities {
         }
         self.wake(&pos);
         index_chunk(&mut self.by_chunk, pos);
-        let entity = self.map.entry(pos).or_insert_with(make);
+        let entity = self.map.get_or_insert_with(pos, make);
         if absent && matches!(entity, BlockEntity::Mod(_)) {
             if self.on_load_enabled {
                 self.on_load.push_back((pos, self.generations[&pos]));
@@ -1073,7 +1079,17 @@ impl BlockEntities {
     pub fn unload(&mut self, mut gone: impl FnMut(&Pos) -> bool) {
         self.carried.retain(|p, _| !gone(p));
         let asleep = std::mem::take(&mut self.asleep);
-        self.retain_impl(|p, _| !gone(p), false);
+        // A sign that goes moves the sign revision; the kept ones are not
+        // lent out, so they keep theirs.
+        let sign_dropped = self
+            .map
+            .iter()
+            .any(|(p, e)| matches!(e, BlockEntity::Sign(_)) && gone(p));
+        let dropped = self.map.retain_keys(|p| !gone(p));
+        self.forget_dropped(&dropped);
+        if sign_dropped {
+            self.bump_sign_revision();
+        }
         self.retire_taken(gone);
         self.asleep = asleep;
         let map = &self.map;
@@ -1126,6 +1142,25 @@ impl BlockEntities {
         });
         if sign_changed {
             self.bump_sign_revision();
+        }
+    }
+    /// What [`Self::unload`] forgets of the block entities it dropped from the map.
+    fn forget_dropped(&mut self, dropped: &[Pos]) {
+        for p in dropped {
+            retire_attachments(
+                &mut self.attachments,
+                self.attachment_observer.as_ref(),
+                &self.generations,
+                p,
+            );
+            self.generations.remove(p);
+            self.freed |= self.live.remove(p).is_some();
+            self.pending.remove(p);
+            forget_mod(&mut self.mods, *p);
+            self.boxes.remove(p);
+            forget_listed(&mut self.listed, p);
+            unindex_chunk(&mut self.by_chunk, p);
+            self.sign_editors.remove(p);
         }
     }
     /// [`Self::unload`] of the block entities in `chunks`, reading theirs alone ([`Self::by_chunk`])
@@ -1369,6 +1404,9 @@ mod attachment_tests;
 
 #[cfg(test)]
 mod lease_tests;
+
+#[cfg(test)]
+mod revision_tests;
 
 #[cfg(test)]
 mod tests {

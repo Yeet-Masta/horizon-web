@@ -112,6 +112,7 @@ fn a_queued_record_keeps_its_snapshot_after_the_owner_is_dropped() {
         tables: save.tables.get().cloned(),
         shape: save.shape,
         section_palettes: None,
+        block_entities: None,
     });
     // As `save_later` makes it: the snapshot taken at the request.
     let record = Record::Chunk(

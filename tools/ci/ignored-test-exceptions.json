@@ -586,6 +586,14 @@
   {
     "package": "horizon-client-lib",
     "target": "lib",
+    "test": "save::block_entity_cache_tests::bench_repeated_block_entity_saves",
+    "path": "crates/horizon-client/src/save/block_entity_cache_tests.rs",
+    "reason": "a measurement, not a check",
+    "rationale": "Opt-in measurement, not an ordinary daily correctness check: a measurement, not a check. Run by hand on an idle machine with the optimized profile and its explicitly requested inputs; all assertions remain in the test."
+  },
+  {
+    "package": "horizon-client-lib",
+    "target": "lib",
     "test": "save::compression_bench::benches::bench_chunk_compression_speedup",
     "path": "crates/horizon-client/src/save/compression_bench.rs",
     "reason": "a measurement, not a check",

@@ -20,6 +20,7 @@ impl SaveDir {
             tables: self.tables.get().cloned(),
             shape: self.shape,
             section_palettes: Some(Arc::clone(&self.section_palettes)),
+            block_entities: Some(Arc::clone(&self.block_entities)),
         }))
     }
 }

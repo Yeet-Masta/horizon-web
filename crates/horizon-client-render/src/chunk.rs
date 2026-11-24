@@ -877,6 +877,9 @@ pub struct Chunk {
     pub generated: bool,
     /// Block entities read from a save, moved into the world on arrival.
     pub block_entities: Vec<((i32, i32, i32), block_entity::BlockEntity)>,
+    /// On a save snapshot, the store revision each of `block_entities` had
+    /// when it was copied, by index ([`Self::block_entity_revision`]).
+    block_entity_revisions: Vec<((i32, i32, i32), Option<u64>)>,
     /// `CustomName` of the container block entities (shown as the screen title).
     pub block_names: Vec<((i32, i32, i32), Tag)>,
     /// Generation postprocessing marks (ProtoChunk.postProcessing) as world
@@ -904,6 +907,33 @@ pub struct Chunk {
     pub dynamic_pending: bool,
 }
 impl Chunk {
+    /// Sets the block entities of a save snapshot with the store revision of
+    /// each (`BlockEntities::revision`), in the same order. A revision says
+    /// the copy is the one the store had then; `None` says nothing.
+    pub fn set_revised_block_entities(
+        &mut self,
+        entities: Vec<((i32, i32, i32), block_entity::BlockEntity)>,
+        revisions: impl IntoIterator<Item = Option<u64>>,
+    ) {
+        self.block_entity_revisions = entities
+            .iter()
+            .zip(revisions)
+            .map(|((pos, _), revision)| (*pos, revision))
+            .collect();
+        self.block_entities = entities;
+    }
+    /// The store revision of `block_entities[index]` as it was copied, if it
+    /// is still the entry at that index. An entry replaced in the list since
+    /// has none; one changed in place keeps it, so a snapshot is not changed
+    /// after it is made.
+    pub fn block_entity_revision(&self, index: usize) -> Option<u64> {
+        let (pos, _) = self.block_entities.get(index)?;
+        if self.block_entity_revisions.len() != self.block_entities.len() {
+            return None;
+        }
+        let (at, revision) = self.block_entity_revisions[index];
+        revision.filter(|_| at == *pos)
+    }
     /// An all-air chunk in the current `layout`.
     pub fn empty(x: i32, z: i32) -> Self {
         Self::with_layout(x, z, ColumnLayout::VANILLA)
@@ -987,6 +1017,7 @@ impl Chunk {
             fresh: false,
             generated: false,
             block_entities: Vec::new(),
+            block_entity_revisions: Vec::new(),
             block_names: Vec::new(),
             structure_refs: Vec::new(),
             structure_starts: Vec::new(),

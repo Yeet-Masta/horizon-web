@@ -42,14 +42,14 @@ pub(super) fn palettes(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::*;
     use super::DEFAULT_PALETTE_CACHE_BYTES;
     use horizon_core::nbt::Limits;
     use horizon_world::{DATA_VERSION, region::RegionFile};
     use std::{fs, sync::OnceLock};
 
-    fn test_registry(names: &[&str], with_props: bool) -> BlockRegistry {
+    pub(in crate::save) fn test_registry(names: &[&str], with_props: bool) -> BlockRegistry {
         let mut states: Vec<Tag> = names.iter().map(|n| Tag::String((*n).into())).collect();
         if with_props {
             states.push(Tag::compound([
@@ -95,7 +95,7 @@ mod tests {
         })
     }
 
-    fn test_biomes(names: &[&str]) -> Arc<Biomes> {
+    pub(in crate::save) fn test_biomes(names: &[&str]) -> Arc<Biomes> {
         let dir = tempfile::tempdir().expect("tempdir");
         let textures = dir.path().join("assets/minecraft/textures/colormap");
         let biome_dir = dir.path().join("data/minecraft/worldgen/biome");
@@ -250,6 +250,7 @@ mod tests {
                     tables: None,
                     shape: LevelShape::OVERWORLD,
                     section_palettes: palette_cache,
+                    block_entities: None,
                 });
                 let records: Vec<((i32, i32), Record)> = chunks
                     .iter()
@@ -350,7 +351,10 @@ mod tests {
             None,
             LevelShape::OVERWORLD,
             None,
-            Some(&budget),
+            SaveCaches {
+                palettes: Some(&budget),
+                block_entities: None,
+            },
         );
         assert_eq!(
             first,
@@ -366,7 +370,10 @@ mod tests {
             None,
             LevelShape::OVERWORLD,
             None,
-            Some(&budget),
+            SaveCaches {
+                palettes: Some(&budget),
+                block_entities: None,
+            },
         );
         let expected_b = encode_with(&chunk, &reg_b, &biomes_b, None, LevelShape::OVERWORLD);
         assert_eq!(second, expected_b);
@@ -404,7 +411,10 @@ mod tests {
                     None,
                     LevelShape::OVERWORLD,
                     None,
-                    Some(&save.section_palettes),
+                    SaveCaches {
+                        palettes: Some(&save.section_palettes),
+                        block_entities: None,
+                    },
                 ),
                 Limits::saved(),
             )

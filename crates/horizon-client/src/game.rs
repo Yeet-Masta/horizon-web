@@ -6411,7 +6411,7 @@ impl Game<'_> {
         &self,
         chunks: impl IntoIterator<Item = &'a Arc<horizon_client::chunk::Chunk>>,
     ) -> Vec<Arc<horizon_client::chunk::Chunk>> {
-        horizon_client::save::chunks_with_block_entities(
+        horizon_client::save::chunks_with_revised_block_entities(
             chunks,
             &self.world.block_entities,
             &self.world.block_names,
