@@ -3014,6 +3014,19 @@ pub fn held_item_transform(
     if !super::illager::shows_item(m) {
         return None;
     }
+    // Species whose vanilla renderer adds no held-item layer (EndermanRenderer,
+    // IronGolemRenderer, SnowGolemRenderer, WardenRenderer, CreakingRenderer)
+    // never draw held items (#20924).
+    if matches!(
+        m.species(),
+        Species::Enderman
+            | Species::IronGolem
+            | Species::SnowGolem
+            | Species::Warden
+            | Species::Creaking
+    ) {
+        return None;
+    }
     let base = base_transform(m, alpha, camera);
     let s = anim::state(m, alpha);
     let (model, poses, anchors) = posed_body(m, alpha, data);
@@ -3846,6 +3859,44 @@ mod tests {
             mob.extra.set_main_hand(Some("minecraft:emerald".into()));
             assert!(held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, main).is_some());
             assert!(held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, !main).is_none());
+        }
+    }
+
+    /// Mobs without an `ItemInHandLayer` in vanilla (endermen, iron golems,
+    /// snow golems, wardens, creakings) never draw a held item (#20924).
+    #[test]
+    fn mobs_without_item_in_hand_layer_never_draw_held_items() {
+        let (mut mob, data) = humanoid_zombie();
+        mob.extra.set_slot_id(
+            horizon_items::equipment::MAINHAND,
+            Some("minecraft:diamond_sword".into()),
+        );
+        mob.extra.set_slot_id(
+            horizon_items::equipment::OFFHAND,
+            Some("minecraft:shield".into()),
+        );
+        // Humanoids with ItemInHandLayer draw held items.
+        assert!(held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, false).is_some());
+        assert!(held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, true).is_some());
+
+        for species in [
+            Species::Enderman,
+            Species::IronGolem,
+            Species::SnowGolem,
+            Species::Warden,
+            Species::Creaking,
+        ] {
+            let mut kind = (*mob.kind).clone();
+            kind.species = species;
+            mob.kind = std::sync::Arc::new(kind);
+            assert!(
+                held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, false).is_none(),
+                "{species:?} main hand has no ItemInHandLayer"
+            );
+            assert!(
+                held_item_transform(&mob, 1.0, glam::DVec3::ZERO, &data, true).is_none(),
+                "{species:?} off hand has no ItemInHandLayer"
+            );
         }
     }
     /// PhantomRenderer.scale moves the model down into its 0.5-high box:
