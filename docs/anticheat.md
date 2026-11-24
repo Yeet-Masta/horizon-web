@@ -59,6 +59,12 @@ again, so a player an operator pardons (`/pardon`) is kicked once more before an
 `combat` and `ground` ban at the second kick (`ban_after = 2`), `timer` and `prediction` never do; `ban_after = 0`
 turns a check's bans off.
 
+The server replaces the strikes file only after writing and flushing a complete new copy in the
+same directory, preserving symlink targets and file permissions. A missing file starts an empty
+history; an unreadable or invalid file writes a warning to the server log and keeps counts in
+memory without overwriting the file on disk. A failed save writes a warning and leaves the last
+complete file in place. Set `strikes = ""` to keep counts only until the server stops.
+
 A kick or a ban is always told, even below `alert`: a warning in the console, the log line (with what the check
 saw) unless `log = ""`, and a line in the chat of the online operators (`alert_level`) unless `alerts = false`, so
 an operator can pardon a ban that was wrong.

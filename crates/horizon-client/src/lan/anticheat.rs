@@ -9,14 +9,18 @@ use crate::collisions::SceneCollisions;
 use horizon_anticheat::{Check, Config, Strikes};
 use horizon_core::geometry::{Aabb, Vec3};
 use horizon_core::nbt::{JavaString, Tag};
-use std::{io::Write, time::Instant};
+use std::{
+    io::{self, Write},
+    path::Path,
+    time::Instant,
+};
 
 pub struct Anticheat {
     pub config: Config,
     /// The thread writing `log`, started at the first flag: the tick only hands it the lines.
     log: Option<LogWriter>,
     /// The players' kicks by check, read from `strikes` at the first kick.
-    strikes: Option<Strikes>,
+    strikes: Option<StrikeStore>,
     /// When the previous server tick started, for the timer's balance.
     last_tick: Option<Instant>,
     tick_rate: f32,
@@ -82,21 +86,67 @@ impl Anticheat {
     /// Player `uuid` was kicked by `check`: its kicks by it so far and whether this one bans. The
     /// count is saved at once, so a restart doesn't forgive it.
     fn strike(&mut self, uuid: u128, check: Check) -> (u32, bool) {
-        let path = std::path::Path::new(&self.config.strikes);
-        let strikes = self.strikes.get_or_insert_with(|| {
-            std::fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or_default()
-        });
+        let path = Path::new(&self.config.strikes);
+        let store = self.strikes.get_or_insert_with(|| read_strikes(path));
         let ban_after = self.config.actions(check).ban_after;
-        let kick = strikes.kick(&uuid_text(uuid), check, ban_after);
-        if !self.config.strikes.is_empty()
-            && let Ok(json) = serde_json::to_vec_pretty(strikes)
-        {
-            let _ = std::fs::write(path, json);
+        let kick = store.strikes.kick(&uuid_text(uuid), check, ban_after);
+        if store.persist {
+            let result = serde_json::to_vec_pretty(&store.strikes).and_then(|json| {
+                horizon_server_files::durable::write(path, &json).map_err(serde_json::Error::io)
+            });
+            if let Err(error) = result {
+                log::warn!(
+                    "Could not save anticheat strikes to {}: {error}",
+                    path.display()
+                );
+            }
         }
         kick
+    }
+}
+
+struct StrikeStore {
+    strikes: Strikes,
+    /// False when persistence is disabled or the existing file could not be read cleanly, so
+    /// subsequent kicks keep counting in memory without overwriting the file on disk.
+    persist: bool,
+}
+
+fn read_strikes(path: &Path) -> StrikeStore {
+    if path.as_os_str().is_empty() {
+        return StrikeStore {
+            strikes: Strikes::default(),
+            persist: false,
+        };
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(strikes) => StrikeStore {
+                strikes,
+                persist: true,
+            },
+            Err(error) => {
+                log::warn!("Invalid anticheat strikes in {}: {error}", path.display());
+                StrikeStore {
+                    strikes: Strikes::default(),
+                    persist: false,
+                }
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => StrikeStore {
+            strikes: Strikes::default(),
+            persist: true,
+        },
+        Err(error) => {
+            log::warn!(
+                "Could not read anticheat strikes from {}: {error}",
+                path.display()
+            );
+            StrikeStore {
+                strikes: Strikes::default(),
+                persist: false,
+            }
+        }
     }
 }
 
@@ -599,6 +649,104 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_strike_save_keeps_the_last_complete_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("strikes.json");
+        let config = Config {
+            strikes: path.to_str().unwrap().to_owned(),
+            ..Config::default()
+        };
+
+        let mut first = Anticheat::new(config.clone());
+        assert_eq!(first.strike(1, Check::Ground), (1, false));
+        let before = std::fs::read(&path).unwrap();
+
+        // Pointing at a directory fails to read; in-memory counts still advance
+        // and the existing path is left intact rather than overwritten.
+        let unreadable_dir = dir.path().join("unreadable-strikes");
+        std::fs::create_dir(&unreadable_dir).unwrap();
+        let mut unreadable = Anticheat::new(Config {
+            strikes: unreadable_dir.to_str().unwrap().to_owned(),
+            ..Config::default()
+        });
+        assert_eq!(unreadable.strike(1, Check::Ground), (1, false));
+        assert_eq!(unreadable.strike(1, Check::Ground), (2, true));
+        assert!(unreadable_dir.is_dir());
+
+        // Invalid JSON also stays intact on disk while counts continue in memory.
+        let corrupt = dir.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"{not json").unwrap();
+        let mut invalid = Anticheat::new(Config {
+            strikes: corrupt.to_str().unwrap().to_owned(),
+            ..Config::default()
+        });
+        assert_eq!(invalid.strike(1, Check::Ground), (1, false));
+        assert_eq!(invalid.strike(1, Check::Ground), (2, true));
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"{not json");
+
+        // When publication fails (e.g. a read-only parent directory on Unix),
+        // the last complete file stays intact without relying on any staging filename.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked_dir = dir.path().join("locked");
+            std::fs::create_dir(&locked_dir).unwrap();
+            let locked_path = locked_dir.join("strikes.json");
+            std::fs::write(&locked_path, &before).unwrap();
+            let locked_config = Config {
+                strikes: locked_path.to_str().unwrap().to_owned(),
+                ..Config::default()
+            };
+            let mut restarted = Anticheat::new(locked_config.clone());
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            // Skip the read-only directory assertion only if the process bypasses mode bits (e.g. root).
+            let can_write_locked = std::fs::File::create(locked_dir.join("probe")).is_ok();
+            let _ = std::fs::remove_file(locked_dir.join("probe"));
+            if !can_write_locked {
+                assert_eq!(restarted.strike(1, Check::Ground), (2, true));
+                assert_eq!(std::fs::read(&locked_path).unwrap(), before);
+            }
+            std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if !can_write_locked {
+                let mut recovered = Anticheat::new(locked_config);
+                assert_eq!(recovered.strike(1, Check::Ground), (2, true));
+                assert_eq!(
+                    read_strikes(&locked_path).strikes.0[&uuid_text(1)]["ground"],
+                    0
+                );
+            }
+
+            // Symlinks and Unix permissions are preserved when replacing the strikes file.
+            let target = dir.path().join("real-strikes.json");
+            std::fs::write(&target, &before).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let link = dir.path().join("link-strikes.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let mut linked = Anticheat::new(Config {
+                strikes: link.to_str().unwrap().to_owned(),
+                ..Config::default()
+            });
+            assert_eq!(linked.strike(1, Check::Ground), (2, true));
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(read_strikes(&target).strikes.0[&uuid_text(1)]["ground"], 0);
+        }
+
+        // Normal reload from the saved file still advances and persists.
+        let mut restarted = Anticheat::new(config);
+        assert_eq!(restarted.strike(1, Check::Ground), (2, true));
+        assert_eq!(read_strikes(&path).strikes.0[&uuid_text(1)]["ground"], 0);
+    }
 
     /// The log's lines reach the file in the order flagged, every one of them by the time the
     /// anticheat is dropped (the server stopping), even a flood written just before.
