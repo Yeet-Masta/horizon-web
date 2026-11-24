@@ -98,7 +98,7 @@ pub(super) fn build_renderer(
         .collect();
     renderer
         .hud
-        .set_text_shader(&renderer.device, atlas.text_shaders.gui.as_deref());
+        .set_text_shaders(&renderer.device, &atlas.text_shaders);
     renderer
         .hud
         .set_gui_shader(&renderer.device, atlas.gui_shader.as_deref());

@@ -24,6 +24,19 @@ use std::{
     },
 };
 
+mod pages;
+pub(crate) use pages::{Baked as PageGlyph, FontPages, PageKind, nearest_repeat};
+#[cfg(test)]
+pub(crate) use pages::{marker_font_atlas, marker_text};
+
+struct PageFonts {
+    textures: FontPages,
+    sets: HashMap<String, pages::PageSet>,
+    missing: Option<pages::PageSet>,
+    native_missing: Option<Rect>,
+    gui_metrics: bool,
+}
+
 /// `FontDescription.DEFAULT`.
 pub const DEFAULT: &str = "minecraft:default";
 
@@ -443,6 +456,7 @@ pub struct Font {
     region: (u32, u32),
     metrics_only: bool,
     cache: RefCell<Cache>,
+    pages: RefCell<Option<Box<PageFonts>>>,
     /// Set anew for each font and each `reset_cache` (see `epoch`).
     generation: std::cell::Cell<u64>,
     /// "Force Unicode Font": the `uniform` filter option.
@@ -1126,6 +1140,7 @@ impl TrueType {
         &self,
         id: ab_glyph::GlyphId,
         max: (u32, u32),
+        grayscale: bool,
     ) -> Option<(Glyph, Option<(u32, u32, Vec<u8>)>)> {
         let advance = self.advance(id);
         let empty = Glyph {
@@ -1143,17 +1158,16 @@ impl TrueType {
             TrueTypeOutline::Drawable(outline, w, h) => (outline, w, h),
         };
         let bounds = outline.px_bounds();
-        let mut rgba = vec![0u8; w as usize * h as usize * 4];
+        let components = if grayscale { 1 } else { 4 };
+        let mut rgba = vec![0u8; w as usize * h as usize * components];
         outline.draw(|x, y, coverage| {
-            let v = if coverage < 0.1 {
+            let v = if !grayscale && coverage < 0.1 {
                 0
             } else {
                 (coverage.min(1.0) * 255.0).round() as u8
             };
-            let i = ((y * w + x) * 4) as usize;
-            if let Some(px) = rgba.get_mut(i..i + 4) {
-                px.copy_from_slice(&[v; 4]);
-            }
+            let i = (y * w + x) as usize * components;
+            rgba[i..i + components].fill(v);
         });
         let os = self.oversample;
         // GlyphBitmap: bitmap_left / bitmap_top over the oversampling, and
@@ -1448,6 +1462,7 @@ impl Font {
                 // `Font.random`: `RandomSource.create()`.
                 random: crate::random_source::create(),
             }),
+            pages: RefCell::new(None),
             generation: std::cell::Cell::new(next_generation()),
             uniform: false,
             japanese: false,
@@ -1467,9 +1482,22 @@ impl Font {
     }
     /// `FontManager`: a font's providers with references expanded.
     fn load_set(&self, id: &str, pixels: &[u8]) -> FontSet {
+        FontSet {
+            providers: self.load_providers(id, &self.sheets, pixels),
+            glyphs: Default::default(),
+            non_fishy: Default::default(),
+            by_width: None,
+        }
+    }
+
+    fn load_providers(
+        &self,
+        id: &str,
+        sheets: &HashMap<String, Rect>,
+        pixels: &[u8],
+    ) -> Vec<Provider> {
         let all = providers(&self.source, id);
-        let providers = all
-            .iter()
+        all.iter()
             .filter_map(|p| match p["type"].as_str()? {
                 "space" => Some(Provider::Space(
                     p["advances"]
@@ -1489,7 +1517,7 @@ impl Font {
                     load_bitmap(
                         &self.source,
                         p,
-                        &self.sheets,
+                        sheets,
                         pixels,
                         self.atlas,
                         self.metrics_only,
@@ -1506,16 +1534,19 @@ impl Font {
                 )),
                 _ => None,
             })
-            .collect();
-        FontSet {
-            providers,
-            glyphs: Default::default(),
-            non_fishy: Default::default(),
-            by_width: None,
-        }
+            .collect()
     }
     /// Forget rasterized glyphs (after changing font options).
     pub fn reset_cache(&self) {
+        self.reset_native_cache();
+        if let Some(pages) = self.pages.borrow_mut().as_mut() {
+            pages.sets.clear();
+            pages.missing = None;
+            pages.textures.reset();
+        }
+    }
+
+    fn reset_native_cache(&self) {
         let mut cache = self.cache.borrow_mut();
         for (_, set) in &mut cache.sets {
             set.glyphs.clear();
@@ -1525,6 +1556,9 @@ impl Font {
         cache.region.cursor = (0, 0);
         cache.region.row = 0;
         cache.region.full = false;
+        if let Some(pages) = self.pages.borrow_mut().as_mut() {
+            pages.native_missing = None;
+        }
         cache.strips.clear();
         self.generation.set(next_generation());
     }
@@ -1535,7 +1569,7 @@ impl Font {
     /// rects.
     pub fn begin_frame(&self) {
         if self.cache.borrow().region.full {
-            self.reset_cache();
+            self.reset_native_cache();
         }
     }
     /// Changes whenever a glyph may come out different: another font, a
@@ -1560,6 +1594,94 @@ impl Font {
         } else {
             self.glyph_of(&format!("minecraft:{id}"), c)
         }
+    }
+
+    pub(crate) fn enable_pages(&self, gui_metrics: bool) -> FontPages {
+        let textures = FontPages::default();
+        *self.pages.borrow_mut() = Some(Box::new(PageFonts {
+            textures: textures.clone(),
+            sets: HashMap::new(),
+            missing: None,
+            native_missing: None,
+            gui_metrics,
+        }));
+        textures
+    }
+
+    fn uses_gui_page_metrics(&self) -> bool {
+        self.pages.borrow().as_ref().is_some_and(|p| p.gui_metrics)
+    }
+
+    fn with_page_set<T>(
+        &self,
+        id: &str,
+        f: impl FnOnce(&mut pages::PageSet, &mut Cache) -> T,
+    ) -> Option<T> {
+        let mut pages = self.pages.borrow_mut();
+        let pages = pages.as_mut()?;
+        let mut cache = self.cache.borrow_mut();
+        if !pages.sets.contains_key(id) && cache.sets.iter().any(|(key, _)| key == id) {
+            // The shared HUD atlas may hold a cropped or animated sprite.
+            // Read the original provider image on first use.
+            let providers = self.load_providers(id, &HashMap::new(), &[]);
+            let set = pages::PageSet::new(pages.textures.clone(), providers, self.missing);
+            pages.sets.insert(id.to_owned(), set);
+        }
+        let set = if let Some(set) = pages.sets.get_mut(id) {
+            set
+        } else {
+            pages.missing.get_or_insert_with(|| {
+                pages::PageSet::new(pages.textures.clone(), Vec::new(), self.missing)
+            })
+        };
+        Some(f(set, &mut cache))
+    }
+
+    fn request_page(&self, id: &str, c: char, non_fishy: bool) -> Option<PageGlyph> {
+        self.with_page_set(id, |set, cache| set.request(self, cache, c, non_fishy))
+    }
+
+    pub(crate) fn page_glyph(&self, c: char, style: &Style) -> Option<PageGlyph> {
+        self.request_page(style.font.as_deref().unwrap_or(DEFAULT), c, false)
+    }
+
+    pub(crate) fn page_white(&self) -> Option<PageGlyph> {
+        self.with_page_set(DEFAULT, |set, _| set.white)
+    }
+
+    /// Native rendering still needs a missing glyph if a shader variant failed.
+    /// Its matching UVs come from the shared atlas, not from a different page.
+    pub(crate) fn native_missing_rect(&self) -> Option<Rect> {
+        let mut pages = self.pages.borrow_mut();
+        let pages = pages.as_mut()?;
+        if let Some(rect) = pages.native_missing {
+            return Some(rect);
+        }
+        let (x, y) = self.cache.borrow_mut().region.place(
+            5,
+            8,
+            pages::missing_pixels(),
+            self.atlas,
+            self.region,
+        )?;
+        let rect = glyph_rect(x, y, 5, 8, self.atlas);
+        pages.native_missing = Some(rect);
+        Some(rect)
+    }
+
+    pub(crate) fn page_metric(&self, c: char, style: &Style) -> Option<Glyph> {
+        self.with_page_set(style.font.as_deref().unwrap_or(DEFAULT), |set, cache| {
+            set.metric(self, cache, c)
+        })
+    }
+
+    fn glyph_metric(&self, id: &str, c: char) -> Glyph {
+        if self.uses_gui_page_metrics()
+            && let Some(glyph) = self.with_page_set(id, |set, cache| set.metric(self, cache, c))
+        {
+            return glyph;
+        }
+        self.glyph_of(id, c)
     }
     /// The first active provider's glyph, else the missing glyph.
     fn glyph_of(&self, id: &str, c: char) -> Glyph {
@@ -1693,7 +1815,8 @@ impl Font {
                                 ..self.missing
                             });
                         }
-                        let Some((glyph, bitmap)) = ttf.glyph(id, (self.atlas.0, self.region.1))
+                        let Some((glyph, bitmap)) =
+                            ttf.glyph(id, (self.atlas.0, self.region.1), false)
                         else {
                             continue;
                         };
@@ -1717,32 +1840,13 @@ impl Font {
     fn rasterize_hex(&self, region: &mut Region, h: HexGlyph) -> Option<Glyph> {
         let width = h.right.saturating_sub(h.left) + 1;
         if self.metrics_only {
-            return Some(Glyph {
-                rect: None,
-                left: 0.0,
-                top: 0.0,
-                right: width as f32 / 2.0,
-                bottom: 8.0,
-                advance: hex_advance(&h),
-                offset: 0.5,
-            });
+            return Some(hex_glyph(&h, width));
         }
-        let mut rgba = Vec::with_capacity((width * 16 * 4) as usize);
-        for row in h.rows {
-            for bit in h.left..=h.right {
-                let set = bit < 32 && (row >> (31 - bit)) & 1 != 0;
-                rgba.extend(if set { [255; 4] } else { [0; 4] });
-            }
-        }
+        let rgba = hex_pixels(&h, width);
         let (x, y) = region.place(width, 16, rgba, self.atlas, self.region)?;
         Some(Glyph {
             rect: Some(glyph_rect(x, y, width, 16, self.atlas)),
-            left: 0.0,
-            top: 0.0,
-            right: width as f32 / 2.0,
-            bottom: 8.0,
-            advance: hex_advance(&h),
-            offset: 0.5,
+            ..hex_glyph(&h, width)
         })
     }
     /// Starts the random `random_glyph` draws on over from `seed`.
@@ -1760,32 +1864,47 @@ impl Font {
     /// or for a font without any (Force Unicode Font, a TrueType font) its
     /// glyphs below U+0250.
     pub fn random_glyph(&self, style: &Style, advance: f32) -> Glyph {
-        use horizon_core::random::RandomSource;
+        self.obfuscated_glyphs(style, advance, false).0
+    }
+
+    pub(crate) fn obfuscated_glyphs(
+        &self,
+        style: &Style,
+        advance: f32,
+        paged: bool,
+    ) -> (Glyph, Option<PageGlyph>) {
         let id = style.font.as_deref().unwrap_or(DEFAULT);
-        let width = advance.ceil() as i32;
-        let pick = {
-            let mut cache = self.cache.borrow_mut();
-            let Cache {
-                sets,
-                unihex,
-                random,
-                ..
-            } = &mut *cache;
-            let Some((_, set)) = sets.iter_mut().find(|(k, _)| k == id) else {
-                return self.missing;
-            };
-            if set.by_width.is_none() {
-                set.by_width = Some(self.glyphs_by_width(set, unihex));
-            }
-            set.by_width
-                .as_ref()
-                .and_then(|m| m.get(&width))
-                .and_then(|chars| {
-                    let i = random.next_int_bound(chars.len() as i32).ok()?;
-                    chars.get(i as usize).copied()
-                })
+        let pick = self.pick_obfuscated(id, advance);
+        let page = if paged {
+            self.with_page_set(id, |set, cache| {
+                pick.map_or(set.missing, |c| set.request(self, cache, c, true))
+            })
+        } else {
+            None
         };
-        pick.map_or(self.missing, |c| self.glyph_non_fishy(id, c))
+        (
+            pick.map_or(self.missing, |c| self.glyph_non_fishy(id, c)),
+            page,
+        )
+    }
+
+    fn pick_obfuscated(&self, id: &str, advance: f32) -> Option<char> {
+        use horizon_core::random::RandomSource;
+        let width = advance.ceil() as i32;
+        let mut cache = self.cache.borrow_mut();
+        let Cache {
+            sets,
+            unihex,
+            random,
+            ..
+        } = &mut *cache;
+        let (_, set) = sets.iter_mut().find(|(k, _)| k == id)?;
+        if set.by_width.is_none() {
+            set.by_width = Some(self.glyphs_by_width(set, unihex));
+        }
+        let chars = set.by_width.as_ref()?.get(&width)?;
+        let i = random.next_int_bound(chars.len() as i32).ok()?;
+        chars.get(i as usize).copied()
     }
     fn glyphs_by_width(
         &self,
@@ -1875,7 +1994,7 @@ impl Font {
         if c == '\u{fffc}' && style.inline_object.is_some() {
             return 8.0;
         }
-        let g = self.glyph_styled(c, style);
+        let g = self.glyph_metric(style.font.as_deref().unwrap_or(DEFAULT), c);
         g.advance + if style.is_bold() { g.offset } else { 0.0 }
     }
     /// Font.width of plain text (legacy codes are formatting, not glyphs).
@@ -1883,9 +2002,18 @@ impl Font {
         if s.contains('§') {
             return self.width_text(&Text::legacy(s));
         }
+        // `Font.width(String)` uses StringSplitter's logical codepoint order.
+        // The native path still measures the shaped glyphs it displays.
+        if self.uses_gui_page_metrics() {
+            return s
+                .chars()
+                .map(|c| self.glyph_metric(DEFAULT, c).advance)
+                .sum::<f32>()
+                .ceil();
+        }
         crate::bidi::visual_str(s)
             .chars()
-            .map(|c| self.glyph(c).advance)
+            .map(|c| self.glyph_metric(DEFAULT, c).advance)
             .sum::<f32>()
             .ceil()
     }
@@ -1893,6 +2021,13 @@ impl Font {
     /// not glyphs. Right-to-left text is measured as it is drawn, shaped.
     pub fn width_text(&self, t: &Text) -> f32 {
         let t = t.resolved();
+        if self.uses_gui_page_metrics() {
+            return t
+                .chars()
+                .map(|(c, s)| self.advance(c, s))
+                .sum::<f32>()
+                .ceil();
+        }
         crate::bidi::visual(&t)
             .chars()
             .map(|(c, s)| self.advance(c, s))
@@ -2113,7 +2248,7 @@ impl Font {
     pub fn fit(&self, s: &str, width: f32) -> usize {
         let mut w = 0.0;
         for (i, c) in s.chars().enumerate() {
-            w += self.glyph(c).advance;
+            w += self.glyph_metric(DEFAULT, c).advance;
             if w > width {
                 return i;
             }
@@ -2124,7 +2259,7 @@ impl Font {
     pub fn fit_reverse(&self, s: &str, width: f32) -> usize {
         let mut w = 0.0;
         for (i, c) in s.chars().rev().enumerate() {
-            w += self.glyph(c).advance;
+            w += self.glyph_metric(DEFAULT, c).advance;
             if w > width {
                 return i;
             }
@@ -2134,6 +2269,29 @@ impl Font {
     pub fn white(&self) -> Rect {
         self.white
     }
+}
+
+fn hex_glyph(h: &HexGlyph, width: u32) -> Glyph {
+    Glyph {
+        rect: None,
+        left: 0.0,
+        top: 0.0,
+        right: width as f32 / 2.0,
+        bottom: 8.0,
+        advance: hex_advance(h),
+        offset: 0.5,
+    }
+}
+
+fn hex_pixels(h: &HexGlyph, width: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity((width * 16 * 4) as usize);
+    for row in h.rows {
+        for bit in h.left..=h.right {
+            let set = bit < 32 && (row >> (31 - bit)) & 1 != 0;
+            rgba.extend(if set { [255; 4] } else { [0; 4] });
+        }
+    }
+    rgba
 }
 
 /// `StringSplitter.FlatComponents.splitAt`: the parts before `at` as a line,

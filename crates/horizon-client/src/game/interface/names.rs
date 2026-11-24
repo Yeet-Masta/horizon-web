@@ -744,6 +744,11 @@ impl Game<'_> {
         marks: Marks,
         mut layouts: Option<&mut NameTagLayouts>,
     ) -> Vec<horizon_client::font::Patch> {
+        let text_layer = if text_layer == 0 && self.gui.atlas.text_shaders.has_normal() {
+            horizon_client::gfx::WORLD_TEXT_OVERLAY
+        } else {
+            text_layer
+        };
         // Options.getBackgroundOpacity(0.25) black, as ARGB.color.
         const BACKGROUND: u32 = 0x3F00_0000;
         // The camera's facing (Camera.rotation()), turned round in third-person
@@ -849,15 +854,11 @@ impl Game<'_> {
                 };
                 // The corners from the bottom left, as the world draws quads.
                 for v in [quad[5], quad[2], quad[1], quad[0]] {
-                    out.push(Vertex {
-                        normal: [0; 4],
-                        pos: (at(v.pos[0], v.pos[1]) + shift).to_array(),
-                        uv: v.uv,
-                        layer: text_layer,
-                        color: v.color,
+                    out.push(v.world_text_vertex(
+                        (at(v.pos[0], v.pos[1]) + shift).to_array(),
+                        text_layer,
                         light,
-                        glint_uv: [0.0, 0.0],
-                    });
+                    ));
                 }
             }
         }

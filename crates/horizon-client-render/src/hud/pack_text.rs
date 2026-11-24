@@ -20,6 +20,7 @@ const GLUE: Glue = Glue {
     prelude: "layout(location = 0) in vec2 hz_pos;\n\
               layout(location = 1) in vec2 hz_uv;\n\
               layout(location = 2) in vec4 hz_color;\n\
+              layout(location = 3) in vec2 hz_page_uv;\n\
               const int hz_corner[6] = int[6](0, 3, 2, 0, 2, 1);\n\
               int hz_vertex_id() {\n\
                   int i = int(gl_VertexIndex) - int(gl_InstanceIndex);\n\
@@ -29,6 +30,11 @@ const GLUE: Glue = Glue {
     // GL's clip depth runs from -w to w, wgpu's from 0 to w; GUI text has no depth test.
     finish: "gl_Position.z = 0.5 * gl_Position.w;",
     vertex_id: "hz_vertex_id()",
+};
+
+const TEXT_GLUE: Glue = Glue {
+    setup: "Position = vec3(hz_pos, 0.0); Color = hz_color; UV0 = hz_page_uv;",
+    ..GLUE
 };
 
 /// `BlitRenderState.buildVertices` and `ColoredRectangleRenderState.buildVertices`: the
@@ -56,10 +62,9 @@ const GUI: Glue = Glue {
     finish: "",
     vertex_id: GLUE.vertex_id,
 };
-
 /// The packs' text shader, when a pack replaces either stage.
 pub(super) fn load(root: &ResourceSource, defaults: &ResourceSource) -> Option<Arc<CoreProgram>> {
-    load_core(root, defaults, "text", &["IS_GUI"], &GLUE)
+    load_core(root, defaults, "text", &["IS_GUI"], &TEXT_GLUE)
 }
 
 /// The packs' core shader `name` (`shaders/core/<name>.vsh` and `.fsh`) over `defaults` (the
@@ -154,6 +159,22 @@ pub(super) fn load_shaders(
         &["IS_SEE_THROUGH"],
         &crate::gfx::core_text::SEE_THROUGH_GLUE,
     );
+    atlas.text_shaders.gui_grayscale = load_core(
+        root,
+        defaults,
+        "text",
+        &["IS_GUI", "IS_GRAYSCALE"],
+        &TEXT_GLUE,
+    );
+    atlas.text_shaders.world_grayscale =
+        world(&["IS_GRAYSCALE"], &crate::gfx::core_text::WORLD_GLUE);
+    atlas.text_shaders.see_through_grayscale = world(
+        &["IS_SEE_THROUGH", "IS_GRAYSCALE"],
+        &crate::gfx::core_text::SEE_THROUGH_GLUE,
+    );
+    if atlas.text_shaders.any() {
+        atlas.text_shaders.pages = Some(atlas.font.enable_pages(atlas.text_shaders.has_gui()));
+    }
     // `LightmapInfo` is the lightmap pipeline's own uniform block, none of vanilla's shared ones.
     atlas.lightmap_shader = load_lightmap(root, defaults);
 }
@@ -323,7 +344,17 @@ impl PackText {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let attributes = wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Unorm8x4];
+        let [pos, uv, color] = wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Unorm8x4];
+        let attributes = [
+            pos,
+            uv,
+            color,
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: std::mem::offset_of!(HudVertex, glint_uv) as u64,
+                shader_location: 3,
+            },
+        ];
         let create = |blend| {
             let desc = wgpu::RenderPipelineDescriptor {
                 label: Some(&label),
@@ -416,17 +447,6 @@ impl PackText {
         uploads.buffer(encoder, &self.uniform, 0, bytemuck::cast_slice(&data));
     }
 
-    /// Draw `range` (whole glyph quads) with the pack's shader; the caller sets its own
-    /// pipeline and bind group again after.
-    pub(super) fn draw(
-        &self,
-        pass: &mut wgpu::RenderPass<'_>,
-        range: std::ops::Range<u32>,
-        coverage: bool,
-    ) {
-        self.draw_with(pass, &self.group, range, coverage);
-    }
-
     pub(super) fn draw_fill(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -446,7 +466,7 @@ impl PackText {
         pass.draw(range.clone(), range.start..range.start + 1);
     }
 
-    /// [`Self::draw`] reading the textures of `group` ([`Self::texture_group`]).
+    /// Draw `range` with its texture group's `Sampler0`.
     pub(super) fn draw_with(
         &self,
         pass: &mut wgpu::RenderPass<'_>,
@@ -538,20 +558,19 @@ fn uniforms(batch: &HudBatch, size: [u32; 2], scale: f32, kind: Kind) -> [f32; 2
     data
 }
 
-/// `range` split into runs of GUI text and of the rest, in order.
+/// `range` split into runs bound to the same font page (or to the ordinary atlas).
 pub(super) fn text_runs(
     vertices: &[HudVertex],
-    range: std::ops::Range<u32>,
-) -> Vec<(std::ops::Range<u32>, bool)> {
-    let mut runs: Vec<(std::ops::Range<u32>, bool)> = Vec::new();
-    for i in range {
-        let text = vertices.get(i as usize).is_some_and(|v| v.text != 0);
-        match runs.last_mut() {
-            Some((run, t)) if *t == text => run.end = i + 1,
-            _ => runs.push((i..i + 1, text)),
+    mut range: std::ops::Range<u32>,
+) -> impl Iterator<Item = (std::ops::Range<u32>, u32)> + '_ {
+    std::iter::from_fn(move || {
+        let start = range.next()?;
+        let page = vertices[start as usize].text;
+        while range.start < range.end && vertices[range.start as usize].text == page {
+            range.start += 1;
         }
-    }
-    runs
+        Some((start..range.start, page))
+    })
 }
 
 #[cfg(test)]
@@ -639,10 +658,10 @@ mod tests {
             glint_uv: [0.0; 2],
             text,
         };
-        let vertices: Vec<HudVertex> = [0, 0, 1, 1, 1, 0].into_iter().map(vertex).collect();
+        let vertices: Vec<HudVertex> = [0, 0, 2, 2, 3, 0].into_iter().map(vertex).collect();
         assert_eq!(
-            text_runs(&vertices, 1..6),
-            [(1..2, false), (2..5, true), (5..6, false)]
+            text_runs(&vertices, 1..6).collect::<Vec<_>>(),
+            [(1..2, 0), (2..4, 2), (4..5, 3), (5..6, 0)]
         );
     }
 }

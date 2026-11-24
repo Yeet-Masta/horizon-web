@@ -95,6 +95,14 @@ reads the pack; what is left is the GUI scaling types and the core shaders, plus
 | GUI scaling `tile`, `stretch` | small | `ui.rs` |
 | Remaining core shader draw paths | large | [#13218](https://github.com/horizon-rust/horizon/issues/13218), [#19495](https://github.com/horizon-rust/horizon/issues/19495) |
 
+### Font textures visible to core shaders
+
+When a pack replaces `core/text`, GUI and world draws bind the selected font's own 256×256
+texture page. Bitmap color and grayscale coverage pages are separate, with vanilla's texel
+spacing and UV inset. This applies to ordinary, polygon-offset, and see-through world text.
+With no replacement shader those draws still use Horizon's shared glyph atlas. Font rasterization
+and glyph selection are unchanged.
+
 ## Testing a pack
 
 `tools/test_resource_pack_parity.py` builds small packs (folder and zip, overlays, a filter, textures, languages,

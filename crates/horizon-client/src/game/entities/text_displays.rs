@@ -455,16 +455,7 @@ impl Game<'_> {
                     let v = quad[i];
                     let point =
                         matrix.transform_point3(glam::Vec3::new(v.pos[0], v.pos[1], v.depth));
-                    out.push(Vertex {
-                        pos: point.to_array(),
-                        uv: v.uv,
-                        color: v.color,
-                        light,
-                        layer,
-                        normal: [0; 4],
-
-                        glint_uv: [0.0, 0.0],
-                    });
+                    out.push(v.world_text_vertex(point.to_array(), layer, light));
                 }
             }
             self.text_display_vertices += batch.vertices.len() / 6 * 4;

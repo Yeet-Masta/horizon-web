@@ -1129,15 +1129,14 @@ impl Game<'_> {
                 continue;
             }
             for (pos, v) in at.into_iter().zip(corners) {
-                draw.vertices.push(Vertex {
-                    pos,
-                    uv: v.uv,
-                    layer: 0,
-                    color: v.color,
-                    light,
-                    normal: [0; 4],
-                    glint_uv: [0.0, 0.0],
-                });
+                let layer = if v.text == 0 {
+                    0
+                } else if outline.is_some() && i * 6 >= front {
+                    horizon_client::gfx::WORLD_TEXT_POLYGON_OFFSET_OVERLAY
+                } else {
+                    horizon_client::gfx::WORLD_TEXT_OVERLAY
+                };
+                draw.vertices.push(v.world_text_vertex(pos, layer, light));
             }
         }
         width.ceil()

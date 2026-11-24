@@ -435,7 +435,13 @@ fn coverage_uses_pack_texts_final_alpha_and_discard() {
         fragment: naga::front::wgsl::parse_str("struct Result { @location(0) color: vec4<f32> } @fragment fn main(@builtin(position) p: vec4<f32>) -> Result { if p.x > 2.0 { discard; } return Result(vec4(0.4, 0.2, 0.1, 0.5)); }").unwrap(),
         other: Vec::new(),
     };
-    gpu.hud.set_text_shader(&gpu.device, Some(&program));
+    let (_dir, atlas) = crate::font::marker_font_atlas(true);
+    let shaders = crate::gfx::core_text::TextShaders {
+        gui: Some(Arc::new(program)),
+        pages: atlas.text_shaders.pages.clone(),
+        ..Default::default()
+    };
+    gpu.hud.set_text_shaders(&gpu.device, &shaders);
     assert!(gpu.hud.pack_text.is_some());
     let mut batch = HudBatch::new(
         [4, 2],
@@ -447,8 +453,19 @@ fn coverage_uses_pack_texts_final_alpha_and_discard() {
     for x in [0.0, 2.0, 0.0, 2.0] {
         quad(&mut batch, Blend::Alpha, rgba(255, 255, 255, 255), x, 0.25);
     }
+    let style = crate::text::Style {
+        font: Some("fixture:one".into()),
+        ..Default::default()
+    };
+    let glyph = atlas.font.page_glyph('A', &style).unwrap();
+    shaders
+        .pages
+        .as_ref()
+        .unwrap()
+        .upload(&gpu.device, &gpu.queue);
+    gpu.hud.prepare_font_groups(&gpu.device);
     for v in &mut batch.vertices {
-        v.text = 1;
+        v.set_font_page(glyph.page);
     }
     gpu.check(&batch, 0.0, [191, 191, 0, 0]);
 }
@@ -464,8 +481,120 @@ fn a_pack_text_shader_without_a_colour_output_is_dropped_not_wrapped() {
         fragment: naga::front::wgsl::parse_str("@fragment fn main() -> @location(1) vec4<f32> { return vec4(1.0); }").unwrap(),
         other: Vec::new(),
     };
-    gpu.hud.set_text_shader(&gpu.device, Some(&program));
+    let shaders = crate::gfx::core_text::TextShaders {
+        gui: Some(Arc::new(program)),
+        ..Default::default()
+    };
+    gpu.hud.set_text_shaders(&gpu.device, &shaders);
     assert!(gpu.hud.pack_text.is_none());
+}
+
+#[test]
+fn translated_gui_text_uses_each_fonts_page_and_stock_needs_no_page() {
+    let _gpu = crate::gfx::test_gpu::lock();
+    let Some(mut gpu) = Gpu::new() else { return };
+
+    for (pack, expected) in [
+        (false, [[255, 0, 0, 255], [0, 255, 0, 255]]),
+        (true, [[0, 255, 0, 255], [0, 0, 255, 255]]),
+    ] {
+        let (_dir, atlas) = crate::font::marker_font_atlas(pack);
+        assert_eq!(atlas.text_shaders.pages.is_some(), pack);
+        let image = gpu.device.create_texture_with_data(
+            &gpu.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Marker fixture native HUD atlas"),
+                size: wgpu::Extent3d {
+                    width: atlas.width,
+                    height: atlas.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &atlas.pixels,
+        );
+        let view = image.create_view(&Default::default());
+        gpu.hud = HudRenderer::new(
+            &gpu.device,
+            hud_coverage::HUD_FORMAT,
+            &view,
+            &view,
+            &view,
+            &gpu.device.create_sampler(&Default::default()),
+            true,
+        )
+        .unwrap();
+        gpu.hud.set_text_shaders(&gpu.device, &atlas.text_shaders);
+        gpu.hud.atlas_texture = Some(image);
+        assert_eq!(gpu.hud.pack_text.is_some(), pack);
+
+        let mut batch = HudBatch::scratch([4, 2]);
+        for (name, x) in [("one", 0.0), ("two", 2.0)] {
+            batch.text_styled(
+                &atlas,
+                &crate::font::marker_text(name),
+                x,
+                -5.0,
+                u32::MAX,
+                false,
+            );
+        }
+        if let Some(pages) = gpu.hud.font_pages() {
+            pages.upload(&gpu.device, &gpu.queue);
+        }
+        let mut uploads = crate::gfx::upload::Uploads::new(&gpu.device);
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        gpu.hud
+            .prepare(&gpu.device, &mut uploads, &mut encoder, &batch, [4, 2]);
+        uploads.finish(&encoder);
+        gpu.queue.submit([encoder.finish()]);
+        let (color, mask) = gpu.draw(&batch, 0.0, 0.0, true);
+        let [a, b] = expected;
+        assert_eq!(
+            color.as_chunks::<4>().0,
+            [a, a, b, b, a, a, b, b],
+            "pack = {pack}"
+        );
+        assert_eq!(mask, [255; 8]);
+        if pack {
+            let mut gray = HudBatch::scratch([4, 2]);
+            gray.text_styled(
+                &atlas,
+                &crate::font::marker_text("gray"),
+                3.0,
+                4.0,
+                u32::MAX,
+                false,
+            );
+            gpu.hud
+                .font_pages()
+                .unwrap()
+                .upload(&gpu.device, &gpu.queue);
+            let mut uploads = crate::gfx::upload::Uploads::new(&gpu.device);
+            let mut encoder = gpu.device.create_command_encoder(&Default::default());
+            gpu.hud
+                .prepare(&gpu.device, &mut uploads, &mut encoder, &gray, [4, 2]);
+            uploads.finish(&encoder);
+            gpu.queue.submit([encoder.finish()]);
+            let (color, _) = gpu.draw(&gray, 0.0, 0.0, true);
+            let pixels = color.as_chunks::<4>().0;
+            assert!(
+                pixels.iter().any(|p| p[1] > 0),
+                "grayscale shader sampled no coverage: {pixels:?}"
+            );
+            assert!(
+                pixels.iter().all(|p| p[0] == 0 && p[2] == 0),
+                "non-R8 page color: {pixels:?}"
+            );
+        }
+    }
+    eprintln!("translated and native font page control pixels checked");
 }
 
 /// A pack's `position_tex_color` draws a `PackBlit` with its picture as `Sampler0`, in place of
