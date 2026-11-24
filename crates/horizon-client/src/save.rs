@@ -330,12 +330,9 @@ pub fn upgrade_older_world_with(
     world: &Path,
     progress: &horizon_world::datafix::progress::UpgradeProgress,
 ) -> Result<()> {
-    let Some(root) = read_dat(&world.join("level.dat")) else {
+    let Some(version) = saved_data_version(world) else {
         return Ok(());
     };
-    let version = root.get("Data").map_or(i64::from(DATA_VERSION), |d| {
-        number(d.get("DataVersion")).unwrap_or(-1) // saves of 1.8 and before have none
-    });
     if version >= i64::from(DATA_VERSION) {
         return Ok(());
     }
@@ -351,6 +348,17 @@ pub fn upgrade_older_world_with(
     horizon_world::datafix::files::upgrade_world_with(world, progress)
         .map_err(|e| format!("upgrading {}: {e}", world.display()))?;
     Ok(())
+}
+/// Whether opening the world needs the data-fixer upgrade path. Saves of 1.8 and before have no
+/// DataVersion, which counts as an upgrade that currently fails with the supported-version error.
+pub fn needs_world_upgrade(world: &Path) -> bool {
+    saved_data_version(world).is_some_and(|version| version < i64::from(DATA_VERSION))
+}
+fn saved_data_version(world: &Path) -> Option<i64> {
+    let root = read_dat(&world.join("level.dat"))?;
+    Some(root.get("Data").map_or(i64::from(DATA_VERSION), |d| {
+        number(d.get("DataVersion")).unwrap_or(-1) // saves of 1.8 and before have none
+    }))
 }
 /// Whether opening the world runs file fixes, which vanilla asks for a backup
 /// first (`BackupStatus.FILE_FIXING_REQUIRED`). Saves of 1.8 and before have no

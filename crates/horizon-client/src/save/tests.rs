@@ -1899,13 +1899,17 @@ fn older_worlds_are_upgraded_on_opening() {
     };
     for &old in olds {
         super::write_dat(&dir.join("level.dat"), level(old)).unwrap();
+        assert!(super::needs_world_upgrade(&dir));
         super::upgrade_older_world(&dir).unwrap();
         assert_eq!(version(&dir), Some(i64::from(super::DATA_VERSION)));
+        assert!(!super::needs_world_upgrade(&dir));
     }
     // 1.21.1: upgraded to the current version.
     super::write_dat(&dir.join("level.dat"), level(3955)).unwrap();
+    assert!(super::needs_world_upgrade(&dir));
     super::upgrade_older_world(&dir).unwrap();
     assert_eq!(version(&dir), Some(i64::from(super::DATA_VERSION)));
+    assert!(!super::needs_world_upgrade(&dir));
     super::upgrade_older_world(&dir).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

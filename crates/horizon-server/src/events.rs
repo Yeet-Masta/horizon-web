@@ -71,51 +71,110 @@ impl Shared {
     }
 }
 
-/// Fetches the game's typed events (`server-events` on its control endpoint) while it runs.
+/// Fetches the game's typed events (`server-events` on its control endpoint) while it starts or runs.
 pub fn poll_game(shared: Arc<Shared>) {
     let _ = thread::Builder::new().name("events".into()).spawn(move || {
-        let mut control: Option<(u32, engine::Control)> = None;
-        let mut since = 0u64;
+        let mut poller = GamePoller::default();
         loop {
             thread::sleep(POLL);
-            let (pid, running) = {
-                let state = shared.state.lock().unwrap();
-                (state.engine_pid, state.phase == Phase::Running)
-            };
-            let (Some(pid), true) = (pid, running) else {
-                control = None;
-                continue;
-            };
-            // A new game numbers its events from 1 again.
-            let mut history = false;
-            if control.as_ref().is_none_or(|(p, _)| *p != pid) {
-                control = engine::Control::connect(&shared.dir).ok().map(|c| (pid, c));
-                since = 0;
-                // What the game recorded before this first fetch (its saves while it started) happened before
-                // the management protocol's clients could hear of it.
-                history = true;
-            }
-            let Some((_, game)) = control.as_mut() else {
-                continue;
-            };
-            let Ok(reply) = game.ask(&format!("server-events {since}")) else {
-                control = None;
-                continue;
-            };
-            for event in reply["events"].as_array().into_iter().flatten() {
-                let mut event = event.clone();
-                since = since.max(event["seq"].as_u64().unwrap_or(since));
-                let kind = event["type"].as_str().unwrap_or("game").to_owned();
-                if let Some(fields) = event.as_object_mut() {
-                    fields.remove("seq");
-                }
-                if !(history && matches!(kind.as_str(), "saving" | "saved")) {
-                    crate::management::game_event(&shared, &kind, &event);
-                }
-                shared.emit(&kind, event);
-            }
+            poller.poll_once(&shared, engine::REPLY_TIMEOUT);
         }
     });
+}
+
+#[derive(Default)]
+struct GameEventCursor {
+    pid: Option<u32>,
+    since: u64,
+    skip_startup_history: bool,
+}
+
+impl GameEventCursor {
+    /// Returns true for a new engine process, whose event sequence starts over at one.
+    fn select_pid(&mut self, pid: u32) -> bool {
+        if self.pid == Some(pid) {
+            return false;
+        }
+        self.pid = Some(pid);
+        self.since = 0;
+        self.skip_startup_history = true;
+        true
+    }
+}
+
+#[derive(Default)]
+struct GamePoller {
+    control: Option<(u32, engine::Control)>,
+    cursor: GameEventCursor,
+}
+
+impl GamePoller {
+    /// One poll pass. Keeping the cursor separate from the socket lets a timeout reconnect to the
+    /// same engine without replaying events it already forwarded.
+    fn poll_once(&mut self, shared: &Arc<Shared>, reply_timeout: Duration) {
+        let (pid, pollable) = {
+            let state = shared.state.lock().unwrap();
+            (
+                state.engine_pid,
+                matches!(state.phase, Phase::Starting | Phase::Running),
+            )
+        };
+        let Some(pid) = pid else {
+            self.control = None;
+            self.cursor = GameEventCursor::default();
+            return;
+        };
+        if !pollable {
+            self.control = None;
+            return;
+        }
+
+        // Only a different process resets the cursor. A dropped connection to the same process
+        // must retain it, or a slow startup can replay every event already delivered.
+        if self.cursor.select_pid(pid) {
+            self.control = None;
+        }
+        if self
+            .control
+            .as_ref()
+            .is_none_or(|(connected_pid, _)| *connected_pid != pid)
+        {
+            self.control = engine::Control::connect(&shared.dir)
+                .ok()
+                .map(|control| (pid, control));
+        }
+        let Some((_, game)) = self.control.as_mut() else {
+            return;
+        };
+        if game.set_reply_timeout(reply_timeout).is_err() {
+            self.control = None;
+            return;
+        }
+        let Ok(reply) = game.ask(&format!("server-events {}", self.cursor.since)) else {
+            self.control = None;
+            return;
+        };
+
+        // Keep this set across connection/auth failures. The first successful reply for a new
+        // process is the only one whose pre-management save history should be suppressed.
+        let skip_startup_history = self.cursor.skip_startup_history;
+        self.cursor.skip_startup_history = false;
+        for event in reply["events"].as_array().into_iter().flatten() {
+            let mut event = event.clone();
+            self.cursor.since = self
+                .cursor
+                .since
+                .max(event["seq"].as_u64().unwrap_or(self.cursor.since));
+            let kind = event["type"].as_str().unwrap_or("game").to_owned();
+            if let Some(fields) = event.as_object_mut() {
+                fields.remove("seq");
+            }
+            if !(skip_startup_history && matches!(kind.as_str(), "saving" | "saved")) {
+                crate::management::game_event(shared, &kind, &event);
+            }
+            shared.emit(&kind, event);
+        }
+    }
 }
 
 /// `GET /api/v1/events[?since=N][&types=join,chat,...]`.
@@ -194,6 +253,11 @@ pub fn route(shared: &Arc<Shared>, request: &Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::{TcpListener, TcpStream},
+        sync::Mutex,
+    };
 
     fn event_reply(response: Response) -> Value {
         assert!(response.stream.is_none());
@@ -203,6 +267,140 @@ mod tests {
             "headers": response.headers,
             "body": serde_json::from_str::<Value>(&response.body).unwrap(),
         })
+    }
+
+    fn accept_control_client(listener: &TcpListener) -> (BufReader<TcpStream>, TcpStream) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(accepted) => break accepted,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("timed out accepting control client: {error}"),
+            }
+        };
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut auth = String::new();
+        reader.read_line(&mut auth).unwrap();
+        assert_eq!(auth.trim_end(), "auth t");
+        let mut writer = stream;
+        writeln!(writer, "{{\"ok\":true}}").unwrap();
+        (reader, writer)
+    }
+
+    fn read_since(reader: &mut BufReader<TcpStream>) -> u64 {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        line.trim_end()
+            .strip_prefix("server-events ")
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn write_events(writer: &mut TcpStream, events: &[Value]) -> std::io::Result<()> {
+        writeln!(
+            writer,
+            "{}",
+            json!({
+                "next": events.last().and_then(|event| event["seq"].as_u64()).unwrap_or(0),
+                "events": events,
+            })
+        )
+    }
+
+    #[test]
+    fn reconnect_after_control_timeout_resumes_the_event_cursor() {
+        let temp = std::env::temp_dir().join(format!(
+            "horizon-server-events-reconnect-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let path = horizon_server_launch::control_path(&temp);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            json!({
+                "port": listener.local_addr().unwrap().port(),
+                "token": "t",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let all_events = vec![
+            json!({ "seq": 1, "type": "world_upgrade_started" }),
+            json!({ "seq": 2, "type": "world_upgrade_progress", "progress": 0.5 }),
+            json!({ "seq": 3, "type": "world_upgrade_finished" }),
+        ];
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen_requests = requests.clone();
+        let server_events = all_events.clone();
+        let server = thread::spawn(move || {
+            {
+                let (mut reader, mut writer) = accept_control_client(&listener);
+                let first_since = read_since(&mut reader);
+                seen_requests.lock().unwrap().push(first_since);
+                write_events(&mut writer, &server_events[..2]).unwrap();
+
+                let timed_out_since = read_since(&mut reader);
+                seen_requests.lock().unwrap().push(timed_out_since);
+                // Simulate a long startup operation outlasting the control reply timeout.
+                thread::sleep(Duration::from_millis(180));
+                let _ = write_events(&mut writer, &server_events);
+            }
+
+            let (mut reader, mut writer) = accept_control_client(&listener);
+            let resumed_since = read_since(&mut reader);
+            seen_requests.lock().unwrap().push(resumed_since);
+            let pending: Vec<_> = server_events
+                .iter()
+                .filter(|event| event["seq"].as_u64().unwrap() > resumed_since)
+                .cloned()
+                .collect();
+            write_events(&mut writer, &pending).unwrap();
+        });
+
+        let shared = Shared::with_install(&temp, None);
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.phase = Phase::Starting;
+            state.engine_pid = Some(std::process::id());
+        }
+
+        let mut poller = GamePoller::default();
+        poller.poll_once(&shared, Duration::from_secs(1));
+        poller.poll_once(&shared, Duration::from_millis(40));
+        poller.poll_once(&shared, Duration::from_secs(1));
+        drop(poller);
+        server.join().unwrap();
+
+        assert_eq!(*requests.lock().unwrap(), [0, 2, 2]);
+        let all = |_: &str| true;
+        let (last, events) = shared.events.lock().unwrap().after(0, &all);
+        assert_eq!(last, 3);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "world_upgrade_started",
+                "world_upgrade_progress",
+                "world_upgrade_finished",
+            ]
+        );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

@@ -761,7 +761,8 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   3. stops the game, backs up the world (`backups/<time>-before-<tag>.zip`), records the release in use in
      `<dir>/previous` and points `<dir>/current` at the new one;
   4. checks that the new game loads on this system (`--help`), then starts it;
-  5. waits until it has logged `Done` and answered a status request, for 300 s (`--timeout`).
+  5. waits for `Done` and a non-error status reply, for 300 s (`--timeout`). A legacy game without a control
+     endpoint (including No AI) is considered ready at `Done`.
 
   If the new game doesn't load, stops, or isn't up in time, the supervisor goes back by itself: `current`
   points at the release before, `previous` is left as it was, the world is put back from the backup (the
