@@ -1095,6 +1095,18 @@ pub trait PlayersBackendMut {
         pos: [i32; 3],
         original: &ItemStack,
     ) -> Result<(), TriggerCriterionError>;
+    /// Side: server. Fires `minecraft:consume_item` for `player` with `stack`
+    /// (`CriteriaTriggers.CONSUME_ITEM.trigger`).
+    /// An invalid stack returns `Stack(StackWriteError)` before the trigger fires.
+    /// Evaluates vanilla predicates and rewards in the player's own level; never reads inventory.
+    /// `Ok(())` means reached, even if nothing matched. Refuses remote clients (`NotServer`)
+    /// and stale/offline/displaced players (`PlayerUnavailable`).
+    #[access(WorldOnly)]
+    fn player_trigger_consume_item(
+        &mut self,
+        player: PlayerRef,
+        stack: &ItemStack,
+    ) -> Result<(), TriggerCriterionError>;
     /// Side: server.
     /// `Player.setLastDeathLocation`: stores where the player died, or
     /// forgets it for None. The client hears of it with the player's next

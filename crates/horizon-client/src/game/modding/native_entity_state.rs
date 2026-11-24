@@ -128,6 +128,42 @@ impl Game<'_> {
             Body::Other(_) => None,
         }
     }
+    /// Whether the entity's eyes are submerged in water (`Entity.isUnderWater`:
+    /// `isEyeInFluid(WATER) && isInWater()`): players and mobs.
+    pub(super) fn entity_is_under_water(&self, entity: EntityRef) -> Option<bool> {
+        use horizon_client::motion::WATER;
+        match self.native_target_body(self.native_entity_read_target(entity)?)? {
+            Body::Player(p) => Some(p.is_eye_in_fluid(WATER) && p.fluids.was_touching_water),
+            Body::Mob(m) => Some(m.fluids.eye_in_water && m.fluids.in_water),
+            Body::Other(_) => None,
+        }
+    }
+    /// Whether the entity is on fire (`Entity.isOnFire`): not fire-immune and either
+    /// burning (`fire_ticks > 0`) or carrying the client's synced on-fire flag.
+    /// Players, mobs, armor stands and dropped items on a server; on a remote client,
+    /// only the local player's own fire state is available (`None` for any other entity).
+    pub(super) fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool> {
+        let target = self.native_entity_read_target(entity)?;
+        if self.remote.is_some() && !matches!(target, Target::Player) {
+            return None;
+        }
+        match self.native_target_body(target)? {
+            Body::Player(p) => Some(
+                p.fire_ticks > 0
+                    || (self.remote.is_some()
+                        && matches!(target, Target::Player)
+                        && self.remote.as_ref().is_some_and(|r| r.own_on_fire)),
+            ),
+            Body::Mob(m) => Some(m.is_on_fire()),
+            Body::Other(Target::Stand(id)) => {
+                Some(self.armor_stands.iter().find(|s| s.id == id)?.fire_ticks > 0)
+            }
+            Body::Other(Target::Item(id)) => {
+                Some(self.dropped.iter().find(|i| i.id == id)?.fire_ticks > 0)
+            }
+            Body::Other(_) => None,
+        }
+    }
     /// `Entity.isValid`: the entity is in the level and not removed. A stale handle, a mob queued for
     /// removal and a frame or painting that is gone are not valid.
     pub(super) fn entity_is_valid(&self, entity: EntityRef) -> bool {
@@ -1548,5 +1584,53 @@ mod fuse_tests {
             assert!(!game.entity_set_fuse(entity, -1));
             assert_eq!(game.tnts.last().unwrap().fuse, 37);
         });
+    }
+
+    #[test]
+    fn entity_is_on_fire_and_is_under_water_read_entity_state() {
+        if std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        let mut game = crate::game::native_machines::tests::server_game();
+        let zombie_kind = game
+            .res
+            .mob_types()
+            .get("minecraft:zombie")
+            .unwrap()
+            .clone();
+        let blaze_kind = game
+            .res
+            .mob_types()
+            .get("minecraft:blaze")
+            .unwrap()
+            .clone();
+        let mut zombie = horizon_client::mobs::Mob::new(
+            101,
+            zombie_kind,
+            Vec3::new(0.0, 64.0, 0.0),
+            0.0,
+        );
+        zombie.fire_ticks = 40;
+        zombie.fluids.in_water = true;
+        zombie.fluids.eye_in_water = false;
+        let mut blaze = horizon_client::mobs::Mob::new(
+            102,
+            blaze_kind,
+            Vec3::new(2.0, 64.0, 0.0),
+            0.0,
+        );
+        blaze.fire_ticks = 40;
+        blaze.fluids.in_water = true;
+        blaze.fluids.eye_in_water = true;
+        game.mobs.push(zombie);
+        game.mobs.push(blaze);
+
+        let zombie_ref = game.entity(101).unwrap();
+        let blaze_ref = game.entity(102).unwrap();
+
+        assert_eq!(zombie_ref.is_on_fire(&game), Some(true));
+        assert_eq!(blaze_ref.is_on_fire(&game), Some(false));
+        assert_eq!(zombie_ref.is_under_water(&game), Some(false));
+        assert_eq!(blaze_ref.is_under_water(&game), Some(true));
     }
 }

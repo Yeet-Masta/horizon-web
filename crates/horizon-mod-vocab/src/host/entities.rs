@@ -519,6 +519,19 @@ pub trait EntitiesBackend {
     #[access(WorldOnly)]
     fn entity_is_in_water(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
+    /// Whether the entity's eyes are submerged in water (`Entity.isUnderWater`:
+    /// `isEyeInFluid(WATER) && isInWater()`): players and mobs. On a client, reads its own
+    /// cached fluid update as `entity_eye_fluid` does. None for other kinds and stale handles.
+    #[access(WorldOnly)]
+    fn entity_is_under_water(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
+    /// Whether the entity is on fire (`Entity.isOnFire`): not fire-immune and either
+    /// burning (`fire_ticks > 0`) or carrying the client shared on-fire flag. Players, mobs,
+    /// armor stands and dropped items on a server; on a client, the local player's own fire
+    /// state, and None for any other entity there. None for other kinds and stale handles.
+    #[access(WorldOnly)]
+    fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
     /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
