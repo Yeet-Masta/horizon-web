@@ -178,19 +178,66 @@ pub fn connect(marker: &Marker, deadline: Instant) -> io::Result<Stream> {
         }
     }
 }
+/// Whether `owner` may own a control socket directory.
+///
+/// The current user (`euid`) may own any control socket directory. A parent or
+/// ancestor directory (`private` false) may also be owned by root (uid = 0), or by
+/// `root_as`: a different uid that root shows up as (typically `None` on a normal system,
+/// or `Some(65534)` in a sandbox where root is unmapped).
+fn trusted_owner(owner: u32, euid: u32, private: bool, root_as: Option<u32>) -> bool {
+    owner == euid || (!private && (owner == 0 || Some(owner) == root_as))
+}
+/// Whether the text of a `uid_map` leaves root unmapped. Each line is
+/// `inside outside count`; root is mapped when a line starts at inside uid 0.
+/// Text that doesn't parse counts as mapped, keeping it strict.
+#[cfg(target_os = "linux")]
+fn leaves_root_unmapped(uid_map: &str) -> bool {
+    let mut lines = uid_map.lines().peekable();
+    lines.peek().is_some()
+        && lines.all(|line| {
+            let fields: Option<Vec<u32>> = line
+                .split_whitespace()
+                .map(|field| field.parse().ok())
+                .collect();
+            matches!(fields.as_deref(), Some(&[inside, _, count]) if inside != 0 || count == 0)
+        })
+}
+/// The uid root shows up as in this process's user namespace when that namespace
+/// leaves root unmapped: the kernel's overflow uid, typically 65534. `None` when
+/// root is mapped or either file can't be read.
+#[cfg(target_os = "linux")]
+fn root_as() -> Option<u32> {
+    let uid_map = std::fs::read_to_string("/proc/self/uid_map").ok()?;
+    if !leaves_root_unmapped(&uid_map) {
+        return None;
+    }
+    std::fs::read_to_string("/proc/sys/kernel/overflowuid")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+#[cfg(not(target_os = "linux"))]
+fn root_as() -> Option<u32> {
+    None
+}
 fn check_directory(directory: &Dir, path: &Path, private: bool) -> io::Result<()> {
     let metadata = rustix::fs::fstat(directory)?;
     let mode = metadata.st_mode & 0o7777;
-    let reason =
-        if metadata.st_uid != unsafe { libc::geteuid() } && (private || metadata.st_uid != 0) {
-            "unexpected owner"
-        } else if mode & 0o022 != 0 && (private || mode & 0o1000 == 0) {
-            "group or other users can write to it"
-        } else if private && mode & 0o777 != 0o700 {
-            "expected a private directory (mode 0700)"
-        } else {
-            return Ok(());
-        };
+    let reason = if !trusted_owner(
+        metadata.st_uid,
+        unsafe { libc::geteuid() },
+        private,
+        root_as(),
+    ) {
+        "unexpected owner"
+    } else if mode & 0o022 != 0 && (private || mode & 0o1000 == 0) {
+        "group or other users can write to it"
+    } else if private && mode & 0o777 != 0o700 {
+        "expected a private directory (mode 0700)"
+    } else {
+        return Ok(());
+    };
     Err(io::Error::new(
         io::ErrorKind::PermissionDenied,
         format!(
@@ -321,4 +368,30 @@ fn runtime_addresses_validate_candidates_and_exchange() {
         drop(endpoint);
         assert!(!marker.directory.exists());
     }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn overflow_uid_owns_only_parents_and_only_when_root_is_unmapped() {
+    let (me, nobody) = (1000, 65534);
+    // A sandbox's map (only the user) leaves root unmapped; a host's maps it.
+    assert!(leaves_root_unmapped("      1000       1000          1\n"));
+    assert!(!leaves_root_unmapped("         0          0 4294967295\n"));
+    assert!(!leaves_root_unmapped("0 100000 65536\n1000 1000 1\n"));
+    assert!(!leaves_root_unmapped("1000 1000 1\n0 100000 65536\n"));
+    // Text that doesn't parse, or no lines at all, keeps the strict rule.
+    assert!(!leaves_root_unmapped(""));
+    assert!(!leaves_root_unmapped("1000 1000\n"));
+
+    let sandboxed = Some(nobody);
+    // Root unmapped: the overflow uid may own a parent, never a private directory.
+    assert!(trusted_owner(nobody, me, false, sandboxed));
+    assert!(!trusted_owner(nobody, me, true, sandboxed));
+    // Root mapped: the overflow uid is a real user and owns nothing.
+    assert!(!trusted_owner(nobody, me, false, None));
+    // What held before still holds.
+    assert!(trusted_owner(me, me, true, sandboxed));
+    assert!(trusted_owner(0, me, false, None));
+    assert!(!trusted_owner(0, me, true, None));
+    assert!(!trusted_owner(1001, me, false, sandboxed));
+    assert!(trusted_owner(0, me, false, sandboxed));
 }
