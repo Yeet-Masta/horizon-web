@@ -68,6 +68,14 @@
 
 <p align="center">
   <a href="https://blacksmith.sh"><img src="docs/media/readme/blacksmith.png" alt="CI powered by Blacksmith" width="280"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://coderabbit.link/horizon">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/media/readme/coderabbit-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="docs/media/readme/coderabbit-light.png">
+      <img src="docs/media/readme/coderabbit-light.png" alt="Code reviews by CodeRabbit" width="220">
+    </picture>
+  </a>
 </p>
 
 <p align="center">
