@@ -894,7 +894,13 @@ impl Game<'_> {
             let pitch = (1.0
                 + (super::explosion::client_float() - super::explosion::client_float()) * 0.2)
                 * 0.7;
-            self.audio.play(src.sound, Some(center), 4.0, pitch);
+            self.audio.play_on(
+                mod_api::SoundSource::Blocks as usize,
+                src.sound,
+                Some(center),
+                4.0,
+                pitch,
+            );
         }
         // Explosion.isSmall: below a radius of 2.
         let ty = if radius < 2.0 {
@@ -1190,5 +1196,37 @@ mod tests {
         assert_eq!(back.acceleration, 0.05);
         // The power a server sends with the turn is the halved one.
         assert_eq!(p.acceleration_power(), Some(0.05));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn wind_burst_plays_on_blocks_sound_source() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.audio.capture = Some(Vec::new());
+            for (sound, breeze) in [
+                ("minecraft:entity.wind_charge.wind_burst", false),
+                ("minecraft:entity.breeze.wind_burst", true),
+            ] {
+                let src = Source {
+                    sound,
+                    breeze,
+                    wind_charge: !breeze,
+                    mob: breeze,
+                    silent: false,
+                    cause: BurstCause::default(),
+                };
+                game.wind_burst([0.5, 65.0, 0.5], 1.2, 1.22, src).unwrap();
+            }
+            let captured = game.audio.capture.take().unwrap();
+            assert_eq!(captured.len(), 2);
+            for c in &captured {
+                assert_eq!(
+                    c.source,
+                    mod_api::SoundSource::Blocks as usize,
+                    "{} should play on Blocks",
+                    c.event
+                );
+            }
+        });
     }
 }

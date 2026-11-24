@@ -594,7 +594,13 @@ impl Game<'_> {
             let sound = self
                 .remote_sound_name(&p.sound)
                 .unwrap_or_else(|| "minecraft:entity.generic.explode".to_owned());
-            self.audio.play(&sound, Some(p.center), 4.0, pitch);
+            self.audio.play_on(
+                mod_api::SoundSource::Blocks as usize,
+                &sound,
+                Some(p.center),
+                4.0,
+                pitch,
+            );
         }
         if let Some(options) = self.received_particle(&p.particle, p.center) {
             self.particles.add(&options, p.center, [1.0, 0.0, 0.0]);
