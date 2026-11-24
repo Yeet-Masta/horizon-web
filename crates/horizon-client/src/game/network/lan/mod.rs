@@ -8,6 +8,7 @@ mod event_timings;
 mod level_event_targets;
 mod mob_metadata;
 mod mob_states;
+pub(super) mod publish_message;
 mod raw_inbox;
 mod residency;
 pub(super) mod sync;
@@ -1235,10 +1236,7 @@ impl Game<'_> {
         } else {
             return Err("no world of this game to open".into());
         };
-        self.system_message(Text::translate(
-            "menu.multiplayerOptions.publish.started.lan",
-            &[Text::literal(port.to_string())],
-        ));
+        self.system_message(publish_message::lan_started(i32::from(port)));
         Ok(())
     }
     pub(super) fn start_lan_hub(
