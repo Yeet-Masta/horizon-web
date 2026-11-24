@@ -437,7 +437,8 @@ impl<'a> Split<'a> {
         }
         self.p1_window = 1;
         self.windows.truncate(1);
-        self.surfaces.truncate(1);
+        // Window 1 is the first surface, and the only one numbered 1.
+        self.close_surfaces(|s| s.key == 1);
         let Some(main) = self.surfaces.pop() else {
             return Ok(());
         };
