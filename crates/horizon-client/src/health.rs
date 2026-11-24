@@ -288,7 +288,7 @@ impl<'a> DamageLevel<'a> {
         self.attack
     }
     /// The authoritative world's merged tag tables, if available.
-    pub fn tags(&self) -> Option<&crate::items::Items> {
+    pub fn tags(&self) -> Option<&'a crate::items::Items> {
         self.tags
     }
     /// The cached block parser context, if available.
@@ -441,6 +441,16 @@ impl TestLevel {
     }
     pub fn level(&mut self) -> DamageLevel<'_> {
         DamageLevel::of(&mut self.world, &self.registry, None, None, &self.hooks)
+    }
+    /// [`Self::level`] whose hits read the tags and registries of `items` (its enchantments).
+    pub fn level_with<'a>(&'a mut self, items: &'a crate::items::Items) -> DamageLevel<'a> {
+        DamageLevel::of(
+            &mut self.world,
+            &self.registry,
+            Some(items),
+            None,
+            &self.hooks,
+        )
     }
     /// The level's random, for a probe that draws from it outside a hit.
     pub fn random(&mut self) -> &mut horizon_core::random::LevelRandom {

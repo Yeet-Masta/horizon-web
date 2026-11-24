@@ -318,7 +318,15 @@ impl Game<'_> {
             &self.health_resources.damage,
             damage_type,
         ));
-        let vanilla = mob.refuses_damage(&source);
+        // LivingEntity.isInvulnerableTo's EnchantmentHelper.isImmuneToDamage. A query only
+        // reads the level, so a requirement's draw comes from a copy of its random.
+        let vanilla = mob.refuses_damage(&source)
+            || mob.immune_by_enchantment(
+                world_items!(self),
+                &source,
+                &horizon_client::health::NO_ATTACK,
+                &mut self.world.random.clone(),
+            );
         horizon_client::health::query_invulnerability(
             &self.world,
             self.pack.assets.registry,
