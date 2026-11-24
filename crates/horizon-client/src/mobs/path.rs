@@ -1338,7 +1338,7 @@ impl<'a, 'w> Finder<'a, 'w> {
             if prefers_shallow {
                 for &n in out.as_slice() {
                     let node = &mut self.nodes[n as usize];
-                    if node.kind == PathType::Water && node.y < 63 - 10 {
+                    if node.kind == PathType::Water && node.y < self.w.sea_level - 10 {
                         node.cost_malus += 1.0;
                     }
                 }
@@ -2394,6 +2394,77 @@ mod tests {
         assert!(
             cached_paths[7].as_ref().is_some_and(|p| p.reached),
             "multi-target (>4) query should reach a target"
+        );
+    }
+
+    /// `AmphibiousNodeEvaluator.getNeighbors`: the shallow-swimming malus is
+    /// `y < level.getSeaLevel() - 10`, not the overworld's 63. In a flat world
+    /// (sea level -63) no water is deep, so a frog swims straight at y = 52;
+    /// at sea level 63 that straight route costs extra and the frog rises to
+    /// the shallow water at y = 53.
+    #[test]
+    #[ignore = "daily"]
+    fn a_frog_measures_deep_water_from_the_levels_sea_level() {
+        let ran = crate::mobs::world::with_built_test_world(
+            &[],
+            |world, registry| {
+                world
+                    .chunks
+                    .insert((0, 0), std::sync::Arc::new(Chunk::empty(0, 0)));
+                let water = registry.default_state("minecraft:water").unwrap();
+                // Open water, three deep, so every node is WATER rather than
+                // WATER_BORDER: no block touches the water.
+                for x in 0..7 {
+                    for y in 52..=54 {
+                        world.set(x, y, 0, water).unwrap();
+                    }
+                }
+            },
+            |w, types| {
+                let frog = std::sync::Arc::new(types.types["minecraft:frog"].clone());
+                let mut flat = (*w).clone();
+                flat.sea_level = -63;
+                let mut sea = (*w).clone();
+                sea.sea_level = 63;
+
+                let deep = |p: &Path| {
+                    p.nodes
+                        .iter()
+                        .filter(|n| n.kind == PathType::Water && n.y < 63 - 10)
+                        .count()
+                };
+
+                let mut flat_frog =
+                    crate::mobs::Mob::new(1, frog.clone(), Vec3::new(0.5, 52.0, 0.5), 0.0);
+                flat_frog.fluids.in_water = true;
+                let path = flat_frog
+                    .create_path_to(&flat, [6, 52, 0], 0)
+                    .expect("the flat-world frog reaches the far side");
+                assert_eq!(
+                    deep(&path),
+                    7,
+                    "at sea level -63 every water block is shallow, so the frog stays at y = 52: {path:?}"
+                );
+                assert!(
+                    path.nodes.iter().all(|n| n.y == 52),
+                    "the flat-world frog does not rise to the shallow water: {path:?}"
+                );
+
+                let mut sea_frog = crate::mobs::Mob::new(2, frog, Vec3::new(0.5, 52.0, 0.5), 0.0);
+                sea_frog.fluids.in_water = true;
+                let path = sea_frog
+                    .create_path_to(&sea, [6, 52, 0], 0)
+                    .expect("the sea-level-63 frog reaches the far side");
+                assert_eq!(
+                    deep(&path),
+                    2,
+                    "at sea level 63 the frog rises into the shallow water and only its start and target stay deep: {path:?}"
+                );
+            },
+        );
+        assert!(
+            ran,
+            "prepared vanilla resources are needed for this daily test"
         );
     }
 }
