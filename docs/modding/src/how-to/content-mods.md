@@ -323,6 +323,29 @@ moss carpet rather than the candidate block.
 
 A block with template `minecraft:farmland` may set `"base_block": "namespace:block"` to choose the block it becomes when it dries out, is trampled, or has a solid block placed above it. The ID must name a registered block; without the key, the template's dirt base is used.
 
+A custom growing-plant head can name its pair so both blocks get the right survival check. Put `growing_plant` on the
+head block only; its `head` id must be that block, and `body` must name another declared block using the matching
+vanilla body template from the same mod (including one of its declared namespaces). The body has no item: set
+`"item": false` and omit `block_item` and `pick_item`. `direction` is `up` or `down`. Set `kelp` to `true` when the plant rejects support blocks tagged
+`minecraft:cannot_support_kelp` (it defaults to `false`). This describes survival checks; it does not add growth or
+placement behavior beyond the chosen vanilla templates.
+
+The generated survival rule for the pair takes precedence over entries for either block in
+`worldgen/blocks/survival-rules.json`.
+
+```json
+{ "template": "minecraft:weeping_vines",
+  "growing_plant": {
+    "head": "ruby:wisteria",
+    "body": "ruby:wisteria_plant",
+    "direction": "down"
+  } }
+```
+
+The body uses `minecraft:weeping_vines_plant` as its template and does not repeat `growing_plant`. The other head/body
+template pairs are `kelp`/`kelp_plant`, `cave_vines`/`cave_vines_plant`, and
+`twisting_vines`/`twisting_vines_plant`.
+
 A block whose template is one of vanilla's signs is a sign, whatever its name: it has vanilla's sign block
 entity, so the text, the editor, dye, glow ink, wax and saving all work as they do on an oak sign, and the
 client draws its text. A wooden sign is two blocks and a hanging sign two more, one form per template, and the

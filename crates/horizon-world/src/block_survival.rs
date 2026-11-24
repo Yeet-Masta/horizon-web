@@ -27,6 +27,12 @@ pub enum SurvivalRule {
     SeaPickle,
     Bell,
     GrowingPlant,
+    GrowingPlantFamily {
+        head: String,
+        body: String,
+        direction: Direction,
+        kelp: bool,
+    },
     MangrovePropagule,
     Speleothem,
     Scaffolding,
@@ -370,6 +376,21 @@ impl<'r> BlockSurvivalRegistry<'r> {
                             kelp,
                         }
                     }
+                    SurvivalRule::GrowingPlantFamily {
+                        head,
+                        body,
+                        direction,
+                        kelp,
+                    } => Rule::GrowingPlant {
+                        head: registry
+                            .default_state(head)
+                            .ok_or_else(|| invalid("missing growing plant head"))?,
+                        body: registry
+                            .default_state(body)
+                            .ok_or_else(|| invalid("missing growing plant body"))?,
+                        direction: *direction,
+                        kelp: *kelp,
+                    },
                     SurvivalRule::MangrovePropagule => Rule::MangrovePropagule(boolean("hanging")?),
                     SurvivalRule::Speleothem => {
                         Rule::Speleothem(match property("vertical_direction")? {

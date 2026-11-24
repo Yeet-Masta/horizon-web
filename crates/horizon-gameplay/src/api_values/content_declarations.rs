@@ -121,6 +121,7 @@ impl TryIntoEngine<()> for mod_api::Block {
             }),
             id: self.id.clone(),
             template: self.template.clone(),
+            growing_plant: None,
             pick_item: self.pick_item.clone(),
             properties: self.properties.try_into_engine(&())?,
             shapes: self

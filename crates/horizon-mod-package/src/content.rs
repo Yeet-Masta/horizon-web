@@ -476,6 +476,8 @@ fn state_name(s: &str) -> bool {
 struct BlockFile {
     template: String,
     #[serde(default)]
+    growing_plant: Option<GrowingPlant>,
+    #[serde(default)]
     properties: BlockProperties,
     shapes: Option<BlockShapes>,
     collision_shapes: Option<BlockShapes>,
@@ -531,6 +533,9 @@ pub struct Block {
     pub id: String,
     /// The vanilla block it copies, `minecraft:<path>`.
     pub template: String,
+    /// A custom growing-plant family, declared on its head block. The same
+    /// pair is used for survival checks of both the head and body blocks.
+    pub growing_plant: Option<GrowingPlant>,
     pub properties: BlockProperties,
     pub shapes: Option<BlockShapes>,
     pub collision_shapes: Option<BlockShapes>,
@@ -585,6 +590,38 @@ pub struct Block {
     pub sign_text_glow: Option<bool>,
     /// The block farmland turns into; the template's base when unset.
     pub base_block: Option<String>,
+}
+
+/// The paired blocks and vertical direction of a content growing plant.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GrowingPlant {
+    /// The declared growing-plant head block id.
+    pub head: String,
+    /// The declared growing-plant body block id.
+    pub body: String,
+    /// Direction in which the family grows.
+    pub direction: GrowingPlantDirection,
+    /// Whether the family refuses support blocks tagged `cannot_support_kelp`.
+    #[serde(default)]
+    pub kelp: bool,
+}
+
+impl GrowingPlant {
+    pub fn direction_name(&self) -> &'static str {
+        match self.direction {
+            GrowingPlantDirection::Up => "up",
+            GrowingPlantDirection::Down => "down",
+        }
+    }
+}
+
+/// The vertical direction of a growing plant.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum GrowingPlantDirection {
+    Up,
+    Down,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1166,6 +1203,7 @@ impl Content {
             }
         }
         let all: Vec<&Block> = self.blocks.iter().chain(blocks).collect();
+        check_growing_plant_pairs(&all, &self.namespaces)?;
         check_wall_pairs(&all)?;
         for item in items {
             let id = item.id.as_str();
@@ -1335,6 +1373,7 @@ impl Content {
             let block = Block {
                 id: block,
                 template: file.template,
+                growing_plant: file.growing_plant,
                 properties: file.properties,
                 shapes: file.shapes,
                 collision_shapes: file.collision_shapes,
@@ -1367,6 +1406,7 @@ impl Content {
             }
             self.blocks.push(block);
         }
+        check_growing_plant_pairs(&self.blocks.iter().collect::<Vec<_>>(), &self.namespaces)?;
         // After every block, so a wall form may be declared in a later file.
         check_wall_pairs(&self.blocks.iter().collect::<Vec<_>>())?;
         let mut remainders = Vec::new();
@@ -1806,6 +1846,20 @@ fn check_block(file: &Block) -> Result<(), String> {
             return Err("base_block is a block id, namespace:path".into());
         }
     }
+    if let Some(family) = &file.growing_plant {
+        if file.id != family.head {
+            return Err("growing_plant must be declared on its head block".into());
+        }
+        if !namespaced_id(&family.head) || !namespaced_id(&family.body) {
+            return Err("growing_plant head and body are namespaced block ids".into());
+        }
+        if family.head == family.body {
+            return Err("growing_plant head and body must be different blocks".into());
+        }
+        if growing_plant_body_template(&file.template).is_none() {
+            return Err("growing_plant needs a vanilla growing-plant head template".into());
+        }
+    }
     // Every vanilla `SignBlock`'s id ends in `_sign`, and no other block's does.
     let sign = file.template.ends_with("_sign");
     if let Some(wood) = &file.wood_type {
@@ -1885,6 +1939,65 @@ fn check_block(file: &Block) -> Result<(), String> {
         }
         if sign && (direction == "up") != file.template.ends_with("_hanging_sign") {
             return Err("attachment_direction must match the sign template".into());
+        }
+    }
+    Ok(())
+}
+
+fn growing_plant_body_template(head_template: &str) -> Option<&'static str> {
+    match head_template {
+        "minecraft:kelp" => Some("minecraft:kelp_plant"),
+        "minecraft:cave_vines" => Some("minecraft:cave_vines_plant"),
+        "minecraft:twisting_vines" => Some("minecraft:twisting_vines_plant"),
+        "minecraft:weeping_vines" => Some("minecraft:weeping_vines_plant"),
+        _ => None,
+    }
+}
+
+fn check_growing_plant_pairs(blocks: &[&Block], namespaces: &[String]) -> Result<(), String> {
+    let mut body_owners = BTreeMap::new();
+    for head in blocks {
+        let Some(family) = &head.growing_plant else {
+            continue;
+        };
+        let body_is_owned = family
+            .body
+            .split_once(':')
+            .is_some_and(|(namespace, _)| namespaces.iter().any(|owned| owned == namespace));
+        if !body_is_owned {
+            return Err(format!(
+                "{}: growing_plant body {} must be one of this mod's blocks",
+                head.id, family.body
+            ));
+        }
+        if let Some(previous_head) = body_owners.insert(family.body.as_str(), head.id.as_str()) {
+            return Err(format!(
+                "{}: growing_plant body {} is already assigned to {previous_head}",
+                head.id, family.body
+            ));
+        }
+        let body = blocks
+            .iter()
+            .find(|block| block.id == family.body)
+            .ok_or_else(|| {
+                format!(
+                    "{}: growing_plant body {} is not declared",
+                    head.id, family.body
+                )
+            })?;
+        let expected_template = growing_plant_body_template(&head.template)
+            .expect("check_block validates growing_plant head templates");
+        if body.template != expected_template {
+            return Err(format!(
+                "{}: growing_plant body {} must use template {expected_template}",
+                head.id, family.body
+            ));
+        }
+        if body.item || body.block_item.is_some() || body.pick_item.is_some() {
+            return Err(format!(
+                "{}: growing_plant body {} has no item, so it sets \"item\": false and no block_item or pick_item",
+                head.id, family.body
+            ));
         }
     }
     Ok(())
@@ -2394,6 +2507,7 @@ capabilities = ["registries"]
             [Block {
                 id: "ruby:ruby_block".into(),
                 template: "minecraft:iron_block".into(),
+                growing_plant: None,
                 shapes: None,
                 collision_shapes: None,
                 outline_context_shapes: BTreeMap::new(),
@@ -3448,6 +3562,158 @@ capabilities = ["registries"]
         let wall = block("ruby:wall", "minecraft:oak_wall_sign", false, None);
         content.declare(&[sign, wall], &[]).unwrap();
         assert_eq!(content.blocks.len(), 2);
+    }
+
+    #[test]
+    fn growing_plant_families_validate_their_head_and_body_pair() {
+        let family = |head: &str, body: &str| GrowingPlant {
+            head: head.into(),
+            body: body.into(),
+            direction: GrowingPlantDirection::Down,
+            kelp: false,
+        };
+        let block = |id: &str, template: &str, growing_plant: Option<GrowingPlant>| Block {
+            id: id.into(),
+            template: template.into(),
+            growing_plant,
+            ..Block::default()
+        };
+        const VALID_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:body","direction":"down"}}"#;
+        const MISSING_BODY_HEAD: &[u8] = br#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"ruby:head","body":"ruby:missing","direction":"down"}}"#;
+        const VALID_BODY: &[u8] = br#"{"template":"minecraft:weeping_vines_plant","item":false}"#;
+        const WRONG_BODY: &[u8] = br#"{"template":"minecraft:twisting_vines_plant"}"#;
+        let load = |name: &str, head: &[u8], body: Option<&[u8]>| {
+            let mut files = vec![("data/ruby/horizon/block/head.json", head)];
+            if let Some(body) = body {
+                files.push(("data/ruby/horizon/block/body.json", body));
+            }
+            hmod(name, MANIFEST_TEXT, &files)
+        };
+
+        for (invalid, message) in [
+            (
+                block(
+                    "ruby:body",
+                    "minecraft:weeping_vines_plant",
+                    Some(family("ruby:head", "ruby:body")),
+                ),
+                "declared on its head",
+            ),
+            (
+                block(
+                    "ruby:plant",
+                    "minecraft:weeping_vines",
+                    Some(family("ruby:plant", "ruby:plant")),
+                ),
+                "must be different blocks",
+            ),
+            (
+                block(
+                    "ruby:plant",
+                    "minecraft:stone",
+                    Some(family("ruby:plant", "ruby:body")),
+                ),
+                "vanilla growing-plant head template",
+            ),
+        ] {
+            assert!(check_block(&invalid).unwrap_err().contains(message));
+        }
+
+        let head = block(
+            "ruby:head",
+            "minecraft:weeping_vines",
+            Some(family("ruby:head", "ruby:body")),
+        );
+        let body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+
+        let foreign_head = block(
+            "ruby:head",
+            "minecraft:weeping_vines",
+            Some(family("ruby:head", "dependency:body")),
+        );
+        let error = Content::declared("ruby")
+            .declare(&[foreign_head], &[])
+            .unwrap_err();
+        assert!(error.contains("body dependency:body must be one of this mod's blocks"));
+
+        let mut namespaced_content = Content::declared("ruby");
+        namespaced_content.namespaces.push("ruby_extra".into());
+        namespaced_content
+            .declare(
+                &[
+                    block(
+                        "ruby:head",
+                        "minecraft:weeping_vines",
+                        Some(family("ruby:head", "ruby_extra:body")),
+                    ),
+                    block("ruby_extra:body", "minecraft:weeping_vines_plant", None),
+                ],
+                &[],
+            )
+            .unwrap();
+
+        for (name, body) in [
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.item = true;
+                ("item", body)
+            },
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.block_item = Some("ruby:body_item".into());
+                ("block_item", body)
+            },
+            {
+                let mut body = block("ruby:body", "minecraft:weeping_vines_plant", None);
+                body.pick_item = Some("ruby:seed".into());
+                ("pick_item", body)
+            },
+        ] {
+            let mut content = Content::declared("ruby");
+            let error = content.declare(&[head.clone(), body], &[]).unwrap_err();
+            assert!(
+                error.contains("body ruby:body has no item"),
+                "{name}: {error}"
+            );
+        }
+
+        let mut content = Content::declared("ruby");
+        content.declare(&[head, body.clone()], &[]).unwrap();
+
+        let duplicate_head = block(
+            "ruby:other_head",
+            "minecraft:twisting_vines",
+            Some(family("ruby:other_head", "ruby:body")),
+        );
+        let error = content
+            .declare(std::slice::from_ref(&duplicate_head), &[])
+            .unwrap_err();
+        assert!(error.contains("already assigned to ruby:head"), "{error}");
+        assert_eq!(content.blocks.len(), 2, "a rejected family is not declared");
+
+        let loaded = load("growing-plant", VALID_HEAD, Some(VALID_BODY)).unwrap();
+        let loaded_head = loaded
+            .blocks
+            .iter()
+            .find(|block| block.id == "ruby:head")
+            .unwrap();
+        assert_eq!(
+            loaded_head.growing_plant.as_ref().unwrap().body,
+            "ruby:body"
+        );
+
+        let missing_body = load("growing-plant-missing-body", MISSING_BODY_HEAD, None).unwrap_err();
+        assert!(
+            missing_body.contains("body ruby:missing is not declared"),
+            "{missing_body}"
+        );
+
+        let wrong_body_template =
+            load("growing-plant-wrong-body", VALID_HEAD, Some(WRONG_BODY)).unwrap_err();
+        assert!(
+            wrong_body_template.contains("must use template minecraft:weeping_vines_plant"),
+            "{wrong_body_template}"
+        );
     }
 
     #[test]

@@ -462,6 +462,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         &self,
         block: super::states::BlockId,
     ) -> (super::states::BlockId, super::states::BlockId) {
+        let data = self.b.block_data(block);
+        if let (Some(head), Some(body)) = (data.growing_plant_head, data.growing_plant_body) {
+            return (head, body);
+        }
         let name = &*self.b.table.info(block).name;
         let head = name.strip_suffix("_plant").unwrap_or(name);
         let head = self.b.table.block_by_name(head).unwrap_or(block);
@@ -475,7 +479,15 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `GrowingPlantBlock.canAttachTo` (kelp refuses `cannot_support_kelp`).
     fn growing_plant_can_attach_to(&self, state: BlockStateId, attached: BlockStateId) -> bool {
         let b = self.b;
-        if b.instance_of(state, Class::Kelp) || b.instance_of(state, Class::KelpPlant) {
+        let block = b.block(state);
+        let data = b.block_data(block);
+        let rejects_kelp_support =
+            if data.growing_plant_head.is_some() && data.growing_plant_body.is_some() {
+                data.growing_plant_kelp
+            } else {
+                b.instance_of(state, Class::Kelp) || b.instance_of(state, Class::KelpPlant)
+            };
+        if rejects_kelp_support {
             !b.in_set(attached, &b.tags.cannot_support_kelp)
         } else {
             true

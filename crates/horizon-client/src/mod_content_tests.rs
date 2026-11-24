@@ -4602,6 +4602,54 @@ fn roots_unused_for_a_day_are_removed() {
     fs::remove_dir_all(&scratch).unwrap();
 }
 
+/// The content generator writes family metadata to both rows, and the world
+/// behaviour loader consumes those rows as one custom head/body pair.
+#[test]
+#[ignore = "daily"]
+fn declared_growing_plant_family_reaches_world_behaviours() {
+    let Some(base) = prepared() else { return };
+    let scratch = std::env::temp_dir().join(format!(
+        "horizon-growing-plant-family-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&scratch);
+    let manifest = manifest("testmod", "");
+    let m = folder_mod(
+        &scratch.join("mod"),
+        &[
+            ("horizon-mod.toml", &manifest),
+            (
+                "data/testmod/horizon/block/vines_head.json",
+                r#"{"template":"minecraft:weeping_vines","growing_plant":{"head":"testmod:vines_head","body":"testmod:vines_body","direction":"down","kelp":true}}"#,
+            ),
+            (
+                "data/testmod/horizon/block/vines_body.json",
+                r#"{"template":"minecraft:weeping_vines_plant","item":false}"#,
+            ),
+        ],
+    );
+    let root = resource_root_fixture(&base, Path::new(""), &[m], &scratch.join("cache")).unwrap();
+    let assets = Assets::load(&root).unwrap();
+    let registry = assets.registry;
+    let behaviours = horizon_world::level::Behaviours::load(registry, &root).unwrap();
+    let head = registry.default_state("testmod:vines_head").unwrap();
+    let body = registry.default_state("testmod:vines_body").unwrap();
+    let head_id = behaviours.block(head);
+    let body_id = behaviours.block(body);
+
+    for state in [head, body] {
+        let data = behaviours.data(state);
+        assert_eq!(data.growing_plant_head, Some(head_id));
+        assert_eq!(data.growing_plant_body, Some(body_id));
+        assert_eq!(
+            data.growth_direction,
+            horizon_core::geometry::Direction::Down
+        );
+        assert!(data.growing_plant_kelp);
+    }
+    fs::remove_dir_all(scratch).unwrap();
+}
+
 // These fixtures accept every listed content package on both sides. Production
 // captures the inventory after admission, including active code-only packages.
 fn fixture_inventory(mods: &[ContentMod]) -> horizon_mod_package::enabled::EnabledMods {

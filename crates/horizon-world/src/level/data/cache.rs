@@ -126,6 +126,12 @@ struct Block {
     feature: Option<String>,
     grow_probability: f64,
     growth_direction: u8,
+    #[serde(default)]
+    growing_plant_head: Option<u16>,
+    #[serde(default)]
+    growing_plant_body: Option<u16>,
+    #[serde(default)]
+    growing_plant_kelp: bool,
     schedule_fluid_ticks: bool,
     weather: u8,
     ignite_odds: i32,
@@ -526,6 +532,9 @@ impl Snapshot {
                 feature: block.feature.as_ref().map(|v| v.to_string()),
                 grow_probability: block.grow_probability,
                 growth_direction: direction_index(block.growth_direction),
+                growing_plant_head: block.growing_plant_head.map(|v| v.0),
+                growing_plant_body: block.growing_plant_body.map(|v| v.0),
+                growing_plant_kelp: block.growing_plant_kelp,
                 schedule_fluid_ticks: block.schedule_fluid_ticks,
                 weather: block.weather,
                 ignite_odds: block.ignite_odds,
@@ -702,6 +711,9 @@ impl Snapshot {
                     feature: wire.feature.map(Arc::from),
                     grow_probability: wire.grow_probability,
                     growth_direction: direction(wire.growth_direction)?,
+                    growing_plant_head: wire.growing_plant_head.map(BlockId),
+                    growing_plant_body: wire.growing_plant_body.map(BlockId),
+                    growing_plant_kelp: wire.growing_plant_kelp,
                     schedule_fluid_ticks: wire.schedule_fluid_ticks,
                     weather: wire.weather,
                     ignite_odds: wire.ignite_odds,
