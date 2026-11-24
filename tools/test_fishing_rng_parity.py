@@ -56,6 +56,50 @@ def prepare_reference(work):
     }
 
 
+def cast_effects(binary=None, work_dir=None, reference_only=False):
+    """Cast a rod with world-pack effects and observe the bobber it creates."""
+    import test_command_exec_parity as driver
+
+    def value(amount):
+        return {'effect': {'type': 'minecraft:add', 'value': amount}, 'requirements': {
+            'type': 'minecraft:entity_properties', 'entity': 'this',
+            'predicate': {'minecraft:entity_type': 'minecraft:player'},
+        }}
+
+    install = driver.install_datapack_fixtures
+
+    def with_rod_effects(world, predicates, functions, *args, **kwargs):
+        install(world, predicates, {**functions, 'fishing_test:ready': 'return 1\n'}, *args, **kwargs)
+        path = world / 'datapacks/command-selector-fixture/data/fishing_test/enchantment/casting.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cost = {'base': 1, 'per_level_above_first': 0}
+        definition = {'description': 'Casting probe', 'supported_items': 'minecraft:fishing_rod',
+                      'weight': 1, 'max_level': 1, 'min_cost': cost, 'max_cost': cost,
+                      'anvil_cost': 1, 'slots': ['hand'], 'effects': {
+                          'minecraft:fishing_time_reduction': [value(2.625)],
+                          'minecraft:fishing_luck_bonus': [value(4.75)],
+                      }}
+        path.write_text(json.dumps(definition), encoding='utf-8')
+
+    ops = [{'op': 'cmd', 'cmd': command, 'record': False} for command in [
+        '/gamemode survival @s',
+        '/item replace entity @s weapon.mainhand with minecraft:fishing_rod'
+        '[enchantments={"fishing_test:casting":1}]',
+    ]]
+    ops += [{'op': 'use_item'},
+            {'op': 'player_state', 'label': 'bobber lure ticks and luck', 'observe': 'fishing_cast',
+             'expect_observation': [52, 4]},
+            {'op': 'use_item'}]
+    driver.install_datapack_fixtures = with_rod_effects
+    driver.corpus_module.groups = lambda: [('casting enchantments', ops)]
+    sys.argv = [sys.argv[0], '--work-dir', str(work_dir or lab.LOCAL / 'fishing-cast-effects-parity')]
+    if binary:
+        sys.argv += ['--binary', str(binary)]
+    if reference_only:
+        sys.argv.append('--reference-only')
+    driver.main()
+
+
 def main():
     work = Path(tempfile.mkdtemp(prefix="fishing-rng-", dir=lab.LOCAL))
     java_options = os.environ.get("JAVA_TOOL_OPTIONS", "")
@@ -72,6 +116,9 @@ def main():
     subprocess.run(fast_bins.command("horizon-client"),
                    cwd=lab.ROOT, env=env, check=True)
     binary = lab.cargo_target() / "fast" / ("horizon-client.exe" if os.name == "nt" else "horizon-client")
+    subprocess.run([sys.executable, str(Path(__file__).resolve()), "--cast-effects-only",
+                    "--binary", str(binary), "--work-dir", str(work / "cast-effects")],
+                   cwd=lab.ROOT, check=True)
     subprocess.run([sys.executable, str(lab.ROOT / "tools/test_command_exec_parity.py"),
                     "--only", "scoreboard", "--allow-gaps", "--binary", str(binary), "--work-dir", str(work)],
                    cwd=lab.ROOT, env=env, check=True)
@@ -129,12 +176,18 @@ def main():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cast-effects-only", action="store_true")
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--work-dir", type=Path)
+    parser.add_argument("--reference-only", action="store_true")
     parser.add_argument("--prepare-reference", type=Path,
                         help="generate only the named Rust test's vanilla inputs in this private directory")
     parser.add_argument("--env-file", type=Path,
                         help="append the three generated input paths to an environment file")
     args = parser.parse_args()
-    if args.prepare_reference:
+    if args.cast_effects_only:
+        cast_effects(args.binary, args.work_dir, args.reference_only)
+    elif args.prepare_reference:
         if not args.env_file:
             parser.error("--prepare-reference requires --env-file")
         environment = prepare_reference(args.prepare_reference)

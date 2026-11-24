@@ -786,6 +786,24 @@ public final class VanillaCommandExecOracle {
                         out.append(gson.toJson(record)).append('\n');
                     }
                     case "player_state" -> {
+                        if (op.has("observe") && op.get("observe").getAsString().equals("fishing_cast")) {
+                            JsonObject record = new JsonObject();
+                            record.addProperty("cmd", "#player_state " + op.get("label").getAsString());
+                            record.add("messages", new JsonArray());
+                            record.add("results", new JsonArray());
+                            try {
+                                var hook = player.fishing;
+                                var lure = hook.getClass().getDeclaredField("lureSpeed");
+                                var luck = hook.getClass().getDeclaredField("luck");
+                                lure.setAccessible(true);
+                                luck.setAccessible(true);
+                                record.add("state", gson.toJsonTree(new int[] {lure.getInt(hook), luck.getInt(hook)}));
+                            } catch (ReflectiveOperationException e) {
+                                throw new IllegalStateException(e);
+                            }
+                            out.append(gson.toJson(record)).append('\n');
+                            break;
+                        }
                         try {
                             var field=net.minecraft.server.PlayerAdvancements.class.getDeclaredField("progress");field.setAccessible(true);
                             var progress=(java.util.Map<?,?>)field.get(player.getAdvancements());

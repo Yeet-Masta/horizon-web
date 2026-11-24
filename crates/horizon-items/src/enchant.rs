@@ -937,12 +937,53 @@ impl Enchantments {
         component: &str,
         ctx: &EffectContext<'_>,
         random: &mut LegacyRandom,
-        mut value: f32,
+        value: f32,
     ) -> f32 {
         let Some(e) = self.get(id) else { return value };
-        for effect in e.effects[component].as_array().into_iter().flatten() {
+        self.apply_filtered_value(&e.effects[component], level, ctx, (random, None), value)
+    }
+
+    /// `Enchantment.modifyEntityFilteredValue`: requirements use the loot
+    /// context's level random and the value effect uses the entity's random.
+    pub fn modify_entity_value(
+        &self,
+        stack: &ItemStack,
+        component: &str,
+        ctx: &EffectContext<'_>,
+        level_random: &mut horizon_core::random::LevelRandom,
+        entity_random: &mut horizon_core::random::EntityRandom,
+        mut value: f32,
+    ) -> f32 {
+        for (id, level) in stack.all_enchantments().iter() {
+            if let Some(e) = self.get(id) {
+                value = self.apply_filtered_value(
+                    &e.effects[component],
+                    *level,
+                    ctx,
+                    (entity_random, Some(level_random)),
+                    value,
+                );
+            }
+        }
+        value
+    }
+
+    fn apply_filtered_value(
+        &self,
+        effects: &Value,
+        level: u32,
+        ctx: &EffectContext<'_>,
+        (random, mut requirement_random): (&mut LegacyRandom, Option<&mut LegacyRandom>),
+        mut value: f32,
+    ) -> f32 {
+        for effect in effects.as_array().into_iter().flatten() {
             if let Some(req) = effect.get("requirements")
-                && !self.condition(req, level, ctx, random)
+                && !self.condition(
+                    req,
+                    level,
+                    ctx,
+                    requirement_random.as_deref_mut().unwrap_or(&mut *random),
+                )
             {
                 continue;
             }
@@ -1287,6 +1328,56 @@ pub fn apply_value_effect(
 pub mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn entity_filtered_values_draw_requirements_and_effects_from_their_owners() {
+        use horizon_core::random::{EntityRandom, LevelRandom};
+
+        let component = "minecraft:projectile_count";
+        // Seed 42 draws about 0.728 and 0.055. Both requirements pass in this
+        // order, but the removal requirement would fail if checked first.
+        let add = json!({"effects":{component:[{
+            "requirements":{"condition":"minecraft:random_chance","chance":0.8},
+            "effect":{"type":"minecraft:add","value":2}
+        }]}});
+        let remove = json!({"effects":{component:[{
+            "requirements":{"condition":"minecraft:random_chance","chance":0.1},
+            "effect":{"type":"minecraft:remove_binomial","chance":1.0}
+        }]}});
+        let enchantments = Enchantments::default()
+            .with_entries([("test:add", &add), ("test:remove", &remove)])
+            .unwrap()
+            .unwrap();
+        let mut stack = ItemStack::new("minecraft:crossbow", 1);
+        stack.data_mut().enchantments.extend([
+            ("test:add".into(), 1),
+            ("test:unresolved".into(), 1),
+            ("test:remove".into(), 1),
+        ]);
+        let mut level = LevelRandom::for_level(LegacyRandom::new(42));
+        let mut entity = EntityRandom::own(LegacyRandom::new(17));
+        assert_eq!(
+            enchantments.modify_entity_value(
+                &stack,
+                component,
+                &EffectContext::default(),
+                &mut level,
+                &mut entity,
+                3.0,
+            ),
+            0.0
+        );
+        let mut expected_level = LegacyRandom::new(42);
+        for _ in 0..2 {
+            expected_level.next_float();
+        }
+        let mut expected_entity = LegacyRandom::new(17);
+        for _ in 0..5 {
+            expected_entity.next_float();
+        }
+        assert_eq!(level.state(), expected_level.state());
+        assert_eq!(entity.state(), expected_entity.state());
+    }
 
     #[test]
     fn custom_damage_output_is_bounded_before_builtin_nodes() {

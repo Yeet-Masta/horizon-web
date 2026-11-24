@@ -234,6 +234,86 @@ impl horizon_client::join_seq::Joined for Hook {
     }
 }
 impl Hook {
+    /// Construct the hook with the rod's effect bonuses and the
+    /// angler's aim.
+    fn cast(
+        id: u32,
+        eye: Vec3,
+        rotation: (f32, f32),
+        enchantments: &horizon_items::enchant::Enchantments,
+        rod: &ItemStack,
+        level_random: &mut LevelRandom,
+        entity_random: &mut EntityRandom,
+    ) -> Self {
+        // FishingRodItem.use: the angler is THIS_ENTITY in both effects.
+        let ctx = horizon_items::enchant::EffectContext {
+            this: Some("minecraft:player"),
+            ..Default::default()
+        };
+        let lure = (enchantments
+            .modify_entity_value(
+                rod,
+                "minecraft:fishing_time_reduction",
+                &ctx,
+                level_random,
+                entity_random,
+                0.0,
+            )
+            .max(0.0)
+            * 20.0) as i32;
+        let luck = (enchantments.modify_entity_value(
+            rod,
+            "minecraft:fishing_luck_bonus",
+            &ctx,
+            level_random,
+            entity_random,
+            0.0,
+        ) as i32)
+            .max(0);
+        let (y_sin, y_cos, dir_y) = cast_direction(rotation.0, rotation.1);
+        // snapTo(x, getEyeY(), z): the hook's feet start at the owner's eye.
+        let start = Vec3::new(
+            eye.x - f64::from(y_sin) * 0.3,
+            eye.y,
+            eye.z - f64::from(y_cos) * 0.3,
+        );
+        // The hook's own random (`Entity.random`).
+        let mut random = EntityRandom::own(random_source::entity());
+        let uuid = horizon_client::save::insecure_uuid(&mut random);
+        // FishingHook's second random is reseeded from UUID/game time on
+        // use, but its construction still takes its own unique seed.
+        let _synchronized = random_source::create();
+        let v = cast_velocity(y_sin, y_cos, dir_y, &mut random);
+        Self {
+            uuid,
+            attachment_lifetime: Default::default(),
+            join: horizon_client::join_seq::JoinSeq::UNJOINED,
+            caster: None,
+            caster_generation: horizon_client::join_seq::JoinSeq::UNJOINED,
+            id,
+            position: start,
+            previous: start,
+            velocity: v,
+            state: State::Flying,
+            last_deflected_by: None,
+            needs_sync: false,
+            tick_count: 0,
+            life: 0,
+            on_ground: false,
+            nibble: 0,
+            time_until_lured: 0,
+            time_until_hooked: 0,
+            fish_angle: 0.0,
+            out_of_water: 0,
+            open_water: true,
+            luck,
+            lure,
+            medium: None,
+            lerp: HookLerp::default(),
+            random,
+        }
+    }
+
     fn hit_entity(&mut self, id: u32, deflects: bool) -> EntityCollision {
         if deflects {
             let first = self.last_deflected_by != Some(id);
@@ -484,7 +564,7 @@ impl Game<'_> {
                 return true;
             }
         }
-        let Some(p) = self.player.as_ref() else {
+        let Some(p) = self.player.as_mut() else {
             return false;
         };
         let at = [p.position.x, p.position.y, p.position.z];
@@ -513,54 +593,22 @@ impl Game<'_> {
                 0.5,
                 pitch,
             );
-            // FishingHook(player, level, luck, lureSpeed)
-            let lure = stack.enchantment_level("minecraft:lure") as i32 * 5 * 20;
-            let luck = stack.enchantment_level("minecraft:luck_of_the_sea") as i32;
-            let (yaw, pitch) = (self.yaw, self.pitch);
-            let (y_sin, y_cos, dir_y) = cast_direction(yaw, pitch);
-            let eye_y = p.position.y + f64::from(p.dimensions.eye_height);
-            // snapTo(x, getEyeY(), z): the hook's feet start at the owner's eye.
-            let start = Vec3::new(
-                p.position.x - f64::from(y_sin) * 0.3,
-                eye_y,
-                p.position.z - f64::from(y_cos) * 0.3,
-            );
-            // The hook's own random (`Entity.random`).
-            let mut random = EntityRandom::own(random_source::entity());
-            let uuid = horizon_client::save::insecure_uuid(&mut random);
-            // FishingHook's second random is reseeded from UUID/game time on
-            // use, but its construction still takes its own unique seed.
-            let _synchronized = random_source::create();
-            let v = cast_velocity(y_sin, y_cos, dir_y, &mut random);
             self.next_entity += 1;
-            self.install_fishing_hook(Hook {
-                uuid,
-                attachment_lifetime: Default::default(),
-                join: horizon_client::join_seq::JoinSeq::UNJOINED,
-                caster: None,
-                caster_generation: horizon_client::join_seq::JoinSeq::UNJOINED,
-                id: self.next_entity,
-                position: start,
-                previous: start,
-                velocity: v,
-                state: State::Flying,
-                last_deflected_by: None,
-                needs_sync: false,
-                tick_count: 0,
-                life: 0,
-                on_ground: false,
-                nibble: 0,
-                time_until_lured: 0,
-                time_until_hooked: 0,
-                fish_angle: 0.0,
-                out_of_water: 0,
-                open_water: true,
-                luck,
-                lure,
-                medium: None,
-                lerp: HookLerp::default(),
-                random,
-            });
+            let eye = Vec3::new(
+                p.position.x,
+                p.position.y + f64::from(p.dimensions.eye_height),
+                p.position.z,
+            );
+            let hook = Hook::cast(
+                self.next_entity,
+                eye,
+                (self.yaw, self.pitch),
+                &world_stations!(self).enchantments,
+                stack,
+                &mut self.world.random,
+                &mut p.random,
+            );
+            self.install_fishing_hook(hook);
             // FishingRodItem.use counts a cast, not a reel-in.
             self.award_stat("used", &stack.item, 1);
             self.use_vibration(stack, "minecraft:item_interact_start");
@@ -1502,6 +1550,11 @@ impl Game<'_> {
     }
 }
 impl Game<'_> {
+    /// FishingRodItem.use's inputs after the real cast, for command parity.
+    pub(super) fn fishing_cast_settings(&self) -> Option<(i32, i32)> {
+        self.hook.as_ref().map(|hook| (hook.lure, hook.luck))
+    }
+
     /// The hooks drawn here, with their owners' ids (0 for this player's own).
     pub(super) fn hooks_status(&self) -> Vec<serde_json::Value> {
         let at = |p: Vec3| [p.x, p.y, p.z];
@@ -2185,6 +2238,42 @@ fn cast_direction(yaw: f32, pitch: f32) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::{Hook, cast_direction, entity_hit_margin, first_entity_hit, pull_item, rebound};
+
+    #[test]
+    fn fishing_cast_reads_bonuses_from_a_custom_rod_enchantment() {
+        use super::{EntityRandom, ItemStack, LegacyRandom, LevelRandom, Vec3};
+        use horizon_items::enchant::Enchantments;
+        use serde_json::json;
+
+        let definition = json!({"effects": {
+            "minecraft:fishing_time_reduction": [
+                {"effect": {"type": "minecraft:add", "value": 2.625}}
+            ],
+            "minecraft:fishing_luck_bonus": [
+                {"effect": {"type": "minecraft:set", "value": 4.75}}
+            ]
+        }});
+        let id = "test:angler";
+        let enchantments = Enchantments::default()
+            .with_entries([(id, &definition)])
+            .unwrap()
+            .unwrap();
+        let mut rod = ItemStack::new("minecraft:fishing_rod", 1);
+        rod.data_mut().enchantments.push((id.into(), 1));
+        let mut level = LevelRandom::for_level(LegacyRandom::new(42));
+        let mut entity = EntityRandom::own(LegacyRandom::new(17));
+
+        let hook = Hook::cast(
+            1,
+            Vec3::ZERO,
+            (0.0, 0.0),
+            &enchantments,
+            &rod,
+            &mut level,
+            &mut entity,
+        );
+        assert_eq!((hook.lure, hook.luck), (52, 4));
+    }
 
     /// Compare the production loot selector to a real FishingHook.retrieve oracle.
     #[test]
