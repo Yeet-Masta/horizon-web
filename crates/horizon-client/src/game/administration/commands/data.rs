@@ -1418,6 +1418,14 @@ impl Game<'_> {
     /// What `BlockDataAccessor.setData` tells the world after a load: `setChanged` and
     /// `sendBlockUpdated(3)`, even when the block state stays the same.
     pub(in crate::game) fn block_entity_updated(&mut self, key: (i32, i32, i32)) {
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        if type_for(WATER_CAULDRON).is_some()
+            && self.res.facts().get(self.world.block(key.0, key.1, key.2)).name.as_ref()
+                == WATER_CAULDRON
+        {
+            self.after_commit(super::super::transactions::After::CauldronData(key));
+            return;
+        }
         self.mark_block_entity_updated(key);
         let state = self.world.block(key.0, key.1, key.2);
         // Redraw what shows the block entity (signs, banners).

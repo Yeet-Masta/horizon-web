@@ -19,6 +19,16 @@ impl Game<'_> {
         // LevelChunk.setBlockState: another block's block entity goes, even
         // one of the same type (a mod's blocks may share one).
         let other_block = previous.is_some_and(|p| self.res.facts().get(p).name != name);
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        if name.as_ref() == WATER_CAULDRON && type_for(WATER_CAULDRON).is_some() {
+            // This vanilla block may come from an unmodded server. Only the
+            // matching block entity record authorizes making its client holder.
+            if other_block {
+                self.forget_block_entity_attachments(pos);
+                self.world.block_entities.remove(&pos);
+            }
+            return;
+        }
         self.ensure_stateful_entity_table();
         // State-aware factories decide creation only. A valid same-block
         // instance survives even when the new state would create none.

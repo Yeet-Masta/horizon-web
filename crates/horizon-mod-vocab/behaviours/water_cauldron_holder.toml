@@ -1,0 +1,10 @@
+version = 1
+doc = """\
+A mod-owned block entity type may opt in to hold data on `minecraft:water_cauldron` without changing its block ID or levels. \
+The holder survives level changes and chunk saves, not removal or replacement. During a cauldron interaction, the first fill exposes the incoming holder in `fire`, \
+and the saved payload, cauldron state and inventory exchange commit or roll back together. Matching Horizon peers receive the holder and its mod update tag; vanilla peers see only the block state."""
+tests = [
+  "crates/horizon-client/src/mod_content_block_entity_tests.rs::only_the_water_cauldron_can_opt_in_to_a_native_factory",
+  "crates/horizon-client/src/game/blocks/cauldron_interactions/water_cauldron.rs::native_water_cauldron_saves_syncs_and_rolls_back_the_complete_bottle",
+  "crates/horizon-client/src/lan/conn/cauldron_wire.rs::vanilla_projection_removes_only_the_opted_in_holder",
+]

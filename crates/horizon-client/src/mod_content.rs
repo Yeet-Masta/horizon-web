@@ -1403,14 +1403,18 @@ impl<'a> Plan<'a> {
                     return Err(format!("block entity type {} is already declared", kind.id).into());
                 }
                 for block in &kind.blocks {
-                    if block.starts_with("minecraft:") {
+                    let water_cauldron = block == crate::block_entity_types::WATER_CAULDRON
+                        && crate::lan::chunks::block_entity_type(block).is_none();
+                    if block.starts_with("minecraft:") && !water_cauldron {
                         return Err(format!(
                             "mod {mod_id}: block entity type {} cannot own vanilla block {block}",
                             kind.id
                         )
                         .into());
                     }
-                    if !declared_ids.contains(block.as_str()) {
+                    if !declared_ids.contains(block.as_str())
+                        && !(water_cauldron && defaults.contains_key(block))
+                    {
                         return Err(format!(
                             "block entity type {}: {block} is not a block",
                             kind.id

@@ -164,6 +164,50 @@ fn validates_declared_type_ids_and_exclusive_known_mod_block_membership() {
 }
 
 #[test]
+fn only_the_water_cauldron_can_opt_in_to_a_native_factory() {
+    let base = base("water-cauldron");
+    fs::write(
+        base.join("facts.json"),
+        r#"{"states":[["minecraft:stone"],["minecraft:water_cauldron"],["minecraft:chest"]],
+            "defaults":{"minecraft:stone":0,"minecraft:water_cauldron":1,"minecraft:chest":2}}"#,
+    )
+    .unwrap();
+    fs::write(
+        base.join("gameplay-facts.json"),
+        r#"{"states":[{"item":"minecraft:stone"},{"item":"minecraft:cauldron"},{"item":"minecraft:chest"}]}"#,
+    )
+    .unwrap();
+    let mut mods = [declared_mod(), declared_mod()];
+    mods[1].id = "other".into();
+    mods[1].content = Content::declared("other");
+    let water = crate::block_entity_types::WATER_CAULDRON;
+    mods[0].content.block_entity_types = vec![kind("test:holder", &[water])];
+    assert_eq!(
+        Plan::new(&base, &mods)
+            .unwrap()
+            .block_entity_factories
+            .get(water),
+        Some(&"test:holder"),
+    );
+    for (block, error) in [
+        (water, "belongs to both block entity types"),
+        (
+            "minecraft:stone",
+            "cannot own vanilla block minecraft:stone",
+        ),
+        (
+            "minecraft:chest",
+            "cannot own vanilla block minecraft:chest",
+        ),
+    ] {
+        mods[1].content.block_entity_types = vec![kind("other:holder", &[block])];
+        let error_text = Plan::new(&base, &mods).err().unwrap().to_string();
+        assert!(error_text.contains(error), "{error_text}");
+    }
+    fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
 fn code_declared_types_build_a_root_and_membership_changes_invalidate_its_cache() {
     let base = base("cache");
     let mut mods = [ContentMod {

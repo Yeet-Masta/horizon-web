@@ -490,6 +490,22 @@ impl Game<'_> {
         if !self.native_level_write_position(level, pos)? {
             return Ok(false);
         }
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        if !self.transactions.is_empty() && type_for(WATER_CAULDRON).is_some() {
+            let old = self.world.block(pos[0], pos[1], pos[2]);
+            let facts = self.res.facts();
+            let was = facts.get(old).name.as_ref();
+            let now = facts.get(state).name.as_ref();
+            if was == WATER_CAULDRON
+                || (was == "minecraft:cauldron" && now == WATER_CAULDRON)
+            {
+                if self.world_debug {
+                    return Ok(false);
+                }
+                return Ok(old != state
+                    && self.journal_set_block_with_flags(pos, state, flags.bits()));
+            }
+        }
         Ok(self.native_set_block(level.dimension_id(), pos, state, flags.bits()))
     }
     /// Remove a block in place (`Level.removeBlock`), preserving its fluid.
@@ -1160,6 +1176,7 @@ pub(super) mod tests {
                 "XDG_DATA_HOME",
                 "XDG_CONFIG_HOME",
                 "XDG_RUNTIME_DIR",
+                "XDG_CACHE_HOME",
                 "HORIZON_LAUNCHER_TRASH",
                 "HORIZON_LAUNCHER_CLIPBOARD",
                 "HORIZON_LAUNCHER_DESKTOP",

@@ -1133,6 +1133,17 @@ impl LevelAccess for GameLevel<'_> {
             // Returning 0 skips remove_entity's side effects once; command blocks have no contents or drops.
             return 0;
         }
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        // A cauldron action may already have put the incoming holder in storage
+        // so the mod could fill it within the savepoint. It is not the old holder.
+        let key = (pos.x, pos.y, pos.z);
+        if self.facts.get(old).name.as_ref() == "minecraft:cauldron"
+            && self.facts.get(self.block_state(pos)).name.as_ref() == WATER_CAULDRON
+            && matches!(self.world.block_entities.get(&key), Some(BlockEntity::Mod(entity))
+                if Some(entity.id()) == type_for(WATER_CAULDRON))
+        {
+            return 0;
+        }
         self.remove_entity(pos, old, side_effects)
     }
     fn load_block_entity(&mut self, pos: BlockPos, mut nbt: horizon_core::nbt::Compound) {

@@ -802,3 +802,6 @@ fn cauldron_tag_registration_normalizes_admits_and_expands_over_the_complete_set
         );
     });
 }
+
+#[path = "water_cauldron.rs"]
+mod water_cauldron;

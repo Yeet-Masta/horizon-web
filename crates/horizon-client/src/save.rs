@@ -2163,6 +2163,41 @@ fn decode_after_sections(
             }
         }
     }
+    // A pre-mod save has the vanilla states but no holder records at these positions.
+    // Decode the ordinary saved entities first; only create the missing holders.
+    use crate::block_entity_types::{WATER_CAULDRON, type_for};
+    if let Some(kind) = type_for(WATER_CAULDRON) {
+        let is_cauldron = |id| {
+            registry
+                .state(horizon_world::registry::BlockStateId(id))
+                .is_some_and(|state| state.name == WATER_CAULDRON)
+        };
+        let layout = chunk.layout();
+        for (sy, section) in chunk.sections.iter().enumerate() {
+            if !section.blocks.maybe_has(is_cauldron) {
+                continue;
+            }
+            let mut states = [0; 4096];
+            section.unpack(&mut states);
+            for (n, &state) in (0_i32..).zip(&states) {
+                if !is_cauldron(state) {
+                    continue;
+                }
+                let pos = (
+                    chunk.x * 16 + (n & 15),
+                    layout.min_y() + sy as i32 * 16 + (n >> 8),
+                    chunk.z * 16 + ((n >> 4) & 15),
+                );
+                if !chunk.block_entities.iter().any(|(at, _)| *at == pos) {
+                    use crate::containers::{BlockEntity, ModBlockEntity};
+                    let entity = ModBlockEntity::new(kind.to_owned(), Default::default());
+                    chunk
+                        .block_entities
+                        .push((pos, BlockEntity::Mod(Box::new(entity))));
+                }
+            }
+        }
+    }
     if let Tag::Compound(map) = tag {
         if let Ok(Some(data)) = attachment_compound(map.get(&ATTACHMENTS_KEY.into())) {
             extras.attachments =

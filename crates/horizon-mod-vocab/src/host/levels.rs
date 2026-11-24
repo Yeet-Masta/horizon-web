@@ -1017,6 +1017,8 @@ pub trait LevelsBackendMut {
     /// Set a block (`Level.setBlock`). Stale/unavailable levels and invalid states return
     /// typed errors without mutation. Ok(false) means vanilla refused an unchanged,
     /// unloaded or out-of-height write. Notification follows the supplied update flags.
+    /// An opted-in water cauldron's level or replacement, and filling an empty cauldron
+    /// into that holder, join the current storage transaction, if any.
     #[access(WorldOnly)]
     fn level_set_block(
         &mut self,

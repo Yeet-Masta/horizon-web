@@ -1255,6 +1255,12 @@ fn register_block_entity_types(
         if blocks.id(block).is_none() {
             return Err(format!("unknown block {block}").into());
         }
+        if block == block_entity_types::WATER_CAULDRON
+            && let Some(owner) = types.type_for(block)
+            && owner != kind
+        {
+            return Err(format!("block {block} is already owned by block entity type {owner}").into());
+        }
         if let Some(base) = bases.get(kind)
             && !classes
                 .get(block)

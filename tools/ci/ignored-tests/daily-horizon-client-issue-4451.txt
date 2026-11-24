@@ -179,6 +179,7 @@ horizon-client game::cauldron_interactions::tests::cauldron_tag_registration_nor
 horizon-client game::cauldron_interactions::tests::cauldron_transfer_awards_two_statistics_once lib daily resources
 horizon-client game::cauldron_interactions::tests::cauldron_unknown_effect_keys_refuse_before_fire lib daily resources
 horizon-client game::cauldron_interactions::tests::cauldron_world_close_discards_callbacks_before_failed_preparation lib daily resources
+horizon-client game::cauldron_interactions::tests::water_cauldron::native_water_cauldron_saves_syncs_and_rolls_back_the_complete_bottle lib daily resources
 horizon-client game::chat::damage_type_registry_tests::a_world_packs_damage_type_parses_in_damage lib daily resources
 horizon-client game::chat::enchantment_snapshot_tests::synchronized_definitions_refresh_existing_enchantment_views lib daily resources
 horizon-client game::chat::end_clock_tests::time_moves_the_clock_the_end_runs_on lib daily resources

@@ -1933,15 +1933,20 @@ impl GameLevel<'_> {
         }
         block_entity_for_block(self.registry, self.facts, name, nbt.unwrap_or_default())
     }
-    /// Creates a declared state-aware block entity from its actual state. No answer
-    /// means no entity; the registered declaration owns its type identity.
+    /// Creates a declared state-aware block entity from its actual state. No answer means
+    /// no entity, except for the opted-in water cauldron, whose holder always exists.
     pub(super) fn new_block_entity_for_state(&self, state: BlockStateId) -> Option<BlockEntity> {
         let state_info = self.registry.state(state)?;
         let name = &state_info.name;
         if self.world.block_entities.stateful_entity(state.0) {
             let mut nbt = None;
             self.native_block_entity(name, state, &mut nbt);
-            return block_entity_for_block(self.registry, self.facts, name, nbt?);
+            let nbt = if name == horizon_client::block_entity_types::WATER_CAULDRON {
+                nbt.unwrap_or_default()
+            } else {
+                nbt?
+            };
+            return block_entity_for_block(self.registry, self.facts, name, nbt);
         }
         let mut entity = self.new_block_entity(name)?;
         entity.apply_state_mode(state_info.properties.get("mode").map(String::as_str));
@@ -2947,12 +2952,17 @@ impl Game<'_> {
             return;
         }
         let registry = self.pack.assets.registry;
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        let water_cauldron = type_for(WATER_CAULDRON).is_some();
         let mut blocks = FxHashMap::default();
         let states = (0..registry.len() as u32)
             .map(|id| {
                 let Some(state) = registry.state(BlockStateId(id)) else {
                     return false;
                 };
+                if water_cauldron && state.name == WATER_CAULDRON {
+                    return true;
+                }
                 if state.name.starts_with("minecraft:") {
                     return false;
                 }

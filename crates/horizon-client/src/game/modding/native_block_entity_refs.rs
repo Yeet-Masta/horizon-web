@@ -546,7 +546,11 @@ impl Game<'_> {
             return Ok(false);
         }
         self.block_entity_updated(key);
-        self.container_changed(key);
+        if block == horizon_client::block_entity_types::WATER_CAULDRON {
+            self.after_commit(super::transactions::After::Changed(key));
+        } else {
+            self.container_changed(key);
+        }
         Ok(true)
     }
 
