@@ -75,7 +75,7 @@ impl<'r, 'a> BlockParser<'r, 'a> {
             reg,
             for_testing,
             allow_nbt,
-            id: "minecraft:".into(),
+            id: String::new(),
             definition: None,
             properties: Vec::new(),
             vague: Vec::new(),
@@ -100,7 +100,7 @@ impl<'r, 'a> BlockParser<'r, 'a> {
         self.reg.blocks.get(id).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    pub fn parse(&mut self) -> CmdResult<BlockInput> {
+    fn parse_inner(&mut self) -> CmdResult<()> {
         self.sugg = if self.for_testing {
             Sugg::BlockIdOrTag
         } else {
@@ -127,6 +127,11 @@ impl<'r, 'a> BlockParser<'r, 'a> {
             super::snbt::parse_compound_argument(self.reader)?;
             self.nbt = Some(self.reader.string[start..self.reader.cursor].to_owned());
         }
+        Ok(())
+    }
+
+    pub fn parse(&mut self) -> CmdResult<BlockInput> {
+        self.parse_inner()?;
         let (id, properties) = match &self.tag {
             Some(t) => (t.clone(), self.vague.clone()),
             None => (self.id.clone(), self.properties.clone()),
@@ -136,6 +141,21 @@ impl<'r, 'a> BlockParser<'r, 'a> {
             properties,
             tag: self.tag.is_some(),
             nbt: self.nbt.clone(),
+        })
+    }
+
+    fn parse_owned(mut self) -> CmdResult<BlockInput> {
+        self.parse_inner()?;
+        let tag = self.tag.is_some();
+        let (id, properties) = match self.tag {
+            Some(t) => (t, self.vague),
+            None => (self.id, self.properties),
+        };
+        Ok(BlockInput {
+            id,
+            properties,
+            tag,
+            nbt: self.nbt,
         })
     }
 
@@ -271,7 +291,14 @@ impl<'r, 'a> BlockParser<'r, 'a> {
                 self.reader.cursor = key_start;
                 return Err(CommandError::tr_at(
                     "argument.block.property.duplicate",
-                    &[&key, &self.id],
+                    &[
+                        &key,
+                        &(if self.id.is_empty() {
+                            "minecraft:"
+                        } else {
+                            self.id.as_str()
+                        }),
+                    ],
                     self.reader,
                 ));
             }
@@ -280,7 +307,14 @@ impl<'r, 'a> BlockParser<'r, 'a> {
                 self.reader.cursor = key_start;
                 return Err(CommandError::tr_at(
                     "argument.block.property.novalue",
-                    &[&key, &self.id],
+                    &[
+                        &key,
+                        &(if self.id.is_empty() {
+                            "minecraft:"
+                        } else {
+                            self.id.as_str()
+                        }),
+                    ],
                     self.reader,
                 ));
             }
@@ -442,7 +476,7 @@ impl<'r, 'a> BlockParser<'r, 'a> {
 /// BlockStateParser.parseForBlock / parseForTesting (the reader is rewound on errors).
 pub fn parse(reader: &mut Reader, reg: &Registries, for_testing: bool) -> CmdResult<BlockInput> {
     let cursor = reader.cursor;
-    let r = BlockParser::new(reader, reg, for_testing, true).parse();
+    let r = BlockParser::new(reader, reg, for_testing, true).parse_owned();
     if r.is_err() {
         reader.cursor = cursor;
     }
@@ -455,6 +489,6 @@ pub fn suggest(builder: &mut SuggestionsBuilder, reg: &Registries, for_testing: 
         cursor: builder.start,
     };
     let mut parser = BlockParser::new(&mut reader, reg, for_testing, true);
-    let _ = parser.parse();
+    let _ = parser.parse_inner();
     parser.fill_suggestions(builder);
 }
