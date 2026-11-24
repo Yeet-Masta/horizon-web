@@ -1,0 +1,2 @@
+# horizon-rust/horizon#19797: the spectator game-mode switch test loads prepared game resources.
+horizon-client game::game_mode::tests::switching_to_spectator_on_ground_preserves_y_position lib daily resources
