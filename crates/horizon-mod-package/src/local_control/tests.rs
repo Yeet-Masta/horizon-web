@@ -2,7 +2,10 @@ use super::*;
 use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
 
 pub(super) fn marker() -> (tempfile::TempDir, Marker) {
+    use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
+    // The endpoint refuses a parent others can write to; `tempdir` follows the umask (0775 under 0002).
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let parent = root.path().canonicalize().unwrap();
     let directory = parent.join(std::ffi::OsStr::from_bytes(b"fresh-\xff"));
     let marker = Marker::new(directory).unwrap();

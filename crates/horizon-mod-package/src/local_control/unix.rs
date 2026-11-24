@@ -329,6 +329,8 @@ fn runtime_addresses_validate_candidates_and_exchange() {
     #[cfg(not(target_os = "macos"))]
     let fallback = "/tmp";
     let root = tempfile::tempdir_in(fallback).unwrap();
+    // Owner-only whatever the umask: a candidate whose parent others can write to is refused.
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let safe = root.path().canonicalize().unwrap().join("runtime");
     std::fs::create_dir(&safe).unwrap();
     std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o700)).unwrap();
