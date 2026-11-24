@@ -219,7 +219,7 @@ fn text(v: &Value) -> String {
 }
 
 /// Only `https://` links are kept: a page never opens another scheme.
-fn https(url: &str) -> Option<String> {
+pub(crate) fn https(url: &str) -> Option<String> {
     url.starts_with("https://").then(|| url.to_owned())
 }
 

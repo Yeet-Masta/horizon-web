@@ -904,7 +904,15 @@ impl Links {
                 ("official_server", &mut links.official_server),
             ] {
                 if let Some(url) = map.get(key).and_then(|v| v.as_str()) {
-                    *slot = url.trim().to_string();
+                    let url = url.trim();
+                    // The links are opened by the OS: only https (or empty, to hide) is taken.
+                    // The official server is a host address, not a link.
+                    if key == "official_server"
+                        || url.is_empty()
+                        || crate::browser::details::https(url).is_some()
+                    {
+                        *slot = url.to_string();
+                    }
                 }
             }
             links.min_launcher = min_launcher_in(map.get("min_launcher"));
@@ -7188,6 +7196,21 @@ pub fn {f}("
                 .as_deref(),
             Some("0.2.80")
         );
+        // A link the OS would open as another scheme keeps the built-in one.
+        for bad in [
+            "file:///etc/passwd",
+            "smb://host/share",
+            "javascript:alert(1)",
+            "http://x.y",
+            "x://y",
+        ] {
+            assert_eq!(
+                Links::parse(&format!(
+                    r#"{{"discord": "{bad}", "sponsor": "{bad}", "website": "{bad}", "roadmap": "{bad}", "docs": "{bad}"}}"#
+                )),
+                defaults
+            );
+        }
         // A key that is missing keeps its default; a new address replaces it; empty hides it.
         assert_eq!(
             Links::parse(r#"{"discord": "https://x.y/z"}"#),

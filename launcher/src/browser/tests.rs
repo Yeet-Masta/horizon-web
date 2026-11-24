@@ -552,3 +552,26 @@ fn curseforge_is_coming_soon_and_never_searched() {
     assert_eq!(ids, [SourceId::Modrinth, SourceId::Horizon]);
     assert!(source(SourceId::CurseForge).is_none());
 }
+
+#[test]
+fn a_curseforge_page_that_is_not_https_is_dropped() {
+    let page = |url: &str| {
+        curseforge::parse_mod(&json!({
+            "id": 1, "classId": 6, "links": {"websiteUrl": url}
+        }))
+        .unwrap()
+        .page
+    };
+    assert_eq!(
+        page("https://www.curseforge.com/x"),
+        "https://www.curseforge.com/x"
+    );
+    for bad in [
+        "file:///etc/hosts",
+        "smb://host/share",
+        "http://x.y",
+        "custom://run",
+    ] {
+        assert_eq!(page(bad), "", "{bad}");
+    }
+}
