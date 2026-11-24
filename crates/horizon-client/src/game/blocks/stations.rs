@@ -505,6 +505,28 @@ fn argb(c: i32) -> u32 {
 fn rgb_of(rgba: u32) -> u32 {
     (rgba & 0xFF) << 16 | (rgba >> 8 & 0xFF) << 8 | (rgba >> 16 & 0xFF)
 }
+/// The custom statistic a workstation's `useWithoutItem` awards after
+/// `openMenu`: `AbstractFurnaceBlock.openContainer` and
+/// `BrewingStandBlock.useWithoutItem` award it even when `createMenu` refused
+/// a lock, so the refused open calls this too.
+pub(super) fn station_open_stat(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "minecraft:crafting_table" => "interact_with_crafting_table",
+        "minecraft:furnace" => "interact_with_furnace",
+        "minecraft:blast_furnace" => "interact_with_blast_furnace",
+        "minecraft:smoker" => "interact_with_smoker",
+        "minecraft:brewing_stand" => "interact_with_brewingstand",
+        "minecraft:beacon" => "interact_with_beacon",
+        "minecraft:grindstone" => "interact_with_grindstone",
+        "minecraft:smithing_table" => "interact_with_smithing_table",
+        "minecraft:stonecutter" => "interact_with_stonecutter",
+        "minecraft:loom" => "interact_with_loom",
+        "minecraft:cartography_table" => "interact_with_cartography_table",
+        n if n.ends_with("anvil") => "interact_with_anvil",
+        _ => return None,
+    })
+}
+
 impl Game<'_> {
     /// `EnchantmentScreen.containerTick`'s `tickBook` for an open enchanting table.
     pub(super) fn tick_enchanting_book(&mut self) {
@@ -533,22 +555,7 @@ impl Game<'_> {
         self.station_changed();
         self.beacon_opened();
         // The block's interaction statistic.
-        let stat = match name {
-            "minecraft:crafting_table" => "interact_with_crafting_table",
-            "minecraft:furnace" => "interact_with_furnace",
-            "minecraft:blast_furnace" => "interact_with_blast_furnace",
-            "minecraft:smoker" => "interact_with_smoker",
-            "minecraft:brewing_stand" => "interact_with_brewingstand",
-            "minecraft:beacon" => "interact_with_beacon",
-            "minecraft:grindstone" => "interact_with_grindstone",
-            "minecraft:smithing_table" => "interact_with_smithing_table",
-            "minecraft:stonecutter" => "interact_with_stonecutter",
-            "minecraft:loom" => "interact_with_loom",
-            "minecraft:cartography_table" => "interact_with_cartography_table",
-            n if n.ends_with("anvil") => "interact_with_anvil",
-            _ => "",
-        };
-        if !stat.is_empty() {
+        if let Some(stat) = station_open_stat(name) {
             self.award_custom_stat(stat, 1);
         }
         true

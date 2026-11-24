@@ -31,6 +31,16 @@ pub(super) fn open_stat(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+/// Why a container's menu did not open.
+pub(super) enum ContainerRefusal {
+    /// A carrier transfer holds this cell: its block entity's container
+    /// does not open while the operation runs. Horizon's own fence, so
+    /// no vanilla `useWithoutItem` follows.
+    CarrierFence,
+    /// `BaseContainerBlockEntity.createMenu`: the opener cannot unlock
+    /// the container, and `sendChestLockedNotifications` named it.
+    Locked,
+}
 impl Game<'_> {
     /// `ServerPlayerGameMode.useItemOn` for a spectator: the block's menu
     /// (`BlockState.getMenuProvider`) opens, and nothing else happens. The
@@ -109,16 +119,18 @@ impl Game<'_> {
     /// a double chest, which asks both halves' `canOpen`): a `lock` the opener
     /// cannot unlock refuses the menu with `sendChestLockedNotifications` -
     /// the action bar names the container and one chest-locked sound plays.
-    /// True when the open is refused.
-    pub(super) fn refuse_locked_container(&mut self, key: (i32, i32, i32), name: &str) -> bool {
+    /// `Some` when the open is refused.
+    pub(super) fn refuse_locked_container(
+        &mut self,
+        key: (i32, i32, i32),
+        name: &str,
+    ) -> Option<ContainerRefusal> {
         // A carrier transfer fence holds this cell: its block entity's
         // container does not open while the operation runs.
         if self.world.carrier_fences.locks_cell(&[key.0, key.1, key.2]) {
-            return true;
+            return Some(ContainerRefusal::CarrierFence);
         }
-        let Some(default_key) = horizon_client::containers::default_name_key(name) else {
-            return false;
-        };
+        let default_key = horizon_client::containers::default_name_key(name)?;
         // `LockCode.canUnlock` reads `Player.getMainHandItem`, whichever
         // hand the click came from.
         let hand = self.stack_in(self.selected).cloned();
@@ -134,7 +146,7 @@ impl Game<'_> {
             .flatten()
             .any(|&half| self.container_locked_for(half, spectator, hand.as_ref()))
         {
-            return false;
+            return None;
         }
         // The display name of the provider the player tried to open: a double
         // chest is named by its right half, else its left, else
@@ -170,7 +182,7 @@ impl Game<'_> {
         };
         self.audio
             .play("minecraft:block.chest.locked", Some(at), 1.0, 1.0);
-        true
+        Some(ContainerRefusal::Locked)
     }
     /// ShulkerBoxSlot.mayPlace: no shulker box inside a shulker box.
     pub(super) fn refuses(&self, slot: usize, stack: &ItemStack) -> bool {

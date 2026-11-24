@@ -3889,10 +3889,29 @@ impl Game<'_> {
             // The use still succeeds, but no menu, stat or piglin anger.
             return;
         }
-        // BaseContainerBlockEntity.createMenu: a lock the opener cannot
-        // unlock refuses the menu with vanilla's action bar and sound.
-        if self.refuse_locked_container(key, &name) {
+        // `ShulkerBoxBlock.useWithoutItem` asks for the lid's room before
+        // `openMenu`, so a box that cannot open never reaches the lock.
+        if storage::is_shulker_box(&name) && !self.shulker_can_open(pos) {
             return;
+        }
+        // `BaseContainerBlockEntity.createMenu`: a lock the opener cannot
+        // unlock refuses the menu with vanilla's action bar and sound. The
+        // block's `useWithoutItem` goes on regardless of what `openMenu`
+        // returned: it awards the open stat and angers the piglins that see it.
+        match self.refuse_locked_container(key, &name) {
+            None => {}
+            Some(storage::ContainerRefusal::CarrierFence) => return,
+            Some(storage::ContainerRefusal::Locked) => {
+                if let Some(stat) =
+                    storage::open_stat(&name).or_else(|| stations::station_open_stat(&name))
+                {
+                    self.award_custom_stat(stat, 1);
+                }
+                if self.guarded_by_piglins(&name) {
+                    self.anger_piglins(true);
+                }
+                return;
+            }
         }
         if &*name == "minecraft:lectern" {
             self.open_lectern(pos);
@@ -3945,8 +3964,6 @@ impl Game<'_> {
             self.world.block_entities.get_or_insert_with(key, || {
                 BlockEntity::for_block(&name).unwrap_or(BlockEntity::Chest(Vec::new()))
             });
-        } else if storage::is_shulker_box(&name) && !self.shulker_can_open(pos) {
-            // ShulkerBoxBlock.canOpen: the lid has no room; nothing opens.
         } else if let Some(entity) = BlockEntity::for_block(&name) {
             self.world.block_entities.get_or_insert_with(key, || entity);
             horizon_client::spans::time("open_loot", || self.unpack_opened_loot(key, &name));
