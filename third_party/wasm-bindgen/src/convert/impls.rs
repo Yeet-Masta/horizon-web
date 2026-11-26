@@ -164,6 +164,8 @@ macro_rules! type_wasm_native {
         impl UpcastFrom<$t> for JsOption<JsValue> {}
         impl UpcastFrom<$t> for JsNullable<JsValue> {}
         impl UpcastFrom<$t> for $t {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Option<Target> {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Nullable<Target> {}
     )*)
 }
 
@@ -269,6 +271,8 @@ macro_rules! type_wasm_native_f64_option {
         impl UpcastFrom<$t> for JsOption<JsValue> {}
         impl UpcastFrom<$t> for JsNullable<JsValue> {}
         impl UpcastFrom<$t> for $t {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Option<Target> {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Nullable<Target> {}
     )*)
 }
 
@@ -382,6 +386,8 @@ macro_rules! type_abi_as_u32 {
         impl UpcastFrom<$t> for JsOption<JsValue> {}
         impl UpcastFrom<$t> for JsNullable<JsValue> {}
         impl UpcastFrom<$t> for $t {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Option<Target> {}
+        impl<Target: UpcastFrom<$t>> UpcastFrom<$t> for Nullable<Target> {}
     )*)
 }
 
@@ -480,6 +486,8 @@ impl UpcastFrom<bool> for JsValue {}
 impl UpcastFrom<bool> for JsOption<JsValue> {}
 impl UpcastFrom<bool> for JsNullable<JsValue> {}
 impl UpcastFrom<bool> for bool {}
+impl<Target: UpcastFrom<bool>> UpcastFrom<bool> for Option<Target> {}
+impl<Target: UpcastFrom<bool>> UpcastFrom<bool> for Nullable<Target> {}
 
 impl IntoWasmAbi for char {
     type Abi = u32;
@@ -529,6 +537,8 @@ impl UpcastFrom<char> for JsValue {}
 impl UpcastFrom<char> for JsOption<JsValue> {}
 impl UpcastFrom<char> for JsNullable<JsValue> {}
 impl UpcastFrom<char> for char {}
+impl<Target: UpcastFrom<char>> UpcastFrom<char> for Option<Target> {}
+impl<Target: UpcastFrom<char>> UpcastFrom<char> for Nullable<Target> {}
 
 impl<T> IntoWasmAbi for *const T {
     type Abi = WasmWordRepr;
@@ -563,6 +573,9 @@ unsafe impl<T: ErasableGeneric> ErasableGeneric for Option<T> {
 impl<T, Target> UpcastFrom<Option<T>> for Option<Target> where Target: UpcastFrom<T> {}
 impl<T, Target> UpcastFrom<Option<T>> for JsOption<Option<Target>> where Target: UpcastFrom<T> {}
 impl<T, Target> UpcastFrom<Option<T>> for JsNullable<Option<Target>> where Target: UpcastFrom<T> {}
+// `None` is `undefined`, a JS value, so an optional carrier upcasts to `JsValue`
+// whenever its payload does, as each scalar and string carrier does.
+impl<T> UpcastFrom<Option<T>> for JsValue where JsValue: UpcastFrom<T> {}
 
 /// Pointers in a `Nullable` cross as JS numbers with the `f64` sentinels, as
 /// they do in an `Option`.
@@ -868,11 +881,21 @@ unsafe impl<T: ErasableGeneric> ErasableGeneric for Nullable<T> {
 }
 
 impl<T, Target> UpcastFrom<Nullable<T>> for Nullable<Target> where Target: UpcastFrom<T> {}
+// An `Option<T>` reads `null` as `None`, so every value of a `Nullable<T>` is one
+// of an `Option<T>`. This is the only `Nullable` to `Option` rule coherence
+// allows, so `Nullable<T>` reaches `Option<Nullable<T>>` through it once `T`
+// wraps into `Nullable`.
+impl<T, Target> UpcastFrom<Nullable<T>> for Option<Target> where Target: UpcastFrom<T> {}
 impl<T, Target> UpcastFrom<Nullable<T>> for JsOption<Nullable<Target>> where Target: UpcastFrom<T> {}
 impl<T, Target> UpcastFrom<Nullable<T>> for JsNullable<Nullable<Target>> where Target: UpcastFrom<T> {}
+impl<T> UpcastFrom<Nullable<T>> for JsValue where JsValue: UpcastFrom<T> {}
 
-impl<T: MaybeIntoWasmAbi + ErasableGeneric<Repr = JsValue> + Promising> Promising for Option<T> {
+impl<T: Promising> Promising for Option<T> {
     type Resolution = Option<<T as Promising>::Resolution>;
+}
+
+impl<T: Promising> Promising for Nullable<T> {
+    type Resolution = Nullable<<T as Promising>::Resolution>;
 }
 
 impl<T: IntoWasmAbi> IntoWasmAbi for Clamped<T> {
@@ -920,6 +943,8 @@ impl Promising for () {
 
 impl UpcastFrom<()> for JsValue {}
 impl UpcastFrom<()> for () {}
+// `()` crosses as `undefined`, which an `Option<T>` reads as `None`.
+impl<T> UpcastFrom<()> for Option<T> {}
 
 unsafe impl ErasableGeneric for () {
     type Repr = ();
@@ -981,7 +1006,7 @@ unsafe impl<T: ErasableGeneric, E: ErasableGeneric> ErasableGeneric for Result<T
     type Repr = Result<<T as ErasableGeneric>::Repr, <E as ErasableGeneric>::Repr>;
 }
 
-impl<T: ErasableGeneric + Promising, E: ErasableGeneric> Promising for Result<T, E> {
+impl<T: Promising, E> Promising for Result<T, E> {
     type Resolution = Result<<T as Promising>::Resolution, E>;
 }
 

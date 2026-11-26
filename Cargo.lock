@@ -3467,8 +3467,9 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.106"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.3.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -6509,7 +6510,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.129"
+version = "0.2.130"
 dependencies = [
  "cfg-if",
  "rustversion",
@@ -6519,8 +6520,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.79"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.4.80"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e14e0327cb5368ad60ccb22d04a9827a693c95a926d8d125e9fa39e0baec501"
 dependencies = [
  "js-sys",
  "tokio",
@@ -6529,8 +6531,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.129"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.2.130"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e931a02a39abdbf66966fc35902b5ed58344750a70885bed4ebb3d8eaf28ed9"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -6538,8 +6541,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.129"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.2.130"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ca4b54280e455bd831e33a6b8e734baf432fe63fbc35c42ac14ce67a043a53a"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -6550,8 +6554,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.129"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.2.130"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b1f9c3798725016c6ee5f2f57869ec0831e8bbc0ab0310a86e787e97f41389e"
 dependencies = [
  "unicode-ident",
 ]
@@ -6914,8 +6919,9 @@ dependencies = [
 
 [[package]]
 name = "web-sys"
-version = "0.3.106"
-source = "git+https://github.com/wasm-bindgen/wasm-bindgen?rev=39ae823bbc14c9d0a4a2869361483b5453a9b133#39ae823bbc14c9d0a4a2869361483b5453a9b133"
+version = "0.3.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7d179596ff5ec0f6de4db64d54011bde6289cc49603d3a6e4ce3f329207ab88"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

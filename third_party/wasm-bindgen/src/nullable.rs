@@ -15,20 +15,21 @@ use crate::{JsCast, JsValue};
 ///
 /// | Type | JS type | JS → Rust | Rust → JS |
 /// |---|---|---|---|
-/// | `Option<T>` | `T \| undefined` | `undefined` → `None`; anything else, `null` included under `wasm_bindgen_unstable_strict_option`, goes to `T`'s conversion | `None` → `undefined` |
+/// | `Option<T>` | `T \| undefined` | `undefined` and `null` → `None`; anything else goes to `T`'s conversion | `None` → `undefined` |
 /// | `Nullable<T>` | `T \| null` | `null` → `Null`; anything else, `undefined` included, goes to `T`'s conversion | `Null` → `null` |
 /// | `Option<Nullable<T>>` | `T \| null \| undefined` | `undefined` → `None`, `null` → `Some(Null)`, else `Some(Value(..))` | `None` → `undefined`, `Some(Null)` → `null` |
 ///
-/// The `Option` layer of `Option<Nullable<T>>` always treats only `undefined`
-/// as `None`, with or without the cfg, since `null` has to reach the
-/// `Nullable` layer. `opt.and_then(Nullable::value)` collapses the union to an
+/// The `Option` layer of `Option<Nullable<T>>` treats only `undefined` as
+/// `None`, since `null` has to reach the `Nullable` layer.
+/// `opt.and_then(Nullable::value)` collapses the union to an
 /// `Option<T>`. No other nesting is supported: `Nullable<Nullable<T>>`,
 /// `Nullable<Option<T>>` and `Option<Option<T>>` do not cross the boundary.
 ///
-/// Use these for a value crossing the boundary directly. Inside a JS type,
-/// such as `Array<T>` or `Promise<T>`, and in generic positions, use the
-/// JS-side handles [`JsOption<T>`] and [`JsNullable<T>`] instead, which stay
-/// JS values rather than converting.
+/// Both may also name a slot of a js-sys `Function<fn(..)>` signature or a
+/// `Promise<T>` resolution. Where a js-sys container's type-erased methods
+/// marshal the element itself, as `Array::get` and `Map::get` do, the
+/// element must be a handle: use the JS-side [`JsOption<T>`] and
+/// [`JsNullable<T>`] there, which stay JS values rather than converting.
 ///
 /// [`JsOption<T>`]: crate::sys::JsOption
 /// [`JsNullable<T>`]: crate::sys::JsNullable
@@ -389,6 +390,16 @@ impl<T> From<Nullable<T>> for Option<T> {
     #[inline]
     fn from(nullable: Nullable<T>) -> Self {
         nullable.value()
+    }
+}
+
+impl<T: Into<JsValue>> From<Nullable<T>> for JsValue {
+    #[inline]
+    fn from(nullable: Nullable<T>) -> Self {
+        match nullable {
+            Nullable::Null => JsValue::NULL,
+            Nullable::Value(v) => v.into(),
+        }
     }
 }
 

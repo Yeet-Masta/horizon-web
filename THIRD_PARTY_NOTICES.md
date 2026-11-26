@@ -174,7 +174,7 @@ std's missing clock.
 ## wasm-bindgen
 
 `third_party/wasm-bindgen` is the `wasm-bindgen` crate of
-[wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) at commit 39ae823 by the wasm-bindgen
+[wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) 0.2.130 by the wasm-bindgen
 developers, under the MIT License or the Apache License 2.0 (`third_party/wasm-bindgen/LICENSE-MIT`,
 `third_party/wasm-bindgen/LICENSE-APACHE`). Its closures require `UnwindSafe` functions on every
 wasm target with panics that unwind, as its `MaybeUnwindSafe` marker does, so the web build

@@ -74,8 +74,8 @@ rem One file has no server to send the headers threads need.
 
 cd /d "%root%" || exit /b 1
 
-rem The wasm-bindgen CLI must match Cargo.lock: wasm-bindgen comes from its main branch for now
-rem (Cargo.toml's [patch.crates-io]), so the CLI is built from the same commit.
+rem The wasm-bindgen CLI must match Cargo.lock: its version (or its commit, when wasm-bindgen
+rem comes from git).
 set "pinned="
 set "rev="
 for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "$l = Get-Content Cargo.lock; $i = [array]::IndexOf($l, 'name = ' + [char]34 + 'wasm-bindgen' + [char]34); if ($i -ge 0) { ($l[$i + 1] -split [char]34)[1] }"`) do set "pinned=%%v"

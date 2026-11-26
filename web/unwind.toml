@@ -3,8 +3,22 @@
 # crash report) instead of trapping the thread it ran on. WebAssembly exception handling (every
 # browser with WebGPU has it); std is built with panic_unwind (web/build.sh). The one-thread wasm32
 # build, on stable's prebuilt std, still aborts.
+#
+# The legacy encoding of exception handling (try/catch, every browser with WebGPU has it), not
+# the standard one (exnref) that nightly Rust emits by default: LLVM 23's CFG stackifier gives
+# some try_table a catch_all_ref whose label takes nothing (llvm/llvm-project#230956), a module
+# that wasm-bindgen and the browsers refuse ("catch_all_ref label must have exactly one result
+# type"). Back to exnref once a nightly has the fix.
 [target.wasm64-unknown-unknown]
-rustflags = ["-Cpanic=unwind", "-Ctarget-feature=+exception-handling"]
+rustflags = [
+  "-Cpanic=unwind",
+  "-Ctarget-feature=+exception-handling",
+  "-Cllvm-args=-wasm-use-legacy-eh",
+]
 
 [target.wasm32-unknown-unknown]
-rustflags = ["-Cpanic=unwind", "-Ctarget-feature=+exception-handling"]
+rustflags = [
+  "-Cpanic=unwind",
+  "-Ctarget-feature=+exception-handling",
+  "-Cllvm-args=-wasm-use-legacy-eh",
+]

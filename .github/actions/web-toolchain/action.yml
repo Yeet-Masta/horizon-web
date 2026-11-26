@@ -25,13 +25,21 @@ runs:
       id: bindgen
       shell: bash
       run: |
+        version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
         rev=$(awk '/^name = "wasm-bindgen"$/ { getline; getline; if (match($0, /#[0-9a-f]+/)) print substr($0, RSTART + 1, RLENGTH - 1); exit }' Cargo.lock)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
         echo "rev=$rev" >> "$GITHUB_OUTPUT"
     - uses: actions/cache@v4
       id: bindgen-cache
       with:
         path: ~/.cargo/bin/wasm-bindgen
-        key: wasm-bindgen-${{ steps.bindgen.outputs.rev }}
+        key: wasm-bindgen-${{ steps.bindgen.outputs.version }}-${{ steps.bindgen.outputs.rev }}
     - if: steps.bindgen-cache.outputs.cache-hit != 'true'
       shell: bash
-      run: cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force
+      # The release Cargo.lock names, or the commit when wasm-bindgen comes from git.
+      run: |
+        if [ -n "${{ steps.bindgen.outputs.rev }}" ]; then
+          cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev "${{ steps.bindgen.outputs.rev }}" --locked --force
+        else
+          cargo install wasm-bindgen-cli --version "${{ steps.bindgen.outputs.version }}" --locked --force
+        fi

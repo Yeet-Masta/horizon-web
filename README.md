@@ -43,8 +43,8 @@ what's missing.
 cargo run --release -p horizon-prepare -- --prepare --server-jar ~/Downloads/server.jar
 web/pack-resources.sh
 
-# 2. Build: nightly Rust, and the wasm-bindgen CLI from the commit Cargo.lock pins.
-cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev 39ae823bbc14c9d0a4a2869361483b5453a9b133 --locked --force
+# 2. Build: nightly Rust, and the wasm-bindgen CLI of the version Cargo.lock pins.
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
 web/build.sh             # on Windows: web\build.bat
 
 # 3. Play at http://localhost:8080/

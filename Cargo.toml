@@ -115,19 +115,15 @@ large_enum_variant = "allow"
 # read as `target_family = "wasm"`: wgpu 30 counts wasm64 as a native target, so
 # the web build on wasm64-unknown-unknown (web/README.md) had no WebGPU backend.
 #
-# The wasm-bindgen family at a commit of its main branch: threads on memory64 (#5378), which
-# the web build's workers need (web/README.md), aren't in a release yet. The CLI
-# must be built from that commit (web/build.sh says how). Back to
-# crates.io once a release has them.
+# The wasm-bindgen family from crates.io (0.2.130 has threads on memory64, #5378, which the
+# web build's workers need: web/README.md); the CLI must be the same version (web/build.sh
+# says how).
 [patch.crates-io]
 # wasm-bindgen itself from third_party/ (its closures' unwind-safety bound on wasm64; the folder's
-# Cargo.toml), here and for js-sys, web-sys and wasm-bindgen-futures, which name it from git.
+# Cargo.toml), for js-sys, web-sys and wasm-bindgen-futures too.
 wasm-bindgen = { path = "third_party/wasm-bindgen" }
 # chrono 0.4.45 whose clock is the page's on wasm64 too (third_party/chrono/Cargo.toml).
 chrono = { path = "third_party/chrono" }
-wasm-bindgen-futures = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
-js-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
-web-sys = { git = "https://github.com/wasm-bindgen/wasm-bindgen", rev = "39ae823bbc14c9d0a4a2869361483b5453a9b133" }
 wgpu = { path = "third_party/wgpu" }
 wgpu-core = { path = "third_party/wgpu-core" }
 wgpu-hal = { path = "third_party/wgpu-hal" }

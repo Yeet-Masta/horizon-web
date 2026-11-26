@@ -9,8 +9,8 @@ of Minecraft: Java Edition 26.3. The page never downloads game files.
 ## Build
 
 ```sh
-# The wasm-bindgen CLI from the commit Cargo.lock pins (web/build.sh prints this command too):
-cargo install wasm-bindgen-cli --git https://github.com/wasm-bindgen/wasm-bindgen --rev 39ae823bbc14c9d0a4a2869361483b5453a9b133 --locked --force
+# The wasm-bindgen CLI of the version Cargo.lock pins (web/build.sh prints this command too):
+cargo install wasm-bindgen-cli --version 0.2.130 --locked
 web/build.sh               # wasm32 with threads: nightly Rust and -Zbuild-std (rustup installs rust-src)
 web/build.sh --wasm64      # wasm64: up to 8 GiB of memory instead of 4, 7-14% slower (memory64's bounds checks)
 web/build.sh --no-threads  # one thread: for browsers or hosts where web/coi.js can't isolate the page
@@ -27,10 +27,15 @@ Worlds opened there aren't kept: a `file://` page has no storage. The
 one-thread build can't host single player yet: the integrated server's loop
 would run on the page's thread and never return.
 
-wasm-bindgen comes from its main branch for now (`[patch.crates-io]` in the
-root `Cargo.toml`): threads on memory64 aren't in a release yet. The CLI must
-be built from the same commit as the crates; `web/build.sh` says so when it
-isn't.
+The wasm-bindgen CLI must be the version of the crates (0.2.130, which has
+threads on memory64); `web/build.sh` says so when it isn't. The crate itself
+comes from `third_party/wasm-bindgen` (`[patch.crates-io]` in the root
+`Cargo.toml`, THIRD_PARTY_NOTICES.md).
+
+Panics unwind with the legacy encoding of exception handling
+(`web/unwind.toml`): nightly Rust's default, exnref, meets an LLVM 23 bug
+(llvm/llvm-project#230956) that makes a module wasm-bindgen and the browsers
+refuse.
 
 The page and module land in `web/dist/`. A release build uses the root `Cargo.toml`'s `web`
 profile: release with whole-program (fat) LTO instead of thin, which filled a new world's

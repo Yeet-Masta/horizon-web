@@ -54,8 +54,8 @@ done
 # One file has no server to send the headers threads need.
 
 cd "$root"
-# wasm-bindgen comes from its main branch for now (Cargo.toml's [patch.crates-io]): the CLI
-# must be built from the same commit.
+# The wasm-bindgen CLI must be the version Cargo.lock pins (or its commit, when wasm-bindgen
+# comes from git).
 pinned="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
 rev="$(awk '/^name = "wasm-bindgen"$/ { getline; getline; if (match($0, /#[0-9a-f]+/)) print substr($0, RSTART + 1, RLENGTH - 1); exit }' Cargo.lock)"
 have="$(wasm-bindgen --version 2>/dev/null | awk '{ print $2 }' || true)"
