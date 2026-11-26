@@ -1,6 +1,6 @@
 //! Behaviour tables built once from the pinned client resources.
 use super::{
-    Behaviours, GameplayStateSource,
+    Behaviours, GameplayStateSource, HotTags,
     classes::{Class, ClassSet, Interface},
     states::{BlockId, PropKey, StateTable},
 };
@@ -206,6 +206,10 @@ pub struct BlockData {
     pub feature: Option<Arc<str>>,
     pub grow_probability: f64,
     pub growth_direction: Direction,
+    /// Declared head/body pair for a custom growing-plant family.
+    pub growing_plant_head: Option<BlockId>,
+    pub growing_plant_body: Option<BlockId>,
+    pub growing_plant_kelp: bool,
     pub schedule_fluid_ticks: bool,
     pub weather: u8,
     pub ignite_odds: i32,
@@ -763,6 +767,7 @@ fn build_with_gameplay<G: GameplayStateSource>(
         all_tags.insert(name.clone(), Arc::new(set));
     }
     let tags = Tags::resolve(&all_tags);
+    let hot_tags = HotTags::resolve(&all_tags);
     let tag = |name: &str| -> Option<Arc<BlockSet>> {
         all_tags
             .get(name.strip_prefix('#').unwrap_or(name))
@@ -990,9 +995,14 @@ fn build_with_gameplay<G: GameplayStateSource>(
             })
             .map(|s| interned(&mut strings, s));
         let growth_direction = match field("growthDirection").and_then(Value::as_str) {
-            Some("DOWN") => Direction::Down,
+            Some("DOWN" | "down") => Direction::Down,
             _ => Direction::Up,
         };
+        let growing_plant_head = block_field("growingPlantHead");
+        let growing_plant_body = block_field("growingPlantBody");
+        let growing_plant_kelp = field("growingPlantKelp")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let default = table.default_state(block);
         let sound = &gameplay_states[default.0 as usize];
         let sounds = Arc::new(Sounds {
@@ -1025,6 +1035,9 @@ fn build_with_gameplay<G: GameplayStateSource>(
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0),
             growth_direction,
+            growing_plant_head,
+            growing_plant_body,
+            growing_plant_kelp,
             schedule_fluid_ticks: field("scheduleFluidTicks")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
@@ -1126,6 +1139,7 @@ fn build_with_gameplay<G: GameplayStateSource>(
         named,
         tags,
         all_tags,
+        hot_tags,
         facts,
         shapes,
         shape_info,

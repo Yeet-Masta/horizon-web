@@ -37,6 +37,10 @@ mod respawn_attributes;
 #[path = "tests/portal_spawn_tests.rs"]
 mod portal_spawn_tests;
 
+#[cfg(test)]
+#[path = "tests/exit_search_tests.rs"]
+mod exit_search_tests;
+
 /// `Player.getDimensionChangingDelay`.
 pub(super) const PLAYER_DELAY: i32 = 10;
 /// `VehicleEntity.getDimensionChangingDelay`: boats and minecarts.
@@ -112,6 +116,10 @@ pub(super) struct Portals {
     pub(super) entities: HashMap<u32, PortalState>,
     /// Positions before this tick's moves, by entity id.
     pub(super) before: FxHashMap<u32, Vec3>,
+    /// End portal contacts on accepted boat packet moves, before the entity
+    /// tick snapshots the boats' positions. Kept until the normal portal pass
+    /// so those contacts don't advance the portal processor a tick early.
+    boat_end_contacts: FxHashMap<u32, (Dim, BlockPos)>,
     arrivals: Vec<Arrival>,
     /// The vehicles server players ride that went through a portal this
     /// tick, in their level, with their entry: they carry their riders
@@ -214,15 +222,22 @@ fn move_passengers(tag: &mut Tag, by: Vec3, turn: f32) {
 fn doubles(values: [f64; 3]) -> Tag {
     Tag::List(values.iter().map(|v| Tag::Double(v.to_bits())).collect())
 }
-/// Whether a `width` by `height` box moving from `from` to `to` meets the End
-/// portal at `pos`: `Entity.collidedWithShapeMovingFrom` against its
-/// entity-inside shape, y 6/16..12/16 of the block.
+/// `Entity.collidedWithShapeMovingFrom` for a dimension box. Kept with the
+/// original mod-facing signature; the game's AABB path uses `_box` below.
+#[allow(dead_code)] // mod-facing signature; the game path uses _box
 fn touches_end_portal(from: Vec3, to: Vec3, width: f32, height: f32, pos: BlockPos) -> bool {
     let half = f64::from(width) / 2.0;
     let start = Aabb::new(
         Vec3::new(from.x - half, from.y, from.z - half),
         Vec3::new(from.x + half, from.y + f64::from(height), from.z + half),
     );
+    touches_end_portal_box(from, to, start, pos)
+}
+
+/// Whether the box `start` (the entity's box at `from`) moving to `to` meets
+/// the End portal at `pos`: `Entity.collidedWithShapeMovingFrom` against its
+/// entity-inside shape, y 6/16..12/16 of the block.
+fn touches_end_portal_box(from: Vec3, to: Vec3, start: Aabb, pos: BlockPos) -> bool {
     let (x, y, z) = (f64::from(pos.x), f64::from(pos.y), f64::from(pos.z));
     let shape = Aabb::new(
         Vec3::new(x, y + 0.375, z),
@@ -331,6 +346,84 @@ fn preserve_arrival_cooldown(tag: &mut Tag) {
     {
         fields.insert("PortalCooldown".into(), Tag::Int(ENTITY_DELAY));
     }
+}
+
+/// What the search for an existing exit portal found
+/// (`PortalForcer.findClosestPortalPosition`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::game) enum ExitSearch {
+    /// The nearest portal, with every chunk its rectangle can touch loaded,
+    /// and the rectangle around it.
+    Found(BlockPos, FoundRectangle),
+    /// The nearest portal's rectangle reaches a chunk the level has not
+    /// loaded: the search read the block from disk (`portal_blocks`), and the
+    /// world would answer air there (`getLargestRectangleAround`).
+    Unloaded(BlockPos, Vec<(i32, i32)>),
+    /// No portal within reach.
+    NoPortal,
+}
+
+/// The chunks `largest_rectangle_around` can touch around `found`: the
+/// rectangle contains `found`, so its widest row is the horizontal run of
+/// portal blocks through `found` at its own height. Until the portal axis is
+/// read from its loaded chunk, both horizontal runs count. The position that
+/// ends a run is read to stop the rectangle, so its chunk is included too.
+fn exit_rectangle_chunks(portals: &[BlockPos], found: BlockPos) -> Vec<(i32, i32)> {
+    let mut chunks = vec![(found.x >> 4, found.z >> 4)];
+    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+        let mut p = found;
+        for _ in 0..21 {
+            p = BlockPos::new(p.x + dx, p.y, p.z + dz);
+            let chunk = (p.x >> 4, p.z >> 4);
+            if !chunks.contains(&chunk) {
+                chunks.push(chunk);
+            }
+            if !portals.contains(&p) {
+                break;
+            }
+        }
+    }
+    chunks.sort_unstable();
+    chunks
+}
+
+/// The chunks `rectangle` covers: `axis1_size` runs along X for an X-axis
+/// portal, else along Z; the other horizontal axis is the portal plane.
+fn rectangle_chunks(rectangle: FoundRectangle, x_axis: bool) -> Vec<(i32, i32)> {
+    let (x0, x1, z0, z1) = if x_axis {
+        (
+            rectangle.min_corner.x,
+            rectangle.min_corner.x + rectangle.axis1_size - 1,
+            rectangle.min_corner.z,
+            rectangle.min_corner.z,
+        )
+    } else {
+        (
+            rectangle.min_corner.x,
+            rectangle.min_corner.x,
+            rectangle.min_corner.z,
+            rectangle.min_corner.z + rectangle.axis1_size - 1,
+        )
+    };
+    let mut chunks = Vec::new();
+    for z in (z0 >> 4)..=(z1 >> 4) {
+        for x in (x0 >> 4)..=(x1 >> 4) {
+            chunks.push((x, z));
+        }
+    }
+    chunks
+}
+
+/// Where a plan's exit is (`NetherPortalBlock.getExitPortal`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Exit {
+    /// The rectangle the traveller lands in.
+    Found(FoundRectangle),
+    /// The nearest portal's rectangle reaches a chunk that is not loaded or
+    /// lit: wait for it.
+    Waiting,
+    /// No portal was found and `createPortal` could not build one.
+    Missing,
 }
 
 impl Game<'_> {
@@ -499,24 +592,51 @@ impl Game<'_> {
         out
     }
     /// `PortalForcer.findClosestPortalPosition` and the rectangle around it,
-    /// for `plan` in the loaded dimension; builds nothing.
+    /// for `plan` in the loaded dimension; builds nothing. A `Game` method
+    /// keeps its name and signature (a mod point): this is
+    /// [`Self::search_exit_portal`] for a caller that only needs the portal
+    /// and its rectangle, and sees `None` while a chunk is still unloaded.
+    #[allow(dead_code)]
     pub(in crate::game) fn find_exit_portal(
         &mut self,
         plan: &Plan,
     ) -> Option<(BlockPos, FoundRectangle)> {
+        match self.search_exit_portal(plan) {
+            ExitSearch::Found(found, rectangle) => Some((found, rectangle)),
+            ExitSearch::Unloaded(..) | ExitSearch::NoPortal => None,
+        }
+    }
+    /// `find_exit_portal` with what the search found, including a portal
+    /// whose rectangle reaches a chunk the level has not loaded.
+    pub(in crate::game) fn search_exit_portal(&mut self, plan: &Plan) -> ExitSearch {
         let to_nether = plan.dim == Dim::Nether;
         let radius = if to_nether { 16 } else { 128 };
         let border = self.border_bounds();
         let portals = self.portal_blocks(plan.approximate, radius);
         let (min_section, max_section) = if to_nether { (0, 15) } else { (-4, 19) };
-        let found = closest_portal(
+        let Some(found) = closest_portal(
             &portals,
             plan.approximate,
             to_nether,
             &border,
             min_section,
             max_section,
-        )?;
+        ) else {
+            return ExitSearch::NoPortal;
+        };
+        // `PoiManager.ensureLoadedAndValid` loads every chunk the search reads,
+        // so `getBlockState(pos)` is the portal's block. Here the search also
+        // reads saved chunks; until every chunk the rectangle can touch is in
+        // the level the world answers air for the others, and the rectangle
+        // would be clipped to the loaded part (`getLargestRectangleAround`).
+        // Wait for all of them instead.
+        let chunks = exit_rectangle_chunks(&portals, found);
+        if chunks
+            .iter()
+            .any(|&(x, z)| !self.world.chunks.contains_key(&(x, z)))
+        {
+            return ExitSearch::Unloaded(found, chunks);
+        }
         let state = self.world.block(found.x, found.y, found.z);
         let x_axis = self.res.behaviours().portal_axis(state).unwrap_or(true);
         let rectangle = largest_rectangle_around(
@@ -527,18 +647,52 @@ impl Game<'_> {
             21,
             |p| self.world.block(p.x, p.y, p.z) == state,
         );
-        Some((found, rectangle))
+        ExitSearch::Found(found, rectangle)
     }
     /// The exit portal of `plan` in the loaded dimension: the closest one
-    /// within reach, else one built by `PortalForcer.createPortal`.
+    /// within reach, else one built by `PortalForcer.createPortal`. A `Game`
+    /// method keeps its name and signature (a mod point): this is
+    /// [`Self::resolve_exit_portal`] for a caller that only needs the
+    /// rectangle, and sees `None` while the exit is still loading.
+    #[allow(dead_code)]
     pub(super) fn nether_exit_portal(&mut self, plan: &Plan) -> Option<FoundRectangle> {
+        match self.resolve_exit_portal(plan) {
+            Exit::Found(rectangle) => Some(rectangle),
+            Exit::Waiting | Exit::Missing => None,
+        }
+    }
+    /// `nether_exit_portal` with the answer: found, still loading, or
+    /// impossible to build.
+    pub(super) fn resolve_exit_portal(&mut self, plan: &Plan) -> Exit {
         let to_nether = plan.dim == Dim::Nether;
         let border = self.border_bounds();
-        if let Some((found, rectangle)) = self.find_exit_portal(plan) {
-            // NetherPortalBlock.getExitPortal: the ticket goes on the chunk
-            // of the portal found.
-            self.place_portal_ticket((found.x >> 4, found.z >> 4));
-            return Some(rectangle);
+        match self.search_exit_portal(plan) {
+            ExitSearch::Found(found, rectangle) => {
+                // NetherPortalBlock.getExitPortal: the tickets go on the
+                // chunks of the portal found. The exit can be far from
+                // `plan.approximate`, so the arrival waits for the light of
+                // the rectangle's own chunks, not only the approximate area.
+                let state = self.world.block(found.x, found.y, found.z);
+                let x_axis = self.res.behaviours().portal_axis(state).unwrap_or(true);
+                let chunks = rectangle_chunks(rectangle, x_axis);
+                for &chunk in &chunks {
+                    self.place_portal_ticket(chunk);
+                }
+                if !chunks.iter().all(|&(x, z)| self.streaming.is_lit(x, z)) {
+                    return Exit::Waiting;
+                }
+                return Exit::Found(rectangle);
+            }
+            ExitSearch::Unloaded(_, chunks) => {
+                // `ensureLoadedAndValid`: these chunks are part of the search.
+                // Their tickets keep the area loaded until the rectangle can
+                // be read; the arrival waits for them.
+                for chunk in chunks {
+                    self.place_portal_ticket(chunk);
+                }
+                return Exit::Waiting;
+            }
+            ExitSearch::NoPortal => {}
         }
         let logical = if to_nether { 128 } else { 384 };
         let (approximate, x_axis) = (plan.approximate, plan.entry_x_axis);
@@ -546,20 +700,21 @@ impl Game<'_> {
             b.create_portal(level, ticks, approximate, x_axis, &border, logical)
         });
         let _ = self.process_level_events();
-        if let Some(exit) = created {
-            let dim = if to_nether {
-                "minecraft:the_nether"
-            } else {
-                "minecraft:overworld"
-            };
-            let corner = exit.min_corner;
-            self.native_portal_create(dim, [corner.x, corner.y, corner.z]);
-            // A portal built for the entity: the ticket goes on the chunk it
-            // arrives in (`TeleportTransition.PLACE_PORTAL_TICKET`).
-            let (at, _) = self.arrival(plan, exit);
-            self.place_portal_ticket(Self::chunk_of(at));
-        }
-        created
+        let Some(exit) = created else {
+            return Exit::Missing;
+        };
+        let dim = if to_nether {
+            "minecraft:the_nether"
+        } else {
+            "minecraft:overworld"
+        };
+        let corner = exit.min_corner;
+        self.native_portal_create(dim, [corner.x, corner.y, corner.z]);
+        // A portal built for the entity: the ticket goes on the chunk it
+        // arrives in (`TeleportTransition.PLACE_PORTAL_TICKET`).
+        let (at, _) = self.arrival(plan, exit);
+        self.place_portal_ticket(Self::chunk_of(at));
+        Exit::Found(exit)
     }
     /// `ChunkPos.containing`: the chunk a position is in.
     pub(super) fn chunk_of(at: Vec3) -> (i32, i32) {
@@ -790,20 +945,35 @@ impl Game<'_> {
         }
     }
     /// `Entity.load`: the saved `PortalCooldown` (an entity that just came
-    /// through stands in its exit portal for 300 ticks without going back).
+    /// through stands in its exit portal until its own cooldown expires).
+    /// It sets the counter and leaves a portal process the entity already
+    /// has, and a zero counter is a counter like any other.
     pub(super) fn restore_portal_cooldown(&mut self, id: u32, tag: &Tag) {
-        if let Some(cooldown) = tag
+        let cooldown = tag
             .get("PortalCooldown")
             .and_then(horizon_client::nbt_path::int_value)
-            && cooldown != 0
-        {
-            self.portals.entities.insert(
-                id,
-                PortalState {
-                    cooldown,
-                    process: None,
-                },
-            );
+            .unwrap_or(0);
+        if let Some(traveller) = self.end.gateways.get_mut(&id) {
+            traveller.set_cooldown(cooldown);
+        }
+        if cooldown != 0 || self.portals.entities.contains_key(&id) {
+            let state = self.portals.entities.entry(id).or_default();
+            state.cooldown = cooldown;
+            if cooldown == 0 && state.process.is_none() {
+                self.portals.entities.remove(&id);
+            }
+        }
+    }
+    /// `Entity.load` on a live entity (`/data merge`): `getIntOr("PortalCooldown", 0)`
+    /// takes any numeric tag and leaves the portal process as it is.
+    pub(super) fn reload_portal_cooldown(&mut self, id: u32, tag: &Tag) {
+        if let Some(portal) = self.portals.entities.get_mut(&id) {
+            portal.cooldown = tag
+                .get("PortalCooldown")
+                .and_then(horizon_client::nbt_path::int_value)
+                .unwrap_or(0);
+        } else {
+            self.restore_portal_cooldown(id, tag);
         }
     }
     /// `Entity.saveWithoutId` writes the live `PortalCooldown`: the countdown
@@ -812,28 +982,22 @@ impl Game<'_> {
     /// portal state, as the projectile writer does. An entity the portal
     /// state does not know is not on a cooldown, and writes 0.
     pub(super) fn save_portal_cooldown(&self, id: u32, tag: &mut Tag) {
-        horizon_client::nether_portal::put_portal_cooldown(
-            tag,
-            horizon_client::nether_portal::portal_cooldown(&self.portals.entities, id),
+        // An entity inside an End gateway counts down on the gateway's state.
+        let cooldown = self.end.gateways.get(&id).map_or_else(
+            || horizon_client::nether_portal::portal_cooldown(&self.portals.entities, id),
+            |traveller| traveller.cooldown(),
         );
+        horizon_client::nether_portal::put_portal_cooldown(tag, cooldown);
     }
-    /// `Entity.saveWithoutId`: the modeled non-arrow projectile codecs
-    /// share the live cooldown between command reads and chunk writes.
+    /// `Entity.saveWithoutId`: the modeled projectile codecs share the live cooldown
+    /// between command reads and chunk writes. Kept under its name and signature for
+    /// the mod points; the body is `save_portal_cooldown`, which arrows use too.
     pub(super) fn save_projectile_portal_cooldown(
         &self,
         projectile: &horizon_client::projectiles::Projectile,
         tag: &mut Tag,
     ) {
-        if projectile.arrow.is_none()
-            && let Tag::Compound(fields) = tag
-        {
-            let cooldown = self
-                .portals
-                .entities
-                .get(&projectile.id)
-                .map_or(0, |portal| portal.cooldown);
-            fields.insert("PortalCooldown".into(), Tag::Int(cooldown));
-        }
+        self.save_portal_cooldown(projectile.id, tag);
     }
     /// `Entity.getDimensionChangingDelay`, by class: boats and minecarts
     /// (`VehicleEntity`) always 10, projectiles (`Projectile`) 2; any other
@@ -1036,6 +1200,43 @@ impl Game<'_> {
             self.find_portals(Some(ridden));
         }
     }
+    /// `Entity.checkInsideBlocks` for a boat driven by `handleMoveVehicle`:
+    /// the server resolves its move and then snaps an accepted packet to its
+    /// target. Both segments can cross the thin portal between tick snapshots.
+    pub(super) fn record_boat_end_portal_contact(
+        &mut self,
+        id: u32,
+        from: Vec3,
+        reached: Vec3,
+        to: Vec3,
+        bounds: Aabb,
+    ) {
+        if (from == reached && reached == to) || self.portals.boat_end_contacts.contains_key(&id) {
+            return;
+        }
+        let mut sections = std::mem::take(&mut self.portals.sections);
+        let entry = self
+            .swept_portal_box(
+                from,
+                reached,
+                bounds.move_by(reached.subtract(to)),
+                &mut sections,
+            )
+            .or_else(|| {
+                if reached != to {
+                    self.swept_portal_box(reached, to, bounds, &mut sections)
+                } else {
+                    None
+                }
+            });
+        self.portals.sections = sections;
+        if let Some(pos) = entry
+            && self.is_end_portal(self.world.block(pos.x, pos.y, pos.z))
+        {
+            self.portals.boat_end_contacts.insert(id, (self.dim, pos));
+        }
+    }
+
     fn find_portals(&mut self, only: Option<&[u32]>) {
         if self.remote.is_some() {
             return;
@@ -1074,9 +1275,14 @@ impl Game<'_> {
         }
         let mut inside: Vec<(u32, BlockPos, i32)> = Vec::new();
         let mut portal_sections = std::mem::take(&mut self.portals.sections);
+        let dim = self.dim;
+        let keep_other_contacts = |id: &u32, contact: &mut (Dim, BlockPos)| {
+            contact.0 != dim || (only.is_none() && ridden.contains(id))
+        };
         // No loaded section has a portal state in its palette (nearly always): no
         // sweep below can meet a portal block, so the walk would find nothing.
         if !self.level_may_hold_portal(&mut portal_sections) {
+            self.portals.boat_end_contacts.retain(keep_other_contacts);
             self.portals.sections = portal_sections;
             return;
         }
@@ -1107,14 +1313,22 @@ impl Game<'_> {
             let from = entity
                 .portal_from()
                 .unwrap_or_else(|| self.portals.before.get(&id).copied().unwrap_or(to));
-            let Some((width, height)) = entity.portal_size() else {
+            let Some(bounds) = entity.portal_bounds(to) else {
                 continue;
             };
-            if let Some(pos) = self.swept_portal(from, to, width, height, &mut portal_sections) {
+            let entry = self
+                .swept_portal_box(from, to, bounds, &mut portal_sections)
+                .or_else(|| {
+                    let &(contact_dim, pos) = self.portals.boat_end_contacts.get(&id)?;
+                    (contact_dim == dim && self.is_end_portal(self.world.block(pos.x, pos.y, pos.z)))
+                        .then_some(pos)
+                });
+            if let Some(pos) = entry {
                 inside.push((id, pos, self.dimension_changing_delay(id)));
             }
         });
         self.portals.sections = portal_sections;
+        self.portals.boat_end_contacts.retain(keep_other_contacts);
         for (id, pos, delay) in inside {
             self.portals
                 .entities
@@ -1123,8 +1337,9 @@ impl Game<'_> {
                 .set_inside(pos, delay);
         }
     }
-    /// The first nether or End portal block an entity box swept through
-    /// (`Entity.checkInsideBlocks`, whose first portal sets the entry).
+    /// Original mod-facing signature: a width-by-height box. The game's
+    /// AABB path calls `swept_portal_box`; this wrapper keeps mods working.
+    #[allow(dead_code)] // mod-facing signature; the game path uses _box
     fn swept_portal(
         &self,
         from: Vec3,
@@ -1134,19 +1349,30 @@ impl Game<'_> {
         portal_sections: &mut horizon_client::portal_sections::PortalSections,
     ) -> Option<BlockPos> {
         let half = f64::from(width) / 2.0;
-        let bounds = horizon_core::geometry::Aabb::new(
+        let bounds = Aabb::new(
             Vec3::new(to.x - half, to.y, to.z - half),
             Vec3::new(to.x + half, to.y + f64::from(height), to.z + half),
-        )
-        .deflate(Vec3::new(
+        );
+        self.swept_portal_box(from, to, bounds, portal_sections)
+    }
+
+    /// The first nether or End portal block an entity box swept through
+    /// (`Entity.checkInsideBlocks`, whose first portal sets the entry).
+    fn swept_portal_box(
+        &self,
+        from: Vec3,
+        to: Vec3,
+        bounds: Aabb,
+        portal_sections: &mut horizon_client::portal_sections::PortalSections,
+    ) -> Option<BlockPos> {
+        let bounds = bounds.deflate(Vec3::new(
             f64::from(1.0e-5_f32),
             f64::from(1.0e-5_f32),
             f64::from(1.0e-5_f32),
         ));
         // Every block the sweep visits lies in the box covering both ends.
-        let reach = bounds
-            .union_bounds(bounds.move_by(from.subtract(to)))
-            .inflate(Vec3::new(1.0, 1.0, 1.0));
+        let start = bounds.move_by(from.subtract(to));
+        let reach = bounds.union_bounds(start).inflate(Vec3::new(1.0, 1.0, 1.0));
         if !self.may_hold_portal(reach, portal_sections) {
             return None;
         }
@@ -1159,7 +1385,7 @@ impl Game<'_> {
             |p, _| {
                 let state = self.world.block(p.x, p.y, p.z);
                 if self.res.behaviours().portal_axis(state).is_some()
-                    || (self.is_end_portal(state) && touches_end_portal(from, to, width, height, p))
+                    || (self.is_end_portal(state) && touches_end_portal_box(from, to, start, p))
                 {
                     found = Some(p);
                     return false;
@@ -1583,12 +1809,34 @@ impl Game<'_> {
                 (at, motion, turn)
             } else {
                 let exit =
-                    horizon_client::spans::time("exit_portal", || self.nether_exit_portal(&plan));
-                let Some(exit) = exit else {
-                    continue;
-                };
-                let (at, rotation) = self.arrival(&plan, exit);
-                (at, rotate_y(motion, -rotation), [yaw + rotation, pitch])
+                    horizon_client::spans::time("exit_portal", || self.resolve_exit_portal(&plan));
+                match exit {
+                    Exit::Found(exit) => {
+                        let (at, rotation) = self.arrival(&plan, exit);
+                        (at, rotate_y(motion, -rotation), [yaw + rotation, pitch])
+                    }
+                    Exit::Waiting => {
+                        // The exit's rectangle reaches a chunk that is not
+                        // loaded or lit: its tickets are placed; land once
+                        // they are ready.
+                        self.portals.arrivals.insert(
+                            i,
+                            Arrival {
+                                tnt_used_portal,
+                                plan,
+                                tag,
+                                transferred,
+                            },
+                        );
+                        self.portals.dirty = true;
+                        i += 1;
+                        continue;
+                    }
+                    Exit::Missing => {
+                        log::error!("Unable to create a portal, likely target out of worldborder");
+                        continue;
+                    }
+                }
             };
             set_arrival_pose(&mut tag, at, motion, [yaw, pitch], yaw - was_yaw);
             preserve_arrival_cooldown(&mut tag);
@@ -1724,7 +1972,16 @@ impl Game<'_> {
             return None;
         }
         let mut sections = std::mem::take(&mut self.portals.sections);
-        let entry = self.swept_portal(f.previous, f.position, 0.98, 0.98, &mut sections);
+        let half = f64::from(0.98_f32) / 2.0;
+        let bounds = Aabb::new(
+            Vec3::new(f.position.x - half, f.position.y, f.position.z - half),
+            Vec3::new(
+                f.position.x + half,
+                f.position.y + f64::from(0.98_f32),
+                f.position.z + half,
+            ),
+        );
+        let entry = self.swept_portal_box(f.previous, f.position, bounds, &mut sections);
         self.portals.sections = sections;
         let delay = self.dimension_changing_delay(f.id);
         if let Some(entry) = entry {
@@ -1832,8 +2089,9 @@ impl Game<'_> {}
 mod tests {
     use super::super::server_travel::TravelCause;
     use super::*;
+    use horizon_std::sync::Mutex;
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU32, Ordering},
     };
 
@@ -1844,7 +2102,7 @@ mod tests {
             game.options.execution_role =
                 super::super::execution_role::ExecutionRole::IntegratedServer;
             game.options.game_dir = Some(
-                std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap())
+                std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
                     .join("portal-tree"),
             );
             game.build_registries();
@@ -2364,36 +2622,55 @@ mod tests {
     fn the_end_portal_shape_takes_falling_items_and_standing_mobs() {
         let portal = BlockPos::new(0, 100, 3);
         let at = |y| Vec3::new(0.5, y, 3.5);
+        let box_at = |pos: Vec3, width: f32, height: f32| {
+            let half = f64::from(width) / 2.0;
+            Aabb::new(
+                Vec3::new(pos.x - half, pos.y, pos.z - half),
+                Vec3::new(pos.x + half, pos.y + f64::from(height), pos.z + half),
+            )
+        };
         // A dropped item falling through the slab, or in it.
-        assert!(touches_end_portal(
+        assert!(touches_end_portal_box(
             at(100.6),
             at(100.56),
-            0.25,
-            0.25,
+            box_at(at(100.6), 0.25, 0.25),
             portal
         ));
         // One tick's fall across the whole slab, in it at neither end.
-        assert!(touches_end_portal(at(101.0), at(99.9), 0.25, 0.25, portal));
-        // Resting below the slab (on the floor) or above it.
-        assert!(!touches_end_portal(
-            at(100.0),
-            at(100.0),
-            0.25,
-            0.25,
+        assert!(touches_end_portal_box(
+            at(101.0),
+            at(99.9),
+            box_at(at(101.0), 0.25, 0.25),
             portal
         ));
-        assert!(!touches_end_portal(
+        // Resting below the slab (on the floor) or above it.
+        assert!(!touches_end_portal_box(
+            at(100.0),
+            at(100.0),
+            box_at(at(100.0), 0.25, 0.25),
+            portal
+        ));
+        assert!(!touches_end_portal_box(
             at(100.8),
             at(100.8),
-            0.25,
-            0.25,
+            box_at(at(100.8), 0.25, 0.25),
             portal
         ));
         // A cow standing in the portal block.
-        assert!(touches_end_portal(at(100.0), at(100.0), 0.9, 1.4, portal));
+        assert!(touches_end_portal_box(
+            at(100.0),
+            at(100.0),
+            box_at(at(100.0), 0.9, 1.4),
+            portal
+        ));
         // Beside it.
         let beside = Vec3::new(2.0, 100.0, 3.5);
-        assert!(!touches_end_portal(beside, beside, 0.9, 1.4, portal));
+        assert!(!touches_end_portal_box(
+            beside,
+            beside,
+            box_at(beside, 0.9, 1.4),
+            portal
+        ));
     }
 
     #[test]
@@ -2470,6 +2747,9 @@ mod tests {
 #[cfg(test)]
 #[path = "tests/portal_cooldown_tests.rs"]
 mod cooldown_tests;
+#[cfg(test)]
+#[path = "tests/portal_persistence_tests.rs"]
+mod persistence_tests;
 
 #[cfg(test)]
 #[path = "nether_portal/arrival_effects_tests.rs"]
@@ -2501,6 +2781,9 @@ impl Game<'_> {
             )
         };
         let frame = |p: [i32; 3]| &*name(p) == "minecraft:obsidian";
+        // findEmptyPortalShape requires numPortalBlocks == 0: a partly
+        // filled frame is not a candidate for fire lighting.
+        let is_portal = |p: [i32; 3]| &*name(p) == "minecraft:nether_portal";
         let d = if x_axis { [1, 0, 0] } else { [0, 0, 1] };
         let mut bottom = start;
         let mut n = 0;
@@ -2534,6 +2817,7 @@ impl Game<'_> {
             return None;
         }
         let mut height = 0;
+        let mut portal_blocks = 0;
         'rows: while height <= 21 {
             let y = left[1] + height;
             if !frame([left[0] - d[0], y, left[2] - d[2]])
@@ -2542,15 +2826,20 @@ impl Game<'_> {
                 break;
             }
             for i in 0..width {
-                if !empty([left[0] + d[0] * i, y, left[2] + d[2] * i]) {
+                let q = [left[0] + d[0] * i, y, left[2] + d[2] * i];
+                if !empty(q) {
                     break 'rows;
+                }
+                if is_portal(q) {
+                    portal_blocks += 1;
                 }
             }
             height += 1;
         }
         let top_ok =
             (0..width).all(|i| frame([left[0] + d[0] * i, left[1] + height, left[2] + d[2] * i]));
-        ((3..=21).contains(&height) && top_ok).then_some((left, width, height))
+        ((3..=21).contains(&height) && top_ok && portal_blocks == 0)
+            .then_some((left, width, height))
     }
     /// BaseFireBlock.onPlace: lighting fire inside a frame creates a portal,
     /// only in the Overworld and the Nether (`inPortalDimension`).

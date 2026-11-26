@@ -108,7 +108,7 @@ council matter.
 | **🧭 Server & SMP lead** | The server's settings, by the written rules (backup first, warning in game) | As every lead | A panel sub-user once a council accounts poll gives one | As every lead |
 | **🧭 Group lead** | The group's free actions; gives and removes its helper role | In the group's channels: delete messages, manage and pin threads, ping the group; the helper role through Kira | — | Triage on the group's labels through Kira (no repository role) |
 | **🌌 Horizon Team** | Merges; elects Team members | #horizon-team and the staff channels. The role still carries timeout and delete; whether it keeps them is a mod matter | — | `horizon-team`: write on horizon, horizon-mods, horizon-mixins, horizon-native-mod-template and horizon-server; also kira and horizon-site if P37 passes |
-| **🔧 Server Manager** | — | Manage Channels and Manage Roles (the server's layout); given by council poll | — | — |
+| **🔧 Server Manager** | — | Manage Channels and Manage Roles for the server layout. Manage Server for Community Onboarding and the Server Guide. Given by council poll | — | — |
 | **🏛️ Council** | Council polls, vetoes, emergencies (any 2) | A moderator's permissions plus Ban, mention @everyone and pin; #council | Panel sub-users for two members if P38 passes | The `council` team: code-owner reviews and the release tools' owner powers if P35 passes, security managers if P36 passes; a second organisation owner if P28 passes |
 | **Account holder** (the founder) | Carries out decisions on his accounts (section 11) | Server owner | The panel's owner account | Organisation owner |
 
@@ -403,12 +403,11 @@ holder or an org owner removes GitHub access when the Team role ends.
 | **Modding** | The mod API, native and content mods, mixins, the mod registry, `cargo horizon-mod` | The mod API lives in horizon-rust/horizon, beside horizon-rust/horizon-mods, horizon-mixins, horizon-native-mod-template and the registry. Label `mods` | The 🧩 MODDING category (#modding, #horizon-modding-team); roles 🧩 Modder (picked) and 🧩 Horizon Modding Team (the lead gives it) |
 | **Shaders and rendering** | The renderer, shaders, shader packs, OptiFine and Polytone pack formats | Label `rendering`; `crates/horizon-client-render` (gfx), `*.wgsl`, `horizon-shaders`, `horizon-shader-api`, `horizon-optifine`, `horizon-polytone` | #shaders-rendering |
 | **Performance** | Frame rate, memory, server tick, benchmarks | Label `perf`; `horizon-bench`, the benchmark tools | #performance |
-| **Launcher** | The launcher: installs, updates, instances, its pages | Label `launcher`; `launcher/` | #launcher |
-| **Server and SMP** | Dedicated server, hosting, the anticheat, multiplayer, and the official SMP | Labels `server`, `multiplayer`; `horizon-server*`, `horizon-anticheat`, `lan/`, `dedicated*`; horizon-rust/horizon-server | #server-smp (plus #join-server, #server-chat) |
+| **Horizon GUI** | The launcher (GPUI: installs, updates, instances, pages), in-game menus, HUD, settings, controller navigation, and the design system | Labels `launcher`, `ui`, `accessibility`; `launcher/`, `title/`, `settings_shell.rs`, `hud*`, `ui.rs`, `docs/design-system.md`, `horizon-theme` | #horizon-gui |
+| **Server and SMP** | Dedicated server, hosting, the anticheat, multiplayer, and the official SMP | Labels `server`, `multiplayer`; `horizon-server*`, `horizon-anticheat`, `lan/`, `dedicated*`; horizon-rust/horizon-server | #server (plus #join-server, #survival-chat, #server-chat) |
 | **Translations** | The game's and the launcher's languages | Label `roadmap:languages`; `launcher/lang/`, `crates/horizon-client/assets/horizon/lang/` | #translations and the 🌍 language channels |
 | **Website** | playhorizon.dev | horizon-rust/horizon-site; label `website`. The site's design stays as it is unless the council decides otherwise | #website |
 | **Vanilla accuracy** | Parity with vanilla 26.3: harnesses, oracles, the port ledger | Labels `parity`, `parity-regression`, `full-parity`; `tools/test_*_parity.py`, the Java oracles | #vanilla-accuracy |
-| **UI** | The game's menus, HUD, settings, controller navigation, the design system | Labels `ui`, `accessibility`; `title/`, `settings_shell.rs`, `hud*`, `ui.rs`, `docs/design-system.md`, `horizon-theme`. The launcher's look is shared with Launcher | #ui |
 
 A pull request can belong to two groups. Both leads can comment, and the Team merges as usual. If the leads disagree,
 the council decides.
@@ -530,14 +529,14 @@ unable to act, and never puts an account that is tied to a person into anyone el
 
 | Account | Today | Can it be shared? | Plan |
 | --- | --- | --- | --- |
-| **GitHub organisation** (horizon-rust) | Two owners since 2026-11-11: the founder and rdbtCVS (P28); a `council` team holds CODEOWNERS (P35) and is the security managers (P36) | Yes: an organisation can have several owners | **Step 1:** a second owner from the council, chosen by a 2/3 poll in the council's first week, with two-factor authentication on. **Step 2:** a `council` team; CODEOWNERS reviews and the release tools' owner powers (`paused`, `/nightly remove`) move from the founder to that team |
+| **GitHub organisation** (horizon-rust) | Shared among council owners (including the founder, rdbtCVS and NikitaMGrimm); a `council` team holds CODEOWNERS (P35) and is the security managers (P36) | Yes: an organisation can have several owners | **Step 1:** a second owner from the council, chosen by a 2/3 poll in the council's first week, with two-factor authentication on. **Step 2:** a `council` team; CODEOWNERS reviews and the release tools' owner powers (`paused`, `/nightly remove`) move from the founder to that team |
 | **Discord server** | Owned by the founder | Partly: a server has exactly one owner; powers can be given through roles | **Step 1:** the 🏛️ Council role gets moderation and ban permissions; Kira applies the outcomes of passed polls, so nobody needs Manage Roles; two-factor authentication becomes required for moderation. Ownership itself stays with the founder until a legal entity exists |
 | **Kira** (bot application, Railway service) | The founder's Discord developer account and Railway | The bot: yes (a Discord developer team). Railway: adding members may need a paid plan | **Step 1:** a Discord developer team with two council members. Railway members once the council decides on money |
 | **Official server** (hosting panel) | The founder's account | Yes: panel sub-users | **Step 1:** sub-users for the Server and SMP lead and for one council member |
 | **Domains** (playhorizon.dev and the others) | The founder's registrar account | Not without moving it | Auto-renewal on, registered for several years ahead. They move only to a legal entity, if one is created |
 | **The Microsoft app approved by Mojang** (sign-in) | The founder's Azure app registration; Mojang approved it after his application | **No.** The approval was given on his application. Moving the app or adding owners would change who Mojang deals with, and we have found no documented way to transfer an approval | **Never moves** without Mojang's written agreement. The only change considered: a legal entity, if one is created, and only if Mojang agrees |
 | **Signing** (Apple developer certificate, release signing keys) | The founder's | The Apple certificate is in his legal name: no | The Apple certificate never moves. Release keys stay in GitHub's protected environments, and the council team approves their use from step 2 |
-| **Money** (sponsorship, donations) | Personal accounts of the founder | Through a fiscal host | Section 12 |
+| **Money** (sponsorship, donations) | [Open Collective](https://opencollective.com/horizonrust), fiscally hosted by [Open Source Collective](https://opencollective.com/opensource) | Yes: council-governed collective with public ledger | Section 12 |
 | **The founder's machines, AI accounts and password vault** | His | No | His own things: they never move. The project should depend on them less over time |
 
 **Order:** first the safety nets that remove a single point of failure (a second organisation owner, the bot's
@@ -547,10 +546,12 @@ and the founder carries it out.
 
 ## 12. Money
 
-*Placeholder: the options (Open Collective and others) are being researched.*
+Horizon manages its donations and sponsorships on [Open Collective](https://opencollective.com/horizonrust),
+fiscally hosted by [Open Source Collective](https://opencollective.com/opensource) (a 501(c)(6) non-profit
+fiscal host for open-source projects).
 
 - The council approves every expense by a **2/3 poll**.
-- **Every income and every expense is public.**
+- **Every income and every expense is public** on the Open Collective ledger.
 - Nobody votes on money paid to themselves.
 
 ## 13. Transparency

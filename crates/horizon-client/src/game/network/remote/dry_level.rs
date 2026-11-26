@@ -27,6 +27,10 @@ impl horizon_world::level::LevelAccess for DryLevel<'_> {
     fn cake_can_eat(&self, vanilla: bool) -> bool {
         self.base.cake_can_eat(vanilla)
     }
+    /// The guess runs as its live level would, whose side knows the mods' switches.
+    fn template_suppressed(&self, state: BlockStateId) -> bool {
+        self.base.template_suppressed(state)
+    }
     fn emit(&mut self, event: horizon_world::level::LevelEvent) {
         if let horizon_world::level::LevelEvent::Sound {
             pos,
@@ -67,6 +71,12 @@ impl horizon_world::level::LevelAccess for DryLevel<'_> {
             return None;
         }
         self.base.shulker_is_closed(pos)
+    }
+    fn shulker_lid_progress(&self, pos: horizon_core::position::BlockPos) -> Option<f32> {
+        if self.changed.contains_key(&pos) {
+            return None;
+        }
+        self.base.shulker_lid_progress(pos)
     }
     fn min_y(&self) -> i32 {
         self.base.min_y()

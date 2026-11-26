@@ -1,41 +1,159 @@
 //! Receiving-provider credit follows ordered events and decoder placeholders.
+use super::super::raw_backlog::BundlePart;
 use super::*;
+use crate::game::export::ExportIngress;
+
+#[inline(always)]
+fn backlog_item_overdue(queued_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(queued_at) >= BACKLOG_LIMIT
+}
+
+#[inline(always)]
+fn backlog_head_since<T>(events: &VecDeque<(T, Instant)>) -> Option<Instant> {
+    events.front().map(|(_, queued_at)| *queued_at)
+}
 
 impl Remote {
-    pub(super) fn receive_credited_backlog(&mut self, events: &mut VecDeque<Received>) {
+    pub(super) fn receive_credited_backlog(&mut self, events: &mut VecDeque<(Received, Instant)>) {
         // Chunk packets start decoding now; the frame that reaches one in
         // order inserts its column.
+        let now = Instant::now();
         for receipt in self.session.poll() {
             let (event, credit) = receipt.into_parts();
-            events.push_back(match event {
-                Event::Packet(p) if matches!(*p, C::LevelChunkWithLight(_)) => {
-                    match self.decoder.submit(self.chunk_format.clone(), p) {
-                        None => Received::Chunk(self.chunk_format.clone(), credit),
-                        Some(p) => Received::Event(Event::Packet(p), credit),
+            events.push_back((self.received(event, credit), now));
+        }
+    }
+
+    /// Turn one delivered event into backlog slots. A closed bundle becomes a
+    /// single `Received::Bundle`: its chunks are queued on the decoder, and the
+    /// whole group is released by the frame only when all of them can decode.
+    fn received(
+        &self,
+        event: Event,
+        credit: horizon_client::net::ingress::ReceiveLease<Event>,
+    ) -> Received {
+        match event {
+            Event::Bundle(bundle) => {
+                let mut parts = Vec::with_capacity(bundle.len());
+                for event in Vec::from(bundle) {
+                    match event {
+                        Event::Packet(p) if matches!(*p, C::LevelChunkWithLight(_)) => {
+                            match self.decoder.submit(self.chunk_format.clone(), p) {
+                                None => parts.push(BundlePart::Chunk(self.chunk_format.clone())),
+                                Some(p) => parts.push(BundlePart::Event(Event::Packet(p))),
+                            }
+                        }
+                        event => parts.push(BundlePart::Event(event)),
                     }
                 }
-                event => Received::Event(event, credit),
-            });
+                Received::Bundle(parts, credit)
+            }
+            Event::Packet(p) if matches!(*p, C::LevelChunkWithLight(_)) => {
+                match self.decoder.submit(self.chunk_format.clone(), p) {
+                    None => Received::Chunk(self.chunk_format.clone(), Some(credit)),
+                    Some(p) => Received::Event(Event::Packet(p), Some(credit)),
+                }
+            }
+            event => Received::Event(event, Some(credit)),
         }
+    }
+}
+
+fn export_fence(item: &Received) -> Option<u64> {
+    let Received::Event(Event::Packet(packet), _) = item else {
+        return None;
+    };
+    match packet.as_ref() {
+        C::Unknown(horizon_client::net::EXPORT_FENCE, bytes) => {
+            Some(u64::from_be_bytes(bytes.as_slice().try_into().ok()?))
+        }
+        _ => None,
+    }
+}
+
+fn prepare_export_ingress(
+    events: &mut VecDeque<(Received, Instant)>,
+    gate: ExportIngress,
+) -> std::result::Result<Option<u64>, ()> {
+    // Losing the connection invalidates the batch. It must be handled even
+    // when the last tick never reached its fence.
+    if let Some(index) = events
+        .iter()
+        .position(|(item, _)| matches!(item, Received::Event(Event::Disconnected { .. }, _)))
+    {
+        let end = events.remove(index).unwrap();
+        events.clear();
+        events.push_back(end);
+        return Ok(None);
+    }
+    // The server has already completed this tick. Return receive credit as
+    // each available packet is applied so the rest of the batch can arrive.
+    match gate {
+        ExportIngress::Through(fence) => Ok(Some(fence)),
+        ExportIngress::Blocked => Err(()),
     }
 }
 
 impl Game<'_> {
     pub(super) fn poll_remote_events(&mut self) -> Result<()> {
+        let gate = self.export_ingress();
         let Some(r) = self.remote.as_mut() else {
             return Ok(());
         };
+        let is_local = r.session.address == "local";
         let mut events = std::mem::take(&mut r.backlog);
         r.receive_credited_backlog(&mut events);
-        let overdue = r
-            .backlog_since
-            .is_some_and(|since| since.elapsed() >= BACKLOG_LIMIT);
+        let cutoff = match gate.map(|gate| prepare_export_ingress(&mut events, gate)) {
+            Some(Ok(cutoff)) => cutoff,
+            Some(Err(())) => {
+                r.backlog_since = backlog_head_since(&events);
+                r.backlog = events;
+                return Ok(());
+            }
+            None => None,
+        };
         let mut chunks = Duration::ZERO;
         // A run of ForgetLevelChunk (thousands when the server's view moves far: a
         // teleport at 32 chunks) is forgotten at once, before whatever follows it.
         let mut forgotten = horizon_client::fast_hash::FxHashSet::default();
         let mut forgotten_credits = Vec::new();
-        while let Some(item) = events.pop_front() {
+        // C1..CN below belong to one closed bundle; while it is non-zero the
+        // frame may not stop at a chunk budget or reorder its items.
+        let mut group_left = 0usize;
+        while let Some((item, queued_at)) = events.pop_front() {
+            let item = match item {
+                Received::Bundle(parts, credit) => {
+                    let chunk_count = parts
+                        .iter()
+                        .filter(|part| matches!(part, BundlePart::Chunk(_)))
+                        .count();
+                    let ready = self
+                        .remote
+                        .as_ref()
+                        .map_or(0, |r| r.decoder.ready_run(chunk_count));
+                    if ready < chunk_count {
+                        events.push_front((Received::Bundle(parts, credit), queued_at));
+                        break;
+                    }
+                    let last = parts.len().saturating_sub(1);
+                    let mut credit = Some(credit);
+                    group_left = parts.len();
+                    for (index, part) in parts.into_iter().enumerate().rev() {
+                        let lease = if index == last { credit.take() } else { None };
+                        let item = match part {
+                            BundlePart::Event(event) => Received::Event(event, lease),
+                            BundlePart::Chunk(format) => Received::Chunk(format, lease),
+                        };
+                        events.push_front((item, queued_at));
+                    }
+                    continue;
+                }
+                other => other,
+            };
+            let in_bundle = group_left > 0;
+            if in_bundle {
+                group_left -= 1;
+            }
             if let Received::Event(Event::Packet(packet), _) = &item
                 && let C::ForgetLevelChunk(p) = &**packet
             {
@@ -49,9 +167,20 @@ impl Game<'_> {
             });
             forgotten_credits.clear();
             let chunk = matches!(item, Received::Chunk(_, _));
-            if chunk && !overdue && chunks >= CHUNK_PACKETS_PER_FRAME {
-                events.push_front(item);
+            if chunk
+                && !in_bundle
+                && chunks >= CHUNK_PACKETS_PER_FRAME
+                && !backlog_item_overdue(queued_at, Instant::now())
+            {
+                events.push_front((item, queued_at));
                 break;
+            }
+            if is_local && let Some(fence) = export_fence(&item) {
+                self.note_export_fence(fence);
+                if cutoff == Some(fence) {
+                    break;
+                }
+                continue;
             }
             let started = chunk.then(Instant::now);
             let (event, _credit) = match item {
@@ -65,7 +194,11 @@ impl Game<'_> {
                     let (packet, column) = match next {
                         Next::Ready(decoded) => decoded,
                         Next::Decoding => {
-                            events.push_front(Received::Chunk(format, credit));
+                            debug_assert!(
+                                !in_bundle,
+                                "a bundle was released before all its chunks could decode"
+                            );
+                            events.push_front((Received::Chunk(format, credit), queued_at));
                             break;
                         }
                         Next::Lost => {
@@ -81,6 +214,9 @@ impl Game<'_> {
                     }
                     chunks += started.map_or(Duration::ZERO, |t| t.elapsed());
                     continue;
+                }
+                Received::Bundle(..) => {
+                    unreachable!("bundles are expanded before this match")
                 }
             };
             match event {
@@ -149,7 +285,7 @@ impl Game<'_> {
                         remote.quiet_commands = false;
                         remote.custom_books = false;
                     }
-                    self.clear_lod();
+                    self.clear_lod_for_world_entry();
                     if let Some(remote) = &self.remote {
                         remote.session.reset_far_terrain();
                     }
@@ -226,7 +362,13 @@ impl Game<'_> {
                     from_server,
                 } => {
                     self.reset_book_view();
-                    log::info!("Horizon: disconnected: {reason}");
+                    log::info!(
+                        "Horizon: disconnected: {}",
+                        horizon_client::logging::one_line(&horizon_client::net::logged_reason(
+                            &reason,
+                            key.as_deref()
+                        ))
+                    );
                     // ClientboundTransferPacket left a target: connect there
                     // instead of showing the disconnect, the stored cookies
                     // carried over (ClientCommonPacketListenerImpl.
@@ -237,7 +379,7 @@ impl Game<'_> {
                         })
                     });
                     if let Some((address, name, cookies)) = transfer {
-                        self.leave_server(None)?;
+                        self.leave_server_for_transfer()?;
                         self.connect_server_with_cookies(&address, &name, Some(cookies))?;
                         return Ok(());
                     }
@@ -248,7 +390,13 @@ impl Game<'_> {
                 }
                 Event::RawPayload(mut incoming) => {
                     if !self.receive_client_payload(&mut incoming)? {
-                        events.push_front(Received::Event(Event::RawPayload(incoming), _credit));
+                        // A bundled payload's main root can defer (a busy guest).
+                        // It stays at the head, so the rest of the group follows
+                        // it in order once the root commits.
+                        events.push_front((
+                            Received::Event(Event::RawPayload(incoming), _credit),
+                            queued_at,
+                        ));
                         break;
                     }
                 }
@@ -258,6 +406,9 @@ impl Game<'_> {
                     }
                     packet => self.handle_packet(packet)?,
                 },
+                Event::Bundle(_) => {
+                    unreachable!("bundles are not transported inside bundles")
+                }
             }
             chunks += started.map_or(Duration::ZERO, |t| t.elapsed());
             if self.remote.is_none() {
@@ -270,14 +421,180 @@ impl Game<'_> {
             });
         }
         if let Some(r) = self.remote.as_mut() {
-            r.backlog_since = if events.is_empty() {
-                None
-            } else {
-                Some(r.backlog_since.unwrap_or_else(Instant::now))
-            };
+            r.backlog_since = backlog_head_since(&events);
             r.backlog = events;
         }
         self.send_suggestion_request();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn completed_export_batch_returns_credit_before_its_fence_arrives() {
+        let packet_charge = horizon_mod_runtime::byte_channel::message_overhead::<Event>() + 1;
+        let (send, receive) =
+            horizon_client::net::ingress::channel(2 * packet_charge, |_: &Event| 1).unwrap();
+        let packet = |id| Event::Packet(Box::new(C::Unknown(id, Vec::new())));
+        let fence = 93_u64;
+        let marker = Event::Packet(Box::new(C::Unknown(
+            horizon_client::net::EXPORT_FENCE,
+            fence.to_be_bytes().to_vec(),
+        )));
+        let mut backlog = VecDeque::new();
+        let collect = |backlog: &mut VecDeque<_>| {
+            backlog.extend(receive.take_turn().into_iter().map(|receipt| {
+                let (event, lease) = receipt.into_parts();
+                (Received::Event(event, Some(lease)), Instant::now())
+            }));
+        };
+
+        send.send(packet(1)).unwrap();
+        send.send(packet(2)).unwrap();
+        let blocked = send.send(packet(3)).unwrap_err();
+        collect(&mut backlog);
+        assert!(prepare_export_ingress(&mut backlog, ExportIngress::Blocked).is_err());
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Through(fence)),
+            Ok(Some(fence))
+        );
+        assert!(backlog.iter().all(|(item, _)| export_fence(item).is_none()));
+        assert_eq!(receive.stats().reserved_bytes, 2 * packet_charge);
+        backlog.clear();
+        assert_eq!(receive.stats().reserved_bytes, 0);
+
+        send.send(blocked.value).unwrap();
+        send.send(marker).unwrap();
+        collect(&mut backlog);
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Through(fence)),
+            Ok(Some(fence))
+        );
+        let (last_packet, _) = backlog.pop_front().unwrap();
+        assert!(
+            matches!(last_packet, Received::Event(Event::Packet(p), _) if matches!(*p, C::Unknown(3, _)))
+        );
+        let (marker, _) = backlog.pop_front().unwrap();
+        assert_eq!(export_fence(&marker), Some(fence));
+    }
+
+    #[test]
+    fn export_ingress_drains_through_the_matching_fence_and_prioritizes_disconnect() {
+        use super::*;
+        use horizon_client::net::ingress;
+        let (send, recv) = ingress::channel(1024, |_: &Event| 1).unwrap();
+        let packet = |tick| {
+            Event::Packet(Box::new(C::SetTime(
+                horizon_protocol::packets::play::SetTime {
+                    game_time: tick,
+                    clocks: Vec::new(),
+                },
+            )))
+        };
+        let marker = |fence: u64| {
+            Event::Packet(Box::new(C::Unknown(
+                horizon_client::net::EXPORT_FENCE,
+                fence.to_be_bytes().to_vec(),
+            )))
+        };
+        let mut backlog = VecDeque::new();
+        let add = |backlog: &mut VecDeque<_>, event| {
+            send.send(event).unwrap();
+            let (event, lease) = recv.try_recv_owned().unwrap().into_parts();
+            backlog.push_back((Received::Event(event, Some(lease)), Instant::now()));
+        };
+        add(&mut backlog, packet(11));
+        add(&mut backlog, marker(8));
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Through(9)),
+            Ok(Some(9))
+        );
+        add(&mut backlog, marker(9));
+        add(&mut backlog, packet(12));
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Blocked),
+            Err(())
+        );
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Through(9)),
+            Ok(Some(9))
+        );
+        assert_eq!(backlog.len(), 4);
+        add(
+            &mut backlog,
+            Event::Disconnected {
+                reason: String::from("test"),
+                key: None,
+                from_server: true,
+            },
+        );
+        assert_eq!(
+            prepare_export_ingress(&mut backlog, ExportIngress::Blocked),
+            Ok(None)
+        );
+        assert_eq!(backlog.len(), 1);
+        assert!(matches!(
+            backlog.pop_front(),
+            Some((Received::Event(Event::Disconnected { .. }, _), _))
+        ));
+    }
+
+    use super::*;
+
+    /// Continuous chunk arrivals keep `events` non-empty across frames; once an
+    /// overdue head drains, fresher items behind it must still respect the frame
+    /// budget instead of staying overdue until the queue fully empties (#11751).
+    #[test]
+    fn continuous_arrivals_do_not_keep_fresh_items_overdue_after_head_drains() {
+        fn drain_past_budget(
+            queue: &mut VecDeque<(&'static str, Instant)>,
+            now: Instant,
+        ) -> (Vec<&'static str>, Option<Instant>) {
+            let mut drained = Vec::new();
+            while let Some((item, queued_at)) = queue.pop_front() {
+                if !backlog_item_overdue(queued_at, now) {
+                    queue.push_front((item, queued_at));
+                    break;
+                }
+                drained.push(item);
+            }
+            (drained, backlog_head_since(queue))
+        }
+
+        let t0 = Instant::now();
+        let fresh_at = t0 + (BACKLOG_LIMIT - Duration::from_millis(1));
+        let frame1_now = t0 + BACKLOG_LIMIT;
+        let mut events: VecDeque<(&'static str, Instant)> =
+            VecDeque::from([("old_head", t0), ("fresh_1", fresh_at)]);
+
+        // At `t0 + BACKLOG_LIMIT`, the old head is overdue and drains even after
+        // the frame's chunk budget is spent, while `fresh_1` (1 ms old) defers and
+        // `backlog_since` advances to `fresh_at`.
+        let (drained, since) = drain_past_budget(&mut events, frame1_now);
+        assert_eq!(drained, ["old_head"]);
+        assert_eq!(since, Some(fresh_at));
+
+        // A continuous stream appends another fresh item while the queue is still
+        // non-empty; 10 ms later `t0` would still be overdue, yet `fresh_1` is only
+        // 11 ms old so nothing bypasses the frame budget.
+        let arrival_at = frame1_now + Duration::from_millis(10);
+        events.push_back(("fresh_2", arrival_at));
+        let (drained, since) = drain_past_budget(&mut events, arrival_at);
+        assert!(drained.is_empty());
+        assert_eq!(since, Some(fresh_at));
+
+        // Once `fresh_1` itself reaches `BACKLOG_LIMIT`, only it drains while
+        // `fresh_2` remains deferred and `backlog_since` advances to `arrival_at`.
+        let frame3_now = fresh_at + BACKLOG_LIMIT;
+        let (drained, since) = drain_past_budget(&mut events, frame3_now);
+        assert_eq!(drained, ["fresh_1"]);
+        assert_eq!(since, Some(arrival_at));
+
+        // Once the last item drains, `backlog_since` clears to `None`.
+        let (drained, since) = drain_past_budget(&mut events, arrival_at + BACKLOG_LIMIT);
+        assert_eq!(drained, ["fresh_2"]);
+        assert!(since.is_none());
+        assert!(events.is_empty());
     }
 }

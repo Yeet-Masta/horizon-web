@@ -20,6 +20,8 @@ impl Mob {
             .is_some_and(|attacker| wither::shielded_from(self.species(), attacker))
     }
 
+    /// `LivingEntity.isInvulnerableTo` for one hit attempt, with the overrides of the Warden
+    /// (digging) and the Ghast (a reflected fireball), told to the invulnerability hook.
     pub(super) fn invulnerable_to_attempt(
         &self,
         level: &mut DamageLevel<'_>,
@@ -39,6 +41,11 @@ impl Mob {
                 self.removed
                     || flagged
                     || (source.is_fire() && self.kind.flags.fire_immune && !reflected)
+                    // LivingEntity.isInvulnerableTo: then EnchantmentHelper.isImmuneToDamage.
+                    || level.tags().is_some_and(|items| {
+                        let attack = level.attack();
+                        self.immune_by_enchantment(items, source, attack, level.random())
+                    })
             };
         level.invulnerability_check(crate::health::Hurting::Mob(self, source), vanilla)
     }

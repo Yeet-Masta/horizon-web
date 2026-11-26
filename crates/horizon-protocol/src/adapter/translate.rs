@@ -178,6 +178,13 @@ pub fn clientbound(
             Some(first),
         )));
     }
+    // The 26.1 login step and final spawn-info read both consume the old
+    // dimension name. Keep the same connection snapshot across the two reads.
+    let _legacy_dimensions = if matches!((state, id), (State::Play, cb::LOGIN | cb::RESPAWN)) {
+        session.legacy_registry_context()
+    } else {
+        None
+    };
     // A release at a time: an older server's packets are brought to 26.2's layout first, oldest step first.
     let mut before: Option<Vec<u8>> = None;
     type Step = fn(&Session, State, i32, &[u8]) -> Result<Option<Vec<u8>>>;
@@ -248,8 +255,14 @@ pub fn clientbound(
         }
         (State::Play, cb::LEVEL_CHUNK_WITH_LIGHT) => chunk(session, ids, payload)?,
         (State::Play, cb::LIGHT_UPDATE) => light_update(payload)?,
-        (State::Play, cb::UPDATE_ADVANCEMENTS) => advancements(ids, payload)?,
-        (State::Play, cb::LEVEL_PARTICLES) => particles(ids, payload)?,
+        (State::Play, cb::UPDATE_ADVANCEMENTS) => {
+            let _legacy = session.legacy_item_context();
+            advancements(ids, payload)?
+        }
+        (State::Play, cb::LEVEL_PARTICLES) => {
+            let _legacy = session.legacy_item_context();
+            particles(ids, payload)?
+        }
         (State::Play, cb::EXPLODE) => {
             // 26.3 adds whether the blast's sound plays, last; 26.2 always played it.
             let mut body = payload.to_vec();
@@ -330,7 +343,10 @@ pub fn clientbound(
             strip_id(p.encode())
         }
         (State::Play, cb::SET_ENTITY_DATA) if session.version.at_most(ServerVersion::V1_21_11) => {
-            let mut p = decode_play(ids, id, payload)?;
+            let mut p = {
+                let _legacy = session.legacy_item_context();
+                decode_play(ids, id, payload)?
+            };
             if let play::Clientbound::SetEntityData(d) = &mut p {
                 if session.version.at_most(ServerVersion::V1_20_3) {
                     v1_20_3::entity_data(session, d);
@@ -356,11 +372,17 @@ pub fn clientbound(
         }
         (
             State::Play,
-            cb::SET_ENTITY_DATA
-            | cb::CONTAINER_SET_CONTENT
+            cb::CONTAINER_SET_CONTENT
             | cb::CONTAINER_SET_SLOT
             | cb::SET_CURSOR_ITEM
-            | cb::SET_PLAYER_INVENTORY
+            | cb::SET_PLAYER_INVENTORY,
+        ) => {
+            let _legacy = session.legacy_item_context();
+            redecode(ids, id, payload)?
+        }
+        (
+            State::Play,
+            cb::SET_ENTITY_DATA
             | cb::SET_EQUIPMENT
             | cb::MERCHANT_OFFERS
             | cb::SOUND
@@ -547,6 +569,7 @@ pub fn serverbound(
         (State::Play, sb::SET_CREATIVE_MODE_SLOT | sb::CONTAINER_CLICK) => {
             let p = play::Serverbound::decode(id, payload)?;
             let payload = {
+                let _legacy = session.legacy_item_context();
                 let _down = ids::renumbering(ids, Way::Down);
                 strip_id(p.encode())
             };
@@ -1645,7 +1668,6 @@ pub(crate) mod client_layout_v1_21_4 {
             return Ok(None);
         }
         Ok(Some(match id {
-            cb::EXPLODE => explode_up(payload)?,
             cb::PLAYER_CHAT => player_chat_up(payload)?,
             cb::SET_PLAYER_TEAM => team_up(payload)?,
             cb::UPDATE_ADVANCEMENTS => advancements_up(payload),
@@ -1676,25 +1698,6 @@ pub(crate) mod client_layout_v1_21_4 {
             .position(|n| *n == name)
             .map(|i| i as i32)
             .ok_or_else(|| crate::Error::new(format!("unknown team enum {name}")))
-    }
-
-    /// The explosion's player knockback: 1.21.4 writes a double, then two floats; 1.21.5 three doubles.
-    #[cfg(test)]
-    fn explode_up(payload: &[u8]) -> Result<Vec<u8>> {
-        let mut r = Reader::new(payload);
-        let mut w = Writer::new();
-        for _ in 0..3 {
-            w.f64(r.f64()?);
-        }
-        let knockback = r.bool()?;
-        w.bool(knockback);
-        if knockback {
-            w.f64(r.f64()?);
-            w.f64(f64::from(r.f32()?));
-            w.f64(f64::from(r.f32()?));
-        }
-        w.bytes(r.rest());
-        Ok(w.data)
     }
 
     /// A player chat with the global index 1.21.5 starts it with.
@@ -2102,8 +2105,8 @@ pub(crate) mod client_layout_v1_21_8 {
 
 /// 1.20.6 to 1.21 (protocol 766 to 767): the mirror of `client_session::step_1_20_6`. Clientbound, from the two
 /// Packets pages:
-/// - `explode`'s sound is a sound event holder in 1.21 (a VarInt, 0 for an inline one, then the location and the
-///   range); 1.20.6 sends the inline one alone.
+/// - `explode`'s sound is a sound event holder in both (a VarInt, 0 for an inline one, then the location and the
+///   range; javap on both clients' `ClientboundExplodePacket`), so it is the same bytes.
 /// - `projectile_power` is one double, the power, in 1.21; 1.20.6 sends the vector.
 /// - `merchant_offers`: a trade's costs are trade items in 1.21 (an item id, a count and the components they add,
 ///   no stack flag), and the second cost is optional. The stacks are read under 1.20.6's ids and components.
@@ -2163,8 +2166,7 @@ pub(crate) mod client_layout_v1_20_6 {
         })
     }
 
-    /// explode: the sound is a holder in 1.21, and an inline one (0) here; the two explosion particles have no
-    /// data, so they are read as their ids alone.
+    /// explode: the sound is a holder in both releases; the packet is the same bytes.
     #[cfg(test)]
     fn explode(payload: &[u8]) -> Result<Vec<u8>> {
         let mut r = Reader::new(payload);
@@ -2177,7 +2179,6 @@ pub(crate) mod client_layout_v1_20_6 {
         r.varint()?; // the large explosion particle's id
         let mut w = Writer::new();
         w.bytes(r.since(0));
-        w.varint(0);
         w.bytes(r.rest());
         Ok(w.data)
     }

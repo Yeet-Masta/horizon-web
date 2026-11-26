@@ -93,7 +93,7 @@ pub(super) fn picked_pack(settings: &horizon_client::settings::Settings) -> &str
 
 /// What a renderer readies for the pick, unless it was refused with no version of it left
 /// drawing (`native_shaders::remember_look`), is missing or its owner is off.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PickedPack {
     /// It draws flat where the device can (`pack_draws_flat`): the sections are laid out so.
     pub draws_flat: bool,
@@ -121,8 +121,32 @@ impl PickedPack {
     }
 }
 
+/// `follow_frame`'s key for the pick: its path and outcome, which `look` reads from disk; with
+/// no pick, nothing is read (#19216: it asks every frame).
+pub(super) fn pick_key(
+    picked: &str,
+    look: impl FnOnce() -> (std::path::PathBuf, Option<bool>),
+) -> (std::path::PathBuf, Option<bool>) {
+    if picked.is_empty() {
+        return (std::path::PathBuf::new(), Some(false));
+    }
+    look()
+}
+
 pub(super) fn picked_pack_shape(settings: &horizon_client::settings::Settings) -> PickedPack {
     let picked = picked_pack(settings);
+    shape_of(picked, || shape_on_disk(settings, picked))
+}
+
+/// The shape of `picked`, which `look` reads from disk; with no pick, nothing is read.
+fn shape_of(picked: &str, look: impl FnOnce() -> PickedPack) -> PickedPack {
+    if picked.is_empty() {
+        return PickedPack::default();
+    }
+    look()
+}
+
+fn shape_on_disk(settings: &horizon_client::settings::Settings, picked: &str) -> PickedPack {
     let dir = Game::shader_packs_dir();
     let path = if dev_pack().is_some() {
         dir.join(picked)
@@ -178,7 +202,7 @@ pub(super) fn active_pack<'a>(picked: &'a str, mods: &ModList) -> &'a str {
     }
 }
 
-/// A selected pack may read resource-pack material maps, whether native or GLSL.
+/// Whether the selected pack can read resource-pack material maps.
 pub(super) fn picks_material_pack(settings: &horizon_client::settings::Settings) -> bool {
     let dev = horizon_std::env::var("HORIZON_SHADER_PACK").ok();
     let picked = active_pack(
@@ -196,6 +220,103 @@ pub(super) fn picks_material_pack(settings: &horizon_client::settings::Settings)
     };
     path.file_name()
         .is_none_or(|f| !active_pack(&f.to_string_lossy(), &settings.mods).is_empty())
+        && pack_material_maps(
+            &path,
+            picked.starts_with("horizon:"),
+            horizon_client::sprites::labpbr_maps(),
+        )
+}
+
+/// Classic demand is learned from finalized renderer bindings and kept through the resource
+/// reload it requests. A fresh process starts without it; native demand comes from its API.
+fn pack_material_maps(path: &std::path::Path, native_identity: bool, classic_demand: bool) -> bool {
+    if native_identity || horizon_shader_api::package::is_pack(path) {
+        horizon_shader_api::Pack::read_manifest(path)
+            .is_ok_and(|m| super::native_shaders::needs_material_maps(&m))
+    } else {
+        classic_demand
+    }
+}
+
+#[cfg(test)]
+mod material_demand_tests {
+    use super::pack_material_maps;
+
+    #[test]
+    fn only_native_material_stages_request_companion_maps() {
+        let root = horizon_std::env::temp_dir().join(format!(
+            "horizon-native-material-demand-{}",
+            std::process::id()
+        ));
+        horizon_std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join(horizon_shader_api::MANIFEST);
+        let api = horizon_shader_api::manifest::API;
+        for stage in ["sky", "post", "material"] {
+            let table = match stage {
+                "post" => "[[post]]".to_owned(),
+                _ => format!("[{stage}]"),
+            };
+            horizon_std::fs::write(
+                &manifest,
+                format!(
+                    "schema=1\nid=\"demand\"\nname=\"Demand\"\nversion=\"1\"\n\
+                     api=\"{api}\"\n{table}\nfile=\"stage.wgsl\"\n"
+                ),
+            )
+            .unwrap();
+            horizon_shader_api::Pack::read_manifest(&root)
+                .unwrap_or_else(|error| panic!("{stage}: invalid current-API fixture: {error}"));
+            // No shader source is needed to decide whether this native API exposes maps.
+            for previous in [false, true] {
+                assert_eq!(
+                    pack_material_maps(&root, false, previous),
+                    stage == "material",
+                    "{stage}, previous demand {previous}"
+                );
+            }
+        }
+        horizon_std::fs::write(&manifest, "not a native manifest").unwrap();
+        assert!(!pack_material_maps(&root, false, true));
+        horizon_std::fs::write(
+            &manifest,
+            "schema=1\nid=\"demand\"\nname=\"Demand\"\nversion=\"1\"\napi=\"0.2\"\n\
+             [frame]\nblend=\"linear\"\nprimaries=\"bt2020\"\n\
+             [material]\nfile=\"stage.wgsl\"\n",
+        )
+        .unwrap();
+        horizon_shader_api::Pack::read_manifest(&root)
+            .expect("valid but undrawable native manifest");
+        assert!(!pack_material_maps(&root, false, true));
+        horizon_std::fs::write(
+            &manifest,
+            r#"schema=1
+id="demand"
+name="Demand"
+version="1"
+api="0.1"
+[material]
+file="stage.wgsl"
+"#,
+        )
+        .unwrap();
+        assert!(horizon_shader_api::Pack::read_manifest(&root).is_err());
+        assert!(
+            !pack_material_maps(&root, false, true),
+            "a retired native API cannot retain learned material-map demand"
+        );
+        horizon_std::fs::remove_file(manifest).unwrap();
+        horizon_std::fs::create_dir_all(root.join("shaders")).unwrap();
+        assert!(!pack_material_maps(&root, false, false));
+        assert!(
+            pack_material_maps(&root, false, true),
+            "retain learned PBR demand through reload"
+        );
+        assert!(
+            !pack_material_maps(&root, true, true),
+            "an unavailable native identity cannot inherit classic demand"
+        );
+        horizon_std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// Prefer the connection's current block tags, including a local integrated server's.
@@ -281,6 +402,7 @@ mod block_tag_source_tests {
 pub(super) struct PackIds {
     entities: HashMap<String, i32>,
     blocks: BlockIds,
+    layers: std::sync::Arc<horizon_client::mesher::BlockLayerTable>,
     /// `blockEntityId` by block state, filled as states are drawn.
     block_states: RefCell<HashMap<u32, i32>>,
     /// The id of a name the file lacks: 65535, or 0 without the file.
@@ -344,8 +466,7 @@ impl Game<'_> {
             self.streaming.looks = looks;
             self.all_sections_changed();
         } else if add_ray_looks {
-            self.streaming
-                .free(std::mem::take(&mut self.pending_uploads));
+            self.streaming.free(self.pending_uploads.take_all());
             self.streaming.reload_sections(&mut self.world);
         }
         let selected = picked_pack(&self.settings).to_owned();
@@ -389,30 +510,47 @@ impl Game<'_> {
                 // Stopped because it isn't wanted any more: not the pack's failure.
                 Err(refused) if refused.is_cancelled() => {}
                 Err(refused) => {
+                    let no_room = refused.is_no_room();
                     for note in refused.notes {
                         log::warn!("shader pack {name}: {note}");
                     }
-                    self.shader_pack_failed(&name, dimension, &refused.reason);
+                    self.shader_pack_failed(&name, dimension, &refused.reason, no_room);
                 }
             }
         }
+        // A pack running without the room in video memory for what it draws into, frame after
+        // frame, is turned off before the frames it gives up end the game (#13624). Its files
+        // are not remembered as refused: picked again, with room, it runs.
+        let out_of_room = self.renderer.as_ref();
+        let out_of_room = out_of_room.filter(|r| r.shader_pack_out_of_room());
+        if let Some(dimension) = out_of_room.and_then(|r| r.shader_pack_dimension()) {
+            self.shader_pack_off(
+                &selected,
+                dimension,
+                "video memory is full",
+                format!("Shader pack {selected} was turned off: video memory is full"),
+            );
+        }
         if picked.is_empty() {
+            if horizon_client::sprites::labpbr_maps()
+                && self.rest_loader.is_none()
+                && self.pack_reload.is_none()
+                && !self.pending_pack_reload
+            {
+                horizon_client::sprites::set_labpbr_maps(false);
+                self.reload_packs();
+            }
             return PackInputs::default();
         }
-        if !horizon_client::sprites::labpbr_maps() {
-            horizon_client::sprites::set_labpbr_maps(true);
-            self.reload_packs();
-            return PackInputs::default();
-        }
+        let native = (dev_pack().is_none() && selected.starts_with("horizon:"))
+            || horizon_shader_api::package::is_pack(&path);
         let name = selected.clone();
         let dimension = match self.dim {
             Dim::Overworld | Dim::Extra(_) => 0,
             Dim::Nether => -1,
             Dim::End => 1,
         };
-        if (dev_pack().is_none() && selected.starts_with("horizon:"))
-            || horizon_shader_api::package::is_pack(&path)
-        {
+        if native {
             // One of Horizon's own packs (game/modding/native_shaders.rs).
             self.tick_native_shader_pack(&path);
         } else if let Some(renderer) = &mut self.renderer
@@ -423,6 +561,7 @@ impl Game<'_> {
             let started = horizon_std::time::Instant::now();
             // A pack is not the game's own code: one that makes the shader compiler (or our
             // translation of it) panic is turned off instead of crashing every world load (#3525).
+            let mut no_room = false;
             let loaded = horizon_client::crash::contain(|| {
                 match Pack::open(&path).map(|p| p.with_chosen(chosen_shader_options(name))) {
                     Ok(pack) => {
@@ -456,7 +595,11 @@ impl Game<'_> {
                                 .collect(),
                         );
                         let folder = dimension_folder_named(&pack, self.dim.id(), dimension);
-                        let inputs = renderer.pack_inputs();
+                        // Without room in video memory for its block atlas it is not loaded.
+                        let inputs = renderer.pack_inputs().map_err(|refused| {
+                            no_room = refused.is_no_room();
+                            refused.reason
+                        })?;
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
                         // Textures that name one of the game's: from the resource packs over
                         // the game's own resources.
@@ -483,6 +626,28 @@ impl Game<'_> {
                         for note in &ids.notes {
                             log::warn!("shader pack {name}: block.properties: {note}");
                         }
+                        let layer_properties = Properties::parse(
+                            &pack.read_text("block.properties").unwrap_or_default(),
+                            &macros,
+                        );
+                        let layers = horizon_shaders::BlockLayers::parse(&layer_properties);
+                        for note in &layers.notes {
+                            log::warn!("shader pack {name}: block.properties: {note}");
+                        }
+                        let layers = horizon_client::mesher::BlockLayerTable::resolve(
+                            self.pack.assets.registry,
+                            &layers,
+                        )
+                        .with_lava_layers(
+                            ["lava_still", "lava_flow"]
+                                .iter()
+                                .filter_map(|f| {
+                                    let name = format!("minecraft:block/{f}");
+                                    self.pack.render.sprite_layers.get(&name).map(|&l| l as u16)
+                                })
+                                .collect(),
+                        )
+                        .into();
                         let text = pack.read_text("entity.properties");
                         let entities = BlockIds::parse_kind(
                             &Properties::parse(text.as_deref().unwrap_or_default(), &macros),
@@ -496,6 +661,7 @@ impl Game<'_> {
                         let block_items =
                             block_item_ids(self.res.facts(), self.pack.assets.registry, &ids);
                         self.pack_ids = Some(PackIds {
+                            layers,
                             block_items,
                             item_file: text.is_some(),
                             items: items.plain(),
@@ -544,7 +710,29 @@ impl Game<'_> {
             });
             // A pack that can't run is turned off like one that panics.
             if let Err(error) = loaded.flatten() {
-                self.shader_pack_failed(name, dimension, &error);
+                self.shader_pack_failed(name, dimension, &error, no_room);
+            }
+        }
+        self.sync_block_layers();
+        // Wait for a settled pipeline and resource loader: the no-pack dimension marker
+        // below must not be mistaken for new demand while its resource reload is pending.
+        // This also releases maps after synchronous pack-open errors, which never poll.
+        if !native
+            && self.rest_loader.is_none()
+            && self.pack_reload.is_none()
+            && !self.pending_pack_reload
+            && let Some(renderer) = &mut self.renderer
+            && !renderer.shader_pack_loading()
+            && renderer.shader_pack_dimension() == Some(dimension)
+        {
+            let material_maps = renderer.shader_pack_material_maps();
+            if material_maps != horizon_client::sprites::labpbr_maps() {
+                horizon_client::sprites::set_labpbr_maps(material_maps);
+                // Mark this dimension without a pack until the rebuilt renderer has its
+                // maps, rather than drawing a material shader with temporary stand-ins.
+                let _ = renderer.set_shader_pack(dimension, None, &[]);
+                self.reload_packs();
+                return PackInputs::default();
             }
         }
         let lerp = |(old, new): (f32, f32)| old + (new - old) * partial;
@@ -651,6 +839,23 @@ impl Game<'_> {
         }
     }
 
+    /// Pack selection, options, load failure and world setup all converge here. A worker
+    /// keeps its immutable table snapshot; changing it invalidates resident/pending meshes.
+    fn sync_block_layers(&mut self) {
+        let layers = self.pack_ids.as_ref().map(|ids| &ids.layers);
+        let changed = match layers {
+            Some(layers) => layers != &self.streaming.block_layers,
+            None => {
+                let empty = horizon_client::mesher::BlockLayerTable::default();
+                *self.streaming.block_layers != empty
+            }
+        };
+        if changed {
+            self.streaming.block_layers = layers.cloned().unwrap_or_default();
+            self.all_sections_changed();
+        }
+    }
+
     /// Tag-dependent ID tables and cached block entity IDs must be rebuilt after a
     /// world's data packs or a remote server replace their tags.
     pub(super) fn invalidate_tagged_shader_ids(&mut self) {
@@ -661,7 +866,7 @@ impl Game<'_> {
         {
             self.pack_ids = None;
             if let Some(renderer) = &mut self.renderer {
-                renderer.drop_shader_packs();
+                renderer.unload_shader_pack();
             }
         }
     }
@@ -684,16 +889,27 @@ impl Game<'_> {
         write_shader_options(&options);
         self.pack_ids = None;
         if let Some(renderer) = &mut self.renderer {
-            renderer.drop_shader_packs();
+            // The block atlases stay: no option of the pack changes them.
+            renderer.unload_shader_pack();
         }
     }
 
     /// Turns off the pack `name` after loading it panicked or failed: nothing runs in its place,
     /// it is no longer the picked pack (so the next start does not load it again), and the chat
-    /// says so.
-    fn shader_pack_failed(&mut self, name: &str, dimension: i32, error: &str) {
+    /// says so. Its files are remembered as refused, so they are not tried again as they are,
+    /// unless only video memory was full (`no_room`): picked again, the same files may load.
+    fn shader_pack_failed(&mut self, name: &str, dimension: i32, error: &str, no_room: bool) {
         let path = Self::shader_packs_dir().join(name);
-        remember(&path, fingerprint(&path), false);
+        if !no_room {
+            remember(&path, fingerprint(&path), false);
+        }
+        let said = format!("Shader pack {name} could not be loaded and was turned off");
+        self.shader_pack_off(name, dimension, error, said);
+    }
+
+    /// Turns off the pack `name`, loading or running: nothing runs in its place, what it held in
+    /// video memory is freed, it is no longer the picked pack, and the chat says `said`.
+    fn shader_pack_off(&mut self, name: &str, dimension: i32, error: &str, said: String) {
         log::error!("shader pack {name}: turned off: {error}");
         self.pack_ids = None;
         if let Some(renderer) = &mut self.renderer {
@@ -705,10 +921,7 @@ impl Game<'_> {
             self.settings.horizon.shader_pack.clear();
             self.settings.save(&Self::options_path());
         }
-        self.system_message(Text::colored(
-            format!("Shader pack {name} could not be loaded and was turned off"),
-            0xFF5555,
-        ));
+        self.system_message(Text::colored(said, 0xFF5555));
     }
 
     /// Whether the game's vignette draws: the option, unless the loaded pack turns it off.
@@ -1111,23 +1324,25 @@ mod block_id_tests {
 /// their sprite layer, not their block. A layer takes the id of the block named like its sprite
 /// (`block/oak_leaves` for `oak_leaves`, and still/flow sprites for their fluid), else the id
 /// most blocks drawing it share (ties: the lowest); -1 when no block drawing it has one.
-/// y is 1 for the fluid sprites, 0 otherwise (`fluid_pairs`).
-pub(super) fn block_id_table(pack: &super::PackResources, ids: &BlockIds) -> Vec<i32> {
-    let layers = pack
-        .render
-        .sprite_layers
-        .values()
-        .max()
-        .map_or(0, |l| l + 1) as usize;
-    let sprite = |name: &str| pack.render.sprite_layers.get(name).copied();
+/// Sprite-layer `(id, fluid)` pairs from `block.properties` using the `Arc`-backed parts of
+/// `PackResources` so a background native shader build can compute material block IDs without
+/// borrowing `Game`. `y` is 1 for fluid sprites, 0 otherwise (`fluid_pairs`).
+pub(super) fn block_id_table_from(
+    render: &horizon_client::assets::RenderAssets,
+    assets: &horizon_client::assets::Assets,
+    layer_names: &HashMap<u32, String>,
+    ids: &BlockIds,
+) -> Vec<i32> {
+    let layers = render.sprite_layers.values().max().map_or(0, |l| l + 1) as usize;
+    let sprite = |name: &str| render.sprite_layers.get(name).copied();
     let fluids = ["water_still", "water_flow", "lava_still", "lava_flow"]
         .map(|f| sprite(&format!("minecraft:block/{f}")));
     let mut table = fluid_pairs(layers, fluids.into_iter().flatten());
     if ids.is_empty() {
         return table;
     }
-    let registry = pack.assets.registry;
-    let catalog = &pack.render.model_catalog;
+    let registry = assets.registry;
+    let catalog = &render.model_catalog;
     // (layer, id) -> (a block named like the sprite, the blocks).
     let mut votes = BlockIdVotes::default();
     for i in 0..registry.len() {
@@ -1144,7 +1359,7 @@ pub(super) fn block_id_table(pack: &super::PackResources, ids: &BlockIds) -> Vec
                 layer,
                 id,
                 &state.name,
-                pack.layer_names.get(&layer).map(String::as_str),
+                layer_names.get(&layer).map(String::as_str),
             );
         };
         // Fluids draw from their own sprites.
@@ -1222,6 +1437,17 @@ mod rendered_item_tests {
 mod native_pack_tests {
     use super::{active_pack, pack_draws_flat, pack_reads_vertices, picked_pack_shape};
     use horizon_client::mod_list::{Installed, ModList, NativePage};
+
+    /// With no pick neither the frame's key nor the shape looks at the disk (`follow_frame`
+    /// asks every frame), so neither depends on whether `shaderpacks/` is there.
+    #[test]
+    fn no_pick_reads_nothing_from_disk() {
+        use super::{PickedPack, pick_key, shape_of};
+        let key = pick_key("", || panic!("the key looks at the disk"));
+        assert_eq!(key, (std::path::PathBuf::new(), Some(false)));
+        let shape = shape_of("", || panic!("the shape looks at the disk"));
+        assert_eq!(shape, PickedPack::default());
+    }
 
     #[test]
     fn unknown_pack_is_optimistic_but_refusal_owner_and_presence_override_it() {

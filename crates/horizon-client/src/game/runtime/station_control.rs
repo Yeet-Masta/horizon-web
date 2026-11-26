@@ -75,8 +75,43 @@ impl Game<'_> {
             self.settings.gui_scale_inputs(),
         )))
     }
+    /// Run the window's direct player-state tools on the integrated server's saved owner.
+    /// `selected` is the window's hotbar slot: a `hotbar` in the same control poll has not
+    /// reached the server yet.
+    pub(in crate::game) fn owner_station_command(
+        &mut self,
+        words: &[&str],
+        selected: usize,
+    ) -> Result<Option<Value>> {
+        let owner = self.serving.as_ref().ok_or("no integrated server")?.owner;
+        let guest = self
+            .lan
+            .as_ref()
+            .and_then(|host| host.hub.guests.iter().find(|g| g.uuid == owner && g.placed))
+            .ok_or("the world's owner is not in the world yet")?;
+        let conn = guest.conn;
+        let dimension = super::Dim::from_id(&guest.dimension);
+        let result = self.in_owner_level(|game| {
+            if game.dim != dimension {
+                return Err("could not enter the owner's level".into());
+            }
+            game.as_guest(conn, |game| {
+                game.selected = selected;
+                game.station_command(words)
+            })
+                .ok_or("could not enter the owner's player state")?
+        });
+        if result.is_ok()
+            && words[0] == "effect"
+            && let Some(host) = self.lan.as_mut()
+        {
+            host.hub.sync_all_effects();
+        }
+        result
+    }
+
     /// Commands not known to control.rs; None when unknown here too.
-    pub(super) fn station_command(&mut self, words: &[&str]) -> Result<Option<Value>> {
+    pub(in crate::game) fn station_command(&mut self, words: &[&str]) -> Result<Option<Value>> {
         let arg = |i: usize| {
             words
                 .get(i)
@@ -235,6 +270,11 @@ impl Game<'_> {
                 ok()
             }
             "close" => {
+                // The sign editor is an overlay, not a container: its own close sends the text.
+                if self.sign_edit.is_some() {
+                    self.close_sign_editor();
+                    return ok();
+                }
                 self.close_container();
                 self.set_screen(Screen::Playing);
                 self.capture(true);

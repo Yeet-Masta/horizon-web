@@ -37,7 +37,7 @@ impl Game<'_> {
             gui,
             self.renderer.as_ref(),
             None,
-            self.settings.horizon.api,
+            self.settings.horizon.effective_api(),
             self.settings.horizon.translucent_batching,
             self.settings.vsync,
             &self.settings.horizon,
@@ -78,20 +78,26 @@ impl Game<'_> {
             return;
         }
         let picked = shader_packs::picked_pack(&self.settings);
-        let path = self.native_shaders.resolve_path(
-            &Self::shader_packs_dir(),
-            picked,
-            shader_packs::dev_pack().is_some(),
-        );
-        let available = path.fs_exists()
-            && path.file_name().is_none_or(|f| {
-                !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty()
-            });
-        let outcome = if available {
-            native_shaders::outcome(&path)
-        } else {
-            Some(false)
-        };
+        if picked.is_empty() {
+            self.native_shaders.forget_selection();
+        }
+        let (path, outcome) = shader_packs::pick_key(picked, || {
+            let path = self.native_shaders.resolve_path(
+                &Self::shader_packs_dir(),
+                picked,
+                shader_packs::dev_pack().is_some(),
+            );
+            let available = path.fs_exists()
+                && path.file_name().is_none_or(|f| {
+                    !shader_packs::active_pack(&f.to_string_lossy(), &self.settings.mods).is_empty()
+                });
+            let outcome = if available {
+                native_shaders::outcome(&path)
+            } else {
+                Some(false)
+            };
+            (path, outcome)
+        });
         // The renderer's offer can change while the game runs (Vulkan's formats follow desktop
         // HDR and the window's output), and the frame with it.
         let request = shader_packs::picked_pack_shape(&self.settings).frame();
@@ -166,18 +172,21 @@ impl Game<'_> {
                 s.biome_blend,
                 s.smooth_lighting,
                 s.cutout_leaves,
+                s.better_grass_mode(),
                 s.horizon.opaque_ice,
                 leaf_culling,
             ) != (
                 st.biome_blend,
                 st.smooth_lighting,
                 st.cutout_leaves,
+                st.better_grass_mode,
                 st.opaque_ice,
                 st.leaf_culling,
             );
         self.streaming.biome_blend = self.settings.biome_blend;
         self.streaming.smooth_lighting = self.settings.smooth_lighting;
         self.streaming.cutout_leaves = self.settings.cutout_leaves;
+        self.streaming.better_grass_mode = self.settings.better_grass_mode();
         self.streaming.opaque_ice = self.settings.horizon.opaque_ice;
         self.streaming.leaf_culling = leaf_culling;
         if reload {
@@ -221,15 +230,10 @@ impl Game<'_> {
         self.remote.as_ref()?.far_terrain
     }
 
-    /// LOD Distance as far terrain uses it (`graphics::lod_distance_capped`).
+    /// LOD Distance as far terrain uses it.
     pub(super) fn lod_distance(&self) -> u32 {
         let (distance, _) = self.far_terrain_choice();
-        match &self.renderer {
-            Some(renderer) => {
-                horizon_client::graphics::lod_distance_capped(distance, &renderer.info)
-            }
-            None => distance.min(horizon_client::lod::MAX_CHUNKS),
-        }
+        distance.min(horizon_client::lod::MAX_CHUNKS)
     }
 
     /// Only enabled LOD worlds extend the renderer's range, never simulation.
@@ -263,6 +267,8 @@ impl Game<'_> {
         self.map_patches.clear();
         self.text_patches.get_mut().clear();
         self.kept_block_entities.get_mut().clear();
+        // Mods' dynamic textures keep their names: only their pixels go up again.
+        self.dynamic_textures.forget_uploads();
         horizon_client::ui_theme::reset_atlas();
     }
 
@@ -304,8 +310,7 @@ impl Game<'_> {
     /// discarded, then every loaded section is rebuilt.
     pub(super) fn all_sections_changed(&mut self) {
         self.clear_lod();
-        self.streaming
-            .free(std::mem::take(&mut self.pending_uploads));
+        self.streaming.free(self.pending_uploads.take_all());
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.clear_sections(self.world.layout());
         }

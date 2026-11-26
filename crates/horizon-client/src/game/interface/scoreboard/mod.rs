@@ -20,7 +20,11 @@ use horizon_client::{
     text::Text,
 };
 use horizon_core::nbt::Tag;
+use horizon_protocol::packets::play::Clientbound;
 use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+mod tab_latency_tests;
 
 /// What `ServerPlayer` last recorded for the criteria that follow the player.
 #[derive(Default)]
@@ -115,17 +119,20 @@ impl Game<'_> {
         if root.is_none() && dim == super::Dim::Overworld {
             root = save::read_dat(&self.world_root.join("data/minecraft/world_border.dat"));
         }
-        root.as_ref()
+        let border = root
+            .as_ref()
             .and_then(|root| root.get("data"))
             .map(horizon_client::worldborder::WorldBorder::unpack)
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.levels.limit_border(border)
     }
     /// Save the border of the level in place (`SavedData`, one per level).
     pub(super) fn save_border(&self) {
         if !self.score.loaded || self.remote.is_some() {
             return;
         }
-        if self.border != horizon_client::worldborder::WorldBorder::default()
+        // Not `!= WorldBorder::default()`: that counts `max-world-size`, which is never saved.
+        if !self.border.is_default_when_saved()
             && let Err(e) = save::write_dat(
                 &self.border_path(self.dim),
                 Tag::compound([
@@ -481,10 +488,28 @@ impl Game<'_> {
         host.hub.teams.clone_from(&self.score.board.teams);
         let view = horizon_client::lan::scoreboard::View::of(&self.score.board);
         host.hub.guests.update_all(|g| {
-            if g.placed && g.scoreboard != view {
-                g.send_all(&g.scoreboard.changes(&view));
-                g.scoreboard = view.clone();
+            if !g.placed {
+                return;
             }
+            let packets = if !g.scoreboard_synced {
+                g.scoreboard_synced = true;
+                view.initial_packets()
+            } else if g.scoreboard != view {
+                g.scoreboard.changes(&view)
+            } else {
+                return;
+            };
+            if g.sent_sidebar_claims_slot
+                && packets.iter().any(
+                    |packet| matches!(packet, Clientbound::SetDisplayObjective(d) if d.slot == 1),
+                )
+            {
+                g.sent_sidebar_claims_slot = false;
+            }
+            if !packets.is_empty() {
+                g.send_all(&packets);
+            }
+            g.scoreboard = view.clone();
         });
     }
     /// `ServerPlayer.doTick` score updates and the statistic criteria.
@@ -1032,6 +1057,9 @@ impl Game<'_> {
         for p in players.iter_mut().filter(|p| faces.contains(&p.uuid)) {
             p.skin = self.face_skin(p.uuid, &p.skin);
         }
+        let mut latency_width = tab_list::LATENCY_WIDTH;
+        self.native_tab_list_latency_width(&mut latency_width);
+        let draw_latency = mod_api::__private::listened(mod_api::HookId::TabListLatencyDraw);
         let board = &self.score.board;
         let objective = board.display_objective(sb::SLOT_LIST);
         let up = |id: u128| upside_down.contains(&id);
@@ -1056,8 +1084,35 @@ impl Game<'_> {
             upside_down: &up,
             mark: &marked,
         };
-        let draws = self.tab_list.layout(&inputs, &self.gui.atlas.font);
-        horizon_client::hud_layout::paint(batch, &self.gui.atlas, &draws);
+        let mut slots = Vec::new();
+        let draws = self.tab_list.layout_with_latency(
+            &inputs,
+            &self.gui.atlas.font,
+            latency_width,
+            draw_latency.then_some(&mut slots),
+        );
+        let atlas = &self.gui.atlas;
+        let mut start = 0;
+        for slot in slots {
+            let at = slot.sprite_at;
+            horizon_client::hud_layout::paint(batch, atlas, &draws[start..at]);
+            let mark = batch.vertices.len();
+            let mut canceled = false;
+            self.native_tab_list_latency_draw(
+                slot.player.uuid,
+                &slot.player.name,
+                slot.player.latency,
+                slot.bounds,
+                batch,
+                &mut canceled,
+            );
+            if batch.vertices.len() != mark {
+                let [x0, y0, x1, y1] = slot.bounds.map(|n| n as f32);
+                batch.clip_since(mark, x0, y0, x1, y1);
+            }
+            start = at + usize::from(canceled);
+        }
+        horizon_client::hud_layout::paint(batch, atlas, &draws[start..]);
     }
 }
 

@@ -979,34 +979,30 @@ fn a_material_can_read_hdr_light_sources_and_ray_hit_looks_together() {
     assert!(!report.looks());
 }
 
-/// Ordinary `[[post]]` entries sharing a file are built from the first entry's, `files` and all,
-/// as before compute passes: only compute entries are built per entry.
+/// Ordinary `[[post]]` entries sharing a file are each built with their own `files` ("before
+/// this stage's file", docs/api/shaders.md), in a pack without compute passes too (#16234).
 #[test]
-fn ordinary_post_entries_sharing_a_file_build_as_the_first() {
+fn ordinary_post_entries_sharing_a_file_build_each_with_its_own_files() {
     let manifest = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
                     [[post]]\nfile = \"post.wgsl\"\nfiles = [\"first.wgsl\"]\n\
                     [[post]]\nfile = \"post.wgsl\"\nfiles = [\"second.wgsl\"]\n";
     let post = "fn post(input: PostInput) -> vec4<f32> { return input.color * tint(); }\n";
+    let first = "fn tint() -> vec4<f32> { return vec4<f32>(1.0); }\n";
+    let second = "fn tint() -> vec4<f32> { return vec4<f32>(0.5); }\n";
     let files = [
         (MANIFEST, manifest),
         ("post.wgsl", post),
-        (
-            "first.wgsl",
-            "fn tint() -> vec4<f32> { return vec4<f32>(1.0); }\n",
-        ),
-        ("second.wgsl", "fn shade() -> f32 { return 0.5; }\n"),
+        ("first.wgsl", first),
+        ("second.wgsl", second),
     ]
     .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
     .into();
-    let pack = Pack::from_files(files).unwrap();
-    // The second entry's `files` would leave `tint` undefined.
-    let report = check(&pack).unwrap();
+    let report = check(&Pack::from_files(files).unwrap()).unwrap();
     let [a, b] = &report.stages[..] else {
         panic!("two stages")
     };
-    assert_eq!(format!("{:?}", a.module), format!("{:?}", b.module));
-    let composed = horizon_shader_api::compose(&pack, StageKind::Post, "post.wgsl").text;
-    assert!(composed.contains("fn tint") && !composed.contains("fn shade"));
+    assert!(a.source.contains(first) && !a.source.contains(second));
+    assert!(b.source.contains(second) && !b.source.contains(first));
 }
 
 #[test]
@@ -1157,6 +1153,195 @@ fn the_entity_layer_is_the_pack_s_that_names_it() {
     assert!(traced(&named).unwrap().stages[0].traces_entities());
 }
 
+/// A post pass that lights its point with the sources its cell lists, each tested with a ray.
+const LIT: &str = "fn post(input: PostInput) -> vec4<f32> {
+    let p = view_position(input.uv, input.depth);
+    let near = ray_lights_near(p);
+    var light = vec3<f32>(0.0);
+    for (var i = 0u; i < near.y; i++) {
+        let source = ray_light(ray_light_at(near.x + i));
+        let to = source.position - p;
+        if !trace_any(p, normalize(to), length(to)) {
+            light += source.color * source.level;
+        }
+    }
+    return vec4<f32>(input.color.rgb + light * f32(ray_light_count()), 1.0);
+}
+";
+
+/// `[ray_tracing]` with the light sources (`lights = true`).
+fn lit(post: &str) -> Result<horizon_shader_api::Report, Vec<Problem>> {
+    post_pack(post, TONEMAP, "[ray_tracing]\nlights = true\n")
+}
+
+/// With `lights = true` a post pass that names the light functions is checked without the scene
+/// and with it (each translated to SPIR-V, HLSL and Metal) and binds their buffer against the
+/// scene; one that names none, or only in a comment, binds none. Without the key the names are
+/// unknown, and the check says which key brings them.
+#[test]
+fn the_light_sources_are_the_keyed_pack_s_that_names_them() {
+    let report = lit(LIT).unwrap();
+    let post = &report.stages[0];
+    assert!(post.traces_lights());
+    let plain = naga::valid::Capabilities::default();
+    assert!(!ray_queries(&post.module) && valid(&post.module, plain));
+    let scene = post.scene.as_ref().unwrap();
+    assert!(valid(scene, plain | naga::valid::Capabilities::RAY_QUERY));
+    assert!(!lit(SHADOWED).unwrap().stages[0].traces_lights());
+    let commented = format!("// ray_lights_near\n{SHADOWED}");
+    assert!(!lit(&commented).unwrap().stages[0].traces_lights());
+    // `RayLight` may gain fields: the pack reads it, never builds it.
+    let built = "fn post(input: PostInput) -> vec4<f32> {\n    \
+                 let l = RayLight(vec3<f32>(0.0), 1.0, vec3<f32>(1.0), 0u);\n    \
+                 return vec4<f32>(l.color, 1.0);\n}\n";
+    let problems = lit(built).unwrap_err();
+    assert_eq!(
+        refused(&problems, "RayLight"),
+        [("post.wgsl".to_owned(), 2)]
+    );
+    for unkeyed in [traced(LIT), post_pack(LIT, TONEMAP, "")] {
+        let problems: Vec<String> = unkeyed
+            .unwrap_err()
+            .iter()
+            .map(Problem::to_string)
+            .collect();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`lights = true` under `[ray_tracing]`")),
+            "{problems:#?}"
+        );
+    }
+}
+
+/// Two `[[post]]` entries of one file with different `files`: each binds the light sources by
+/// its own files, whichever comes first.
+#[test]
+fn post_entries_of_one_file_bind_the_light_sources_by_their_own_files() {
+    let post = "fn post(input: PostInput) -> vec4<f32> {\n    \
+                return vec4<f32>(shade(view_position(input.uv, input.depth)), 1.0);\n}\n";
+    let reads =
+        "fn shade(p: vec3<f32>) -> vec3<f32> { return vec3<f32>(f32(ray_lights_near(p).y)); }\n";
+    let plain = "fn shade(p: vec3<f32>) -> vec3<f32> { return p; }\n";
+    for (first, second, lit) in [
+        ("a.wgsl", "b.wgsl", [true, false]),
+        ("b.wgsl", "a.wgsl", [false, true]),
+    ] {
+        let manifest = format!(
+            "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+             [ray_tracing]\nlights = true\n\
+             [[post]]\nname = \"one\"\nfile = \"post.wgsl\"\nfiles = [\"{first}\"]\n\
+             [[post]]\nname = \"two\"\nfile = \"post.wgsl\"\nfiles = [\"{second}\"]\n\
+             [tonemap]\nfile = \"tonemap.wgsl\"\n"
+        );
+        let files = [
+            (MANIFEST, manifest.as_str()),
+            ("post.wgsl", post),
+            ("a.wgsl", reads),
+            ("b.wgsl", plain),
+            ("tonemap.wgsl", TONEMAP),
+        ]
+        .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+        .into();
+        let report = check(&Pack::from_files(files).unwrap()).unwrap();
+        let posts = report.stages.iter().filter(|s| s.kind == StageKind::Post);
+        let got: Vec<bool> = posts.map(|s| s.traces_lights()).collect();
+        assert_eq!(got, lit, "{first} first");
+    }
+}
+
+/// A light function of the pack's own (`ray_light` in the post pass and in a material stage
+/// that traces nothing) stays the pack's without `lights = true`: the pack checks, its material
+/// isn't built against the scene, and every stage composes byte for byte as the same pack with
+/// the helper named otherwise, with the scene and without it. With the key the name is taken.
+#[test]
+fn a_pack_s_own_ray_light_stays_its_own_without_the_key() {
+    let helper = "fn ray_light(c: vec4<f32>) -> vec4<f32> { return c * 0.5; }\n";
+    let post = format!(
+        "{helper}{}",
+        SHADOWED
+            .replace("return vec4<f32>(", "return ray_light(vec4<f32>(")
+            .replace(
+                "f32(hit.material + hit.tags));",
+                "f32(hit.material + hit.tags)));"
+            )
+    );
+    let material = format!(
+        "{helper}fn material(input: MaterialInput) -> Surface {{ return Surface(ray_light(input.albedo)); }}\n"
+    );
+    let pack = |name: &str, keys: &str| {
+        let manifest = format!(
+            "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+             [material]\nfile = \"material.wgsl\"\n[[post]]\nfile = \"post.wgsl\"\n\
+             [tonemap]\nfile = \"tonemap.wgsl\"\n[ray_tracing]\n{keys}"
+        );
+        let files = [
+            (MANIFEST, manifest),
+            ("material.wgsl", material.replace("ray_light", name)),
+            ("post.wgsl", post.replace("ray_light", name)),
+            ("tonemap.wgsl", TONEMAP.to_owned()),
+        ]
+        .map(|(n, t)| (n.to_owned(), t.into_bytes()))
+        .into();
+        Pack::from_files(files).unwrap()
+    };
+    let (own, other) = (pack("ray_light", ""), pack("pack_light", ""));
+    let report = check(&own).unwrap();
+    let material_stage = report.stages.iter().find(|s| s.kind == StageKind::Material);
+    assert!(material_stage.unwrap().scene.is_none());
+    assert!(report.stages.iter().all(|s| !s.traces_lights()));
+    for (kind, file) in [
+        (StageKind::Post, "post.wgsl"),
+        (StageKind::Material, "material.wgsl"),
+    ] {
+        use horizon_shader_api::{compose, compose_scene};
+        for build in [compose, compose_scene] {
+            let renamed = build(&other, kind, file)
+                .text
+                .replace("pack_light", "ray_light");
+            assert_eq!(build(&own, kind, file).text, renamed, "{kind:?}");
+        }
+    }
+    let problems: Vec<String> = check(&pack("ray_light", "lights = true\n"))
+        .unwrap_err()
+        .iter()
+        .map(Problem::to_string)
+        .collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("redefinition of `ray_light`")),
+        "{problems:#?}"
+    );
+    // The key is set: no hint to set it.
+    assert!(
+        !problems.iter().any(|p| p.contains("lights = true")),
+        "{problems:#?}"
+    );
+}
+
+/// With `lights = true` a material stage that names a light function reads them (binding 80),
+/// and a vertex stage that reaches one is refused as a ray from it is: the shadow map draws
+/// with the vertex stage, so the sources are read only where the player's camera draws.
+#[test]
+fn the_material_reads_the_light_sources_and_the_vertex_stage_doesn_t() {
+    let lit = "fn material(input: MaterialInput) -> Surface {\n    \
+               return Surface(input.albedo * f32(ray_light_count()));\n}\n";
+    let report = traced_material(lit, "lights = true\n", &[]).unwrap();
+    assert!(report.stages[0].traces_lights());
+    let vertex = "fn vertex(input: VertexInput) -> vec3<f32> {\n    \
+                  return input.position * f32(ray_light_count());\n}\n";
+    let keys = "lights = true\n[vertex]\nfile = \"vertex.wgsl\"\n";
+    let problems = traced_material(MATERIAL, keys, &[("vertex.wgsl", vertex)]).unwrap_err();
+    let needle = "`vertex` reaches the light sources: it runs in a vertex shader";
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.file == "vertex.wgsl" && p.message.contains(needle)),
+        "{problems:#?}"
+    );
+}
+
 /// Pin the post and material WGSL of a pack that reads `hit.tint` and `hit.emission` and leaves
 /// the entity layer off. The miss-only builds keep their old hashes; the scene builds add looks.
 #[test]
@@ -1188,8 +1373,8 @@ fn a_traced_pack_that_doesn_t_name_ray_entity_composes_as_before() {
     assert_eq!(
         hashes,
         [
-            "1af2ec758e6f343986c676a7df695a1bf820ac9f498840422bbb8ef72df65cc4",
-            "89fcc776fe9b408a89e71fcc10716a5d2744d79e6c1581889de27752c25e4e6a",
+            "799b33836c979da0988245348c9d7ed9bb42b16f499794e7dcfc711b9fadc7cd",
+            "dccdd1f28f0ea7624e8a4c006f80196bf2311c61dc116e29ae33878c97ac0a06",
             "e646501b8bcd9097579a8bcb14e11710439d85617dfc61b044bde4e0490c8681",
             "6c25d87e7bd62b1d8ba9fccc35d6ef6426a845e344e3bf45c197afdf1bdb7db2",
         ]
@@ -1232,8 +1417,8 @@ fn a_traced_pack_that_reads_no_hit_look_composes_as_before() {
     assert_eq!(
         hashes,
         [
-            "63fdd95b1f17608e158dbd7106ec22583c6cf5337f542bf31d6028d436d6e833",
-            "867893c5981df7efb562ecb414a836bed778dbf8323f0e76c2b675f6188227e5",
+            "4f8521322a8e7da2f5eef9345eafa5e0a03329d460e7ccfdb5dc7c30de5e0342",
+            "cf83d4f5161d6cff5cce8e868f0e683533f088620d14a442b154b098c7f77682",
             "dd8aade96c75cdd11a2866b8ab9164c7a7d36355d317dc527de0b1eba4f4880c",
             "1e944762ceee869009feb9a014806d08aa635aa706fb2683cdf1b28e4b325880",
         ]
@@ -1322,6 +1507,43 @@ fn looks_are_read_by_the_terrain_fields_alone() {
          let tier = f32(input.light_source_tier) * f32(input.light_source_whole);\n    \
          return Surface(input.albedo * full * tier);"
     ));
+    // Nor does the frame's jitter.
+    assert!(!material(
+        "    let j = frame.jitter + frame.previous_jitter;\n    \
+         return Surface(input.albedo * (1.0 + j.x * j.y));"
+    ));
+}
+
+/// A pack whose files name either jitter field gets both in its `Frame`, and checks; one that
+/// names neither gets neither.
+#[test]
+fn naming_either_jitter_declares_both() {
+    let jitters = |body: &str| {
+        let mut files = sample().files;
+        let text = format!(
+            "override reflections: bool = true;\nfn material(input: MaterialInput) -> Surface {{\n{body}\n}}\n"
+        );
+        files.insert("material.wgsl".into(), text.into_bytes());
+        let report = check(&Pack::from_files(files).unwrap()).unwrap();
+        let stage = (report.stages.iter()).find(|s| s.kind == StageKind::Material);
+        let module = &stage.unwrap().module;
+        let (_, frame) = (module.types.iter())
+            .find(|(_, t)| t.name.as_deref() == Some("Frame"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, .. } = &frame.inner else {
+            panic!("Frame is a struct")
+        };
+        (members.iter())
+            .filter_map(|m| m.name.clone())
+            .filter(|n| n.contains("jitter"))
+            .collect::<Vec<_>>()
+    };
+    let both = ["jitter", "previous_jitter"];
+    for name in both {
+        let body = format!("    return Surface(input.albedo + frame.{name}.x);");
+        assert_eq!(jitters(&body), both, "{name}");
+    }
+    assert!(jitters("    return Surface(input.albedo);").is_empty());
 }
 
 /// The sample with its material stage's file `material`, its other `files` (the stage's own,
@@ -1560,4 +1782,221 @@ fn a_hit_s_look_fields_bring_the_scene_s_looks() {
         assert!(!ray_looks(text, plain), "{text}");
     }
     assert!(!ray_looks(&none[0], looked), "uncalled look helper");
+}
+
+/// A 0.2 pack with `[ray_tracing]` and the entity stage `entity` (no post pass, no material),
+/// its manifest's other `keys` and `files` added.
+fn traced_entity(
+    entity: &str,
+    keys: &str,
+    files: &[(&str, &str)],
+) -> Result<horizon_shader_api::Report, Vec<Problem>> {
+    let manifest = format!(
+        "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+         [entity]\nfile = \"entity.wgsl\"\n[ray_tracing]\n{keys}"
+    );
+    let files = [(MANIFEST, manifest.as_str()), ("entity.wgsl", entity)]
+        .into_iter()
+        .chain(files.iter().copied())
+        .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+        .collect();
+    check(&Pack::from_files(files).unwrap())
+}
+
+/// Under `lights = true` an entity stage that names a light function, and no trace function, is
+/// built against the scene with binding 80; without the key the names are unknown, and the check
+/// says which key brings them. Its vertex shader is Horizon's, so no pack code reaches them there.
+#[test]
+fn the_entity_stage_reads_the_light_sources_it_names() {
+    let lit = "fn entity(input: EntityInput) -> Surface {\n    \
+               let near = ray_lights_near(input.position);\n    \
+               let l = ray_light(ray_light_at(near.x));\n    \
+               return Surface(input.albedo * l.level * f32(near.y));\n}\n";
+    let report = traced_entity(lit, "lights = true\n", &[]).unwrap();
+    let stage = &report.stages[0];
+    assert_eq!(stage.kind, StageKind::Entity);
+    assert!(stage.traces_lights());
+    let plain = naga::valid::Capabilities::default();
+    assert!(valid(
+        stage.scene.as_ref().unwrap(),
+        plain | naga::valid::Capabilities::RAY_QUERY
+    ));
+    assert!(
+        !traced_entity(ENTITY_SUNLIT, "lights = true\n", &[])
+            .unwrap()
+            .stages[0]
+            .traces_lights()
+    );
+    let problems: Vec<String> = traced_entity(lit, "", &[])
+        .unwrap_err()
+        .iter()
+        .map(Problem::to_string)
+        .collect();
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.contains("`lights = true` under `[ray_tracing]`")),
+        "{problems:#?}"
+    );
+}
+
+/// A mob in the sun's shadow where a ray toward it meets terrain, its rim lit by what a ray
+/// along its normal sees.
+const ENTITY_SUNLIT: &str = "fn entity(input: EntityInput) -> Surface {
+    let start = input.position + input.normal * 0.05;
+    let shadowed = trace_any(start, frame.sun_direction, frame.ray_distance);
+    let hit = trace(start, input.normal, 16.0);
+    let rough = select(0.5, 1.0 - hit_specular_map(hit).r, block_pbr_maps());
+    let rim = hit.albedo.rgb * hit.tint.rgb * rough * hit_normal_map(hit).b;
+    let lit = input.albedo.rgb * input.tint.rgb * input.lightmap * select(1.0, 0.4, shadowed);
+    return Surface(vec4<f32>(lit + rim * 0.1, input.albedo.a * input.tint.a));
+}
+";
+
+/// An entity stage traces as the material stage does: checked without the scene and with it,
+/// in a pack whose only stage it is.
+#[test]
+fn a_traced_entity_stage_is_checked_without_the_scene_and_with_it() {
+    let report = traced_entity(ENTITY_SUNLIT, "", &[]).unwrap();
+    let stage = &report.stages[0];
+    assert_eq!(stage.kind, StageKind::Entity);
+    assert!(!ray_queries(&stage.module));
+    let plain = naga::valid::Capabilities::default();
+    assert!(valid(&stage.module, plain));
+    let scene = stage.scene.as_ref().expect("the stage against the scene");
+    assert!(ray_queries(scene));
+    assert!(valid(scene, plain | naga::valid::Capabilities::RAY_QUERY));
+    assert!(!valid(scene, plain));
+    assert!(!stage.traces_entities());
+    assert!(stage.traces_looks());
+    // The renderer builds its entities from the source, the directive first.
+    let source = stage.scene_source.as_deref().unwrap();
+    assert!(source.starts_with("enable wgpu_ray_query;\n"));
+    assert!(!stage.source.contains("enable wgpu_ray_query"));
+    // The entity layer, a mob's ray meeting the other mobs, where the pack names it.
+    let layered = ENTITY_SUNLIT.replace(
+        "trace_any(start, frame.sun_direction, frame.ray_distance)",
+        "trace_any_layers(start, frame.sun_direction, frame.ray_distance, RAY_SOLID | RAY_ENTITY)",
+    );
+    let report = traced_entity(&layered, "", &[]).unwrap();
+    assert!(report.stages[0].traces_entities());
+    // Its files name no ray query of their own, as every traced stage's.
+    let own = format!("fn mine(s: acceleration_structure) {{}}\n{ENTITY_SUNLIT}");
+    let problems = traced_entity(&own, "", &[]).unwrap_err();
+    assert!(
+        problems[0].message.contains("`acceleration_structure`"),
+        "{problems:#?}"
+    );
+    // Without the key the names aren't there.
+    let p = entity_pack(ENTITY_SUNLIT).expect_err("should fail");
+    assert_eq!(p[0].file, "entity.wgsl", "{p:#?}");
+}
+
+/// An entity stage that names no trace function, in a traced pack, composes as it did before
+/// the entity stage traced, byte for byte, with the scene and without it.
+#[test]
+fn an_entity_stage_that_doesn_t_trace_is_built_as_before() {
+    let quiet = "// Not traced: trace only in a comment.\n\
+                 fn entity(input: EntityInput) -> Surface { return Surface(input.albedo); }\n";
+    let manifest = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\napi = \"0.2\"\n\
+                    [entity]\nfile = \"entity.wgsl\"\n[[post]]\nfile = \"post.wgsl\"\n\
+                    [tonemap]\nfile = \"tonemap.wgsl\"\n[ray_tracing]\n";
+    let files = [
+        (MANIFEST, manifest),
+        ("entity.wgsl", quiet),
+        ("post.wgsl", ENTITY_SHADOWED),
+        ("tonemap.wgsl", TONEMAP),
+    ]
+    .map(|(n, t)| (n.to_owned(), t.as_bytes().to_vec()))
+    .into();
+    let pack = Pack::from_files(files).unwrap();
+    let hashes: Vec<String> = [
+        horizon_shader_api::compose(&pack, StageKind::Entity, "entity.wgsl"),
+        horizon_shader_api::compose_scene(&pack, StageKind::Entity, "entity.wgsl"),
+    ]
+    .iter()
+    .map(|c| horizon_shader_api::package::sha256_hex(c.text.as_bytes()))
+    .collect();
+    assert_eq!(hashes, [ENTITY_UNTRACED; 2]);
+    // Nor does it trace in a pack whose only stage it is.
+    let report = traced_entity(quiet, "", &[]).unwrap();
+    assert!(report.stages[0].scene.is_none() && report.stages[0].scene_source.is_none());
+}
+
+/// The SHA-256 of the entity stage above, composed on main before entity tracing.
+const ENTITY_UNTRACED: &str = "e7a641d743807343540ca08b7c56a10d606b123ab3c682be0398bb089bab23ca";
+
+/// An entity stage that reads the light sources can't have its own `fn normalize`: Horizon's
+/// entity vertex code shares its module and would call it. One that only traces keeps its own
+/// builtin-named helpers, as on main.
+#[test]
+fn a_lit_entity_stage_can_t_take_a_builtin_s_name() {
+    let own = "fn normalize(v: vec3<f32>) -> vec3<f32> { return v * f32(ray_light_count()); }
+               fn entity(input: EntityInput) -> Surface {
+                   return Surface(vec4<f32>(normalize(input.normal), 1.0));
+}
+";
+    let problems = traced_entity(
+        own,
+        "lights = true
+",
+        &[],
+    )
+    .unwrap_err();
+    let needle = "`fn normalize` takes the name of a WGSL builtin: an `[entity]` stage that reads";
+    let found = problems.iter().find(|p| p.message.contains(needle));
+    assert_eq!(
+        found.map(|p| (p.file.as_str(), p.line)),
+        Some(("entity.wgsl", 1)),
+        "{problems:#?}"
+    );
+    let traced = "fn atanh(x: f32) -> f32 { return 0.5 * log((1.0 + x) / (1.0 - x)); }
+                  fn entity(input: EntityInput) -> Surface {
+                      let open = trace_any(input.position, input.normal, 16.0);
+                      return Surface(input.albedo * atanh(f32(open) * 0.5));
+}
+";
+    assert!(
+        traced_entity(
+            traced,
+            "lights = true
+",
+            &[]
+        )
+        .is_ok()
+    );
+}
+
+/// A pack without `[ray_tracing]` keeps a builtin-named helper whatever its comments say.
+#[test]
+fn a_comment_naming_binding_80_doesn_t_refuse_a_helper() {
+    let material = "// as @binding(80) would
+                    fn atanh(x: f32) -> f32 { return 0.5 * log((1.0 + x) / (1.0 - x)); }
+                    fn material(input: MaterialInput) -> Surface {
+                        return Surface(input.albedo * atanh(0.25));
+}
+";
+    let report = post_pack_with_material(material, POST, TONEMAP);
+    assert!(report.is_ok(), "{report:#?}");
+}
+
+/// A material stage that reads the light sources can't have its own `fn fract`: Horizon's
+/// terrain vertex code shares its module and would call it. One that only traces keeps it.
+#[test]
+fn a_lit_material_stage_can_t_take_a_builtin_s_name() {
+    let fract = "fn fract(a: f32) -> f32 { return a - floor(a); }\n";
+    let lit = format!(
+        "{fract}fn material(input: MaterialInput) -> Surface {{\n    \
+         return Surface(input.albedo * fract(f32(ray_light_count())));\n}}\n"
+    );
+    let problems = traced_material(&lit, "lights = true\n", &[]).unwrap_err();
+    let needle = "`fn fract` takes the name of a WGSL builtin: a `[material]` stage that reads";
+    let found = problems.iter().find(|p| p.message.contains(needle));
+    assert_eq!(found.map(|p| p.line), Some(1), "{problems:#?}");
+    let traced = format!(
+        "{fract}fn material(input: MaterialInput) -> Surface {{\n    \
+         let open = trace_any(input.position, frame.sun_direction, 16.0);\n    \
+         return Surface(input.albedo * fract(f32(open)));\n}}\n"
+    );
+    assert!(traced_material(&traced, "", &[]).is_ok());
 }

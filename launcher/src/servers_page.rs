@@ -150,6 +150,9 @@ pub(super) struct Create {
     /// The glass dialog's line under each world: its name and "Horizon · mode · size", read
     /// once when the dialog opens.
     details: HashMap<PathBuf, (String, String)>,
+    /// The glass dialog's world pictures by folder, made small in the background once it
+    /// opens (`worlds_page::icons`); empty until then.
+    icons: HashMap<PathBuf, std::sync::Arc<gpui::Image>>,
     mode: &'static str,
     difficulty: &'static str,
     max_players: u32,
@@ -940,6 +943,35 @@ impl Launcher {
         } else {
             Default::default()
         };
+        // Decoding and shrinking each world's picture reads a file of up to 4096 px a side, so a
+        // long saves folder is done off the UI thread; the rows show their pictures when it ends.
+        if glass {
+            let folders: Vec<PathBuf> = worlds.iter().map(|(_, path)| path.clone()).collect();
+            let task = cx.background_executor().spawn(async move {
+                let icons = worlds_page::icons(folders.iter().map(PathBuf::as_path));
+                (folders, icons)
+            });
+            cx.spawn(async move |this, cx| {
+                let (folders, icons) = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    // A dialog opened again meanwhile takes these pictures only when it lists
+                    // the same worlds, whose pictures they are.
+                    let Some(create) = &mut this.servers.create else {
+                        return;
+                    };
+                    if create
+                        .worlds
+                        .iter()
+                        .map(|(_, path)| path)
+                        .eq(folders.iter())
+                    {
+                        create.icons = icons;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         self.servers.problem = None;
         self.servers.create_scroll = Scrollbar::default();
         self.servers.create = Some(Create {
@@ -955,6 +987,7 @@ impl Launcher {
             eula_missing: false,
             friends,
             details,
+            icons: HashMap::new(),
         });
     }
 
@@ -3403,7 +3436,7 @@ mod tests {
         if std::env::var_os(CHILD).is_none() {
             let root = tempfile::tempdir().unwrap();
             let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "servers_page::tests::managed_start_and_restart_require_consent_before_running_the_supervisor", "--nocapture"])
+                .args(["--include-ignored", "--exact", "servers_page::tests::managed_start_and_restart_require_consent_before_running_the_supervisor", "--nocapture"])
                 .env(CHILD, "1")
                 .env("HORIZON_LAUNCHER_HOME", root.path().join("launcher"))
                 .env("HORIZON_HOME", root.path().join("cache"))
@@ -3485,5 +3518,33 @@ mod tests {
         assert_eq!(backup_label(&b("odd.zip")), ("odd".into(), String::new()));
         assert_eq!(bytes(5_292_542), "5.3 MB");
         assert_eq!(uptime(3725), "1 h 02 min");
+    }
+
+    /// horizon-server lists every zip in its `backups/`, so a zip put there by hand reaches the
+    /// page too. It is shown by its name: no date is read from its first bytes, and a name whose
+    /// 21st byte falls inside a character does not end the page.
+    #[test]
+    fn a_backup_named_by_hand_is_shown_by_its_name() {
+        let b = |name: &str| Backup {
+            name: name.into(),
+            bytes: 1,
+            modified: None,
+        };
+        for name in [
+            "резервная копия",
+            "my world before the big update",
+            "2026-10-19 11-28-57-manual",
+            "2026-10-19_11-28-57",
+            "2026-10-19_11-28-57-",
+        ] {
+            assert_eq!(
+                backup_label(&b(&format!("{name}.zip"))),
+                (name.to_string(), String::new())
+            );
+        }
+        assert_eq!(
+            backup_label(&b("2026-10-19_11-28-57-копия.zip")),
+            ("2026-10-19 11:28:57 UTC".into(), "копия".into())
+        );
     }
 }

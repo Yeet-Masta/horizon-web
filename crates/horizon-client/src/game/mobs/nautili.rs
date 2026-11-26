@@ -159,6 +159,10 @@ impl Game<'_> {
             // doPlayerRide: `player.startRiding(this)`, which keeps the
             // rider's view (`ServerPlayer.startRiding`'s `Relative.ROTATION`).
             let id = self.mobs[index].id;
+            let species = self.mobs[index].species();
+            if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+                return false;
+            }
             if !self.native_may_board(id) {
                 return true;
             }
@@ -170,19 +174,30 @@ impl Game<'_> {
         // Animal.mobInteract: a tame adult fed at full health falls in love
         // (a zombie nautilus too: `ZombieNautilus` overrides neither `isFood`
         // nor `mobInteract`, and its brain simply has no make-love goal).
-        let m = &mut self.mobs[index];
+        let m = &self.mobs[index];
         if food && m.extra.age == 0 && m.extra.in_love <= 0 {
-            m.extra.in_love = 600;
-            m.extra.love_player = true;
+            let Some((index, loved)) = self.animal_love_decision(index, true) else {
+                return true;
+            };
+            let m = &mut self.mobs[index];
+            let loved = loved && m.extra.tame;
             let sound = nautilus::eat_sound(m);
             let id = m.id;
-            self.love_cause.insert(id, self.lan_acting);
-            let kind = self.mobs[index].kind.id.clone();
-            self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
+            if loved {
+                m.extra.in_love = 600;
+                m.extra.love_player = true;
+                self.love_cause.insert(id, self.lan_acting);
+                let kind = self.mobs[index].kind.id.clone();
+                self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
+            }
             self.use_nautilus_food(item);
-            self.nautilus_sound(index, sound);
-            // Animal.setInLove: entity event 18.
-            self.mob_event_particles(self.mobs[index].id, 18);
+            if let Some(index) = self.feeding_animal_index(index, id) {
+                self.nautilus_sound(index, sound);
+                // Animal.setInLove: entity event 18.
+                if loved {
+                    self.mob_event_particles(id, 18);
+                }
+            }
             return true;
         }
         false

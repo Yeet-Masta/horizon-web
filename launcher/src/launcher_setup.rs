@@ -4,6 +4,7 @@ use super::*;
 
 impl Launcher {
     pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let migration_error = instances::absorb_held_selection().err();
         horizon_launcher::game_shader_api::draws_here();
         horizon_launcher::storage::eviction::cleanup_after_start();
         let (tx, rx) = channel();
@@ -49,6 +50,9 @@ impl Launcher {
         })
         .detach();
         let mut settings = Settings::load();
+        if migration_error.is_some() {
+            settings.instance_versions_migrated = false;
+        }
         i18n::set(settings.language());
         if settings.minecraft_dir.is_none() {
             settings.minecraft_dir = backend::default_minecraft_dir();
@@ -66,13 +70,7 @@ impl Launcher {
             });
         }
         let installed = backend::installed();
-        if settings
-            .selected
-            .as_ref()
-            .is_none_or(|s| !installed.contains(s))
-        {
-            settings.selected = installed.first().cloned();
-        }
+        settings.keep_installed_selection(&installed);
         // Pin the window's chrome (macOS title bar) to the choice before the theme reads
         // `window.appearance()`, so both draw the same look.
         titlebar::apply_appearance(window, settings.appearance);
@@ -94,9 +92,7 @@ impl Launcher {
             settings_query_focused: false,
             whats_new_open: None,
             settings_marked: 0,
-            credit_asked: false,
             version_menu: false,
-            credit_picture: None,
             sheet_size: None,
             mods_sticky: sticky::Sticky::default(),
             long_list: cull::Cull::default(),
@@ -112,13 +108,15 @@ impl Launcher {
             updates: Updates::default(),
             checked: None,
             update_error: None,
-            // The installer the last Update started could not put the new launcher in place.
+            // The installer the last Update or close started could not put the new launcher in place.
             self_update: horizon_launcher::update_handoff::take_failure()
                 .map_or(SelfUpdate::Idle, |e| SelfUpdate::Stuck(Some(e))),
             self_update_hidden: false,
+            min_restart_tried: horizon_launcher::update_handoff::min_restarted(),
             update_install: None,
             instance_install: None,
-            install_next: None,
+            manual_install_for: None,
+            install_queue: VecDeque::new(),
             stable_install: None,
             stable_failed: None,
             bar: (0., 0.),
@@ -129,6 +127,9 @@ impl Launcher {
             disk: Vec::new(),
             storage_report: None,
             storage_pending: false,
+            storage_tried: 0,
+            storage_trims: Default::default(),
+            storage_trimming: None,
             storage_confirm: None,
             storage_error: None,
             storage_revoke: None,
@@ -141,6 +142,8 @@ impl Launcher {
             importing_build: false,
             import_error: None,
             native_step: None,
+            native_stopping: false,
+            native_prepare_first: None,
             native_progress: None,
             first_build: None,
             play_after_build: None,
@@ -181,6 +184,7 @@ impl Launcher {
             restyle: true,
             background_error: None,
             location_target: None,
+            location_real_target: horizon_launcher::data_location::linked_data_folder_target(),
             location_error: location_page::startup_error(),
             location_note: location_page::startup_note(),
             args_input: line_edit::LineEdit::new(settings.game_args.clone(), 1024, 38),
@@ -194,16 +198,19 @@ impl Launcher {
             proxy_focused: false,
             proxy_focus: cx.focus_handle(),
             settings,
-            settings_save_error: None,
+            settings_save_error: migration_error,
             links: backend::Links::default(),
             preparing: false,
             prepare_log: VecDeque::new(),
             log_revision: 0,
             prepare_error: None,
+            prepare_fix: None,
             client: None,
             client_error: None,
             client_started: None,
             client_home: None,
+            client_build: None,
+            api_notice: Default::default(),
             crash: None,
             servers: servers_page::Servers::new(),
             internet: internet::Internet::new(),
@@ -256,7 +263,6 @@ impl Launcher {
             list_hover: None,
             list_menu: None,
             home_strip: Default::default(),
-            client_since: None,
             instance_mods: Default::default(),
             mod_preview: Default::default(),
             project_icons: Default::default(),
@@ -372,6 +378,15 @@ impl Launcher {
 
     /// Keeps the current choices in memory if writing fails; every page offers the same retry.
     pub(crate) fn save_settings(&mut self) -> bool {
+        if !self.settings.instance_versions_migrated {
+            if let Err(error) = instances::absorb_held_selection() {
+                self.settings_save_error = Some(error);
+                return false;
+            }
+            self.settings.selection_from(&Settings::load());
+            self.settings.instance_versions_migrated = true;
+            self.reload_instances();
+        }
         self.settings_save_error = self.settings.save().err();
         self.settings_save_error.is_none()
     }
@@ -396,8 +411,13 @@ impl Launcher {
                                 .flex_1()
                                 .min_w_0()
                                 .child(
-                                    shell::text(theme::night::UI, t.danger)
-                                        .child(tr("Settings were not saved.")),
+                                    shell::text(theme::night::UI, t.danger).child(tr(
+                                        if self.settings.instance_versions_migrated {
+                                            "Settings were not saved."
+                                        } else {
+                                            "Horizon cannot start until instance settings are saved."
+                                        },
+                                    )),
                                 )
                                 .child(
                                     shell::text(theme::night::CAPTION, t.ink_soft).child(trf(
@@ -488,6 +508,18 @@ impl Launcher {
         });
     }
 
+    /// A downloaded launcher update's line in both sidebar styles: when it goes in.
+    pub(crate) fn launcher_ready_note(&self, version: &str) -> String {
+        if horizon_launcher::update_handoff::installs_on_close() {
+            trf(
+                "Launcher {version} installs when you close Horizon",
+                &[("version", version)],
+            )
+        } else {
+            trf("Launcher {version}", &[("version", version)])
+        }
+    }
+
     /// Recovery text shared by both sidebar styles and Settings.
     pub(crate) fn launcher_update_help(&self, error: Option<&str>) -> String {
         if let Some(error) = error {
@@ -540,14 +572,43 @@ impl Launcher {
     /// Update: the window closes, the installer puts the new launcher in place and starts it.
     /// When another launcher already put it there, this one only restarts.
     pub(crate) fn apply_launcher_update(&mut self, cx: &mut App) {
-        match horizon_launcher::update_handoff::start_now() {
+        self.hand_over_launcher_update(false, cx)
+    }
+
+    /// `for_minimum`: the restart for links.json's `min_launcher`, which the launcher it starts
+    /// doesn't repeat (`update_handoff::MIN_RESTARTED_ENV`).
+    fn hand_over_launcher_update(&mut self, for_minimum: bool, cx: &mut App) {
+        match horizon_launcher::update_handoff::start_now(for_minimum) {
             Ok(true) => {
                 servers_page::keep_running_through_update();
                 shut_down(cx)
             }
-            Ok(false) => self.self_update = SelfUpdate::Failed(backend::restart()),
+            Ok(false) => self.self_update = SelfUpdate::Failed(backend::restart_with(for_minimum)),
             Err(e) => self.self_update = SelfUpdate::Failed(e),
         }
+    }
+
+    /// A launcher older than links.json's `min_launcher` installs its downloaded update and restarts
+    /// as soon as it is ready, once per start, unless a game it started runs or a version installs
+    /// (`min_launcher`).
+    pub(crate) fn follow_min_launcher(&mut self, cx: &mut App) {
+        use horizon_launcher::min_launcher::{self, Activity, Now};
+        let now = Now {
+            self_update_allowed: backend::self_update_allowed(),
+            package_managed: backend::package_managed_launcher(),
+            ready: matches!(self.self_update, SelfUpdate::Ready(_)),
+            activity: Activity {
+                game: self.client.is_some() || self.starting_client.is_some(),
+                preparing: self.preparing,
+                installing: self.installing.is_some() || !self.removing.is_empty(),
+            },
+            tried: self.min_restart_tried,
+        };
+        if !min_launcher::installs_now(backend::VERSION, self.links.min_launcher.as_deref(), now) {
+            return;
+        }
+        self.min_restart_tried = true;
+        self.hand_over_launcher_update(true, cx);
     }
 
     /// Installs the Horizon version the last check found, keeping the player's choice of
@@ -556,21 +617,13 @@ impl Launcher {
         let Some(release) = self.updates.horizon.clone() else {
             return;
         };
-        if self.installing.is_some() || self.removing.contains(&release.tag) {
+        if self.installing.is_some()
+            || !self.install_queue.is_empty()
+            || self.removing.contains(&release.tag)
+        {
             return;
         }
-        self.update_install = Some(release.tag.clone());
-        self.install(&release);
-    }
-
-    /// The native mods turned on in the instance Play starts, unpacked and checked, with their
-    /// bundles: what the warning names and the build compiles.
-    pub(crate) fn native_mods_to_build(
-        &self,
-    ) -> Result<(std::path::PathBuf, Vec<native_mods::Bundle>), String> {
-        let folder = native_mods::installed_mods(&instances::selected().home)?;
-        let found = native_mods::bundles(&folder)?;
-        Ok((folder, found))
+        self.queue_install(release, InstallSource::Update);
     }
 
     /// What installed native build `version` was made from (`native_status::Build`), read once.

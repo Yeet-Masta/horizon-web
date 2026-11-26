@@ -23,16 +23,11 @@ class ScreenMouseDraggedHookTests(unittest.TestCase):
         start = source.index("                        let previous = self.cursor;", source.index("WindowEvent::CursorMoved { position"))
         cursor_end = source.index("                        if self.dialog_open()", start)
         cursor = source[start:cursor_end]
-        # The extracted fixture only models the mouse-drag hook. Keep the
-        # replay timeline's independent drag handler out of this focused slice.
-        studio_drag = cursor.index("                        if self.studio_mouse_dragged(")
-        hook_dispatch = cursor.index("                        match self.screen_mouse_dragged(previous)", studio_drag)
-        cursor = cursor[:studio_drag] + cursor[hook_dispatch:]
         start = source.index("        if let WindowEvent::Focused(false)")
         focus = source[start:source.index("        if let WindowEvent::ModifiersChanged", start)]
         fixture = r"""
 use std::{cell::RefCell, collections::HashSet};
-type MouseButton = i32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] enum MouseButton { Left, Right }
 mod winit {
     pub mod keyboard {
         #[derive(Clone, Copy)]
@@ -48,17 +43,24 @@ mod native_hooks {
     pub enum ScreenMousePre { NotFired, Canceled, Passed(ScreenMousePost) }
 }
 use native_hooks::{ScreenMousePost, ScreenMousePre};
-fn glfw_button(button: i32) -> i32 { button }
+fn glfw_button(button: MouseButton) -> i32 { match button { MouseButton::Left => 0, MouseButton::Right => 1 } }
 fn glfw_modifiers(state: ModifiersState) -> u32 { state.0 }
 struct View { mouse: (f32, f32) }
 struct Point { x: f64, y: f64 }
-struct Batch { scale: f32 }
+struct Batch { scale: f32, width: f32 }
 enum WindowEvent { Focused(bool) }
-struct Game { drag_button: Option<i32>, physical_buttons: HashSet<i32>, physical_keys: HashSet<i32>,
+struct Pad { menu: PadMenu }
+struct PadMenu { held: [bool; 2] }
+struct Game { drag_button: Option<MouseButton>, physical_buttons: HashSet<MouseButton>, physical_keys: HashSet<i32>,
+    pad: Pad,
     cursor: (f32, f32), modifiers: ModifiersState, synthetic: bool, open: bool, cancel: bool, handled: usize, posts: usize,
     calls: RefCell<Vec<(i32, [f32; 2], (f32, f32))>> }
 impl Game {
     fn pad_synthetic_input(&self) -> bool { self.synthetic }
+    fn active_editor_overlay(&self) -> Option<()> { None }
+    fn studio_mouse_dragged(&mut self, _: f32) -> bool { false }
+    fn screen_mouse_hooks_input(&self) -> bool { !self.pad_synthetic_input() }
+    fn container_mouse_input_pre(&mut self, _: &ScreenMousePost) -> bool { false }
     fn screen_view_now(&self) -> Option<View> { self.open.then_some(View { mouse: self.cursor }) }
     fn native_screen_mouse_dragged_pre(&self, view: &View, button: i32, delta: [f32; 2], modifiers: u32, canceled: &mut bool) {
         assert_eq!(modifiers, 5);
@@ -67,7 +69,7 @@ impl Game {
     TRACK
     DISPATCH
     fn pointer(&mut self, position: Point) -> Result<(), ()> {
-        let b = Batch { scale: 2.0 };
+        let b = Batch { scale: 2.0, width: 640.0 };
         let mut mouse_post = None;
         CURSOR
         self.posts += usize::from(mouse_post.is_some());
@@ -77,16 +79,18 @@ impl Game {
 }
 #[test]
 fn lifecycle_and_cancellation() {
+    use MouseButton::{Left, Right};
     for cancel in [false, true] {
-        let mut game = Game { drag_button: None, physical_buttons: HashSet::from([0, 1]),
+        let mut game = Game { drag_button: None, physical_buttons: HashSet::from([Left, Right]),
+            pad: Pad { menu: PadMenu { held: [false, false] } },
             physical_keys: HashSet::from([10]), cursor: (10.0, 10.0), modifiers: ModifiersState(5), synthetic: false,
             open: true, cancel, handled: 0, posts: 0, calls: RefCell::new(vec![]) };
-        game.track_drag_button(0, true);
-        game.track_drag_button(1, true);
-        game.track_drag_button(0, false);
+        game.track_drag_button(Left, true);
+        game.track_drag_button(Right, true);
+        game.track_drag_button(Left, false);
         // Any release ends the drag (vanilla clears activeButton): right is still held, no drag.
         assert_eq!(game.drag_button, None);
-        game.track_drag_button(1, true);
+        game.track_drag_button(Right, true);
         game.pointer(Point { x: 50.0, y: 30.0 }).unwrap();
         game.pointer(Point { x: 54.0, y: 34.0 }).unwrap();
         assert_eq!(game.cursor, (27.0, 17.0));
@@ -102,10 +106,10 @@ fn lifecycle_and_cancellation() {
         game.open = true; game.physical_buttons.clear();
         game.pointer(Point { x: 60.0, y: 40.0 }).unwrap();
         assert!(game.calls.borrow().is_empty());
-        game.track_drag_button(1, false);
+        game.track_drag_button(Right, false);
         assert_eq!(game.drag_button, None);
-        game.track_drag_button(0, true);
-        game.physical_buttons.insert(0);
+        game.track_drag_button(Left, true);
+        game.physical_buttons.insert(Left);
         game.focus(WindowEvent::Focused(false));
         assert_eq!(game.modifiers.0, 0);
         assert_eq!(game.drag_button, None);

@@ -1656,7 +1656,7 @@ fn place_entities<W: PlacementContext>(
                 nbt.insert(key.into(), Tag::Int(block_pos[i]));
             }
         }
-        // Entity.rotate + Entity.mirror on the yaw.
+        // Entity.rotate + Entity.mirror on the yaw (defaulting missing Rotation to [0.0, 0.0]).
         let wrap = |a: f32| {
             let a = a % 360.0;
             if a >= 180.0 {
@@ -1667,28 +1667,54 @@ fn place_entities<W: PlacementContext>(
                 a
             }
         };
-        if let Some(Tag::List(rot)) = nbt.get(&"Rotation".into()).cloned()
-            && let Some(Tag::Float(bits)) = rot.first()
-        {
-            let yaw = wrap(f32::from_bits(*bits));
-            let rotated = match rotation {
-                Rotation::Clockwise180 => yaw + 180.0,
-                Rotation::Counterclockwise90 => yaw + 270.0,
-                Rotation::Clockwise90 => yaw + 90.0,
-                Rotation::None => yaw,
-            };
-            let mirrored = match mirror {
-                Mirror::FrontBack => -yaw,
-                Mirror::LeftRight => 180.0 - yaw,
-                Mirror::None => yaw,
-            };
-            let mut rot = rot.clone();
-            rot[0] = Tag::Float((rotated + mirrored - yaw).to_bits());
-            nbt.insert("Rotation".into(), Tag::List(rot));
+        let mut rot = match nbt.get(&"Rotation".into()).cloned() {
+            Some(Tag::List(existing)) => existing,
+            _ => vec![Tag::Float(0.0f32.to_bits()), Tag::Float(0.0f32.to_bits())],
+        };
+        let yaw = rot
+            .first()
+            .and_then(|tag| match tag {
+                Tag::Float(bits) => Some(wrap(f32::from_bits(*bits))),
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        let rotated = match rotation {
+            Rotation::Clockwise180 => yaw + 180.0,
+            Rotation::Counterclockwise90 => yaw + 270.0,
+            Rotation::Clockwise90 => yaw + 90.0,
+            Rotation::None => yaw,
+        };
+        let mirrored = match mirror {
+            Mirror::FrontBack => -yaw,
+            Mirror::LeftRight => 180.0 - yaw,
+            Mirror::None => yaw,
+        };
+        let new_yaw = rotated + mirrored - yaw;
+        if let Some(first) = rot.first_mut() {
+            *first = Tag::Float(new_yaw.to_bits());
+        } else {
+            rot.push(Tag::Float(new_yaw.to_bits()));
+            rot.push(Tag::Float(0.0f32.to_bits()));
         }
-        // HangingEntity.rotate/mirror: the facing turns with the template.
+        nbt.insert("Rotation".into(), Tag::List(rot));
+        // HangingEntity.rotate then HangingEntity.mirror: rotate first, then
+        // apply mirror's rotation on the rotated direction.
         if let Some(&Tag::Byte(f)) = nbt.get(&"Facing".into()) {
-            nbt.insert("Facing".into(), Tag::Byte(turn_facing(f, mirror, rotation)));
+            nbt.insert(
+                "Facing".into(),
+                Tag::Byte(turn_facing_3d(f, mirror, rotation)),
+            );
+        }
+        let is_painting = matches!(
+            nbt.get(&"id".into()),
+            Some(Tag::String(id))
+                if matches!(id.to_string_lossy().as_str(), "minecraft:painting" | "painting")
+        );
+        if is_painting && let Some(&Tag::Byte(f)) = nbt.get(&"facing".into()) {
+            nbt.insert(
+                "facing".into(),
+                Tag::Byte(turn_facing_2d(f, mirror, rotation)),
+            );
         }
         if settings.finalize_entities {
             nbt.insert("horizon:finalize".into(), Tag::Byte(1));
@@ -1697,28 +1723,52 @@ fn place_entities<W: PlacementContext>(
     }
     Ok(())
 }
-/// A 3D data value (2 north, 3 south, 4 west, 5 east) mirrored then rotated.
-fn turn_facing(f: i8, mirror: Mirror, rotation: Rotation) -> i8 {
-    if !(2..=5).contains(&f) {
-        return f;
-    }
-    let mirrored = match (mirror, f) {
-        (Mirror::LeftRight, 2) => 3,
-        (Mirror::LeftRight, 3) => 2,
-        (Mirror::FrontBack, 4) => 5,
-        (Mirror::FrontBack, 5) => 4,
-        (_, f) => f,
-    };
-    // Clockwise order: north, east, south, west.
-    let order = [2, 5, 3, 4];
-    let i = order.iter().position(|&d| d == mirrored).unwrap_or(0);
-    let steps = match rotation {
+
+fn rotation_steps(rotation: Rotation) -> usize {
+    match rotation {
         Rotation::None => 0,
         Rotation::Clockwise90 => 1,
         Rotation::Clockwise180 => 2,
         Rotation::Counterclockwise90 => 3,
-    };
-    order[(i + steps) % 4]
+    }
+}
+
+/// A 3D data value (2 north, 3 south, 4 west, 5 east) rotated then mirrored.
+fn turn_facing_3d(f: i8, mirror: Mirror, rotation: Rotation) -> i8 {
+    if !(2..=5).contains(&f) {
+        return f;
+    }
+    // Clockwise order: north (2), east (5), south (3), west (4).
+    let cw = [2, 5, 3, 4];
+    let idx = cw.iter().position(|&d| d == f).unwrap_or(0);
+    let rotated = cw[(idx + rotation_steps(rotation)) % 4];
+
+    match (mirror, rotated) {
+        (Mirror::LeftRight, 2) => 3,
+        (Mirror::LeftRight, 3) => 2,
+        (Mirror::FrontBack, 4) => 5,
+        (Mirror::FrontBack, 5) => 4,
+        (_, d) => d,
+    }
+}
+
+/// A 2D painting facing value (0 south, 1 west, 2 north, 3 east) rotated then mirrored.
+fn turn_facing_2d(f: i8, mirror: Mirror, rotation: Rotation) -> i8 {
+    if !(0..=3).contains(&f) {
+        return f;
+    }
+    // Clockwise order for 2D values: south (0), west (1), north (2), east (3).
+    let cw = [0, 1, 2, 3];
+    let idx = cw.iter().position(|&d| d == f).unwrap_or(0);
+    let rotated = cw[(idx + rotation_steps(rotation)) % 4];
+
+    match (mirror, rotated) {
+        (Mirror::LeftRight, 0) => 2,
+        (Mirror::LeftRight, 2) => 0,
+        (Mirror::FrontBack, 1) => 3,
+        (Mirror::FrontBack, 3) => 1,
+        (_, d) => d,
+    }
 }
 
 /// StructureTemplate.updateShapeAtEdge over the placed positions' voxel
@@ -2206,5 +2256,103 @@ mod tests {
             with_properties_of(&registry, "a:missing", BlockStateId(0)),
             None
         );
+    }
+
+    /// Collects the entity NBT `place_entities` hands the world.
+    struct EntitySink(Vec<Compound>);
+    impl PlacementContext for EntitySink {
+        fn generation(&self) -> crate::worldgen::anchor::WorldGenerationContext {
+            crate::worldgen::anchor::WorldGenerationContext {
+                min_y: -64,
+                height: 384,
+                sea_level: 63,
+            }
+        }
+        fn min_y(&mut self) -> Result<i32, PlacementQueryError> {
+            Ok(-64)
+        }
+        fn height(&mut self, _: HeightmapType, _: i32, _: i32) -> Result<i32, PlacementQueryError> {
+            Err(PlacementQueryError::Unavailable)
+        }
+        fn add_entity(&mut self, nbt: Compound) -> Result<(), PlacementQueryError> {
+            self.0.push(nbt);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn template_entity_without_rotation_turns_from_yaw_zero() {
+        let mut template = StructureTemplate::empty();
+        let mut nbt = Compound::new();
+        nbt.insert("id".into(), Tag::String("minecraft:camel".into()));
+        template.entities.push(super::super::EntityInfo {
+            pos: [0.5, 0.0, 0.5],
+            block_pos: [0, 0, 0],
+            nbt,
+        });
+        let placed_rotation = |settings: PlaceSettings<'_>| {
+            let mut sink = EntitySink(Vec::new());
+            place_entities(&mut sink, &template, [0, 64, 0], &settings).unwrap();
+            let [entity] = &sink.0[..] else {
+                panic!("one entity placed, got {}", sink.0.len());
+            };
+            match entity.get(&"Rotation".into()) {
+                Some(Tag::List(rot)) => rot
+                    .iter()
+                    .map(|t| match t {
+                        Tag::Float(bits) => f32::from_bits(*bits),
+                        other => panic!("Rotation holds {other:?}"),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("Rotation is {other:?}"),
+            }
+        };
+        assert_eq!(
+            placed_rotation(PlaceSettings::new(Rotation::Clockwise90)),
+            [90.0, 0.0]
+        );
+        let mut mirrored = PlaceSettings::new(Rotation::None);
+        mirrored.mirror = Mirror::LeftRight;
+        assert_eq!(placed_rotation(mirrored), [180.0, 0.0]);
+    }
+
+    #[test]
+    fn turn_facing_3d_and_2d_rotate_before_mirror() {
+        // 3D: 2=north, 3=south, 4=west, 5=east; 0/1 and out-of-range pass through.
+        for (facing, mirror, rotation, expected) in [
+            (2, Mirror::None, Rotation::Clockwise90, 5),
+            (2, Mirror::LeftRight, Rotation::Clockwise90, 5),
+            (2, Mirror::None, Rotation::Clockwise180, 3),
+            (2, Mirror::None, Rotation::Counterclockwise90, 4),
+            (2, Mirror::LeftRight, Rotation::None, 3),
+            (5, Mirror::FrontBack, Rotation::None, 4),
+            (2, Mirror::FrontBack, Rotation::Clockwise90, 4), // N->E, then E->W
+            (0, Mirror::LeftRight, Rotation::Clockwise90, 0),
+            (1, Mirror::FrontBack, Rotation::Clockwise180, 1),
+            (9, Mirror::LeftRight, Rotation::Clockwise90, 9),
+        ] {
+            assert_eq!(
+                turn_facing_3d(facing, mirror, rotation),
+                expected,
+                "3d facing={facing} mirror={mirror:?} rot={rotation:?}"
+            );
+        }
+
+        // 2D: 0=south, 1=west, 2=north, 3=east.
+        for (facing, mirror, rotation, expected) in [
+            (2, Mirror::None, Rotation::Clockwise90, 3),
+            (2, Mirror::LeftRight, Rotation::Clockwise90, 3),
+            (2, Mirror::None, Rotation::Clockwise180, 0),
+            (2, Mirror::None, Rotation::Counterclockwise90, 1),
+            (2, Mirror::LeftRight, Rotation::None, 0),
+            (3, Mirror::FrontBack, Rotation::None, 1),
+            (-1, Mirror::LeftRight, Rotation::Clockwise90, -1),
+        ] {
+            assert_eq!(
+                turn_facing_2d(facing, mirror, rotation),
+                expected,
+                "2d facing={facing} mirror={mirror:?} rot={rotation:?}"
+            );
+        }
     }
 }

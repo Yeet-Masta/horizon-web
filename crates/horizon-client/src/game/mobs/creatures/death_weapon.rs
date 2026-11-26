@@ -6,13 +6,7 @@ impl Game<'_> {
     pub(in crate::game) fn projectile_damage_kind(&self, shot: &Projectile) -> DamageKind {
         match shot.kind {
             ProjectileKind::Arrow { .. } => DamageKind::Arrow,
-            ProjectileKind::Trident => DamageKind::Named(
-                horizon_client::mobs::NamedDamage::registered(
-                    &self.health_resources.damage,
-                    "minecraft:trident",
-                )
-                .expect("registered vanilla trident damage"),
-            ),
+            ProjectileKind::Trident => DamageKind::Trident,
             ProjectileKind::SmallFireball | ProjectileKind::LargeFireball { .. } => {
                 DamageKind::Fireball
             }
@@ -49,7 +43,7 @@ impl Game<'_> {
     /// Only listeners need a saved weapon copy; physical family classification never does.
     pub(in crate::game) fn set_projectile_weapon(attack: &mut Attack, weapon: Option<&ItemStack>) {
         if mod_api::__private::listened(mod_api::HookId::LivingIncomingDamage)
-            || mod_api::__private::listened(mod_api::HookId::LivingDeath)
+            || crate::game::native_hooks::death_listened()
             || mod_api::__private::listened(mod_api::HookId::LootDrops)
         {
             attack.projectile_weapon = weapon.cloned();
@@ -179,7 +173,7 @@ impl Game<'_> {
         pos: [f64; 3],
         source: Option<(&'static str, u32)>,
     ) {
-        use horizon_client::mobs::{DamageKind, Who, drops};
+        use horizon_client::mobs::{Who, drops};
         use horizon_world::loot::{LootDamage, LootEntity};
         let accepted = m
             .accepted_hit
@@ -201,7 +195,7 @@ impl Game<'_> {
                     .mobs
                     .iter()
                     .find(|o| o.id == id)
-                    .map(|o| drops::loot_entity(o, None))
+                    .map(|o| self.mob_loot_entity(o))
                     // A charged creeper's blast kills after the creeper left the list.
                     .or_else(|| {
                         self.combat
@@ -214,24 +208,21 @@ impl Game<'_> {
                     }),
                 None => None,
             };
-            let direct = match d.kind {
-                DamageKind::Arrow => Some(LootEntity {
-                    kind: "minecraft:arrow".into(),
+            let direct = match &m.last_direct {
+                // A command or mod's explicit direct entity, which the damage type cannot name.
+                Some(Some(kind)) if source.as_ref().is_some_and(|s| s.kind == *kind) => source.clone(),
+                Some(Some(kind)) => Some(LootEntity {
+                    kind: kind.clone(),
                     ..LootEntity::default()
                 }),
-                DamageKind::Fireball => Some(LootEntity {
-                    kind: "minecraft:fireball".into(),
-                    ..LootEntity::default()
-                }),
-                DamageKind::WitherSkull => Some(LootEntity {
-                    kind: "minecraft:wither_skull".into(),
-                    ..LootEntity::default()
-                }),
-                DamageKind::Fireworks => Some(LootEntity {
-                    kind: "minecraft:firework_rocket".into(),
-                    ..LootEntity::default()
-                }),
-                _ => source.clone(),
+                Some(None) => None,
+                None => match projectile_entity(d.kind) {
+                    Some(kind) => Some(LootEntity {
+                        kind: kind.into(),
+                        ..LootEntity::default()
+                    }),
+                    None => source.clone(),
+                },
             };
             LootDamage {
                 kind: source_damage_type(d).into(),
@@ -257,6 +248,7 @@ impl Game<'_> {
                 .rules
                 .bool_at(horizon_client::gamerules::vanilla::MOB_DROPS),
             world_seed: self.level.seed,
+            raid_at: self.raid_at_mob(m),
         };
         let raider = horizon_client::mobs::raider::is_raider(m.species());
         let to_stack = |stack: &horizon_world::loot::LootStack| {
@@ -386,6 +378,7 @@ impl Game<'_> {
                         Some(m.id),
                         enderman::carried_block_roll(&tool),
                     );
+                    let drops = self.res.items().split_stacks(drops);
                     stacks.extend(
                         drops
                             .into_iter()

@@ -13,7 +13,7 @@ const POSTPROCESS_FLAGS: i32 = 276;
 
 impl Game<'_> {
     pub(super) fn postprocess_chunks(&mut self) -> Result<()> {
-        let ready: Vec<(i32, i32)> = self
+        let mut ready: Vec<(i32, i32)> = self
             .world
             .chunks
             .iter()
@@ -27,16 +27,18 @@ impl Game<'_> {
         if ready.is_empty() {
             return Ok(());
         }
+        ready.sort_unstable();
         // The ticks the marks schedule go to the chunks' containers, which a
         // chunk that arrived since the last tick doesn't have yet
         // (`LevelChunk.registerTickContainerInLevel` comes before
         // `postProcessGeneration`).
         self.sync_tick_chunks();
         for key in ready {
-            let Some(chunk) = self.world.chunks.get_mut(&key) else {
+            let Some(marks) = self.world.chunks.mutate_chunk(key, |chunk| {
+                std::mem::take(&mut Arc::make_mut(chunk).postprocess)
+            }) else {
                 continue;
             };
-            let marks = std::mem::take(&mut Arc::make_mut(chunk).postprocess);
             self.with_level(|b, level, ticks| {
                 for [x, y, z] in marks {
                     let pos = BlockPos::new(x, y, z);

@@ -362,7 +362,7 @@ impl<'a> Split<'a> {
         let window = self.host.window.clone().ok_or("no window")?;
         let mut old = self.host.renderer.take().ok_or("no renderer")?;
         old.release_surface();
-        let api = self.host.settings.horizon.api;
+        let api = self.host.settings.horizon.effective_api();
         let batching = self.host.settings.horizon.translucent_batching;
         let shader_pack = super::shader_packs::picked_pack_shape(&self.host.settings);
         let built = build_renderer(
@@ -437,7 +437,8 @@ impl<'a> Split<'a> {
         }
         self.p1_window = 1;
         self.windows.truncate(1);
-        self.surfaces.truncate(1);
+        // Window 1 is the first surface, and the only one numbered 1.
+        self.close_surfaces(|s| s.key == 1);
         let Some(main) = self.surfaces.pop() else {
             return Ok(());
         };
@@ -447,7 +448,7 @@ impl<'a> Split<'a> {
         self.host.window = Some(window.clone());
         let old = self.host.renderer.take().ok_or("no renderer")?;
         old.take_back(main.compositor);
-        let api = self.host.settings.horizon.api;
+        let api = self.host.settings.horizon.effective_api();
         let batching = self.host.settings.horizon.translucent_batching;
         let shader_pack = super::shader_packs::picked_pack_shape(&self.host.settings);
         let built = build_renderer(

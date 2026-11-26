@@ -7,6 +7,23 @@ const TRIPLE: &str = "x86_64-unknown-linux-gnu";
 /// An xz tar the packager wrote, holding `deps/a.rmeta`.
 const SLICE: &[u8] = include_bytes!("../../../crates/horizon-mod-package/src/sdk/fixture.tar.xz");
 
+#[test]
+fn mod_build_age_requires_two_orderable_nightlies() {
+    use crate::native_mods::fit::Age;
+
+    let older = Some("nightly-2026-11-12-aaaaaaa");
+    let newer = Some("nightly-2026-11-13-bbbbbbb");
+    assert_eq!(nightly_age(newer, older), Age::Newer);
+    assert_eq!(nightly_age(older, newer), Age::Older);
+    assert_eq!(nightly_age(None, newer), Age::Unknown);
+    assert_eq!(nightly_age(newer, None), Age::Unknown);
+    assert_eq!(nightly_age(newer, Some("unknown")), Age::Unknown);
+    assert_eq!(
+        nightly_age(newer, Some("nightly-2026-11-13-ccccccc")),
+        Age::Unknown
+    );
+}
+
 fn runtime() -> String {
     Asset::name(Kind::Runtime, TRIPLE, Side::Client)
 }
@@ -231,6 +248,101 @@ fn an_index_is_refused_by_name_when_its_signature_or_contents_do_not_hold() {
     assert!(!fixture.kept().join(COMMIT).join(INDEX).exists());
 }
 
+/// A stop during a slice's download ends the fetch as cancelled, its words the build's own, with
+/// the download removed and nothing stamped (#19300).
+#[test]
+fn a_stopped_download_ends_as_cancelled_and_keeps_nothing() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let sdk = fixture.sdk(&[]).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = Base::Url(format!("http://{}", listener.local_addr().unwrap()));
+    std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.read(&mut [0; 4096]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                SLICE.len()
+            );
+            let _ = stream.write_all(SLICE);
+        }
+    });
+    let prebuilt = fixture.scratch.path().join("prebuilt");
+    let unit = prebuilt.join(format!("{COMMIT}-{TRIPLE}"));
+    let downloaded = || {
+        fs::read_dir(&unit)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".download"))
+    };
+    // The player stops the build the moment the first slice has arrived.
+    let stop = || match downloaded() {
+        true => Err(super::super::CANCELLED.to_string()),
+        false => Ok(()),
+    };
+    let refusal = slices_in(
+        &prebuilt,
+        &sdk,
+        &base,
+        Route::Api,
+        TRIPLE,
+        Side::Client,
+        &|_| {},
+        &stop,
+    )
+    .unwrap_err();
+    assert_eq!(refusal, Refusal::Cancelled);
+    assert_eq!(refusal.to_string(), super::super::CANCELLED);
+    assert!(!downloaded());
+    let package = Package::at(&unit);
+    for slice in [&package.runtime, &package.api] {
+        assert!(!stamp_path(slice).exists());
+    }
+}
+
+/// A slice request that fails while Stop is pending ends as cancelled, not as the server's
+/// answer (#19300).
+#[test]
+fn a_failed_request_while_stopping_ends_as_cancelled() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let sdk = fixture.sdk(&[]).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = Base::Url(format!("http://{}", listener.local_addr().unwrap()));
+    std::thread::spawn(move || {
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.read(&mut [0; 4096]);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+        }
+    });
+    let asked = std::cell::Cell::new(0);
+    // Stop is pressed once the request is under way.
+    let stop = || {
+        asked.set(asked.get() + 1);
+        match asked.get() > 1 {
+            true => Err(super::super::CANCELLED.to_string()),
+            false => Ok(()),
+        }
+    };
+    let refusal = slices_in(
+        &fixture.scratch.path().join("prebuilt"),
+        &sdk,
+        &base,
+        Route::Api,
+        TRIPLE,
+        Side::Client,
+        &|_| {},
+        &stop,
+    )
+    .unwrap_err();
+    assert_eq!(refusal, Refusal::Cancelled);
+}
+
 #[test]
 fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
     let fixture = Fixture::new();
@@ -249,6 +361,7 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
         TRIPLE,
         Side::Client,
         &|fetched| heard.borrow_mut().push(fetched),
+        &|| Ok(()),
     )
     .unwrap();
     assert_eq!(
@@ -272,6 +385,7 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
         TRIPLE,
         Side::Client,
         &|_| {},
+        &|| Ok(()),
     )
     .unwrap_err();
     assert!(refused.to_string().contains(&engine), "{refused}");
@@ -286,6 +400,7 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
         TRIPLE,
         Side::Client,
         &|fetched| heard.borrow_mut().push(fetched),
+        &|| Ok(()),
     )
     .unwrap();
     assert_eq!(again, package);
@@ -305,6 +420,7 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
             TRIPLE,
             Side::Client,
             &|_| {},
+            &|| Ok(()),
         );
         assert!(fresh.is_ok());
         change(&package.api);
@@ -316,6 +432,7 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
             TRIPLE,
             Side::Client,
             &|_| {},
+            &|| Ok(()),
         );
         assert!(matches!(stale, Err(Refusal::Refused { .. })), "{stale:?}");
         // What failed its stamp is gone, never used half-checked.
@@ -333,6 +450,140 @@ fn the_api_route_fetches_its_two_slices_only_and_reuses_them_on_their_stamps() {
     }
 }
 
+/// #19294: a build's Stop ends its wait for another fetch unpacking the same folder, and the
+/// folder is left to that fetch.
+#[test]
+fn stop_ends_a_wait_for_another_fetch_of_the_same_folder() {
+    let fixture = Fixture::new();
+    let sdk = fixture.sdk(&[]).unwrap();
+    let package = Package::at(
+        &fixture
+            .scratch
+            .path()
+            .join("prebuilt")
+            .join(format!("{COMMIT}-{TRIPLE}")),
+    );
+    fs::create_dir_all(package.runtime.parent().unwrap()).unwrap();
+    let mut lock = package.runtime.as_os_str().to_owned();
+    lock.push(".fetch.lock");
+    let other = crate::native_cache::waited(&PathBuf::from(lock), &|| false)
+        .unwrap()
+        .unwrap();
+    let (sent, got) = std::sync::mpsc::channel();
+    let (base, into) = (fixture.base(), package.runtime.clone());
+    std::thread::spawn(move || {
+        let mut fetched = Fetched::default();
+        // Stop comes only once the fetch waits for the lock: the folder base needs no download,
+        // so the fetch asks twice before (on starting, before unpacking), then while it waits.
+        let asked = std::cell::Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            match asked.get() > 2 {
+                true => Err(super::super::CANCELLED.to_owned()),
+                false => Ok(()),
+            }
+        };
+        let stopped = fetch_into(
+            &sdk,
+            &base,
+            &runtime(),
+            &into,
+            false,
+            &mut fetched,
+            &|_| {},
+            &stop,
+        );
+        let _ = sent.send((stopped, asked.get()));
+    });
+    // Bounded: a wait Stop can't end must fail this test, not hang it.
+    let result = got.recv_timeout(std::time::Duration::from_secs(10));
+    drop(other);
+    let (result, asked) = result.expect("Stop ended the wait");
+    assert!(asked > 2, "stopped before the wait, after {asked} asks");
+    assert!(!package.runtime.exists());
+    // The build ends with exactly the words the window shows as a cancel, not as a failure.
+    assert_eq!(
+        super::super::refused(result.unwrap_err()),
+        super::super::CANCELLED
+    );
+}
+
+#[cfg(unix)]
+fn link_dir(from: &Path, to: &Path) {
+    std::os::unix::fs::symlink(from, to).unwrap();
+}
+#[cfg(windows)]
+fn link_dir(from: &Path, to: &Path) {
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(to.to_string_lossy().replace('/', "\\"))
+        .arg(from.to_string_lossy().replace('/', "\\"))
+        .output()
+        .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+}
+
+/// #19294: a link (a junction on Windows) anywhere between the native root and the folder a
+/// fetch works in is refused before anything is read or written through it.
+#[test]
+fn a_fetch_refuses_a_link_above_its_folder() {
+    let _guard = super::super::tests::scratch_state();
+    let fixture = Fixture::new();
+    let sdk = fixture.sdk(&[]).unwrap();
+    let prebuilt = super::super::root().join("prebuilt");
+    let _ = fs::remove_dir_all(&prebuilt);
+    fs::create_dir_all(prebuilt.parent().unwrap()).unwrap();
+    let elsewhere = fixture.scratch.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    link_dir(&elsewhere, &prebuilt);
+    let package = Package::at(&prebuilt.join(format!("{COMMIT}-{TRIPLE}")));
+    let mut fetched = Fetched::default();
+    let result = fetch_into(
+        &sdk,
+        &fixture.base(),
+        &runtime(),
+        &package.runtime,
+        false,
+        &mut fetched,
+        &|_| {},
+        &|| Ok(()),
+    );
+    let reached: Vec<_> = fs::read_dir(&elsewhere).unwrap().collect();
+    #[cfg(windows)]
+    fs::remove_dir(&prebuilt).unwrap();
+    #[cfg(unix)]
+    fs::remove_file(&prebuilt).unwrap();
+    assert!(reached.is_empty(), "{reached:?}");
+    assert!(matches!(&result, Err(Refusal::Cache(_))), "{result:?}");
+}
+
+/// #19294: a fetch hears only the Stop its caller passes, never a build's elsewhere in the
+/// process: a check, or a test beside a stopped one, still fetches.
+#[test]
+fn a_fetch_hears_only_its_callers_stop() {
+    let _guard = super::super::tests::scratch_state();
+    let fixture = Fixture::new();
+    let sdk = fixture.sdk(&[]).unwrap();
+    let prebuilt = fixture.scratch.path().join("prebuilt");
+    super::super::cancel();
+    let package = slices_in(
+        &prebuilt,
+        &sdk,
+        &fixture.base(),
+        Route::Api,
+        TRIPLE,
+        Side::Client,
+        &|_| {},
+        &|| Ok(()),
+    );
+    super::super::arm_cancel();
+    assert!(package.is_ok(), "{package:?}");
+}
+
 #[test]
 fn a_stamp_from_another_index_is_not_trusted() {
     let fixture = Fixture::new();
@@ -346,6 +597,7 @@ fn a_stamp_from_another_index_is_not_trusted() {
         TRIPLE,
         Side::Client,
         &|_| {},
+        &|| Ok(()),
     )
     .unwrap();
     let other = Sdk {
@@ -355,6 +607,35 @@ fn a_stamp_from_another_index_is_not_trusted() {
     assert!(stamp_holds(&sdk, &runtime(), &package.runtime));
     assert!(!stamp_holds(&other, &runtime(), &package.runtime));
     assert!(!stamp_holds(&sdk, &api(), &package.runtime));
+}
+
+#[test]
+fn a_superseded_nightly_uses_its_archived_signed_index() {
+    let fixture = Fixture::new();
+    let base = fixture.scratch.path().join("base");
+    let kept = fixture.scratch.path().join("versions");
+    let version = "nightly-2026-11-18-0123456";
+    let replacement = "nightly-2026-11-18-abcdef0";
+    let archive = format!("mod-index-{version}");
+    let index = index_of(&[], rust_toolchain::VERSION).to_json();
+    for tag in ["nightly", "nightly-2026-11-18", &archive] {
+        publish(&base, tag, replacement, &fixture.key, index.as_bytes(), &[]);
+    }
+    let read = || build_of_in(&kept, version, &fixture.base(), &fixture.keys());
+    assert!(matches!(read(), Err(Refusal::Unsigned { .. })));
+    assert!(!kept.join(version).exists());
+
+    publish(
+        &base,
+        &archive,
+        version,
+        &fixture.key,
+        index.as_bytes(),
+        &[],
+    );
+    assert_eq!(read().unwrap(), COMMIT);
+    fs::remove_dir_all(base).unwrap();
+    assert_eq!(read().unwrap(), COMMIT);
 }
 
 #[test]

@@ -99,6 +99,7 @@ impl Fake {
             loaders: self.projects[id].loaders.clone(),
             files: vec![file],
             required: needs.iter().map(|s| s.to_string()).collect(),
+            optional: Vec::new(),
             blocked: None,
         };
         let mut served = body.to_vec();
@@ -172,6 +173,145 @@ fn installs_with_dependencies_then_updates_and_removes() {
     assert!(remove(&home, "addon").is_err());
     assert_eq!(Installed::load(&home).entries.len(), 1);
     fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn resource_pack_update_reviews_the_version_it_will_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let ports = dir.path().join("ports");
+    let work = ports.join("cozy");
+    fs::create_dir_all(&work).unwrap();
+    fs::create_dir_all(ports.join("downloads")).unwrap();
+    let manifest = horizon_port_pack::import::Pack {
+        name: "Cozy".into(),
+        ..Default::default()
+    };
+    horizon_port_pack::pipeline::write_json(&work.join("pack.json"), &manifest).unwrap();
+    let home = &work.join("home");
+    let mut fake = Fake::default();
+    fake.add(project("pack", Kind::ResourcePack));
+    fake.release("pack", "1", &[], b"original", false);
+    let pack = fake.project("pack").unwrap();
+    let original = install(&fake, &pack, false, home, NONE).unwrap().remove(0);
+
+    fake.add(project("dependency", Kind::ResourcePack));
+    let mut java_mod = project("java-mod", Kind::Mod);
+    java_mod.loaders = vec!["fabric".into()];
+    fake.add(java_mod);
+
+    let no_prompt = |_: &Version, _: &str| panic!("this update must not ask");
+
+    fake.release(
+        "dependency",
+        "1",
+        &["java-mod"],
+        b"required dependency",
+        false,
+    );
+    fake.release("pack", "2", &["dependency"], b"required", false);
+    let error =
+        update_modrinth_resource_pack(&fake, &original, home, &no_prompt, NONE).unwrap_err();
+    assert!(error.contains("requires Java mods"), "{error}");
+    assert_eq!(fs::read(home.join(&original.file)).unwrap(), b"original");
+
+    fake.release("dependency", "2", &[], b"reviewed dependency", false);
+    fake.versions.lock().unwrap().get_mut("dependency").unwrap()[0]
+        .optional
+        .push(crate::browser::modrinth::OptionalDependency::Project(
+            "java-mod".into(),
+        ));
+    fake.release("pack", "3", &["dependency"], b"optional", false);
+    let decline = |version: &Version, reason: &str| {
+        assert_eq!(version.number, "3");
+        assert!(reason.contains("optional Java mods"), "{reason}");
+        false
+    };
+    assert!(update_modrinth_resource_pack(&fake, &original, home, &decline, NONE).is_err());
+    assert_eq!(fs::read(home.join(&original.file)).unwrap(), b"original");
+
+    let approve = |version: &Version, _: &str| {
+        assert_eq!(version.number, "3");
+        assert_eq!(fs::read(home.join(&original.file)).unwrap(), b"original");
+        fake.release("pack", "4", &[], b"plain", false);
+        fake.release("dependency", "3", &[], b"unreviewed dependency", false);
+        true
+    };
+    let approved = update_modrinth_resource_pack(&fake, &original, home, &approve, NONE)
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        fs::read(home.join("resourcepacks/dependency-2.zip")).unwrap(),
+        b"reviewed dependency"
+    );
+    assert!(!home.join("resourcepacks/dependency-3.zip").exists());
+    assert_eq!(approved.number, "3");
+    assert_eq!(fs::read(home.join(&approved.file)).unwrap(), b"optional");
+    assert!(!home.join(&original.file).exists());
+
+    let latest = update_modrinth_resource_pack(&fake, &approved, home, &no_prompt, NONE)
+        .unwrap()
+        .remove(0);
+    assert_eq!(latest.number, "4");
+    assert_eq!(fs::read(home.join(&latest.file)).unwrap(), b"plain");
+    assert!(!home.join("mods").exists());
+    let listed = crate::modpacks::listed_checked_in(&ports).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].work, work);
+}
+
+#[test]
+fn resource_pack_review_refuses_a_transitive_required_version_pin() {
+    let mut fake = Fake::default();
+    let pack = project("pack", Kind::ResourcePack);
+    fake.add(pack.clone());
+    fake.add(project("dependency", Kind::ResourcePack));
+    fake.add(project("pinned", Kind::ResourcePack));
+    fake.release("pack", "1", &["dependency"], b"pack", false);
+    fake.release("pinned", "2", &[], b"newer release", false);
+    let version = crate::browser::modrinth::parse_version(&serde_json::json!({
+        "id": "dependency-1",
+        "game_versions": [GAME],
+        "loaders": ["minecraft"],
+        "files": [{"url": "https://cdn.modrinth.com/data/dependency/versions/1/dependency.zip", "filename": "dependency.zip"}],
+        "dependencies": [{"project_id": "pinned", "version_id": "pinned-1", "dependency_type": "required"}],
+    }))
+    .unwrap();
+    fake.versions
+        .lock()
+        .unwrap()
+        .insert("dependency".into(), vec![version]);
+    let versions = fake.versions(&pack).unwrap();
+    let error = review_resource_pack(&fake, &pack, &versions, true)
+        .err()
+        .unwrap();
+    assert!(
+        error.contains("required dependency pinned to a specific version"),
+        "{error}"
+    );
+}
+
+#[test]
+fn resource_pack_review_uses_the_selected_release_without_prompting_for_category_warnings() {
+    let mut pack = project("pack", Kind::ResourcePack);
+    pack.loaders.push("core-shaders".into());
+    let mut fake = Fake::default();
+    fake.add(pack.clone());
+    fake.release("pack", "1", &[], b"pack", false);
+    let mut versions = fake.versions(&pack).unwrap();
+    versions[0].loaders = vec!["minecraft".into()];
+    let current = review_resource_pack(&fake, &pack, &versions, false).unwrap();
+    assert!(!current.support.reason().unwrap().contains("Made for"));
+    versions[0].game_versions = vec!["1.21.1".into()];
+    let old = review_resource_pack(&fake, &pack, &versions, true).unwrap();
+    let reason = old.support.reason().unwrap();
+    assert!(reason.contains("Made for 1.21.1") && reason.contains("Core shaders"));
+    assert!(old.confirm_optional_mods(|_, _| panic!("category warning must not prompt")));
+    pack.blocked = Some("explicit block".into());
+    assert!(review_resource_pack(&fake, &pack, &versions, true)
+        .err()
+        .unwrap()
+        .contains("explicit block"));
 }
 
 #[test]
@@ -348,6 +488,190 @@ fn java_mods_are_ported_turned_on_refused_on_clashes_and_removed() {
         fs::read_to_string(home.join("horizon-mods.txt")).unwrap(),
         ""
     );
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A source with Fabric mod `a-b` (one block, so it Works), and the jar's bytes.
+fn hyphenated_mod() -> (Fake, Vec<u8>) {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, text) in [
+        (
+            "fabric.mod.json",
+            r#"{"schemaVersion": 1, "id": "a-b", "version": "1.0"}"#,
+        ),
+        (
+            "assets/a-b/blockstates/chair.json",
+            r#"{"variants": {"": {"model": "a-b:block/chair"}}}"#,
+        ),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(text.as_bytes()).unwrap();
+    }
+    let jar = zip.finish().unwrap().into_inner();
+    let mut fake = Fake::default();
+    let mut p = project("ab", Kind::Mod);
+    p.loaders = vec!["fabric".into()];
+    fake.add(p);
+    fake.release("ab", "1", &[], &jar, false);
+    (fake, jar)
+}
+
+#[test]
+fn a_cached_refusal_of_a_hyphenated_id_is_checked_again() {
+    let home = home("hyphen-cache");
+    let (fake, jar) = hyphenated_mod();
+    // The check an older launcher kept for this jar: refused for its id.
+    let sha: String = sha2::Sha512::digest(&jar)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = home.join("mod-browser/checks-1").join(&sha[..40]);
+    let jar_path = home.join("a-b.jar");
+    fs::write(&jar_path, &jar).unwrap();
+    let mut old = horizon_port_pack::check::check(&jar_path, &dir).unwrap();
+    let _ = fs::remove_dir_all(dir.join("carry"));
+    old.verdict = horizon_port_pack::check::Verdict::No;
+    old.summary = "Can't be carried over: mod id \"a-b\" is not [a-z0-9_]{1,64}: rename it before carrying over".into();
+    fs::write(dir.join("check.json"), serde_json::to_string(&old).unwrap()).unwrap();
+    let file = fake.versions.lock().unwrap()["ab"][0].files[0].clone();
+    assert!(super::super::java::cached(&home, &file).is_none());
+
+    let done = install(&fake, &fake.project("ab").unwrap(), false, &home, NONE).unwrap();
+    assert_eq!(done[0].file, "horizon-mods/a_b");
+    assert_eq!(done[0].verdict.as_deref(), Some("Works"));
+    assert!(home
+        .join("horizon-mods/a_b/assets/a-b/blockstates/chair.json")
+        .is_file());
+
+    // Any other cached refusal stands.
+    old.summary = "Nothing in it ports.".into();
+    fs::write(dir.join("check.json"), serde_json::to_string(&old).unwrap()).unwrap();
+    assert!(super::super::java::cached(&home, &file).is_some());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A valid `.hmod` at `horizon-mods/.backup.hmod` whose manifest says mod id `a_b`: the game
+/// finds it by its manifest, not its name.
+fn backup_archive(home: &Path) {
+    use std::io::Write;
+    let path = home.join("horizon-mods/.backup.hmod");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+    zip.start_file("horizon-mod.toml", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(
+        b"id = \"a_b\"
+name = \"Backup\"
+version = \"1.0\"
+api = \"0.2\"
+side = \"both\"
+capabilities = [\"registries\"]
+",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+    let found = horizon_platform::mod_package::find(&home.join("horizon-mods"));
+    assert_eq!(found, std::slice::from_ref(&path));
+    let package = horizon_platform::mod_package::Package::read(&path).unwrap();
+    assert_eq!(package.manifest.id, "a_b");
+    fs::write(
+        home.join("horizon-mods.txt"),
+        "mod.a_b:true
+",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_hyphenated_id_that_another_installed_mod_has_is_refused() {
+    let home = home("hyphen-clash");
+    let (fake, _) = hyphenated_mod();
+    backup_archive(&home);
+    let refused = install(&fake, &fake.project("ab").unwrap(), false, &home, NONE).unwrap_err();
+    assert!(
+        refused.contains("Another mod already uses the id a_b"),
+        "{refused}"
+    );
+    assert!(!home.join("horizon-mods/a_b").exists());
+    assert_eq!(
+        fs::read_to_string(home.join("horizon-mods.txt")).unwrap(),
+        "mod.a_b:true
+"
+    );
+    assert!(Installed::load(&home).entries.is_empty());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn an_install_interrupted_before_publishing_can_be_retried() {
+    let home = home("hyphen-retry");
+    let (fake, _) = hyphenated_mod();
+    // What a failed move into place leaves: the staging copy, with its manifest.
+    let part = home.join("horizon-mods/.a_b.part");
+    fs::create_dir_all(&part).unwrap();
+    fs::write(
+        part.join("horizon-mod.toml"),
+        "id = \"a_b\"
+name = \"a-b\"
+version = \"1.0\"
+api = \"0.2\"
+side = \"both\"
+capabilities = [\"registries\"]
+",
+    )
+    .unwrap();
+    let found = horizon_platform::mod_package::find(&home.join("horizon-mods"));
+    assert_eq!(found, std::slice::from_ref(&part));
+    assert_eq!(
+        horizon_platform::mod_package::Package::read(&part)
+            .unwrap()
+            .manifest
+            .id,
+        "a_b"
+    );
+    let done = install(&fake, &fake.project("ab").unwrap(), false, &home, NONE).unwrap();
+    assert_eq!(done[0].file, "horizon-mods/a_b");
+    assert!(home.join("horizon-mods/a_b/horizon-mod.toml").is_file());
+    assert!(!part.exists());
+    fs::remove_dir_all(&home).unwrap();
+}
+
+#[test]
+fn a_refused_install_installs_none_of_its_dependencies() {
+    let home = home("hyphen-clash-deps");
+    let (mut fake, jar) = hyphenated_mod();
+    // `a-b` needs `ruby`, a mod that runs.
+    let mut ruby = project("ruby", Kind::Mod);
+    ruby.loaders = vec!["neoforge".into()];
+    fake.add(ruby);
+    let block = r#"{"variants": {"": {"model": "ruby:block/ruby_block"}}}"#;
+    fake.release(
+        "ruby",
+        "1",
+        &[],
+        &mod_jar(
+            "ruby",
+            &[("assets/ruby/blockstates/ruby_block.json", block)],
+        ),
+        false,
+    );
+    fake.release("ab", "2", &["ruby"], &jar, false);
+    backup_archive(&home);
+    let refused = install(&fake, &fake.project("ab").unwrap(), false, &home, NONE).unwrap_err();
+    assert!(
+        refused.contains("Another mod already uses the id a_b"),
+        "{refused}"
+    );
+    assert!(!home.join("horizon-mods/ruby").exists());
+    assert!(!home.join("horizon-mods/a_b").exists());
+    assert_eq!(
+        fs::read_to_string(home.join("horizon-mods.txt")).unwrap(),
+        "mod.a_b:true
+"
+    );
+    assert!(Installed::load(&home).entries.is_empty());
     fs::remove_dir_all(&home).unwrap();
 }
 

@@ -122,8 +122,17 @@ impl Weather {
             return;
         }
         if vertices.len() > self.capacity {
-            self.capacity = vertices.len().next_power_of_two();
-            self.vertices = Self::buffer(device, self.capacity);
+            let capacity = vertices.len().next_power_of_two();
+            let kind = super::frame_targets::Kind::Buffers;
+            // Without the room (#13624) the frame draws no weather, and the old buffer stays.
+            let Some(buffer) =
+                super::frame_targets::made(device, kind, || Self::buffer(device, capacity))
+            else {
+                self.count = 0;
+                return;
+            };
+            self.capacity = capacity;
+            self.vertices = buffer;
         }
         uploads.buffer(encoder, &self.vertices, 0, bytemuck::cast_slice(vertices));
         uploads.buffer(encoder, &self.uniform, 0, bytemuck::bytes_of(&time));
@@ -254,7 +263,8 @@ pub(super) fn native_pipeline(
         bind_group_layouts: &groups,
         ..Default::default()
     });
-    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&super::dx12_compiler::module_label(&stage.label)),
         source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -305,7 +315,8 @@ pub(super) fn native_pipeline(
         multiview_mask: None,
         cache: None,
     });
-    if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
+    let internal = horizon_std::block_on_or(internal.pop(), None);
+    if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
         return Err(format!("{}: {e}", stage.file));
     }
     Ok(pipeline)

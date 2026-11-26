@@ -12,7 +12,7 @@ use horizon_platform::hooks::{self, Hooks};
 use horizon_platform::{mod_links, pages, settings};
 
 /// Every Horizon part in the game, in the order its hooks run.
-const PARTS: [&dyn Hooks; 5] = [
+const PARTS: [&dyn Hooks; 6] = [
     // The anonymous "I'm playing" ping.
     &horizon_heartbeat::HOOKS,
     // Play with Friends: `friend:` addresses join through its tunnel.
@@ -21,13 +21,15 @@ const PARTS: [&dyn Hooks; 5] = [
     &horizon_official_servers::HOOKS,
     // "Playing Horizon" on the player's Discord profile.
     &horizon_discord::HOOKS,
+    // The player's own name over their head in third person (docs/extras.md).
+    &horizon_name_tag::HOOKS,
     // Open and Share for saved performance captures.
     &horizon_perf_share::HOOKS,
 ];
 /// Their settings, in the player's settings files.
-const STORES: [&dyn settings::Store; 1] = [&horizon_discord::SETTING];
+const STORES: [&dyn settings::Store; 2] = [&horizon_discord::SETTING, &horizon_name_tag::SETTING];
 /// Their rows and pages in the options screens.
-const PAGES: [&dyn pages::Page; 1] = [&horizon_discord::SECTION];
+const PAGES: [&dyn pages::Page; 2] = [&horizon_discord::SECTION, &horizon_name_tag::SECTION];
 
 /// The product chooses the built-in Mods screen entries' outside links.
 static MOD_LINKS: [mod_links::Links; 2] = [
@@ -48,6 +50,11 @@ static MOD_LINKS: [mod_links::Links; 2] = [
 /// Registers Horizon's in-game parts with the game. The executable calls it before it runs the
 /// game, and so does the launcher's generated executable for native mods.
 pub fn register() {
+    // Horizon's mark in the windows and the taskbar (branding: the plain game keeps the default
+    // icon), and the menus' look, here too for the native-mod executable, which starts the game
+    // without `horizon_game::main`.
+    horizon_game::set_icon_png(horizon_theme::ICON_PNG);
+    horizon_game::give_menu_look();
     let late = PARTS.into_iter().map(hooks::register);
     let late = late.chain(STORES.into_iter().map(settings::register));
     let late = late.chain(MOD_LINKS.iter().map(mod_links::register));

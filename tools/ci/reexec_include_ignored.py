@@ -11,6 +11,10 @@ before when it is not ignored and runs it too when it is. A rerun is read from i
 to the `.status()`, `.output()` or `.spawn()` that runs it, or to the end of the helper that returns it built (at
 most 40 lines). Running it again changes nothing.
 
+A rerun whose child reads its own argv as launch arguments (`LaunchArguments` takes an argument it does not know as a
+`--key value` pair, so a lone `--include-ignored` would take `--exact` as its value and leave NAME without one) is
+left alone when its lines carry a `// reexec_include_ignored: skip` comment saying so.
+
 Usage: reexec_include_ignored.py [--check]   (--check: list the reruns that lack it, change nothing; exit 1 if any)
 """
 import re
@@ -23,6 +27,7 @@ START = re.compile(r"Command::new\(")
 END = re.compile(r"\.\s*(?:status|output|spawn)\s*\(\s*\)")
 SELECTS = re.compile(r'"--(?:include-)?ignored"')
 EXACT = '"--exact"'
+SKIP = re.compile(r"//\s*reexec_include_ignored:\s*skip\b")
 
 
 def reruns(lines):
@@ -42,9 +47,10 @@ def reruns(lines):
 
 
 def missing(lines):
-    """The reruns among `lines` that select by `--exact` without `--ignored` or `--include-ignored`."""
+    """The reruns among `lines` that select by `--exact` without `--ignored` or `--include-ignored`, and not marked
+    `// reexec_include_ignored: skip`."""
     return [(start, end) for start, end in reruns(lines)
-            if not any(SELECTS.search(text) for text in lines[start:end + 1])]
+            if not any(SELECTS.search(text) or SKIP.search(text) for text in lines[start:end + 1])]
 
 
 def fix(lines):
@@ -63,7 +69,7 @@ def fix(lines):
 
 
 def sources():
-    listing = subprocess.run(["git", "ls-files", "-z", "--", "*.rs", ":!launcher"], cwd=ROOT, capture_output=True,
+    listing = subprocess.run(["git", "ls-files", "-z", "--", "*.rs"], cwd=ROOT, capture_output=True,
                              text=True, check=True)
     return [ROOT / path for path in filter(None, listing.stdout.split("\0"))]
 
@@ -71,7 +77,7 @@ def sources():
 def main(check):
     problems = 0
     for path in sources():
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         if "current_exe" not in text:
             continue
         lines = text.split("\n")
@@ -81,7 +87,7 @@ def main(check):
             print(f"{path.relative_to(ROOT)}:{start + 1}: reruns its test executable by --exact without "
                   "--include-ignored (or --ignored), so the child runs nothing once the test is ignored")
         if found and not check:
-            path.write_text("\n".join(fix(lines)))
+            path.write_text("\n".join(fix(lines)), encoding="utf-8")
     print(f"{problems} reruns {'lack' if check else 'gained'} --include-ignored")
     return 1 if check and problems else 0
 

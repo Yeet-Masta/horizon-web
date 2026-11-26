@@ -53,10 +53,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:
-    from . import anvil_dump, lab, oracle_harness as oh, parity_shard, test_rust_parity as base
+    from . import anvil_dump, fast_bins, lab, oracle_harness as oh, parity_shard, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port
 except ImportError:
     import anvil_dump
+    import fast_bins
     import lab
     import oracle_harness as oh
     import parity_shard
@@ -75,7 +76,7 @@ def seeds(count):
     return SEEDS + [rng.randrange(-2**63, 2**63) for _ in range(count)]
 
 
-def target_dir(profile='release'):
+def target_dir(profile='fast'):
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=lab.ROOT, text=True))
     return Path(metadata['target_directory']) / profile
@@ -151,7 +152,7 @@ def main():
     oh.run_logged(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-nowarn', '-cp', dependencies,
                    '-d', classes, lab.ROOT / 'mods/horizon/src/test/java/dev/horizonlab/parity/VanillaWorldSpawnOracle.java'],
                   build, 'compile-java')
-    oh.run_logged(['cargo', 'build', '--release', '-p', 'horizon-world', '--example', 'world_probe'], build, 'compile-probe')
+    oh.run_logged(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-world', '--example', 'world_probe'], build, 'compile-probe')
     all_seeds = parity_shard.shard(args.seed or seeds(args.random))
     started = time.time()
 
@@ -164,7 +165,7 @@ def main():
     if args.origins_only:
         sys.exit(1 if origin_diffs else 0)
 
-    oh.run_logged(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], build,
+    oh.run_logged(fast_bins.command('horizon-client'), build,
                   'compile-rust', timeout=3600)
     binary = target_dir('fast') / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     # One worker thread: the chunks decorated in a fixed order (see above).

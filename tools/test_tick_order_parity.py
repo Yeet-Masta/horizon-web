@@ -36,10 +36,11 @@ import sys
 import time
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port
     from .test_locator_bar_parity import generate_world
 except ImportError:
+    import fast_bins
     import lab
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, free_port
@@ -433,14 +434,14 @@ def main():
     build = lab.LOCAL / NAME
     build.mkdir(parents=True, exist_ok=True)
     (build / 'report.json').unlink(missing_ok=True)
-    subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], cwd=lab.ROOT,
+    subprocess.run(fast_bins.command('horizon-client'), cwd=lab.ROOT,
                    check=True, capture_output=True)
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=lab.ROOT, text=True))
     binary = Path(metadata['target_directory']) / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     dependencies = os.pathsep.join(map(str, [jars['server'], *libraries]))
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
-    horizon_server = [binary, '--resources', lab.LOCAL / 'horizon-client/26.3', '--dedicated', '--nogui']
+    horizon_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
 
     all_cells = cells()
     world = generate_world(vanilla_server, build)

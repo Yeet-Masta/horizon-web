@@ -175,3 +175,95 @@ fn windows_managed_paths_are_matched_without_case_sensitive_prefixes() {
         ])
     );
 }
+
+/// #16685: one running process with non-ASCII text in its command line made the process list unreadable, and every
+/// move stopped. The text holds a character of each common console code page (Western, Cyrillic, Chinese), so the old
+/// list isn't UTF-8 on any of them.
+#[cfg(windows)]
+#[test]
+fn a_non_ascii_command_line_does_not_stop_the_process_check() {
+    let mut other = process::command("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep 60 # é тест 微信",
+        ])
+        .spawn()
+        .unwrap();
+    let fixture = Fixture::new();
+    let result = ensure_idle(&fixture.roots("source"));
+    let _ = other.kill();
+    // A game or build running on this machine is a fair answer; a list it couldn't read is not.
+    if let Err(error) = result {
+        assert!(error.starts_with("Close games"), "{error}");
+    }
+}
+
+#[test]
+fn progress_follows_a_move_part_by_part() {
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    for (root, name) in [
+        (&source.launcher, "settings.json"),
+        (&source.game, "options.txt"),
+        (&source.build, "compiled.bin"),
+    ] {
+        fs::create_dir_all(root).unwrap();
+        fs::write(root.join(name), b"{}").unwrap();
+    }
+    let bootstrap = fixture.0.join("bootstrap/location.json");
+    fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+    let mut progress = Progress::default();
+    progress.apply(Update::Step(Step::Waiting));
+    let mut steps = vec![Step::Waiting];
+    data_location::migrate(
+        &source,
+        &fixture.0.join("destination"),
+        &bootstrap,
+        |message| {
+            if let Some(update) = Update::from_progress(message) {
+                progress.apply(update);
+            }
+            let step = progress.step.unwrap();
+            if steps.last() != Some(&step) {
+                steps.push(step);
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        steps,
+        [
+            Step::Waiting,
+            Step::Launcher,
+            Step::Game,
+            Step::Build,
+            Step::Committing
+        ]
+    );
+    assert_eq!(progress.files, 3);
+}
+
+#[test]
+fn other_messages_are_no_update() {
+    assert_eq!(
+        Update::from_progress("Data location changed while waiting"),
+        None
+    );
+}
+
+/// The whole job, failure report included, ends in a code without a window.
+#[test]
+fn a_worker_without_a_target_fails_with_a_code() {
+    let worker = Worker {
+        target: None,
+        restart: false,
+    };
+    let mut updates = Vec::new();
+    assert_eq!(
+        worker.run_and_finish(|update| updates.push(update), &AtomicBool::new(false)),
+        1
+    );
+    assert!(updates.is_empty());
+}

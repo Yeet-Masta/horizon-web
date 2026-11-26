@@ -6,6 +6,7 @@
 //! network threads ([`io_pool`]): they forward decoded packets to the game
 //! thread, frame, compress and encrypt what the game queues, and keep the
 //! keep-alive schedule on their own so a long tick never times a client out.
+mod cauldron_wire;
 mod payloads;
 use super::config_payloads::ConfigIo;
 use super::{
@@ -66,7 +67,7 @@ fn login_disconnect(c: &mut Connection, reason: &horizon_core::nbt::Tag) {
 pub fn component_json(tag: &horizon_core::nbt::Tag) -> String {
     component_value(tag).compact()
 }
-fn component_value(tag: &horizon_core::nbt::Tag) -> crate::server::json::Json {
+pub fn component_value(tag: &horizon_core::nbt::Tag) -> crate::server::json::Json {
     use crate::server::json::Json;
     use horizon_core::nbt::Tag;
     const ORDER: &[&str] = &[
@@ -131,7 +132,18 @@ fn component_value(tag: &horizon_core::nbt::Tag) -> crate::server::json::Json {
         Tag::Byte(b) => Json::Bool(*b != 0),
         Tag::Int(i) => Json::Number(i.to_string()),
         Tag::Long(i) => Json::Number(i.to_string()),
+        Tag::Short(i) => Json::Number(i.to_string()),
+        Tag::Float(bits) => finite_number(f64::from(f32::from_bits(*bits))),
+        Tag::Double(bits) => finite_number(f64::from_bits(*bits)),
         _ => Json::Null,
+    }
+}
+fn finite_number(value: f64) -> crate::server::json::Json {
+    use crate::server::json::Json;
+    if value.is_finite() {
+        Json::Number(value.to_string())
+    } else {
+        Json::Null
     }
 }
 
@@ -277,6 +289,8 @@ impl Undrained {
 #[derive(Clone)]
 pub struct PlayerSender {
     payload_transport: Arc<Transport>,
+    /// This guest has not matched the content registry that declares this optional type.
+    hidden_cauldron_kind: Option<i32>,
     /// What the player's network thread has handed the hub and the hub hasn't taken yet.
     pub undrained: Arc<Undrained>,
     /// The bytes of the bodies sent and not framed yet.
@@ -296,6 +310,9 @@ pub struct PlayerSender {
     /// The `horizon:menu_extra` payload layout the client reads: its revision answer,
     /// 0 for one that did not answer (the legacy layout, a menu of a block only).
     pub menu_extra_rev: u8,
+    /// The play packets sent and received, by id, while a mod counts them; shared with the
+    /// connection's network thread, which counts what it receives.
+    pub packet_counts: Arc<super::packet_counts::PacketCounts>,
     /// The host and port the client typed in its handshake ([`typed_address`]), None for a
     /// connection that sent none.
     pub connect: Option<(Arc<str>, u16)>,
@@ -367,10 +384,12 @@ impl PlayerSender {
             to: To::Channel(tx),
             wire: None,
             payload_transport: Transport::empty(),
+            hidden_cauldron_kind: None,
             datapack_offer: None,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            packet_counts: Arc::default(),
             connect: None,
         }
     }
@@ -394,6 +413,7 @@ impl PlayerSender {
         let inspect = outbox.clone();
         let sender = Self {
             payload_transport: transport,
+            hidden_cauldron_kind: None,
             undrained: Arc::default(),
             pending,
             held: Arc::default(),
@@ -410,6 +430,7 @@ impl PlayerSender {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            packet_counts: Arc::default(),
             connect: None,
         };
         (sender, move || inspect.queued_contents())
@@ -424,10 +445,12 @@ impl PlayerSender {
             to: To::Disabled,
             wire: None,
             payload_transport: Transport::empty(),
+            hidden_cauldron_kind: None,
             datapack_offer: None,
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            packet_counts: Arc::default(),
             connect: None,
         }
     }
@@ -524,10 +547,14 @@ impl PlayerSender {
         if matches!(self.to, To::Disabled) {
             return;
         }
+        let Some(body) = cauldron_wire::project(body, self.hidden_cauldron_kind) else {
+            return;
+        };
         if !self.reserve_body(io_pool::charge(body.retained())) {
             self.close();
             return;
         }
+        self.packet_counts.add_body(&body);
         if HOLDING.get() {
             self.held().push(body);
         } else {
@@ -553,6 +580,11 @@ impl PlayerSender {
             self.pending.load(Ordering::Relaxed),
         )
     }
+    /// The bodies held by this sender during a test tick, before the channel path flattens them.
+    #[cfg(test)]
+    pub(crate) fn held_bodies(&self) -> Vec<Body> {
+        self.held().clone()
+    }
     /// Several packets in order, as [`Self::send`] each: under one lock
     /// while the tick holds them. Shared bodies stay shared up to the wire.
     pub fn send_many<B: Into<Body>>(&self, bodies: impl IntoIterator<Item = B>) {
@@ -567,23 +599,30 @@ impl PlayerSender {
         }
         let mut held = self.held();
         for body in bodies {
-            let body = body.into();
+            let Some(body) = cauldron_wire::project(body.into(), self.hidden_cauldron_kind) else {
+                continue;
+            };
             if !self.reserve_body(io_pool::charge(body.retained())) {
                 self.close();
                 return;
             }
+            self.packet_counts.add_body(&body);
             held.push(body);
         }
     }
     /// Hand the held packets to the network thread.
     pub fn flush(&self) {
-        let held = std::mem::take(&mut *self.held());
-        if !held.is_empty() {
-            match &self.to {
-                To::Disabled => {}
-                To::Channel(tx) => drop(tx.send(unshared(held))),
-                To::Pool(outbox, _) => outbox.send(held, None),
-            }
+        let mut held = self.held();
+        if held.is_empty() {
+            return;
+        }
+        match &self.to {
+            To::Disabled => held.clear(),
+            To::Channel(tx) => drop(tx.send(unshared(std::mem::take(&mut *held)))),
+            To::Pool(outbox, _) => outbox.send_from(&mut held, None),
+        }
+        if held.capacity() > 512 {
+            held.shrink_to(64);
         }
     }
     /// Send a play disconnect with this reason after what was sent before,
@@ -601,6 +640,7 @@ impl PlayerSender {
                     self.close();
                     return;
                 }
+                self.packet_counts.add_body(&body);
                 outbox.send(vec![body], Some(io_pool::End::Disconnect));
             }
         }
@@ -648,20 +688,23 @@ impl Drop for PreparedPayload {
 pub fn flush_all<'a>(senders: impl IntoIterator<Item = &'a PlayerSender>) {
     let mut wake: Vec<&Arc<io_pool::Worker>> = Vec::new();
     for s in senders {
-        let held = std::mem::take(&mut *s.held());
+        let mut held = s.held();
         if held.is_empty() {
             continue;
         }
         match &s.to {
-            To::Disabled => {}
-            To::Channel(tx) => drop(tx.send(unshared(held))),
+            To::Disabled => held.clear(),
+            To::Channel(tx) => drop(tx.send(unshared(std::mem::take(&mut *held)))),
             To::Pool(outbox, _) => {
-                if let Some(worker) = outbox.push(held, None)
+                if let Some(worker) = outbox.push_from(&mut held, None)
                     && !wake.iter().any(|w| Arc::ptr_eq(w, worker))
                 {
                     wake.push(worker);
                 }
             }
+        }
+        if held.capacity() > 512 {
+            held.shrink_to(64);
         }
     }
     wake.into_iter().for_each(|w| w.wake());
@@ -900,7 +943,12 @@ fn serve_connection(
         // ServerHandshakePacketListenerImpl: a server that does not reply
         // to status requests closes the connection.
         handshake::STATUS if !shared.enable_status() => Ok(()),
-        handshake::STATUS => serve_status(&mut c, &shared, intention.protocol),
+        handshake::STATUS => {
+            let host = typed_address(&intention, c.is_memory())
+                .map(|(host, _)| host.to_string())
+                .unwrap_or_default();
+            serve_status(&mut c, &shared, intention.protocol, &host)
+        }
         handshake::TRANSFER if !shared.accepts_transfers() => {
             login_disconnect(
                 &mut c,
@@ -909,6 +957,22 @@ fn serve_connection(
             Ok(())
         }
         handshake::LOGIN | handshake::TRANSFER => {
+            // `player_handshake`: the mods read, rewrite or refuse the handshake before the login.
+            let mut intention = intention;
+            match shared.handshake.pass(
+                (!c.is_memory()).then_some(address.ip()),
+                &intention.host,
+                intention.port,
+                intention.protocol,
+                super::handshake_gate::WAIT,
+                || translatable("multiplayer.disconnect.generic", &[]),
+            ) {
+                Ok(host) => intention.host = host,
+                Err(reason) => {
+                    login_disconnect(&mut c, &reason);
+                    return Ok(());
+                }
+            }
             if let Some(version) = older_client(&shared, intention.protocol) {
                 c.serve_older(version);
             } else if intention.protocol != PROTOCOL_VERSION {
@@ -957,7 +1021,12 @@ fn older_client(
     .then_some(version)
 }
 
-fn serve_status(c: &mut Connection, shared: &Shared, protocol: i32) -> Result<(), String> {
+fn serve_status(
+    c: &mut Connection,
+    shared: &Shared,
+    protocol: i32,
+    virtual_host: &str,
+) -> Result<(), String> {
     let e = |e: horizon_protocol::Error| e.to_string();
     let mut requested = false;
     loop {
@@ -968,9 +1037,13 @@ fn serve_status(c: &mut Connection, shared: &Shared, protocol: i32) -> Result<()
             status::Serverbound::StatusRequest(_) => {
                 requested = true;
                 // A client this server lets join is told its own protocol, so its list shows it joinable.
-                let json = match older_client(shared, protocol) {
-                    Some(_) => shared.status_json_for(protocol),
-                    None => shared.status_json(),
+                let shown = match older_client(shared, protocol) {
+                    Some(_) => protocol,
+                    None => PROTOCOL_VERSION,
+                };
+                // The mods may change the answer, or cancel it: the connection then closes.
+                let Some(json) = shared.status_for(protocol, shown, virtual_host) else {
+                    return Ok(());
                 };
                 c.send(
                     &status::Clientbound::StatusResponse(status::StatusResponse { json }).encode(),
@@ -1153,6 +1226,106 @@ fn authenticate(
     }
 }
 
+/// The profile property limits the login success keeps (`ExtraCodecs.GAME_PROFILE_PROPERTIES`):
+/// 16 properties, names of 64 UTF-16 units, values of 32767 and signatures of 1024.
+const MAX_LOGIN_PROPERTIES: usize = 16;
+const MAX_LOGIN_PROPERTY_NAME: usize = 64;
+const MAX_LOGIN_PROPERTY_VALUE: usize = 32767;
+const MAX_LOGIN_PROPERTY_SIGNATURE: usize = 1024;
+
+/// A string's length in UTF-16 code units, what the profile's wire limits count.
+fn utf16_units(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The login's own properties as the mod API's, for `player_login_profile`.
+fn api_profile_properties(properties: &[login::Property]) -> Vec<mod_api::ProfileProperty> {
+    properties
+        .iter()
+        .map(|property| {
+            mod_api::ProfileProperty::new(
+                property.name.clone(),
+                property.value.clone(),
+                property.signature.clone(),
+            )
+        })
+        .collect()
+}
+
+/// The properties a `player_login_profile` listener left, as the login's own, or None when the
+/// list is past the profile's wire limits: the login's own properties are sent then.
+fn login_profile_properties(
+    changed: Vec<mod_api::ProfileProperty>,
+) -> Option<Vec<login::Property>> {
+    if changed.len() > MAX_LOGIN_PROPERTIES {
+        return None;
+    }
+    changed
+        .into_iter()
+        .map(|property| {
+            if property.name.is_empty()
+                || utf16_units(&property.name) > MAX_LOGIN_PROPERTY_NAME
+                || utf16_units(&property.value) > MAX_LOGIN_PROPERTY_VALUE
+                || property
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| utf16_units(signature) > MAX_LOGIN_PROPERTY_SIGNATURE)
+            {
+                return None;
+            }
+            Some(login::Property {
+                name: property.name,
+                value: property.value,
+                signature: property.signature,
+            })
+        })
+        .collect()
+}
+
+/// A player's game profile at login, before the server sends it (`player_login_profile`): the
+/// UUID and name the login authenticated and the properties it would send. The mods may change
+/// the properties; a list past the profile limits leaves the login's own. Runs on the connection
+/// thread, so the callback it reaches has no host.
+#[inline(never)]
+pub fn native_player_login_profile(
+    player: u128,
+    name: &str,
+    properties: &mut Vec<mod_api::ProfileProperty>,
+) {
+    crate::native_client_hooks::player_login_profile(player, name, properties);
+}
+
+/// Holds an admitted login's uuid until the login reaches play. Dropping it while armed releases
+/// the uuid, including while a panic unwinds.
+struct Admission<'a> {
+    shared: &'a Shared,
+    uuid: u128,
+    armed: bool,
+}
+
+impl<'a> Admission<'a> {
+    fn new(shared: &'a Shared, uuid: u128) -> Self {
+        Self {
+            shared,
+            uuid,
+            armed: true,
+        }
+    }
+
+    /// The login reached play, whose connection releases the uuid when it closes.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared.release(self.uuid);
+        }
+    }
+}
+
 fn serve_login(
     mut c: Connection,
     address: std::net::SocketAddr,
@@ -1211,7 +1384,7 @@ fn serve_login(
         .as_ref()
         .filter(|(owner_name, _)| c.is_memory() && hello.name.eq_ignore_ascii_case(owner_name))
         .map(|(owner_name, uuid)| (owner_name.clone(), *uuid));
-    let (uuid, properties) = match (online, forwarding) {
+    let (uuid, mut properties) = match (online, forwarding) {
         (Some(online), _) => {
             match authenticate(&mut c, shared, online, &hello.name, address, &user) {
                 Ok(Ok(profile)) => profile,
@@ -1277,6 +1450,21 @@ fn serve_login(
         lost(shared, &user, &text);
         return Ok(());
     }
+    // Holds the admitted uuid until the login reaches play. A panic in a mod listener or in a
+    // later login step drops it, which releases the uuid.
+    let mut admitted = Admission::new(shared.as_ref(), uuid);
+    // The mods may change the profile the login success carries, before it is sent: a skin mod
+    // replaces the `textures` property here. A list past the profile limits keeps the login's own.
+    if mod_api::__private::listened(mod_api::HookId::PlayerLoginProfile) {
+        let mut changed = api_profile_properties(&properties);
+        native_player_login_profile(uuid, &name, &mut changed);
+        match login_profile_properties(changed) {
+            Some(changed) => properties = changed,
+            None => log::warn!(
+                "Horizon: a mod's login profile for {name} is past the profile limits; keeping the login's own"
+            ),
+        }
+    }
     // A player a proxy said would arrive (`player-expect`) uses the expectation up
     // here, as the login starts: one that ran out while the player was still in
     // configuration (a resource pack prompt) would otherwise make it an ordinary
@@ -1301,6 +1489,7 @@ fn serve_login(
     let result = login_and_configure(&mut c, shared, uuid, &name, &user, properties);
     match result {
         Ok(Some(parts)) => {
+            admitted.disarm();
             play(
                 c,
                 shared,
@@ -1314,12 +1503,10 @@ fn serve_login(
         }
         Ok(None) => {
             put_back();
-            shared.release(uuid);
             Ok(())
         }
         Err(err) => {
             put_back();
-            shared.release(uuid);
             // ServerConfigurationPacketListenerImpl.onDisconnect.
             let profile = format!("{name} ({})", uuid_string(uuid));
             lost(shared, &profile, "Disconnected");
@@ -1360,6 +1547,7 @@ fn forward(
 
 struct Parts {
     payload_transport: Arc<Transport>,
+    hidden_cauldron_kind: Option<i32>,
     uuid: u128,
     name: String,
     properties: Vec<login::Property>,
@@ -1775,9 +1963,16 @@ fn login_and_configure(
     payload_transport.finish_configuration()?;
     let channels = std::mem::take(&mut c.channels);
     c.finish()?;
+    let hidden_cauldron_kind = if brand == "horizon" && sync.content_identity.is_some() {
+        None // the identity challenge had to pass before configuration could finish
+    } else {
+        use crate::block_entity_types::{WATER_CAULDRON, type_for};
+        type_for(WATER_CAULDRON).and_then(|kind| sync.id("minecraft:block_entity_type", kind))
+    };
     Ok(Some(Parts {
         channels,
         payload_transport,
+        hidden_cauldron_kind,
         uuid,
         name: name.to_owned(),
         properties,
@@ -2186,6 +2381,7 @@ fn play(
         alive: Arc::new(AtomicI64::new(-1)),
     });
     let undrained = Arc::<Undrained>::default();
+    let packet_counts = Arc::<super::packet_counts::PacketCounts>::default();
     let sender = PlayerSender {
         undrained: undrained.clone(),
         pending,
@@ -2194,10 +2390,12 @@ fn play(
         to: To::Pool(outbox.clone(), watch.clone()),
         wire: Some(c.reader.counters.clone()),
         payload_transport: parts.payload_transport.clone(),
+        hidden_cauldron_kind: parts.hidden_cauldron_kind,
         datapack_offer: parts.datapack_offer.map(Into::into),
         announced: parts.channels.announced.clone().unwrap_or_default(),
         viewed_levels: parts.channels.viewed_levels.answer(),
         menu_extra_rev: parts.channels.menu_extra_rev.revision(),
+        packet_counts: packet_counts.clone(),
         connect: typed,
     };
     let required_pack = shared
@@ -2220,6 +2418,8 @@ fn play(
         watch,
         counted,
         undrained,
+        packet_counts,
+        deferred: None,
     };
     // The ServerPlayer is made with the configuration's client information (updateOptions).
     shared.set_listed(parts.uuid, parts.info.allows_listing);
@@ -2269,7 +2469,18 @@ struct PlayConn {
     counted: Option<super::Counted>,
     /// Shared with the player's [`PlayerSender`]: what the hub hasn't taken yet.
     undrained: Arc<Undrained>,
+    /// Shared with the player's [`PlayerSender`]: the packets counted while a mod asks.
+    packet_counts: Arc<super::packet_counts::PacketCounts>,
+    /// Already-decoded play event awaiting ingress budget after `Refusal::Pressure`.
+    deferred: Option<NetEvent>,
 }
+/// The id an inbound play packet is counted under: its own when the protocol has it, else -1.
+fn counted_id(id: i32) -> i32 {
+    let known = usize::try_from(id)
+        .is_ok_and(|id| id < horizon_protocol::ids::play::serverbound::NAMES.len());
+    if known { id } else { -1 }
+}
+
 impl PlayConn {
     /// `IntegratedServer.isSingleplayerOwner`: the integrated server's own player,
     /// by name (ignoring case).
@@ -2287,13 +2498,39 @@ impl io_pool::Session for PlayConn {
     /// nobody asked for, a malformed packet.
     fn packet(&mut self, id: i32, payload: Vec<u8>) -> io_pool::Verdict {
         use io_pool::Verdict;
-        let kick = |(reason, text): (horizon_core::nbt::Tag, String)| {
+        // The disconnect the I/O thread sends for a kick does not pass the player's sender: counted here.
+        let counts = self.packet_counts.clone();
+        let kick = move |(reason, text): (horizon_core::nbt::Tag, String)| {
             let body = play::Clientbound::Disconnect(cfg::Disconnect { reason }).encode();
+            counts.add_body(&body);
             Verdict::Kick(text, body)
         };
         if self.payload_transport.closed() {
             return Verdict::Go;
         }
+        if id == crate::net::EXPORT_FENCE
+            && matches!(
+                self.payload_sender.framing,
+                horizon_protocol::connection::Framing::Memory
+            )
+            && self.is_owner()
+            && payload.len() == size_of::<u64>()
+        {
+            // All earlier packets on this connection have entered the server
+            // ingress queue before the client can receive this echo.
+            let mut body = horizon_protocol::buf::Writer::new();
+            body.varint(id);
+            body.bytes(&payload);
+            self.payload_sender.send(body.data);
+            return Verdict::Go;
+        }
+        // Only the ids the protocol has: a client sending others (up to 2^31 of them) must not grow the
+        // connection's table, so all of those are counted under one id, -1.
+        self.packet_counts.add(
+            false,
+            counted_id(id),
+            horizon_protocol::buf::varint_size(id) + payload.len(),
+        );
         let now = Instant::now();
         if let Some(average) = self.rate.as_mut().and_then(|r| r.received(now)) {
             return kick(rate_exceeded(&self.shared, average));
@@ -2406,6 +2643,10 @@ impl io_pool::Session for PlayConn {
                 let event = NetEvent::Packet(self.conn, Box::new(p), payload.len());
                 match self.shared.events.send(event) {
                     Ok(()) => Verdict::Go,
+                    Err(err) if err.reason == crate::net::ingress::Refusal::Pressure => {
+                        self.deferred = Some(err.value);
+                        Verdict::Defer
+                    }
                     Err(_) => Verdict::Close("server closed".to_owned()),
                 }
             }
@@ -2413,14 +2654,37 @@ impl io_pool::Session for PlayConn {
             Err(e) => Verdict::Close(format!("Invalid packet {id}: {e}")),
         }
     }
+    fn flush_deferred(&mut self) -> io_pool::Verdict {
+        use io_pool::Verdict;
+        let Some(event) = self.deferred.take() else {
+            return Verdict::Go;
+        };
+        match self.shared.events.send(event) {
+            Ok(()) => Verdict::Go,
+            Err(err) if err.reason == crate::net::ingress::Refusal::Pressure => {
+                self.deferred = Some(err.value);
+                Verdict::Defer
+            }
+            Err(_) => Verdict::Close("server closed".to_owned()),
+        }
+    }
     /// ServerCommonPacketListenerImpl.keepConnectionAlive: a keep-alive 15 s
     /// after the last was answered. The game thread times a client out
     /// ([`PlayerSender::timed_out`]).
     fn tick(&mut self, now: Instant) -> Option<Vec<u8>> {
-        self.payload_tick(now)
+        // The keep-alive goes out through the I/O thread, not the player's sender: counted here.
+        let body = self.payload_tick(now)?;
+        self.packet_counts.add_body(&body);
+        Some(body)
     }
     fn left(&mut self, reason: String) {
-        let _ = self.shared.events.send(NetEvent::Left(self.conn, reason));
+        if let Some(NetEvent::Packet(_, _, bytes)) = self.deferred.take() {
+            self.undrained.taken(bytes);
+        }
+        let _ = self
+            .shared
+            .events
+            .send_over_budget(NetEvent::Left(self.conn, reason));
         self.shared.closing.fetch_add(1, Ordering::AcqRel);
     }
     fn closed(&mut self) {
@@ -2613,20 +2877,61 @@ pub(super) fn frame_body(
     body: &[u8],
     out: &mut Vec<u8>,
 ) -> horizon_protocol::Result<()> {
-    // Renumbered first for a client of an older release; one with no such packet gets nothing.
-    let Some(body) = writer.for_client(body)? else {
-        return Ok(());
-    };
-    let body = &body[..];
+    // Renumbered first for a client of an older release; one with no such packet gets nothing, and what a packet
+    // brought with it (a boat's wood, an experience orb's value) follows it.
+    // A client of this release takes the body as it is: no allocation per packet.
+    if !writer.serves_older_client() {
+        return frame_one(writer, body, out);
+    }
+    for body in writer.for_client(body)? {
+        frame_one(writer, &body, out)?;
+    }
+    Ok(())
+}
+
+/// One packet body, already in the client's numbering, framed into `out`.
+fn frame_one(
+    writer: &mut ConnWriter,
+    body: &[u8],
+    out: &mut Vec<u8>,
+) -> horizon_protocol::Result<()> {
     match writer.framing() {
         horizon_protocol::connection::Framing::Network(Some(t))
             if body.len() >= t.max(SHARED_FRAME_MIN) =>
         {
             writer.frame_into(&SharedFrames::get().contents(body, t)?, out);
         }
+        // At `MAX_FRAME` or over, `contents` refuses it before anything is written (a threshold
+        // above 2 MiB).
+        horizon_protocol::connection::Framing::Network(Some(t))
+            if body.len() < t && body.len() < horizon_protocol::frame::MAX_FRAME =>
+        {
+            writer.frame_small_into(body, out);
+        }
         _ => writer.frame_into(&writer.contents(body)?, out),
     }
     Ok(())
+}
+
+/// [`frame_body`] for a run of bodies: a small one is framed without touching the connection's
+/// counters, its count and bytes added to `tally`, for the caller to give to
+/// `ConnWriter::count_frames` once (two atomic adds for each packet, 32 000 packets a tick).
+pub(super) fn frame_body_tallied(
+    writer: &mut ConnWriter,
+    body: &[u8],
+    out: &mut Vec<u8>,
+    tally: &mut (i64, i64),
+) -> horizon_protocol::Result<()> {
+    if let horizon_protocol::connection::Framing::Network(Some(t)) = writer.framing()
+        && body.len() < t
+        && body.len() < horizon_protocol::frame::MAX_FRAME
+        && writer.for_client_is_plain()
+    {
+        tally.1 += writer.frame_small_uncounted(body, out);
+        tally.0 += 1;
+        return Ok(());
+    }
+    frame_body(writer, body, out)
 }
 
 /// The keep-alive clock of a play connection, shared by its network thread
@@ -2650,6 +2955,54 @@ impl KeepAliveWatch {
 #[cfg(test)]
 mod tests {
     include!("profession_join_tests.rs");
+
+    /// A body too long for a frame is refused, not framed small, even under a compression
+    /// threshold above `MAX_FRAME`: nothing is written and the cipher does not move on.
+    #[test]
+    fn a_body_too_long_for_a_frame_is_refused_under_a_high_threshold() {
+        use horizon_protocol::frame::MAX_FRAME;
+        let writer = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let stream = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let mut c = Connection::from_stream(stream).unwrap();
+            c.set_compression(i32::MAX);
+            c.enable_encryption(&[5; 16]);
+            let (_, writer) = c.split();
+            (listener, writer)
+        };
+        let ((_a, mut refused), (_b, mut fresh)) = (writer(), writer());
+        let long = vec![1u8; MAX_FRAME];
+        let mut out = Vec::new();
+        assert!(frame_body(&mut refused, &long, &mut out).is_err());
+        let mut tally = (0, 0);
+        assert!(frame_body_tallied(&mut refused, &long, &mut out, &mut tally).is_err());
+        assert!(out.is_empty());
+        assert_eq!(tally, (0, 0));
+        // One byte shorter still fits.
+        let mut framed = Vec::new();
+        frame_body(&mut writer().1, &long[1..], &mut framed).unwrap();
+        assert!(!framed.is_empty());
+        let (mut after, mut want) = (Vec::new(), Vec::new());
+        frame_body(&mut refused, &[1, 2, 3], &mut after).unwrap();
+        frame_body(&mut fresh, &[1, 2, 3], &mut want).unwrap();
+        assert_eq!(after, want);
+    }
+
+    /// A float, double or short in a component (a translate `with` argument) is a JSON number.
+    #[test]
+    fn component_json_keeps_numeric_arguments() {
+        use horizon_core::nbt::Tag;
+        let with = Tag::List(vec![
+            Tag::Float(2.5f32.to_bits()),
+            Tag::Double(1.0f64.to_bits()),
+            Tag::Short(7),
+        ]);
+        let tag = Tag::compound([("translate", Tag::String("k".into())), ("with", with)]);
+        assert_eq!(
+            component_json(&tag),
+            r#"{"translate":"k","with":[2.5,1,7]}"#
+        );
+    }
 
     /// Bodies shared between players reach each of them as the same bytes, in the order
     /// they were sent among the player's own.
@@ -2705,6 +3058,130 @@ mod tests {
         assert!(big.handed(size));
     }
     use super::*;
+
+    /// The profile's wire limits: a list past one is refused whole, so the login's own
+    /// properties are sent, and the 16th property is still taken.
+    #[test]
+    fn a_modded_login_profile_keeps_the_profiles_wire_limits() {
+        let property = |name: &str, value: &str, signature: Option<&str>| {
+            mod_api::ProfileProperty::new(name.into(), value.into(), signature.map(str::to_owned))
+        };
+        assert_eq!(
+            login_profile_properties(vec![property("textures", "e30=", Some("s"))]),
+            Some(vec![login::Property {
+                name: "textures".into(),
+                value: "e30=".into(),
+                signature: Some("s".into()),
+            }])
+        );
+        assert_eq!(login_profile_properties(Vec::new()), Some(Vec::new()));
+        assert!(
+            login_profile_properties(
+                (0..16)
+                    .map(|i| property(&format!("p{i}"), "v", None))
+                    .collect()
+            )
+            .is_some(),
+            "the sixteenth property is allowed"
+        );
+        assert!(
+            login_profile_properties(
+                (0..17)
+                    .map(|i| property(&format!("p{i}"), "v", None))
+                    .collect()
+            )
+            .is_none(),
+            "a seventeenth property is not"
+        );
+        assert!(login_profile_properties(vec![property("", "v", None)]).is_none());
+        assert!(
+            login_profile_properties(vec![property(&"\u{1F600}".repeat(33), "v", None)]).is_none(),
+            "an astral character counts two UTF-16 units: 33 are over 64"
+        );
+        assert!(login_profile_properties(vec![property("n", &"v".repeat(32768), None)]).is_none());
+        assert!(
+            login_profile_properties(vec![property("n", "v", Some(&"s".repeat(1025)))]).is_none()
+        );
+    }
+
+    /// A mod's login-profile edit is what the login success sends, with the login's own uuid and
+    /// name; a list past the profile limits falls back to the login's own properties.
+    #[test]
+    fn a_modded_login_profile_reaches_the_login_success() {
+        use mod_api::{Hooks, ModEntry, ProfileProperty};
+
+        // The library's test adapter installs process-wide, once; it must dispatch this hook.
+        crate::native_client_hooks::test_hooks::install();
+
+        #[derive(Default)]
+        struct Skin;
+        #[mod_api::__subscriptions]
+        impl Hooks for Skin {
+            fn player_login_profile(&self, event: &mut mod_api::PlayerLoginProfileEvent<'_>) {
+                event.properties.retain(|p| p.name != "textures");
+                event.properties.push(ProfileProperty::new(
+                    "textures".into(),
+                    "new".into(),
+                    Some("signed".into()),
+                ));
+            }
+        }
+
+        #[derive(Default)]
+        struct TooMany;
+        #[mod_api::__subscriptions]
+        impl Hooks for TooMany {
+            fn player_login_profile(&self, event: &mut mod_api::PlayerLoginProfileEvent<'_>) {
+                *event.properties = (0..17)
+                    .map(|i| ProfileProperty::new(format!("p{i}"), "v".into(), None))
+                    .collect();
+            }
+        }
+
+        let lan = crate::lan::Lan::start_with(
+            Arc::new(SyncData::empty()),
+            crate::lan::NetConfig {
+                listen: false,
+                ..crate::lan::NetConfig::loopback(0, "Mods".into(), 8)
+            },
+        )
+        .unwrap();
+
+        let login = |mods: mod_platform::Mods| {
+            mod_platform::testing::with_mods(mods, || {
+                let (client, server) = horizon_protocol::connection::Pipe::pair();
+                let shared = lan.shared.clone();
+                let serve = mod_platform::testing::inherit_mods(move |_: &()| {
+                    let _ = super::serve_local(server, shared);
+                });
+                let worker =
+                    horizon_guest_stack::spawn("mod-login".into(), move || serve(&())).unwrap();
+                let profile = login_profile(&mut Connection::local(client), "Alex");
+                worker.join().unwrap();
+                profile
+            })
+        };
+
+        let profile = login(vec![ModEntry::new("skin", Box::new(Skin))].into());
+        assert_eq!(profile.uuid, offline_uuid("Alex"));
+        assert_eq!(profile.name, "Alex");
+        assert_eq!(
+            profile.properties,
+            vec![login::Property {
+                name: "textures".into(),
+                value: "new".into(),
+                signature: Some("signed".into()),
+            }]
+        );
+
+        let profile = login(vec![ModEntry::new("too-many", Box::new(TooMany))].into());
+        assert_eq!(profile.uuid, offline_uuid("Alex"));
+        assert_eq!(profile.name, "Alex");
+        assert!(
+            profile.properties.is_empty(),
+            "a list past the limits keeps the login's own properties"
+        );
+    }
 
     /// arismoko/horizon#3209: a client may announce its channels while the server waits on a configuration
     /// task (here the code of conduct). With no typed declaration the wait reads packets
@@ -3785,6 +4262,8 @@ mod tests {
             next_keep_alive: Instant::now(),
             counted: None,
             undrained: Arc::default(),
+            packet_counts: Arc::default(),
+            deferred: None,
         };
         // The bodies after the packets' one-byte VarInt ids.
         let packets = |sequence: i32| {
@@ -3923,6 +4402,8 @@ mod tests {
             next_keep_alive: Instant::now(),
             counted: None,
             undrained: Arc::default(),
+            packet_counts: Arc::default(),
+            deferred: None,
         };
         let answer = |c: &mut PlayConn, id: i64| c.packet(KEEP_ALIVE, id.to_be_bytes().to_vec());
         // The pending one: accepted.
@@ -3976,6 +4457,8 @@ mod tests {
             next_keep_alive: Instant::now(),
             counted: None,
             undrained: Arc::default(),
+            packet_counts: Arc::default(),
+            deferred: None,
         };
         // The body after the packet's one-byte VarInt id.
         let response = play::Serverbound::CookieResponse(cfg::CookieResponse {
@@ -4042,6 +4525,7 @@ mod outgoing_budget_tests {
                 .unwrap();
         PlayerSender {
             payload_transport: Transport::empty(),
+            hidden_cauldron_kind: None,
             undrained: Arc::default(),
             pending,
             held: Arc::default(),
@@ -4058,6 +4542,7 @@ mod outgoing_budget_tests {
             announced: Arc::default(),
             viewed_levels: Default::default(),
             menu_extra_rev: 0,
+            packet_counts: Arc::default(),
             connect: None,
         }
     }
@@ -4200,3 +4685,208 @@ mod outgoing_budget_tests {
 #[cfg(test)]
 #[path = "datapack_offer_tests.rs"]
 mod datapack_offer_tests;
+
+#[cfg(test)]
+mod handshake_hook_tests {
+    use super::*;
+
+    fn lan() -> crate::lan::Lan {
+        let config = crate::lan::NetConfig {
+            announce: false,
+            listen: false,
+            ..crate::lan::NetConfig::loopback(0, "Handshake".into(), 8)
+        };
+        crate::lan::Lan::start_with(Arc::new(crate::lan::data::SyncData::empty()), config).unwrap()
+    }
+
+    fn send_handshake(c: &mut Connection, host: &str, intent: i32) {
+        c.send(
+            &handshake::Serverbound::Intention(handshake::Intention {
+                protocol: horizon_protocol::PROTOCOL_VERSION,
+                host: host.into(),
+                port: 25570,
+                intent,
+            })
+            .encode(),
+        )
+        .unwrap();
+    }
+
+    /// A mod that refuses the handshake gets its reason to the client as a login disconnect,
+    /// before any login packet; the question carries what the client sent, once.
+    #[test]
+    fn a_refused_handshake_disconnects_before_the_login() {
+        let lan = lan();
+        lan.shared.handshake.set_listened(true);
+        let mut c = Connection::local(lan.connect_local().unwrap());
+        send_handshake(&mut c, "play.example\0data", handshake::LOGIN);
+        let ask = loop {
+            if let Some(ask) = lan.shared.handshake.take().pop() {
+                break ask;
+            }
+            horizon_std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            (ask.host.as_str(), ask.port, ask.address),
+            ("play.example\0data", 25570, None)
+        );
+        assert_eq!(ask.protocol, horizon_protocol::PROTOCOL_VERSION);
+        let reason = crate::text::Text::literal("Bedrock key rejected").component();
+        ask.answer(crate::lan::handshake_gate::Answer {
+            host: "play.example".into(),
+            refusal: Some(crate::lan::data::component_nbt(&reason)),
+        });
+        let (id, payload) = c.recv().unwrap();
+        match login::Clientbound::decode(id, &payload).unwrap() {
+            login::Clientbound::Disconnect(d) => {
+                assert_eq!(d.reason_json, "\"Bedrock key rejected\"")
+            }
+            other => panic!("expected a disconnect, got {other:?}"),
+        }
+        assert!(lan.shared.handshake.take().is_empty(), "asked once");
+    }
+
+    /// A status ping is not a login: the mods are not asked.
+    #[test]
+    fn a_status_ping_is_not_asked() {
+        let lan = lan();
+        lan.shared.handshake.set_listened(true);
+        let mut c = Connection::local(lan.connect_local().unwrap());
+        send_handshake(&mut c, "play.example", handshake::STATUS);
+        c.send(&status::Serverbound::StatusRequest(Empty).encode())
+            .unwrap();
+        let (id, payload) = c.recv().unwrap();
+        assert!(matches!(
+            status::Clientbound::decode(id, &payload).unwrap(),
+            status::Clientbound::StatusResponse(_)
+        ));
+        assert!(lan.shared.handshake.take().is_empty());
+    }
+    #[test]
+    fn play_conn_defers_packet_on_ingress_pressure_and_flushes_when_drained() {
+        use io_pool::{Session, Verdict};
+        let lan = lan();
+        // Saturate the 96 MiB ingress budget so the next packet hits `Refusal::Pressure`.
+        let filler = NetEvent::Left(99, String::with_capacity((96 << 20) - 4096));
+        lan.shared.events.send(filler).unwrap();
+
+        let undrained = Arc::new(Undrained::default());
+        let mut c = PlayConn {
+            payload_sender: PlayerSender::disabled(),
+            payload_transport: Transport::empty(),
+            conn: 7,
+            shared: lan.shared.clone(),
+            uuid: 7,
+            name: "p".to_owned(),
+            required_pack: false,
+            rate: None,
+            watch: Arc::new(KeepAliveWatch {
+                start: Instant::now(),
+                alive: Arc::new(AtomicI64::new(-1)),
+            }),
+            latency: Arc::new(AtomicI32::new(0)),
+            sent_at: None,
+            next_keep_alive: Instant::now(),
+            counted: None,
+            undrained: undrained.clone(),
+            packet_counts: Arc::default(),
+            deferred: None,
+        };
+        let encoded = play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
+            id: 42,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        })
+        .encode();
+        let (id, payload) = (i32::from(encoded[0]), encoded[1..].to_vec());
+
+        assert!(matches!(c.packet(id, payload), Verdict::Defer));
+        assert!(c.deferred.is_some());
+        assert!(matches!(c.flush_deferred(), Verdict::Defer));
+
+        // Drain the ingress channel so budget is available again.
+        let _ = lan.poll();
+        assert!(matches!(c.flush_deferred(), Verdict::Go));
+        assert!(c.deferred.is_none());
+        let events = lan.poll();
+        assert!(events.into_iter().any(|r| matches!(
+            r.into_parts().0,
+            NetEvent::Packet(7, p, _) if matches!(
+                p.as_ref(),
+                play::Serverbound::AcceptTeleportation(play::AcceptTeleportation { id: 42, .. })
+            )
+        )));
+    }
+
+    #[test]
+    fn play_conn_left_sends_over_budget_and_releases_deferred_undrained_bytes() {
+        use io_pool::{Session, Verdict};
+        let lan = lan();
+        let filler = NetEvent::Left(99, String::with_capacity((96 << 20) - 4096));
+        lan.shared.events.send(filler).unwrap();
+
+        let undrained = Arc::new(Undrained::default());
+        let mut c = PlayConn {
+            payload_sender: PlayerSender::disabled(),
+            payload_transport: Transport::empty(),
+            conn: 8,
+            shared: lan.shared.clone(),
+            uuid: 8,
+            name: "p".to_owned(),
+            required_pack: false,
+            rate: None,
+            watch: Arc::new(KeepAliveWatch {
+                start: Instant::now(),
+                alive: Arc::new(AtomicI64::new(-1)),
+            }),
+            latency: Arc::new(AtomicI32::new(0)),
+            sent_at: None,
+            next_keep_alive: Instant::now(),
+            counted: None,
+            undrained: undrained.clone(),
+            packet_counts: Arc::default(),
+            deferred: None,
+        };
+        let encoded = play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
+            id: 1,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+        })
+        .encode();
+        let (id, payload) = (i32::from(encoded[0]), encoded[1..].to_vec());
+        let payload_len = payload.len();
+
+        assert!(matches!(c.packet(id, payload), Verdict::Defer));
+        assert!(undrained.bytes.load(Ordering::Relaxed) >= payload_len);
+
+        // Even while the channel is at budget, `left` must release undrained bytes and deliver `NetEvent::Left`.
+        c.left("Disconnected".to_owned());
+        assert_eq!(undrained.bytes.load(Ordering::Relaxed), 0);
+        let events = lan.poll();
+        assert!(events.into_iter().any(|r| matches!(
+            r.into_parts().0,
+            NetEvent::Left(8, reason) if reason == "Disconnected"
+        )));
+    }
+}
+
+#[cfg(test)]
+mod counted_id_tests {
+    use super::counted_id;
+
+    #[test]
+    fn unknown_inbound_ids_share_one_counter() {
+        let last = horizon_protocol::ids::play::serverbound::NAMES.len() as i32 - 1;
+        assert_eq!(counted_id(0), 0);
+        assert_eq!(counted_id(last), last);
+        for unknown in [last + 1, 1_000_000, i32::MAX, -5] {
+            assert_eq!(counted_id(unknown), -1, "{unknown}");
+        }
+    }
+}

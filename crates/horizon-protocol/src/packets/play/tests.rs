@@ -55,6 +55,47 @@ fn a_command_tree_with_a_cycle_is_refused() {
 }
 
 #[test]
+fn a_command_tree_without_its_root_is_refused() {
+    let root = || CommandNode {
+        kind: 0,
+        executable: false,
+        restricted: false,
+        children: Vec::new(),
+        redirect: None,
+        name: String::new(),
+        parser: None,
+        suggestions: None,
+    };
+    let read = |nodes: Vec<CommandNode>, root: i32| {
+        let mut w = Writer::new();
+        Commands::write(&Commands { nodes, root }, &mut w);
+        Commands::read(&mut Reader::new(&w.data))
+    };
+    assert!(read(vec![root()], 0).is_ok());
+    assert!(read(Vec::new(), 0).is_err());
+    for outside in [-1, 1, i32::MAX] {
+        assert!(read(vec![root()], outside).is_err(), "root {outside}");
+    }
+}
+
+#[test]
+fn a_command_tree_has_at_most_max_command_nodes() {
+    let read = |count: usize| {
+        let mut w = Writer::new();
+        w.varint(count as i32);
+        for _ in 0..count {
+            // A root node without children: flags, no children.
+            w.u8(0);
+            w.varint(0);
+        }
+        w.varint(0);
+        Commands::read(&mut Reader::new(&w.data))
+    };
+    assert!(read(MAX_COMMAND_NODES).is_ok());
+    assert!(read(MAX_COMMAND_NODES + 1).is_err());
+}
+
+#[test]
 fn vec_delta_quantizes_the_base_like_math_round() {
     // Math.round(-2.5) is -2, so a delta of 1 lands on -1/4096, not -2/4096.
     let out = VecDelta::apply([-2.5 / 4096.0, 0.0, 0.0], [1, 0, 0]);
@@ -1436,5 +1477,76 @@ fn jigsaw_packets_round_trip() {
         }),
         Serverbound::encode,
         Serverbound::decode,
+    );
+}
+
+#[test]
+fn a_signature_index_vanilla_never_sends_is_refused() {
+    // MessageSignature.Packed: 0 means a full signature follows, anything else indexes the
+    // last-seen cache (one less than what is written).
+    let mut w = Writer::new();
+    w.varint(-1);
+    assert!(PackedSignature::read(&mut Reader::new(&w.data)).is_err());
+
+    let mut w = Writer::new();
+    w.varint(0);
+    w.bytes(&[7; 256]);
+    assert_eq!(
+        PackedSignature::read(&mut Reader::new(&w.data)),
+        Ok((-1, Some(vec![7; 256])))
+    );
+
+    let mut w = Writer::new();
+    w.varint(4);
+    assert_eq!(
+        PackedSignature::read(&mut Reader::new(&w.data)),
+        Ok((3, None))
+    );
+
+    // The guard has to run on the real packet path, not just when the codec is called directly:
+    // try_encode validates through the generated Codec, so a mod-supplied DeleteChat can no
+    // longer smuggle a malformed marker past the writer (i32::MAX would overflow `v.0 + 1`).
+    let delete = |signature| Clientbound::DeleteChat(DeleteChat { signature });
+    let bad: [(i32, Option<Vec<u8>>); 6] = [
+        (-1, None),              // a full signature without its 256 bytes
+        (-2, None),              // an index vanilla never sends
+        (i32::MAX, None),        // would overflow `v.0 + 1` in write
+        (0, Some(vec![0; 255])), // a full signature with too few bytes
+        (0, Some(vec![0; 256])), // an index that wrongly carries a signature
+        (3, Some(vec![0; 256])), // the same, on a positive index
+    ];
+    for bad in bad {
+        assert!(delete(bad.clone()).try_encode().is_err(), "{bad:?}");
+    }
+    assert!(delete((-1, Some(vec![0; 256]))).try_encode().is_ok());
+    assert!(delete((4, None)).try_encode().is_ok());
+
+    // PlayerChat.last_seen is a List<PackedSignature>: every element must validate as well.
+    let chat = |last_seen| {
+        Clientbound::PlayerChat(PlayerChat {
+            global_index: 0,
+            sender: 5,
+            index: 0,
+            signature: None,
+            content: "hello".into(),
+            timestamp: 1,
+            salt: 2,
+            last_seen,
+            unsigned_content: None,
+            filter: (0, vec![]),
+            chat_type: ChatTypeBound {
+                chat_type: 0,
+                name: literal("Steve"),
+                target: None,
+            },
+        })
+    };
+    assert!(chat(vec![(3, None), (-1, None)]).try_encode().is_err());
+    assert!(chat(vec![(i32::MAX, None)]).try_encode().is_err());
+    assert!(chat(vec![(0, Some(vec![0; 256]))]).try_encode().is_err());
+    assert!(
+        chat(vec![(3, None), (-1, Some(vec![7; 256]))])
+            .try_encode()
+            .is_ok()
     );
 }

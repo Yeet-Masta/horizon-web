@@ -9,7 +9,10 @@
 //! The executor is modelled as running every channel task immediately (the
 //! sound thread keeps up between ticks); a channel's own end is reported by the
 //! backend through `stopped`.
-use crate::sound_events::{INTENTIONALLY_EMPTY, Sentinel, Sound, SoundRegistry};
+use crate::{
+    fast_hash::{FxHashMap, FxHashSet},
+    sound_events::{INTENTIONALLY_EMPTY, Sentinel, Sound, SoundRegistry},
+};
 use horizon_core::random::LegacyRandom;
 use horizon_std::sync::RwLock;
 use std::{collections::HashMap, sync::Arc};
@@ -990,11 +993,43 @@ pub trait Backend {
     fn unpause(&mut self, channel: ChannelId);
     /// `Channel.stopped`.
     fn stopped(&mut self, channel: ChannelId) -> bool;
+    /// Configure a newly created channel's parameters in a single backend call.
+    fn configure_channel(
+        &mut self,
+        channel: ChannelId,
+        pitch: f32,
+        volume: f32,
+        attenuation: Option<f32>,
+        looping: bool,
+        position: [f64; 3],
+        relative: bool,
+        unmuffled: bool,
+    ) {
+        self.set_pitch(channel, pitch);
+        self.set_volume(channel, volume);
+        self.set_attenuation(channel, attenuation);
+        self.set_looping(channel, looping);
+        self.set_position(channel, position);
+        self.set_relative(channel, relative);
+        self.set_unmuffled(channel, unmuffled);
+    }
     /// Update volume, pitch, and position in a single backend call.
     fn update_channel(&mut self, channel: ChannelId, volume: f32, pitch: f32, position: [f64; 3]) {
         self.set_volume(channel, volume);
         self.set_pitch(channel, pitch);
         self.set_position(channel, position);
+    }
+    /// Batch-update volume, pitch, and position for multiple channels in one backend lock.
+    fn update_channels(&mut self, updates: &[(ChannelId, f32, f32, [f64; 3])]) {
+        for &(channel, volume, pitch, position) in updates {
+            self.update_channel(channel, volume, pitch, position);
+        }
+    }
+    /// Destroy multiple channels in a single backend call.
+    fn destroy_batch(&mut self, channels: &[ChannelId]) {
+        for &channel in channels {
+            self.destroy(channel);
+        }
     }
     /// Filter which handles have stopped playing in a single pass.
     fn filter_stopped(&mut self, live: &[(u64, ChannelId)], stopped: &mut Vec<u64>) {
@@ -1007,6 +1042,19 @@ pub trait Backend {
     /// Whether the channel plays clearly through a mod's muffle (`Audio::muffle`): its sound
     /// event is one the mod exempted. A backend without a muffle ignores it.
     fn set_unmuffled(&mut self, _channel: ChannelId, _unmuffled: bool) {}
+    /// Pause a channel of a source a client mod paused (`SoundEngine::pause_source`): a playing
+    /// one pauses, and one whose sound has not started yet starts paused when it does, where
+    /// `pause` (`alSourcePause`) leaves an initial source to start playing. `unpause` lets it go.
+    fn hold(&mut self, channel: ChannelId) {
+        self.pause(channel);
+    }
+}
+/// The bit of a `SoundSource` index in a set of sources.
+fn source_bit(source: usize) -> u16 {
+    u32::try_from(source)
+        .ok()
+        .and_then(|shift| 1u16.checked_shl(shift))
+        .unwrap_or(0)
 }
 /// A `SoundEventListener.onPlaySound` call.
 #[derive(Clone, Debug, PartialEq)]
@@ -1050,13 +1098,15 @@ pub struct SoundEngine {
     /// `loaded`: the library opened.
     pub loaded: bool,
     tick_count: i32,
-    instances: HashMap<InstanceId, SoundInstance>,
+    instances: FxHashMap<InstanceId, SoundInstance>,
     /// Instances their owner still refers to.
-    retained: HashMap<InstanceId, ()>,
+    retained: FxHashSet<InstanceId>,
     next_instance: InstanceId,
     /// `instanceToChannel` (insertion order).
     instance_to_channel: Vec<(InstanceId, u64)>,
-    handles: HashMap<u64, Handle>,
+    /// O(1) lookup mirror of `instance_to_channel`.
+    instance_handle: FxHashMap<InstanceId, u64>,
+    handles: FxHashMap<u64, Handle>,
     next_handle: u64,
     /// `instanceBySource`.
     instance_by_source: Vec<(usize, InstanceId)>,
@@ -1066,9 +1116,11 @@ pub struct SoundEngine {
     mapped_scratch: Vec<u64>,
     removed_scratch: Vec<InstanceId>,
     ticking_scratch: Vec<InstanceId>,
+    updates_scratch: Vec<(ChannelId, f32, f32, [f64; 3])>,
+    destroy_scratch: Vec<ChannelId>,
     /// `queuedSounds` (insertion order).
     queued: Vec<(InstanceId, i32)>,
-    delete_time: HashMap<InstanceId, i32>,
+    delete_time: FxHashMap<InstanceId, i32>,
     queued_tickable: Vec<InstanceId>,
     used: [usize; 2],
     pub limits: [usize; 2],
@@ -1084,6 +1136,10 @@ pub struct SoundEngine {
     /// sound hooks (`hooks`). Absent on a server, which has no sound.
     loop_context: Option<horizon_world::native_load_context::LoopContext>,
     unmuffled: Vec<String>,
+    /// The sources a client mod paused (`pause_source`), a bit each.
+    paused_sources: u16,
+    /// While the game is paused (`pause_all_except`), the sources it left playing, a bit each.
+    game_pause: Option<u16>,
 }
 fn handle_channel(h: &Handle) -> Option<ChannelId> {
     h.channel
@@ -1095,11 +1151,12 @@ impl SoundEngine {
             playback_hook: None,
             loaded: true,
             tick_count: 0,
-            instances: HashMap::new(),
-            retained: HashMap::new(),
+            instances: FxHashMap::default(),
+            retained: FxHashSet::default(),
             next_instance: 1,
             instance_to_channel: Vec::new(),
-            handles: HashMap::new(),
+            instance_handle: FxHashMap::default(),
+            handles: FxHashMap::default(),
             next_handle: 1,
             instance_by_source: Vec::new(),
             gain_by_source: [1.0; 11],
@@ -1108,8 +1165,10 @@ impl SoundEngine {
             mapped_scratch: Vec::new(),
             removed_scratch: Vec::new(),
             ticking_scratch: Vec::new(),
+            updates_scratch: Vec::new(),
+            destroy_scratch: Vec::new(),
             queued: Vec::new(),
-            delete_time: HashMap::new(),
+            delete_time: FxHashMap::default(),
             queued_tickable: Vec::new(),
             used: [0, 0],
             limits: [STATIC_CHANNELS, STREAMING_CHANNELS],
@@ -1119,6 +1178,8 @@ impl SoundEngine {
             notifications: Vec::new(),
             loop_context: None,
             unmuffled: Vec::new(),
+            paused_sources: 0,
+            game_pause: None,
         }
     }
     /// Sound events exempt from muffling, including channels already playing.
@@ -1180,7 +1241,7 @@ impl SoundEngine {
         self.next_instance += 1;
         self.instances.insert(id, instance);
         if retain {
-            self.retained.insert(id, ());
+            self.retained.insert(id);
         }
         id
     }
@@ -1190,8 +1251,8 @@ impl SoundEngine {
         self.collect(id);
     }
     fn referenced(&self, id: InstanceId) -> bool {
-        self.retained.contains_key(&id)
-            || self.instance_to_channel.iter().any(|(i, _)| *i == id)
+        self.retained.contains(&id)
+            || self.instance_handle.contains_key(&id)
             || self.queued.iter().any(|(i, _)| *i == id)
             || self.queued_tickable.contains(&id)
             || self.ticking.contains(&id)
@@ -1251,10 +1312,7 @@ impl SoundEngine {
         pitch.clamp(0.5, 2.0)
     }
     fn channel_of(&self, id: InstanceId) -> Option<u64> {
-        self.instance_to_channel
-            .iter()
-            .find(|(i, _)| *i == id)
-            .map(|(_, h)| *h)
+        self.instance_handle.get(&id).copied()
     }
     /// `refreshCategoryVolume`.
     pub fn refresh_category_volume(&mut self, source: usize, backend: &mut impl Backend) {
@@ -1353,16 +1411,6 @@ impl SoundEngine {
         self.stop(id, backend);
         self.collect(id);
     }
-    /// `ChannelHandle.release`.
-    fn release_handle(&mut self, handle: u64, backend: &mut impl Backend) {
-        if let Some(h) = self.handles.get_mut(&handle) {
-            h.stopped = true;
-            if let Some(c) = h.channel.take() {
-                self.used[usize::from(h.streaming)] -= 1;
-                backend.destroy(c);
-            }
-        }
-    }
     /// `stopAll`.
     pub fn stop_all(&mut self, backend: &mut impl Backend) {
         if !self.loaded {
@@ -1370,10 +1418,21 @@ impl SoundEngine {
         }
         let ids: Vec<InstanceId> = self.instances.keys().copied().collect();
         self.instance_to_channel.clear();
-        let handles: Vec<u64> = self.handles.keys().copied().collect();
-        for h in handles {
-            self.release_handle(h, backend);
+        self.instance_handle.clear();
+        let mut destroy = std::mem::take(&mut self.destroy_scratch);
+        destroy.clear();
+        for h in self.handles.values_mut() {
+            h.stopped = true;
+            if let Some(c) = h.channel.take() {
+                self.used[usize::from(h.streaming)] -= 1;
+                destroy.push(c);
+            }
         }
+        if !destroy.is_empty() {
+            backend.destroy_batch(&destroy);
+            destroy.clear();
+        }
+        self.destroy_scratch = destroy;
         self.handles.clear();
         self.queued.clear();
         self.ticking.clear();
@@ -1492,9 +1551,9 @@ impl SoundEngine {
         }
         self.resolve(id);
         let instance = &self.instances[&id];
-        let Some(subtitle) = instance.event.clone() else {
+        if instance.event.is_none() {
             return PlayResult::NotStarted;
-        };
+        }
         let sound = instance.sound.clone().unwrap_or_else(Sound::empty);
         if sound.sentinel != Sentinel::None {
             return PlayResult::NotStarted;
@@ -1506,6 +1565,7 @@ impl SoundEngine {
         let instance_volume = instance.volume_with(base_volume);
         let attenuation_distance = sound.attenuation_distance(instance_volume);
         if self.listening {
+            let subtitle = instance.event.clone().flatten();
             self.notify(id, subtitle, attenuation_distance);
         }
         let instance = &self.instances[&id];
@@ -1517,6 +1577,16 @@ impl SoundEngine {
                 return PlayResult::NotStarted;
             }
             silently = true;
+        }
+        // Its source is paused (`pause_source`): only a stream, a loop or a sound of music starts,
+        // held below with its channel. Music starts even when a pack doesn't stream it, as vanilla
+        // starts music silently at no volume, so the music manager keeps its track. Any other
+        // sound doesn't start, as one at no volume doesn't, a mod's tickable one-shot or a note
+        // block (on records) too: held, its channel would stay taken until the resume, and rain
+        // every few ticks would take them all.
+        let lasting = sound.stream || instance.looping || source == MUSIC;
+        if !lasting && self.source_paused(source) {
+            return PlayResult::NotStarted;
         }
         let position = instance.position;
         let looping = instance.looping && instance.delay <= 0;
@@ -1552,8 +1622,10 @@ impl SoundEngine {
             },
         );
         self.delete_time.insert(id, self.tick_count + 20);
-        if let Some(entry) = self.instance_to_channel.iter_mut().find(|(i, _)| *i == id) {
-            entry.1 = handle;
+        if self.instance_handle.insert(id, handle).is_some() {
+            if let Some(entry) = self.instance_to_channel.iter_mut().find(|(i, _)| *i == id) {
+                entry.1 = handle;
+            }
         } else {
             self.instance_to_channel.push((id, handle));
         }
@@ -1564,22 +1636,29 @@ impl SoundEngine {
         let pitch = Self::calculate_pitch(instance.pitch_with(base_pitch));
         let (attenuation, relative, tickable) =
             (instance.attenuation, instance.relative, instance.tickable());
-        backend.set_pitch(channel, pitch);
-        backend.set_volume(channel, volume);
-        backend.set_attenuation(
+        backend.configure_channel(
             channel,
+            pitch,
+            volume,
             (attenuation == Attenuation::Linear).then_some(attenuation_distance),
+            looping && !streaming,
+            position,
+            relative,
+            unmuffled,
         );
-        backend.set_looping(channel, looping && !streaming);
-        backend.set_position(channel, position);
-        backend.set_relative(channel, relative);
-        backend.set_unmuffled(channel, unmuffled);
+        // Its source is paused (`pause_source`): it starts paused, keeping its channel, and
+        // silently, as at no volume: the music manager shows no Now Playing toast for a track
+        // nobody hears.
+        let held = self.source_paused(source);
+        if held {
+            backend.hold(channel);
+        }
         backend.start(channel, &sound, looping);
         self.notify_source_started(id, channel, streaming);
         if tickable {
             self.ticking.push(id);
         }
-        if silently {
+        if silently || held {
             PlayResult::StartedSilently
         } else {
             PlayResult::Started
@@ -1612,6 +1691,9 @@ impl SoundEngine {
         self.schedule_tick(backend);
     }
     fn schedule_tick(&mut self, backend: &mut impl Backend) {
+        if self.handles.is_empty() {
+            return;
+        }
         let mut live = std::mem::take(&mut self.live_scratch);
         live.clear();
         live.extend(
@@ -1621,16 +1703,43 @@ impl SoundEngine {
         );
         let mut stopped = std::mem::take(&mut self.mapped_scratch);
         stopped.clear();
-        backend.filter_stopped(&live, &mut stopped);
-        for h in stopped.drain(..) {
-            self.release_handle(h, backend);
+        if !live.is_empty() {
+            backend.filter_stopped(&live, &mut stopped);
         }
-        // Released handles nobody maps any more.
+        let any_stopped = !stopped.is_empty();
+        if any_stopped {
+            let mut destroy = std::mem::take(&mut self.destroy_scratch);
+            destroy.clear();
+            for h in stopped.drain(..) {
+                if let Some(handle) = self.handles.get_mut(&h) {
+                    handle.stopped = true;
+                    if let Some(c) = handle.channel.take() {
+                        self.used[usize::from(handle.streaming)] -= 1;
+                        destroy.push(c);
+                    }
+                }
+            }
+            if !destroy.is_empty() {
+                backend.destroy_batch(&destroy);
+                destroy.clear();
+            }
+            self.destroy_scratch = destroy;
+        }
+        // Released handles nobody maps any more. Skip when every handle still holds a channel.
         let mut mapped = stopped;
-        mapped.clear();
-        mapped.extend(self.instance_to_channel.iter().map(|(_, h)| *h));
-        self.handles
-            .retain(|h, handle| handle.channel.is_some() || mapped.contains(h));
+        if live.len() < self.handles.len() || any_stopped {
+            mapped.clear();
+            mapped.extend(self.instance_to_channel.iter().map(|(_, h)| *h));
+            if mapped.len() > 16 {
+                mapped.sort_unstable();
+                self.handles.retain(|h, handle| {
+                    handle.channel.is_some() || mapped.binary_search(h).is_ok()
+                });
+            } else {
+                self.handles
+                    .retain(|h, handle| handle.channel.is_some() || mapped.contains(h));
+            }
+        }
         self.live_scratch = live;
         self.mapped_scratch = mapped;
     }
@@ -1639,88 +1748,109 @@ impl SoundEngine {
     }
     fn tick_in_game(&mut self, ctx: &TickContext, backend: &mut impl Backend) {
         self.tick_count += 1;
-        for id in std::mem::take(&mut self.queued_tickable) {
-            self.play(id, backend);
+        if !self.queued_tickable.is_empty() {
+            for id in std::mem::take(&mut self.queued_tickable) {
+                self.play(id, backend);
+            }
         }
-        let mut ticking = std::mem::take(&mut self.ticking_scratch);
-        ticking.clear();
-        ticking.extend(self.ticking.iter().copied());
-        for id in ticking.drain(..) {
-            let Some(instance) = self.instances.get(&id) else {
-                continue;
-            };
-            if !instance.can_play_sound() {
-                // SoundEngine still ticks the instance after stopping its channel.
-                self.stop(id, backend);
+        if !self.ticking.is_empty() {
+            let mut ticking = std::mem::take(&mut self.ticking_scratch);
+            let mut updates = std::mem::take(&mut self.updates_scratch);
+            ticking.clear();
+            updates.clear();
+            ticking.extend(self.ticking.iter().copied());
+            for id in ticking.drain(..) {
+                let Some(instance) = self.instances.get(&id) else {
+                    continue;
+                };
+                if !instance.can_play_sound() {
+                    // SoundEngine still ticks the instance after stopping its channel.
+                    self.stop(id, backend);
+                }
+                let instance = self.instances.get_mut(&id).expect("present");
+                instance.tick(ctx);
+                if instance.stopped {
+                    self.stop(id, backend);
+                    continue;
+                }
+                let Some((base_volume, base_pitch)) = self.playback_parameters(id, false) else {
+                    self.cancel_playback(id, backend);
+                    continue;
+                };
+                let instance = self.instances.get_mut(&id).expect("present");
+                let pitch_edited = base_pitch.to_bits() != instance.pitch.to_bits();
+                let (v, source) = (instance.volume_with(base_volume), instance.source);
+                let pitch = Self::calculate_pitch(instance.pitch_with(base_pitch));
+                let position = instance.position;
+                let volume = self.calculate_volume(v, source);
+                let Some(handle) = self.channel_of(id) else {
+                    continue;
+                };
+                if let Some(h) = self.handles.get_mut(&handle) {
+                    h.pitch_edited = pitch_edited;
+                    if let Some(c) = h.channel {
+                        updates.push((c, volume, pitch, position));
+                    }
+                }
+                let instance = self.instances.get_mut(&id).expect("present");
+                if instance.looping
+                    && self.tick_count % 10 == 0
+                    && volume > 0.0
+                    && self.listening
+                    && instance.sound.is_some()
+                    && instance.event.is_some()
+                {
+                    let vol = instance.volume_with(base_volume);
+                    let distance = instance
+                        .sound
+                        .as_ref()
+                        .expect("present")
+                        .attenuation_distance(vol);
+                    let subtitle = instance.event.clone().flatten();
+                    self.notify(id, subtitle, distance);
+                }
             }
-            let instance = self.instances.get_mut(&id).expect("present");
-            instance.tick(ctx);
-            if instance.stopped {
-                self.stop(id, backend);
-                continue;
+            if !updates.is_empty() {
+                backend.update_channels(&updates);
+                updates.clear();
             }
-            let Some((base_volume, base_pitch)) = self.playback_parameters(id, false) else {
-                self.cancel_playback(id, backend);
-                continue;
-            };
-            let instance = self.instances.get_mut(&id).expect("present");
-            let pitch_edited = base_pitch.to_bits() != instance.pitch.to_bits();
-            let (v, source) = (instance.volume_with(base_volume), instance.source);
-            let pitch = Self::calculate_pitch(instance.pitch_with(base_pitch));
-            let position = instance.position;
-            let volume = self.calculate_volume(v, source);
-            let Some(handle) = self.channel_of(id) else {
-                continue;
-            };
-            if let Some(h) = self.handles.get_mut(&handle) {
-                h.pitch_edited = pitch_edited;
-            }
-            if let Some(c) = self.handles.get(&handle).and_then(handle_channel) {
-                backend.update_channel(c, volume, pitch, position);
-            }
-            let instance = self.instances.get_mut(&id).expect("present");
-            if instance.looping
-                && self.tick_count % 10 == 0
-                && volume > 0.0
-                && self.listening
-                && let (Some(sound), Some(subtitle)) =
-                    (instance.sound.clone(), instance.event.clone())
-            {
-                let distance = sound.attenuation_distance(instance.volume_with(base_volume));
-                self.notify(id, subtitle, distance);
-            }
+            self.ticking_scratch = ticking;
+            self.updates_scratch = updates;
         }
         let mut removed = std::mem::take(&mut self.removed_scratch);
         removed.clear();
-        let mut index = 0;
-        while index < self.instance_to_channel.len() {
-            let (id, handle) = self.instance_to_channel[index];
-            if self.handle_stopped(handle)
-                && self.delete_time.get(&id).copied().unwrap_or(0) <= self.tick_count
-            {
-                if let Some(i) = self.instances.get(&id)
-                    && i.looping
-                    && i.delay > 0
+        if !self.instance_to_channel.is_empty() {
+            let mut index = 0;
+            while index < self.instance_to_channel.len() {
+                let (id, handle) = self.instance_to_channel[index];
+                if self.handle_stopped(handle)
+                    && self.delete_time.get(&id).copied().unwrap_or(0) <= self.tick_count
                 {
-                    let at = self.tick_count + i.delay;
-                    if let Some(entry) = self.queued.iter_mut().find(|(q, _)| *q == id) {
-                        entry.1 = at;
-                    } else {
-                        self.queued.push((id, at));
+                    if let Some(i) = self.instances.get(&id)
+                        && i.looping
+                        && i.delay > 0
+                    {
+                        let at = self.tick_count + i.delay;
+                        if let Some(entry) = self.queued.iter_mut().find(|(q, _)| *q == id) {
+                            entry.1 = at;
+                        } else {
+                            self.queued.push((id, at));
+                        }
                     }
+                    self.instance_to_channel.remove(index);
+                    self.instance_handle.remove(&id);
+                    self.handles.remove(&handle);
+                    self.delete_time.remove(&id);
+                    let source = self.instances.get(&id).map(|i| i.source);
+                    self.instance_by_source
+                        .retain(|e| Some(e.0) != source || e.1 != id);
+                    if let Some(p) = self.ticking.iter().position(|t| *t == id) {
+                        self.ticking.remove(p);
+                    }
+                    removed.push(id);
+                } else {
+                    index += 1;
                 }
-                self.instance_to_channel.remove(index);
-                self.handles.remove(&handle);
-                self.delete_time.remove(&id);
-                let source = self.instances.get(&id).map(|i| i.source);
-                self.instance_by_source
-                    .retain(|e| Some(e.0) != source || e.1 != id);
-                if let Some(p) = self.ticking.iter().position(|t| *t == id) {
-                    self.ticking.remove(p);
-                }
-                removed.push(id);
-            } else {
-                index += 1;
             }
         }
         let mut index = 0;
@@ -1741,7 +1871,6 @@ impl SoundEngine {
         for id in removed.drain(..) {
             self.collect(id);
         }
-        self.ticking_scratch = ticking;
         self.removed_scratch = removed;
     }
     fn tick_music_when_paused(&mut self) {
@@ -1751,6 +1880,7 @@ impl SoundEngine {
             let music = self.instances.get(&id).is_some_and(|i| i.source == MUSIC);
             if music && self.handle_stopped(handle) {
                 self.instance_to_channel.remove(index);
+                self.instance_handle.remove(&id);
                 self.handles.remove(&handle);
                 self.delete_time.remove(&id);
                 self.instance_by_source
@@ -1763,6 +1893,7 @@ impl SoundEngine {
     }
     /// `pauseAllExcept`.
     pub fn pause_all_except(&mut self, sources: &[usize], backend: &mut impl Backend) {
+        self.game_pause = Some(sources.iter().fold(0, |set, &s| set | source_bit(s)));
         if !self.loaded {
             return;
         }
@@ -1775,14 +1906,70 @@ impl SoundEngine {
             }
         }
     }
-    /// `resume`.
+    /// `resume`, leaving the channels of a source a client mod paused (`pause_source`) paused.
     pub fn resume(&mut self, backend: &mut impl Backend) {
+        self.game_pause = None;
         if !self.loaded {
             return;
         }
-        let channels: Vec<ChannelId> = self.handles.values().filter_map(handle_channel).collect();
+        let kept: Vec<u64> = self
+            .instance_to_channel
+            .iter()
+            .filter(|(id, _)| {
+                self.instances
+                    .get(id)
+                    .is_some_and(|i| self.source_paused(i.source))
+            })
+            .map(|&(_, handle)| handle)
+            .collect();
+        let channels: Vec<ChannelId> = self
+            .handles
+            .iter()
+            .filter(|(handle, _)| !kept.contains(*handle))
+            .filter_map(|(_, h)| handle_channel(h))
+            .collect();
         for c in channels {
             backend.unpause(c);
+        }
+    }
+    /// Whether a client mod paused `source` (`pause_source`).
+    pub fn source_paused(&self, source: usize) -> bool {
+        self.paused_sources & source_bit(source) != 0
+    }
+    /// A client mod's `sound_source_pause`: every channel of `source` pauses (`paused`) or
+    /// carries on. One pause per source for the whole client, whichever mod asks: a carry-on
+    /// ends it for all. Until the source carries on, a streamed or looping sound of it that
+    /// starts, and any sound of music, starts paused (and silently) and keeps its channel, as
+    /// one paused while playing does, so it stays `is_active`: the music manager keeps a paused
+    /// track as its current one and picks no other (`MusicManager.tick`). Any other sound of it
+    /// doesn't start (`play_inner`): held, its channel would never end. Carrying on, each plays
+    /// on from where it was, one that started paused from its start; while the game's own pause
+    /// (`pause_all_except`) holds the source they wait for the game's `resume`, which in turn
+    /// leaves a paused source paused. Only the sounds played on that very source: `MASTER` is
+    /// the sounds played on master, as in `stop_matching`. The pause outlasts `stop_all` (a new
+    /// level, a device change, a reload).
+    pub fn pause_source(&mut self, source: usize, paused: bool, backend: &mut impl Backend) {
+        let bit = source_bit(source);
+        if paused {
+            self.paused_sources |= bit;
+        } else {
+            self.paused_sources &= !bit;
+        }
+        let held_by_game = self.game_pause.is_some_and(|spared| spared & bit == 0);
+        if !self.loaded || (!paused && held_by_game) {
+            return;
+        }
+        for (id, handle) in &self.instance_to_channel {
+            if self.instances.get(id).map_or(MASTER, |i| i.source) != source {
+                continue;
+            }
+            if let Some(c) = self.handles.get(handle).and_then(handle_channel) {
+                if paused {
+                    backend.hold(c);
+                } else {
+                    backend.unpause(c);
+                }
+            }
         }
     }
     /// Channels in use (static, streaming).

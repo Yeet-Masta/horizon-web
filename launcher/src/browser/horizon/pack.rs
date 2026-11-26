@@ -38,21 +38,29 @@ pub fn list() -> Vec<Installed> {
 }
 
 pub(crate) fn list_in(dir: &Path) -> Vec<Installed> {
-    let mut packs: Vec<Installed> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| read(&e.path()))
-        .collect();
+    let mut packs: Vec<_> = list_results(dir).into_iter().flatten().flatten().collect();
     packs.sort_by_key(|p| p.name.to_lowercase());
     packs
 }
 
+pub(crate) fn list_checked_in(dir: &Path) -> Result<Vec<Installed>, String> {
+    list_results(dir)?.collect()
+}
+
+fn list_results(
+    dir: &Path,
+) -> Result<impl Iterator<Item = Result<Installed, String>> + '_, String> {
+    Ok(crate::modpacks::pack_folders(dir)?.map(|work| read_record(&work?)))
+}
+
 fn read(work: &Path) -> Option<Installed> {
-    let text = fs::read_to_string(work.join(RECORD)).ok()?;
-    let mut pack: Installed = serde_json::from_str(&text).ok()?;
+    read_record(work).ok()
+}
+
+pub(crate) fn read_record(work: &Path) -> Result<Installed, String> {
+    let mut pack: Installed = horizon_port_pack::pipeline::read_json(&work.join(RECORD))?;
     pack.work = work.to_path_buf();
-    Some(pack)
+    Ok(pack)
 }
 
 /// Whether `work` is a registry pack's folder.
@@ -114,15 +122,25 @@ fn install_version_in(
         sha1: None,
         primary: true,
     };
-    let path = fetch(&file, &work.join("downloads"), local, &|f| {
-        progress(&line, f)
-    })?;
+    let downloads = crate::modpacks::downloads()?;
+    let path = fetch(&file, downloads.path(), local, &|f| progress(&line, f))?;
     idx::check_file(index, p, v, &path).inspect_err(|_| {
         let _ = fs::remove_file(&path);
     })?;
     let pack = Modpack::read(&path)?;
     let home = home(work);
     fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    // System temp and the game home may be on different drives. Finish writing the archive
+    // on the profile's drive before changing any installed mods.
+    let kept = work.join(&v.file.name);
+    let stage_archive = || -> std::io::Result<tempfile::NamedTempFile> {
+        let mut pending = tempfile::NamedTempFile::new_in(work)?;
+        std::io::copy(&mut fs::File::open(&path)?, pending.as_file_mut())?;
+        pending.as_file().sync_all()?;
+        Ok(pending)
+    };
+    let archive = stage_archive().map_err(|e| format!("{}: {e}", kept.display()))?;
+
     // A mod the pack's last version listed keeps the player's on/off choice from the Mods
     // page; a mod this version adds starts at the pack's `on`. `install_version` turns a mod
     // on, so the choice is read before it and written back after.
@@ -151,8 +169,9 @@ fn install_version_in(
     if first {
         Modpack::extract_overrides(&path, &home)?;
     }
-    let kept = work.join(&v.file.name);
-    fs::rename(&path, &kept).map_err(|e| format!("{}: {e}", kept.display()))?;
+    archive
+        .persist(&kept)
+        .map_err(|e| format!("{}: {e}", kept.display()))?;
     let record = Installed {
         id: p.id.clone(),
         name: p.name.clone(),
@@ -161,17 +180,21 @@ fn install_version_in(
         mods,
         work: work.to_path_buf(),
     };
-    let text = serde_json::to_string_pretty(&record).map_err(|e| e.to_string())?;
-    fs::write(work.join(RECORD), text).map_err(|e| e.to_string())?;
+    let manifest = work.join(RECORD);
+    let write_record = || -> std::io::Result<()> {
+        let mut pending = tempfile::NamedTempFile::new_in(work)?;
+        serde_json::to_writer_pretty(pending.as_file_mut(), &record)?;
+        pending.persist(&manifest)?;
+        Ok(())
+    };
+    write_record().map_err(|e| format!("{}: {e}", manifest.display()))?;
     Ok(record)
 }
 
 /// Turns the game's command into the pack's profile: its own game folder (the player's
 /// options.txt copied in when the pack brings none), its taken-down mods turned off first.
 pub fn apply(cmd: &mut Command, work: &Path) -> Result<(), String> {
-    if !is_pack(work) {
-        return Err(format!("{} is not an installed modpack.", work.display()));
-    }
+    read_record(work)?;
     let home = home(work);
     fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
     let options = home.join("options.txt");
@@ -270,6 +293,9 @@ mod tests {
         let packs = dir.join("horizon-packs");
         let pack = install_in(&index, true, "cozy", &packs, &|_, _| {}).unwrap();
         assert_eq!(pack.mods, ["coords_hud 0.1.0"]);
+        let kept = pack.work.join("cozy-1.0.0.hpack");
+        assert_eq!(idx::sha256_file(&kept).unwrap(), pack.sha256);
+        assert!(!pack.work.join("downloads").exists());
         let home = home(&packs.join("cozy"));
         assert!(home.join("horizon-mods/coords_hud.hmod").is_file());
         assert!(
@@ -332,6 +358,36 @@ mod tests {
         install_in(&third, true, "cozy", &packs, &|_, _| {}).unwrap();
         assert!(java::is_enabled(&home, "coords_hud"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_archive_staging_failure_leaves_existing_mods_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let packs = dir.path().join("horizon-packs");
+        let first = registry(dir.path(), true, "");
+        let pack = install_in(&first, true, "cozy", &packs, &|_, _| {}).unwrap();
+        let module = home(&pack.work).join("horizon-mods/coords_hud.hmod");
+        fs::remove_file(&module).unwrap();
+
+        let second = registry_at(dir.path(), "1.1.0", true, "");
+        let permissions = fs::metadata(&pack.work).unwrap().permissions();
+        fs::set_permissions(&pack.work, fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = tempfile::NamedTempFile::new_in(&pack.work).is_err();
+        let update = refused.then(|| install_in(&second, true, "cozy", &packs, &|_, _| {}));
+        fs::set_permissions(&pack.work, permissions).unwrap();
+
+        if let Some(result) = update {
+            let error = result.unwrap_err();
+            assert!(error.contains("cozy-1.1.0.hpack"), "{error}");
+            assert_eq!(read_record(&pack.work).unwrap(), pack);
+            assert!(
+                !module.exists(),
+                "the failed update must not reinstall the mod"
+            );
+        }
     }
 
     #[test]

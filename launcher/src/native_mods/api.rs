@@ -1,5 +1,12 @@
 //! The launcher's generated executable for trait mods.
 use super::{internals, Bundle};
+use horizon_platform::mod_package::index::native::{
+    all_dependencies, check_sdk_dependency, dependency_tables, has_mod_api_dependency,
+};
+pub(super) use horizon_platform::mod_package::index::native::{
+    sdk_source_at, INTERNALS_PACKAGE, MOD_API_PACKAGE as API_PACKAGE, POINTS_PACKAGE,
+    SDK_PACKAGES as PACKAGES,
+};
 use std::fs;
 use std::path::Path;
 
@@ -41,17 +48,12 @@ pub(super) fn template(path: &Path) -> Result<String, String> {
         .ok_or_else(|| crate::i18n::tr("This game source has no native inventory entry template. Update Horizon and rebuild the mods against this game.").to_string())
 }
 
-pub(super) fn main_rs(
-    template: &str,
-    mods: &[&horizon_platform::mod_package::Manifest],
-    catalog: &internals::Catalog,
-) -> String {
+pub(super) fn main_rs(template: &str, mods: &[&horizon_platform::mod_package::Manifest]) -> String {
     // Own the bytes even when the staged SDK template references a static in a dylib.
     let template = template.replace(
         "std::hint::black_box(&horizon_mod_package::holder::CAPABILITY);",
         "#[used] static HOLDER_CAPABILITY: [u8; horizon_mod_package::holder::CAPABILITY.len()] = horizon_mod_package::holder::CAPABILITY; std::hint::black_box(&HOLDER_CAPABILITY);",
     );
-    let listed = &catalog.points;
     let entries = mods
         .iter()
         .enumerate()
@@ -61,22 +63,8 @@ pub(super) fn main_rs(
         "    mod_api::__private::native::BuiltMod {{ id: {:?}, version: {:?}, side: mod_api::Side::{:?} }},\n",
         m.id, m.version, m.side,
     )).collect::<String>();
-    let api_points = listed
-        .iter()
-        .map(super::inject::ListedPoint::emitted)
-        .collect::<Vec<_>>();
-    let raw = mods
-        .iter()
-        .enumerate()
-        .flat_map(|(i, manifest)| {
-            horizon_mod_point_emit::api(manifest, &api_points, &format!("mod_{i}::"))
-                .expect("API slots checked")
-                .into_iter()
-                .map(|expression| format!("        {expression},\n"))
-        })
-        .collect::<String>();
     let markers = [
-        ("/* MOD_SLOTS */", &raw),
+        ("/* MOD_SLOTS */", &String::new()),
         ("/* MOD_ENTRIES */", &entries),
         ("/* BUILT_MODS */", &inventory),
     ];
@@ -101,62 +89,6 @@ pub(super) struct Project<'a> {
     pub(super) cargo: toml::Table,
     pub(super) package: String,
     api_deps: Vec<ApiDependency>,
-}
-
-/// The mod API's package, the one crate every mod depends on.
-pub(super) const POINTS_PACKAGE: &str = "horizon-mod-points";
-pub(super) const API_PACKAGE: &str = "horizon-mod-api";
-
-/// The per-mod facade's package, rewritten to its generated crate.
-pub(super) const INTERNALS_PACKAGE: &str = "horizon-internals";
-/// Each game package a mod may depend on, with its library's name.
-pub(super) const PACKAGES: [(&str, &str); 3] = [
-    (API_PACKAGE, "mod_api"),
-    (POINTS_PACKAGE, "mod_points"),
-    (INTERNALS_PACKAGE, "internals"),
-];
-
-/// Where a mod's `Cargo.toml` names the SDK package `package`: the copy of its pinned build that
-/// `cargo horizon-mod` fetches into the project (`.horizon/sdk/`).
-pub(super) fn sdk_path(package: &str) -> String {
-    format!(".horizon/sdk/api/crates/{package}")
-}
-
-/// Whether `value`, a mod's dependency `key` on the SDK package `package`, names the SDK the one
-/// way the launcher takes: by the path to the mod tool's copy of the pinned SDK ([`sdk_path`]).
-/// The launcher builds against its own copy of the same build. Every other form is refused under
-/// one code, each with its own reason: the git form the path form replaced, a version alone (which
-/// Cargo would resolve from crates.io), any other source selector, and a path elsewhere.
-pub(super) fn sdk_source(key: &str, package: &str, value: &toml::Value) -> Result<(), String> {
-    let path = sdk_path(package);
-    let why = if value.get("git").is_some() {
-        "the SDK is no longer named by git".to_owned()
-    } else if let Some(selector) = [
-        "registry",
-        "registry-index",
-        "branch",
-        "tag",
-        "rev",
-        "workspace",
-    ]
-    .into_iter()
-    .find(|selector| value.get(*selector).is_some())
-    {
-        format!("{selector} does not name the SDK")
-    } else {
-        match value.get("path") {
-            None => format!(
-                "a version names no source, so Cargo would take {package} from crates.io, where anyone can publish that name"
-            ),
-            Some(written) if written.as_str() != Some(path.as_str()) => {
-                format!("the path must be \"{path}\", the pinned SDK the mod tool fetches")
-            }
-            Some(_) => return Ok(()),
-        }
-    };
-    Err(format!(
-        "E_SDK_SOURCE: {key}: {why}; write {key} = {{ path = \"{path}\" }}, then any cargo horizon-mod command fetches the pinned SDK there"
-    ))
 }
 
 /// A dependency on one of [`PACKAGES`], under `[dependencies]` or a `[target.*]` table.
@@ -259,63 +191,36 @@ impl<'a> Project<'a> {
             .and_then(toml::Value::as_str)
             .ok_or_else(|| ProjectError::PackageName { mod_id: mod_id() })?
             .to_owned();
-        for table in std::iter::once(&cargo).chain(
-            cargo
-                .get("target")
-                .and_then(toml::Value::as_table)
-                .into_iter()
-                .flat_map(|targets| targets.values())
-                .filter_map(toml::Value::as_table),
-        ) {
-            for kind in [
-                "dependencies",
-                "dev-dependencies",
-                "build-dependencies",
-                "dev_dependencies",
-                "build_dependencies",
-            ] {
-                for (key, value) in table
-                    .get(kind)
-                    .and_then(toml::Value::as_table)
-                    .into_iter()
-                    .flatten()
-                {
-                    let package = value
-                        .get("package")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or(key);
-                    if let Some(&(sdk, _)) = PACKAGES.iter().find(|(sdk, _)| *sdk == package) {
-                        sdk_source(key, sdk, value).map_err(|reason| ProjectError::Cargo {
-                            mod_id: mod_id(),
-                            reason,
-                        })?;
-                    } else {
-                        for selector in [
-                            "git",
-                            "registry",
-                            "registry-index",
-                            "branch",
-                            "rev",
-                            "tag",
-                            "workspace",
-                        ] {
-                            if value.get(selector).is_some() {
-                                return Err(ProjectError::Cargo { mod_id: mod_id(), reason: format!("{key}: {selector} source is refused; use crates.io with Cargo.lock") });
-                            }
-                        }
-                    }
-                    if value
-                        .get("package")
-                        .and_then(toml::Value::as_str)
-                        .unwrap_or(key)
-                        == "horizon-client"
-                    {
-                        return Err(ProjectError::GameDependency {
-                            mod_id: mod_id(),
-                            key: key.clone(),
-                        });
+        for (key, value) in all_dependencies(&cargo) {
+            let sdk = check_sdk_dependency(key, value).map_err(|reason| ProjectError::Cargo {
+                mod_id: mod_id(),
+                reason,
+            })?;
+            if !sdk {
+                for selector in [
+                    "git",
+                    "registry",
+                    "registry-index",
+                    "branch",
+                    "tag",
+                    "rev",
+                    "workspace",
+                ] {
+                    if value.get(selector).is_some() {
+                        return Err(ProjectError::Cargo { mod_id: mod_id(), reason: format!("{key}: {selector} source is refused; use crates.io with Cargo.lock") });
                     }
                 }
+            }
+            if value
+                .get("package")
+                .and_then(toml::Value::as_str)
+                .unwrap_or(key)
+                == "horizon-client"
+            {
+                return Err(ProjectError::GameDependency {
+                    mod_id: mod_id(),
+                    key: key.clone(),
+                });
             }
         }
         let mut api_deps = Vec::new();
@@ -338,10 +243,7 @@ impl<'a> Project<'a> {
                 }
             }
         }
-        if !api_deps
-            .iter()
-            .any(|api| api.target.is_none() && api.package == API_PACKAGE)
-        {
+        if !has_mod_api_dependency(&cargo) {
             return Err(ProjectError::ApiDependency { mod_id: mod_id() });
         }
         Ok(Self {
@@ -375,18 +277,6 @@ impl<'a> Project<'a> {
             })
             .collect()
     }
-}
-
-fn dependency_tables(cargo: &toml::Table) -> impl Iterator<Item = (Option<&str>, &toml::Table)> {
-    let targets = cargo
-        .get("target")
-        .and_then(toml::Value::as_table)
-        .into_iter()
-        .flatten()
-        .map(|(target, config)| (Some(target.as_str()), config.get("dependencies")));
-    std::iter::once((None, cargo.get("dependencies")))
-        .chain(targets)
-        .filter_map(|(target, table)| Some((target, table?.as_table()?)))
 }
 
 // Add API packages and the generated executable to the fresh staged workspace.
@@ -596,7 +486,7 @@ pub(super) fn stage(
         .iter()
         .map(|(_, project)| &project.bundle.manifest)
         .collect();
-    let mut main = main_rs(&template, &manifests, catalog);
+    let mut main = main_rs(&template, &manifests);
     if official {
         main = main.replace(
             "fn main() {",
@@ -656,11 +546,7 @@ mod tests {
             .success());
         let template =
             "fn main() { std::hint::black_box(&horizon_mod_package::holder::CAPABILITY); }";
-        fs::write(
-            &source,
-            main_rs(template, &[], &internals::Catalog::default()),
-        )
-        .unwrap();
+        fs::write(&source, main_rs(template, &[])).unwrap();
         assert!(std::process::Command::new("rustc")
             .args(["--edition=2021", "-O", "-Cprefer-dynamic", "--extern"])
             .arg(format!("horizon_mod_package={}", library.display()))
@@ -796,16 +682,13 @@ mod tests {
         extra.side = mod_vocab::Side::Client;
         let mods = [&base, &extra];
         for count in 0..=2 {
-            let text = main_rs(template, &mods[..count], &internals::Catalog::default());
+            let text = main_rs(template, &mods[..count]);
             let padded = ["/* MOD_ENTRIES */", "/* MOD_SLOTS */", "/* BUILT_MODS */"]
                 .into_iter()
                 .fold(template.to_owned(), |text, marker| {
                     text.replace(marker, &format!("    {marker}"))
                 });
-            assert_eq!(
-                main_rs(&padded, &mods[..count], &internals::Catalog::default()),
-                text
-            );
+            assert_eq!(main_rs(&padded, &mods[..count]), text);
             let facts: Vec<_> = text
                 .lines()
                 .filter(|line| line.contains(" => mod_"))

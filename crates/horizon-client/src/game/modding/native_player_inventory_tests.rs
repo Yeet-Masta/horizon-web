@@ -307,3 +307,54 @@ fn equipment_effects_wait_for_root() {
         assert_eq!(game.audio.capture.as_ref().unwrap().len(), 1);
     });
 }
+
+/// `update_inventory_slot`: the same item rewritten in an armour slot with new components (an
+/// energy item being charged) is a change in place, with no equip sound, while the armour's
+/// modifiers stay; another item is an equip, heard as `set_inventory_slot`'s is. Rewriting a
+/// worn stack each tick through `set_inventory_slot` was heard every tick.
+#[test]
+#[ignore = "daily"]
+fn an_update_in_place_is_silent_and_another_item_is_an_equip() {
+    with_guests(|game| {
+        let player = game.players().server_players()[1];
+        let armor = |game: &super::Game<'_>| {
+            let host: &dyn Host = game;
+            host.living(player.entity())
+                .and_then(|living| living.attribute_value(host, "minecraft:armor"))
+        };
+        let boots = stack(game, r#"{id:"minecraft:iron_boots",count:1}"#);
+        assert_eq!(player.set_inventory_slot(game, 36, Some(boots)), Ok(()));
+        game.audio.capture = Some(Vec::new());
+        for energy in 1..=3 {
+            let charged = stack(
+                game,
+                &format!(
+                    r#"{{id:"minecraft:iron_boots",count:1,components:{{"minecraft:custom_data":{{energy:{energy}}}}}}}"#
+                ),
+            );
+            assert_eq!(player.update_inventory_slot(game, 36, charged.clone()), Ok(()));
+            assert_eq!(player.inventory_slots(game), Some(vec![(36, charged)]));
+        }
+        // iron boots: 2 armour points (`ArmorMaterials.IRON`, boots)
+        assert_eq!(armor(game), Some(2.0));
+        assert!(game.audio.capture.as_ref().unwrap().is_empty(), "no equip sound in place");
+        let diamond = stack(game, r#"{id:"minecraft:diamond_boots",count:1}"#);
+        assert_eq!(player.update_inventory_slot(game, 36, diamond), Ok(()));
+        // diamond boots: 3 armour points
+        assert_eq!(armor(game), Some(3.0));
+        assert_eq!(game.audio.capture.as_ref().unwrap().len(), 1, "another item is an equip");
+        // The offhand (slot 40): the new stack's own armour modifier holds once updated in place.
+        let shard = |game: &super::Game<'_>, amount: u32| {
+            stack(
+                game,
+                &format!(
+                    r#"{{id:"minecraft:stick",count:1,components:{{"minecraft:attribute_modifiers":[{{type:"minecraft:armor",slot:"offhand",amount:{amount}.0d,id:"test:shard",operation:"add_value"}}]}}}}"#
+                ),
+            )
+        };
+        let (one, four) = (shard(game, 1), shard(game, 4));
+        assert_eq!(player.set_inventory_slot(game, 40, Some(one)), Ok(()));
+        assert_eq!(player.update_inventory_slot(game, 40, four), Ok(()));
+        assert_eq!(armor(game), Some(7.0));
+    });
+}

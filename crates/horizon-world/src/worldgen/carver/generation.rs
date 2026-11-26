@@ -8,7 +8,15 @@ use horizon_core::{
     position::ChunkPos,
     random::{LegacyRandom, RandomSource},
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+/// The file beside a worldgen bundle's `carvers.json` that lists the carver
+/// ids a content root left out (a mod's own carver type, or load conditions
+/// that fail): a biome naming one drops it while no data pack supplies it.
+pub const LEFT_OUT: &str = "carvers_left_out.json";
 
 #[derive(Clone, Debug)]
 pub enum WorldCarver {
@@ -80,6 +88,17 @@ impl CarverCatalog {
         self.definitions.keys().map(String::as_str)
     }
     pub fn decode_set(&self, json: &str) -> Result<Vec<Arc<WorldCarver>>, DecodeError> {
+        self.decode_set_leaving_out(json, &BTreeSet::new())
+            .map(|(carvers, _)| carvers)
+    }
+    /// [`Self::decode_set`], where a named carver this catalog lacks and
+    /// `left_out` lists is dropped instead of failing: the carvers, and the
+    /// ids dropped.
+    pub fn decode_set_leaving_out(
+        &self,
+        json: &str,
+        left_out: &BTreeSet<String>,
+    ) -> Result<(Vec<Arc<WorldCarver>>, Vec<String>), DecodeError> {
         use serde_json::value::RawValue;
         let raw: Box<RawValue> = serde_json::from_str(json)?;
         let entries: Vec<Box<RawValue>> = if raw.get().starts_with('[') {
@@ -90,20 +109,20 @@ impl CarverCatalog {
         if entries.len() > 1024 {
             return Err(DecodeError::Field("biome carver count"));
         }
-        entries
-            .iter()
-            .map(|raw| {
-                if let Ok(name) = serde_json::from_str::<String>(raw.get()) {
-                    let name = identifier(&name)?;
-                    self.definitions
-                        .get(&name)
-                        .cloned()
-                        .ok_or_else(|| DecodeError::Registry(format!("unknown carver {name}")))
-                } else {
-                    Ok(Arc::new(WorldCarver::from_json(raw.get())?))
+        let (mut carvers, mut dropped) = (Vec::with_capacity(entries.len()), Vec::new());
+        for raw in &entries {
+            if let Ok(name) = serde_json::from_str::<String>(raw.get()) {
+                let name = identifier(&name)?;
+                match self.definitions.get(&name) {
+                    Some(carver) => carvers.push(carver.clone()),
+                    None if left_out.contains(&name) => dropped.push(name),
+                    None => return Err(DecodeError::Registry(format!("unknown carver {name}"))),
                 }
-            })
-            .collect()
+            } else {
+                carvers.push(Arc::new(WorldCarver::from_json(raw.get())?));
+            }
+        }
+        Ok((carvers, dropped))
     }
 }
 #[derive(Debug)]
@@ -143,6 +162,9 @@ pub fn generate_carving_mask<'a, E>(
         .wrapping_sub(1)
         .wrapping_sub(if upgrading { 0 } else { 7 });
     let mut mask = CarvingMask::new(min, max).map_err(MaskGenerationError::Mask)?;
+    // Each carver index `0..8` uses the same `(x_mul, z_mul, seed)` across all
+    // 289 origin chunks in the 17x17 neighborhood.
+    let mut cached_seeds: [Option<(i64, i64, i64)>; 8] = [None; 8];
     for dx in -8..=8 {
         for dz in -8..=8 {
             let origin = ChunkPos::new(target.x.wrapping_add(dx), target.z.wrapping_add(dz));
@@ -151,8 +173,20 @@ pub fn generate_carving_mask<'a, E>(
                 return Err(MaskGenerationError::TooManyCarvers);
             }
             for (index, carver) in selected.iter().enumerate() {
-                let mut random =
-                    large_feature_random(world_seed.wrapping_add(index as i64), origin);
+                let mut random = if let Some(slot) = cached_seeds.get_mut(index) {
+                    let (mx, mz, seed) = *slot.get_or_insert_with(|| {
+                        let seed = world_seed.wrapping_add(index as i64);
+                        let mut rng = LegacyRandom::new(seed);
+                        (rng.next_long(), rng.next_long(), seed)
+                    });
+                    LegacyRandom::new(
+                        i64::from(origin.x).wrapping_mul(mx)
+                            ^ i64::from(origin.z).wrapping_mul(mz)
+                            ^ seed,
+                    )
+                } else {
+                    large_feature_random(world_seed.wrapping_add(index as i64), origin)
+                };
                 if carver.is_start_chunk(&mut random) {
                     carver
                         .carve(context, &mut random, target, origin, &mut mask)
@@ -171,4 +205,107 @@ pub fn large_feature_random(seed: i64, origin: ChunkPos) -> LegacyRandom {
     random
         .set_seed(i64::from(origin.x).wrapping_mul(x) ^ i64::from(origin.z).wrapping_mul(z) ^ seed);
     random
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const CAVE: &str = r#"{"type":"minecraft:cave","probability":0.5,
+        "count":{"type":"minecraft:uniform","min_inclusive":0,"max_inclusive":2},
+        "y":{"type":"minecraft:uniform","min_inclusive":{"absolute":0},"max_inclusive":{"absolute":64}},
+        "thickness":{"type":"minecraft:uniform","min_inclusive":0.5,"max_exclusive":1.5},
+        "room_vertical_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.5,"max_exclusive":1.0},
+        "horizontal_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.5,"max_exclusive":1.0},
+        "vertical_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.5,"max_exclusive":1.0},
+        "floor_level":{"type":"minecraft:uniform","min_inclusive":-1.0,"max_exclusive":-0.5}}"#;
+
+    fn catalog(ids: &[&str]) -> CarverCatalog {
+        let definitions = ids
+            .iter()
+            .map(|id| ((*id).to_owned(), CAVE.to_owned()))
+            .collect();
+        CarverCatalog::from_json(&definitions).unwrap()
+    }
+
+    /// A biome's carver a content root left out drops while nothing supplies
+    /// it, and is used once a data pack puts a carver under its id.
+    #[test]
+    fn a_left_out_carver_drops_only_while_no_pack_supplies_it() {
+        let left_out = BTreeSet::from(["hollows:vent".to_owned()]);
+        let biome = r#"["hollows:deep_cave", "hollows:vent"]"#;
+        let (set, dropped) = catalog(&["hollows:deep_cave"])
+            .decode_set_leaving_out(biome, &left_out)
+            .unwrap();
+        assert_eq!((set.len(), dropped), (1, vec!["hollows:vent".to_owned()]));
+        let (set, dropped) = catalog(&["hollows:deep_cave", "hollows:vent"])
+            .decode_set_leaving_out(biome, &left_out)
+            .unwrap();
+        assert_eq!((set.len(), dropped.len()), (2, 0));
+        // An unknown carver nobody left out still fails, as vanilla's does.
+        let other = r#"["hollows:other"]"#;
+        assert!(
+            catalog(&[])
+                .decode_set_leaving_out(other, &left_out)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cached_carver_seeds_match_large_feature_random_and_cover_overflow_indices() {
+        let world_seed = -7_123_456_789_012_345_i64;
+        for index in 0..12_i64 {
+            let seed = world_seed.wrapping_add(index);
+            let mut rng = LegacyRandom::new(seed);
+            let (mx, mz) = (rng.next_long(), rng.next_long());
+            for (ox, oz) in [
+                (0, 0),
+                (-8, 8),
+                (i32::MIN, i32::MAX),
+                (i32::MAX, i32::MIN),
+                (-17, -33),
+            ] {
+                let origin = ChunkPos::new(ox, oz);
+                let cached = LegacyRandom::new(
+                    i64::from(origin.x).wrapping_mul(mx)
+                        ^ i64::from(origin.z).wrapping_mul(mz)
+                        ^ seed,
+                );
+                let direct = large_feature_random(seed, origin);
+                assert_eq!(
+                    cached.state(),
+                    direct.state(),
+                    "index={index} origin={origin:?}"
+                );
+            }
+        }
+
+        // Exercise both the cached 0..8 path and the >= 8 fallback path in generate_carving_mask.
+        let carver = Arc::new(WorldCarver::from_json(CAVE).unwrap());
+        let list: Vec<_> = (0..10).map(|_| Arc::clone(&carver)).collect();
+        let generation = WorldGenerationContext::new(0, 64, 32);
+        let target = ChunkPos::new(3, -5);
+        let mask = generate_carving_mask(world_seed, target, generation, false, |_| {
+            Ok::<_, ()>(list.as_slice())
+        })
+        .unwrap();
+        let mut expected = CarvingMask::new(1, 56).unwrap();
+        for dx in -8..=8 {
+            for dz in -8..=8 {
+                let origin = ChunkPos::new(target.x.wrapping_add(dx), target.z.wrapping_add(dz));
+                for (index, carver) in list.iter().enumerate() {
+                    let mut random =
+                        large_feature_random(world_seed.wrapping_add(index as i64), origin);
+                    if carver.is_start_chunk(&mut random) {
+                        carver
+                            .carve(generation, &mut random, target, origin, &mut expected)
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        let got_cols: Vec<_> = mask.columns().collect();
+        let want_cols: Vec<_> = expected.columns().collect();
+        assert!(!got_cols.is_empty(), "expected cave carvers to carve cells");
+        assert_eq!(got_cols, want_cols);
+    }
 }

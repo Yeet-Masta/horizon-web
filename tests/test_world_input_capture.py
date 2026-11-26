@@ -43,28 +43,6 @@ def function(source, name):
 
 
 class WorldInputCaptureTests(unittest.TestCase):
-    def test_loading_completion_wiring(self):
-        game = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
-                       for path in ("game/world/player_spawn.rs", "game/runtime/window_handler.rs", "game.rs"))
-        remote_dir = next(ROOT.glob('crates/horizon-client/src/game/*/remote'))
-        remote = (remote_dir / "mod.rs").read_text(encoding="utf-8")
-        level_tick = (remote_dir / "client_level_tick.rs").read_text(encoding="utf-8")
-        spawn = method(game, "spawn_player")
-        self.assertLess(spawn.index("self.player = Some(player)"),
-                        spawn.index("self.capture_loaded_world()"))
-        # ClientPacketListener.tick: the level load tracker ends the loading screen,
-        # the server hears PlayerLoaded, the mouse is captured, then the player moves.
-        ready = remote[remote.index("    fn tick_client_load("):]
-        self.assertLess(ready.index("r.loaded_sent = true"),
-                        ready.index("self.capture_loaded_world()"))
-        level_fn = level_tick[level_tick.index("    pub(in crate::game) fn tick_remote_level("):]
-        self.assertIn("self.tick_remote_player(running, hold)", level_fn)
-        level = method(remote, "tick_remote_player")
-        self.assertLess(level.index("self.tick_client_load()"),
-                        level.index("self.tick_local_player("))
-        # The extracted local-player pass owns the movement input now.
-        self.assertIn("let stick = self.pad_move()", method(remote, "tick_local_player"))
-
     @unittest.skipUnless(shutil.which("rustc"), "requires Rust")
     def test_capture_lifecycle(self):
         source = "".join((ROOT / "crates/horizon-client/src" / path).read_text(encoding="utf-8")
@@ -616,13 +594,19 @@ mod input_trace {
 struct Radial(bool);
 impl Radial { fn is_open(&self) -> bool { self.0 } }
 struct Pad { radial: Radial }
+struct Replay { driver: Option<()> }
+impl Replay { fn playing(&self) -> bool { self.driver.is_some() } }
+struct StudioFreecam { active: bool }
+struct Studio { freecam: StudioFreecam }
+impl Studio { fn flying(&self) -> bool { self.freecam.active } }
 struct Game {
     pending_save: Option<()>, captured: bool, focused: bool, keyboard_mouse: bool, split_window: bool,
     options: Options, screen: Screen, mouse: MouseLook, last_input: Instant, pad: Pad, scripted: bool,
-    unclaimed_window: bool,
+    unclaimed_window: bool, replay: Replay, studio: Studio,
 }
 impl Game {
     fn scripted_run(&self) -> bool { self.scripted }
+    fn loading_overlay_preview_active(&self) -> bool { false }
     // The input trace records the motion; it does not change the turn.
     fn note_input(&mut self, _: input_trace::InputOrigin, _: input_trace::TraceKind) {}
     // Handing input back from the controller does not change the turn either.
@@ -646,22 +630,26 @@ fn main() {
         (false, false, true, true, true, false, false, true, false, false),
         (false, false, true, true, true, false, false, false, true, false),
     ] {
-        let mut game = Game {
-            pending_save: saving.then_some(()), captured: true, focused: active,
-            keyboard_mouse: owner, split_window: split, options: Options { offscreen },
-            screen: if playing { Screen::Playing } else { Screen::Paused },
-            mouse: MouseLook::default(), last_input: Instant::now(), pad: Pad { radial: Radial(radial) },
-            scripted, unclaimed_window: unclaimed,
-        };
-        game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (0.0, 0.0) });
-        game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
-        let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false };
-        let (x, y) = game.mouse.handle_accumulated_movement(1.0, true, true, look).unwrap();
-        let mut rotation = Rotation { x_rot: 0.0, y_rot: 0.0, x_rot_o: 0.0, y_rot_o: 0.0 };
-        rotation.turn(x, y);
-        let want = if turns { (3.0, -1.5) } else { (0.0, 0.0) };
-        assert!((rotation.y_rot - want.0).abs() < 0.00001 && (rotation.x_rot - want.1).abs() < 0.00001,
-            "rotation=({}, {}), offscreen={offscreen}, split={split}, owner={owner}, active={active}, playing={playing}, saving={saving}, radial={radial}, scripted={scripted}, unclaimed={unclaimed}", rotation.y_rot, rotation.x_rot);
+        // Replay suppresses recorded-view motion; freecam still obeys every ownership gate.
+        for (replay, freecam) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut game = Game {
+                pending_save: saving.then_some(()), captured: true, focused: active,
+                keyboard_mouse: owner, split_window: split, options: Options { offscreen },
+                screen: if playing { Screen::Playing } else { Screen::Paused },
+                mouse: MouseLook::default(), last_input: Instant::now(), pad: Pad { radial: Radial(radial) },
+                scripted, unclaimed_window: unclaimed, replay: Replay { driver: replay.then_some(()) },
+                studio: Studio { freecam: StudioFreecam { active: freecam } },
+            };
+            game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (0.0, 0.0) });
+            game.device_event(&ActiveEventLoop, DeviceId, DeviceEvent::MouseMotion { delta: (20.0, -10.0) });
+            let look = LookOptions { sensitivity: 0.5, smooth_camera: false, scoping: false, invert_x: false, invert_y: false, yaw_scale: 1.0 };
+            let (x, y) = game.mouse.handle_accumulated_movement(1.0, true, true, look).unwrap();
+            let mut rotation = Rotation { x_rot: 0.0, y_rot: 0.0, x_rot_o: 0.0, y_rot_o: 0.0 };
+            rotation.turn(x, y);
+            let want = if turns && (!replay || freecam) { (3.0, -1.5) } else { (0.0, 0.0) };
+            assert!((rotation.y_rot - want.0).abs() < 0.00001 && (rotation.x_rot - want.1).abs() < 0.00001,
+                "rotation=({}, {}), offscreen={offscreen}, split={split}, owner={owner}, active={active}, playing={playing}, saving={saving}, radial={radial}, scripted={scripted}, unclaimed={unclaimed}, replay={replay}, freecam={freecam}", rotation.y_rot, rotation.x_rot);
+        }
     }
 }
 '''

@@ -251,6 +251,11 @@ impl Render for Launcher {
                     k.modifiers.platform
                 } else {
                     k.modifiers.control
+                        && !line_edit::altgr_text(
+                            &k.modifiers,
+                            k.key_char.as_deref(),
+                            line_edit::ALTGR_IS_CTRL_ALT,
+                        )
                 };
                 if this.theme.glass && command && !k.modifiers.shift && k.key == "k" {
                     this.palette_toggle(window, cx);
@@ -343,9 +348,6 @@ impl Render for Launcher {
                 root = root.child(viewer);
             }
         }
-        if t.glass {
-            root = root.children(self.toast_float());
-        }
         if let Some(palette) = self.palette_overlay(window, cx) {
             root = root.child(palette);
         }
@@ -360,6 +362,7 @@ impl Render for Launcher {
         if self.asking_owner() {
             root = root.child(self.owner_screen(cx));
         }
+        root = root.children(self.toast_float());
         if let Some(opening) = &self.opening {
             // The wordmark arrives letter by letter, then gives way to the launcher; a click or
             // a key skips ahead.

@@ -29,7 +29,160 @@ pub(super) struct ObjectHit {
     pub location: [f64; 3],
 }
 
+/// What the crosshair's entity is, for the turn that follows: one of the objects
+/// [`Game::remote_object_hit`] knows, a mob (by index), a projectile a blow turns (by index
+/// in `creatures.projectiles`), or anything else vanilla can pick (an End crystal or dragon
+/// part on a use, a fence knot on an attack, a falling block).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum PickKind {
+    Object,
+    Mob(usize),
+    Projectile(usize),
+    Other,
+}
+
+/// The crosshair's entity (`Minecraft.hitResult` as an `EntityHitResult`): its id, how far
+/// along the view, where it was hit (`getLocation` minus its position, the interact
+/// packet's location) and what it is.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EntityPick {
+    pub id: i32,
+    pub distance: f64,
+    pub location: [f64; 3],
+    pub kind: PickKind,
+}
+
+impl EntityPick {
+    /// The pick as one of the objects [`Game::remote_object_hit`] knows.
+    pub(super) fn object_hit(&self) -> ObjectHit {
+        ObjectHit {
+            id: self.id,
+            distance: self.distance,
+            location: self.location,
+        }
+    }
+}
+
 impl Game<'_> {
+    /// `MultiPlayerGameMode.interact` on `pick`: the click goes to the server whatever
+    /// comes of it, carrying the hand and where the view met the entity.
+    pub(super) fn send_interact(&mut self, pick: &EntityPick, hand: i32, secondary: bool) {
+        self.send(S::Interact(play::Interact {
+            id: pick.id,
+            hand,
+            location: pick.location,
+            secondary,
+        }));
+    }
+
+    /// `GameRenderer.pick`'s entity: the nearest entity vanilla can pick
+    /// (`EntitySelector.CAN_BE_PICKED`) along the view within reach and before the block
+    /// aimed at, of every kind at once. Attacks and uses both go to it, so a click reaches
+    /// the server for every entity a vanilla client's would, and never passes through one
+    /// to what is behind. `attacking` keeps the special cases of each turn's own hit tests.
+    pub(super) fn crosshair_entity(&self, attacking: bool) -> Option<EntityPick> {
+        let (eye, dir) = self.aim()?;
+        let reach = self.entity_reach;
+        let at = |d: f64, origin: Vec3| {
+            [
+                eye[0] + dir[0] * d - origin.x,
+                eye[1] + dir[1] * d - origin.y,
+                eye[2] + dir[2] * d - origin.z,
+            ]
+        };
+        let mut best: Option<EntityPick> = None;
+        let mut offer = |p: EntityPick| {
+            if best.is_none_or(|b| p.distance < b.distance) {
+                best = Some(p);
+            }
+        };
+        if let Some(hit) = self.remote_object_hit(attacking) {
+            offer(EntityPick {
+                id: hit.id,
+                distance: hit.distance,
+                location: hit.location,
+                kind: PickKind::Object,
+            });
+        }
+        if attacking {
+            // LeashFenceKnotEntity is pickable for a blow as for a use.
+            if let Some((id, d, p)) = self.remote_knot_hit() {
+                offer(EntityPick {
+                    id,
+                    distance: d,
+                    location: at(d, Vec3::new(p[0], p[1], p[2])),
+                    kind: PickKind::Other,
+                });
+            }
+        } else {
+            // EndCrystal and EnderDragonPart are pickable for a use too; their interact
+            // passes (`Entity.interact`), so the item is used after it.
+            for c in self.crystals.iter().filter(|c| c.id != 0) {
+                let p = c.position;
+                let bounds = Aabb::new(
+                    Vec3::new(p.x - 1.0, p.y, p.z - 1.0),
+                    Vec3::new(p.x + 1.0, p.y + 2.0, p.z + 1.0),
+                );
+                if let Some(d) = ray_box(eye, dir, reach, bounds) {
+                    offer(EntityPick {
+                        id: c.id as i32,
+                        distance: d,
+                        location: at(d, p),
+                        kind: PickKind::Other,
+                    });
+                }
+            }
+            if let Some((id, d, p)) = self.remote_dragon_part_hit(eye, dir, reach) {
+                offer(EntityPick {
+                    id,
+                    distance: d,
+                    location: at(d, Vec3::new(p[0], p[1], p[2])),
+                    kind: PickKind::Other,
+                });
+            }
+        }
+        if let Some((i, d, location)) = self.mob_hit() {
+            offer(EntityPick {
+                id: self.mobs[i].id as i32,
+                distance: d,
+                location,
+                kind: PickKind::Mob(i),
+            });
+        }
+        // AbstractHurtingProjectile (a wind charge, a fireball) and ShulkerBullet are
+        // pickable, the former with a pick radius of 1 around its box.
+        if let Some((i, d)) = self.redirectable_hit()
+            && self.creatures.projectiles[i].id != 0
+        {
+            let p = &self.creatures.projectiles[i];
+            offer(EntityPick {
+                id: p.id as i32,
+                distance: d,
+                location: at(d, p.position),
+                kind: PickKind::Projectile(i),
+            });
+        }
+        // FallingBlockEntity is pickable (`!isRemoved`): a 0.98 cube. Primed TNT is among the
+        // objects `remote_object_hit` knows.
+        let cube = |p: Vec3| {
+            Aabb::new(
+                Vec3::new(p.x - 0.49, p.y, p.z - 0.49),
+                Vec3::new(p.x + 0.49, p.y + 0.98, p.z + 0.49),
+            )
+        };
+        for f in self.falling.iter().filter(|f| f.id != 0) {
+            if let Some(d) = ray_box(eye, dir, reach, cube(f.position)) {
+                offer(EntityPick {
+                    id: f.id as i32,
+                    distance: d,
+                    location: at(d, f.position),
+                    kind: PickKind::Other,
+                });
+            }
+        }
+        best.filter(|b| self.before_block(b.distance))
+    }
+
     /// BlockAttachedEntity.isPickable: the nearest fence knot's box the view meets, with its id,
     /// distance and position. Its box is wider than the post inside it, so the crosshair meets it
     /// first and LeashFenceKnotEntity.interact takes the click. The fence block behind only ties
@@ -52,17 +205,16 @@ impl Game<'_> {
             .min_by(|a, b| a.1.total_cmp(&b.1))
     }
 
-    /// Whether a use starts on an entity: the crosshair's `EntityHitResult`, or a fence knot.
-    /// Only a use: Horizon's attacks still go to the fence behind a knot.
+    /// Whether a use starts on an entity: the crosshair's `EntityHitResult`.
     pub(super) fn remote_use_targets_entity(&self) -> bool {
-        self.entity_targeted()
-            || self
-                .remote_knot_hit()
-                .is_some_and(|(_, d, _)| self.before_block(d))
+        if self.targeting().entity.is_some() {
+            return self.entity_targeted();
+        }
+        self.crosshair_entity(false).is_some() || self.entity_targeted()
     }
 
-    /// The nearest boat, minecart, item frame, armor stand or painting the
-    /// view hits within reach; also End crystals when attacking, and fence knots when using.
+    /// The nearest pickable non-mob object within reach; also End crystals when attacking,
+    /// and fence knots when using.
     pub(super) fn remote_object_hit(&self, attacking: bool) -> Option<ObjectHit> {
         let (eye, dir) = self.aim()?;
         let at = |d: f64| {
@@ -105,6 +257,10 @@ impl Game<'_> {
         if let Some((i, d)) = self.cart_hit() {
             let p = self.carts[i].position;
             hits.push((self.carts[i].id as i32, d, [p.x, p.y, p.z]));
+        }
+        if let Some((tnt, distance)) = self.primed_tnt_hit(self.entity_reach) {
+            let p = tnt.position;
+            hits.push((tnt.id as i32, distance, [p.x, p.y, p.z]));
         }
         // Interaction.isPickable: an invisible box the server clicks through
         // to its scripts, for both uses and attacks.
@@ -165,14 +321,32 @@ impl Game<'_> {
             }
         }
         self.remote_seat_passengers(vehicle_id, passengers);
+        // One set for the loops over every mob, display, armor stand and
+        // interaction below: the server's list can hold many ids.
+        let riders = super::remote::passenger_set(passengers);
         let player_controls = passengers.first().is_some_and(|&id| {
             self.remote
                 .as_ref()
                 .is_some_and(|r| r.level_player(id).is_some())
         });
+        // `handleSetEntityPassengersPacket` seats only the entities this
+        // client has: the window's player and the tracked ones.
+        let listed: Vec<u32> = passengers
+            .iter()
+            .filter(|&&p| {
+                p == me
+                    || self
+                        .remote
+                        .as_ref()
+                        .is_some_and(|r| r.tracked(p).is_some())
+            })
+            .map(|&p| p as u32)
+            .collect();
         if let Some(i) = self.boats.iter().position(|b| b.id == vehicle_id) {
             self.boats.update(i, |boat| {
                 boat.paddle_controller = player_controls;
+                // AbstractBoat.positionRider seats each by its place in this list.
+                boat.listed_passengers = listed;
             });
         }
 
@@ -182,42 +356,43 @@ impl Game<'_> {
             if m.id == vehicle_id {
                 m.extra.rider = passengers.first().map(|&p| p as u32);
             }
-            if m.extra.mount == Some(vehicle_id) && !passengers.contains(&(m.id as i32)) {
+            if m.extra.mount == Some(vehicle_id) && !riders.contains(&(m.id as i32)) {
                 m.extra.mount = None;
                 m.extra.passenger = false;
-            } else if passengers.contains(&(m.id as i32)) {
+            } else if riders.contains(&(m.id as i32)) {
                 m.extra.mount = Some(vehicle_id);
                 m.extra.passenger = true;
             }
         }
         for (id, display) in &mut self.text_displays {
-            if passengers.contains(id) {
+            if riders.contains(id) {
                 display.vehicle = Some(vehicle_id);
             } else if display.vehicle == Some(vehicle_id) {
                 display.vehicle = None;
             }
         }
         for a in &mut self.armor_stands {
-            if passengers.contains(&(a.id as i32)) {
+            if riders.contains(&(a.id as i32)) {
                 a.vehicle = Some(vehicle_id);
             } else if a.vehicle == Some(vehicle_id) {
                 a.vehicle = None;
             }
         }
         for (&id, i) in &mut self.interactions {
-            if passengers.contains(&id) {
+            if riders.contains(&id) {
                 i.vehicle = Some(vehicle_id);
             } else if i.vehicle == Some(vehicle_id) {
                 i.vehicle = None;
             }
         }
-        if passengers.contains(&me)
+        let aboard = riders.contains(&me);
+        if aboard
             && let Some(r) = self.remote.as_mut()
         {
             r.first_passenger = passengers.first() == Some(&me);
             r.passenger_index = passengers.iter().position(|&p| p == me).unwrap_or(0);
         }
-        if passengers.contains(&me) {
+        if aboard {
             if self.riding != Some(vehicle_id) {
                 self.riding = Some(vehicle_id);
                 // ClientPacketListener.handleSetEntityPassengersPacket: boarding says how to get off,
@@ -289,6 +464,18 @@ impl Game<'_> {
         let Some(id) = self.riding else {
             return Ok(false);
         };
+        // LocalPlayer.aiStep's pending auto-jump: `canAutoJump` needs a walking
+        // player, so one cannot start in a vehicle, but the tick after boarding
+        // still counts the last one down, presses jump (`input.makeJump`) and
+        // keeps that jump from toggling flight (`!wasAutoJump`).
+        let mut keys = keys;
+        if let Some(p) = self.player.as_mut() {
+            p.was_auto_jump = p.auto_jump_time > 0;
+            if p.was_auto_jump {
+                p.auto_jump_time -= 1;
+                keys.jump = true;
+            }
+        }
         // LocalPlayer.aiStep runs its sprint decisions in a vehicle too: `canSprint` and
         // this client's authority stand in for food (`isSprintingPossible`).
         let (can_sprint, local) = self
@@ -309,6 +496,7 @@ impl Game<'_> {
             // Another animal moves on the server with the rider's input
             // (PlayerInput); the rider sits where `positionRider` puts it.
             self.position_rider();
+            self.rider_flight_toggle(keys.jump);
             return Ok(true);
         }
         // Generic entities are valid vehicles too (plugins use displays as seats).
@@ -348,6 +536,7 @@ impl Game<'_> {
                     p.velocity = Vec3::ZERO;
                     p.fall_distance = 0.0;
                 }
+                self.rider_flight_toggle(keys.jump);
                 return Ok(true);
             }
         }
@@ -423,7 +612,20 @@ impl Game<'_> {
             p.velocity = Vec3::ZERO;
             p.fall_distance = 0.0;
         }
+        self.rider_flight_toggle(keys.jump);
         Ok(true)
+    }
+
+    /// `LocalPlayer.aiStep`'s creative-flight toggle for a rider, whose tick
+    /// runs here instead of the walking one. `Player.tick` counts the
+    /// jump-trigger window down and clears a passenger's `onGround` before
+    /// `aiStep`, so the mount must be jumpable (`Player.jumpableVehicle`) and
+    /// the toggle's jump from the ground never runs for a rider.
+    fn rider_flight_toggle(&mut self, jumping: bool) {
+        let vehicle_jumpable = self.jumpable_mount();
+        if let Some(player) = self.player.as_mut() {
+            player.creative_flight_toggle(jumping, vehicle_jumpable);
+        }
     }
 
     /// `LocalPlayer.tick` for a passenger: the boat it controls goes to the
@@ -685,6 +887,10 @@ fn mount_move(m: &Mob) -> S {
         on_ground: m.on_ground,
     })
 }
+
+#[cfg(test)]
+#[path = "remote_vehicles/creative_flight_tests.rs"]
+mod creative_flight_tests;
 
 /// Avatar's VEHICLE attachment scales independently of the vehicle's seat.
 fn generic_player_seat(at: glam::DVec3, before: glam::DVec3, scale: f32) -> (Vec3, Vec3) {

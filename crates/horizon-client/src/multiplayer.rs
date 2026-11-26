@@ -143,6 +143,8 @@ pub enum Screen {
     /// A page a crate registered at the title screen's Friends icon, as a form.
     Page(Form),
     Disconnected {
+        /// What the connection was doing when it ended: the title above the reason.
+        title: DisconnectTitle,
         /// The server's or a mod's reason, rendered in the player's language when drawn.
         reason: Text,
         /// Auto-reconnect's next attempt, until it is cancelled.
@@ -155,6 +157,49 @@ pub enum Screen {
     },
 }
 mod page;
+
+/// `DisconnectedScreen`'s title: which of vanilla's listeners saw the connection end.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisconnectTitle {
+    /// `ClientCommonPacketListenerImpl.GENERIC_DISCONNECT_MESSAGE`: it ended after the login,
+    /// in configuration or play (`createDisconnectScreen`).
+    #[default]
+    Lost,
+    /// `CommonComponents.CONNECT_FAILED`: the join failed before the login finished.
+    ConnectFailed,
+    /// `CommonComponents.TRANSFER_CONNECT_FAILED`: as `ConnectFailed`, for a `/transfer`.
+    TransferFailed,
+    /// `QuickPlay.ERROR_TITLE`: quick play's connection could not be opened.
+    QuickPlayFailed,
+}
+impl DisconnectTitle {
+    /// The title vanilla gives a connection that ended at `reached`. `ConnectScreen.startConnecting`
+    /// picks the connect thread's title (a transfer's, else quick play's, else `CONNECT_FAILED`);
+    /// once the socket is open, `ClientHandshakePacketListenerImpl.onDisconnect` picks only between
+    /// the transfer's and `CONNECT_FAILED`; after `handleLoginFinished` it is the connection lost.
+    pub fn after(reached: crate::net::Reached, transferred: bool, quick_play: bool) -> Self {
+        use crate::net::Reached;
+        match reached {
+            Reached::LoggedIn => Self::Lost,
+            _ if transferred => Self::TransferFailed,
+            Reached::Connecting if quick_play => Self::QuickPlayFailed,
+            Reached::Connecting | Reached::Login => Self::ConnectFailed,
+        }
+    }
+    /// The title in the player's language.
+    pub fn text(self) -> String {
+        let (key, fallback) = match self {
+            Self::Lost => ("disconnect.lost", "Connection Lost"),
+            Self::ConnectFailed => ("connect.failed", "Failed to connect to the server"),
+            Self::TransferFailed => (
+                "connect.failed.transfer",
+                "Connection failed while transferring to the server",
+            ),
+            Self::QuickPlayFailed => ("quickplay.error.title", "Failed to Quick Play"),
+        };
+        crate::lang::get_or(key, fallback)
+    }
+}
 
 /// What the title screen's Friends icon opens: the page a crate registered there
 /// (`Place::Title`), else Join a Friend when an invite code can be joined. None: it is inactive.
@@ -400,7 +445,10 @@ fn entry_address(servers: &[ServerEntry], lan: &Scanner, index: usize) -> Option
             .games()
             .into_iter()
             .nth(index - servers.len())
-            .map(|g| (g.address, true)),
+            // A LAN game joins its sender's IP and announced port, never the
+            // listed text as a host name. One that names no port passes its
+            // listed text, which the LAN connection refuses as an invalid address.
+            .map(|g| (g.join.map_or(g.address, |a| a.to_string()), true)),
     }
 }
 
@@ -423,6 +471,42 @@ const FOOTER: f32 = 60.0;
 /// ServerSelectionList: rows 305 wide and 36 high.
 const ROW_WIDTH: f32 = 305.0;
 const ROW_HEIGHT: f32 = 36.0;
+
+/// One saved server at its actual position in this frame's list.
+#[doc(hidden)]
+pub struct SavedServerRow<'a> {
+    pub server: &'a ServerEntry,
+    pub rect: [f32; 4],
+    pub visible_rect: [f32; 4],
+    pub mouse: Option<[f32; 2]>,
+}
+
+/// Paint a saved row and optionally return its hover tooltip lines.
+#[doc(hidden)]
+pub type DecorateServerRow<'a> = dyn FnMut(SavedServerRow<'_>, &mut HudBatch) -> Vec<Text> + 'a;
+
+impl<'a> SavedServerRow<'a> {
+    fn visible(
+        server: &'a ServerEntry,
+        rect: [f32; 4],
+        (top, bottom, width): (f32, f32, f32),
+        (mx, my): (f32, f32),
+    ) -> Option<Self> {
+        let [x, y, w, h] = rect;
+        let (x0, y0) = (x.max(0.0), y.max(top));
+        let (x1, y1) = ((x + w).min(width), (y + h).min(bottom));
+        if x0 >= x1 || y0 >= y1 {
+            return None;
+        }
+        Some(Self {
+            server,
+            rect,
+            visible_rect: [x0, y0, x1 - x0, y1 - y0],
+            mouse: ((x0..x1).contains(&mx) && (y0..y1).contains(&my)).then_some([mx, my]),
+        })
+    }
+}
+
 /// One row of the list: the saved servers, the LAN header, the LAN games.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Row {
@@ -587,7 +671,13 @@ fn player_list_tooltip(
 
 impl Screen {
     /// Draw after the list and footer so the tooltip is neither clipped nor covered.
-    pub fn draw_tooltip(&self, atlas: &HudAtlas, batch: &mut HudBatch, cursor: (f32, f32)) {
+    pub fn draw_tooltip(
+        &self,
+        atlas: &HudAtlas,
+        batch: &mut HudBatch,
+        cursor: (f32, f32),
+        mut decorations: Vec<Text>,
+    ) {
         let Self::List {
             servers,
             pings,
@@ -607,13 +697,18 @@ impl Screen {
             content_height(servers.len(), lan.games().len()),
         );
         let pings = pings.lock().unwrap();
-        let lines = match ping_tooltip(servers, &pings, size, scroll.amount, cursor) {
+        let mut lines = match ping_tooltip(servers, &pings, size, scroll.amount, cursor) {
             Some(text) => vec![text],
             None => player_list_tooltip(servers, &pings, size, scroll.amount, cursor, |t| {
                 atlas.font.width_text(t)
             })
             .unwrap_or_default(),
         };
+        if lines.is_empty() {
+            lines = decorations;
+        } else {
+            lines.append(&mut decorations);
+        }
         crate::ui::tooltip(batch, atlas, &lines, cursor);
     }
 
@@ -903,12 +998,9 @@ impl Screen {
                 get("horizon.multiplayer.join_friend", "Join a Friend"),
             ),
             // DisconnectedScreen: its title and the reason.
-            Self::Disconnected { reason, .. } => ScreenInfo::new(
+            Self::Disconnected { title, reason, .. } => ScreenInfo::new(
                 "multiplayer/disconnected",
-                join(&[
-                    &get("disconnect.lost", "Connection Lost"),
-                    &reason_plain(reason),
-                ]),
+                join(&[&title.text(), &reason_plain(reason)]),
             ),
         }
     }
@@ -983,7 +1075,9 @@ impl Screen {
         cursor: (f32, f32),
         hide_address: bool,
         phases: &mut dyn FnMut(crate::screen_draw::RenderPhase, &mut HudBatch),
-    ) {
+        decorate_server_row: Option<&mut DecorateServerRow<'_>>,
+    ) -> Vec<Text> {
+        let mut row_tooltip = Vec::new();
         let (w, h) = (batch.width, batch.height);
         let max = self.max_length();
         crate::widgets::begin_screen(|| self.narration());
@@ -1074,11 +1168,19 @@ impl Screen {
                     .duration_since(horizon_std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_millis());
                 let gray = rgba(128, 128, 128, 255);
-                for (i, row) in rows(servers.len(), games.len()).enumerate() {
-                    let y = top + 2.0 - scroll.amount.trunc() + i as f32 * ROW_HEIGHT;
-                    if y + ROW_HEIGHT < top || y > bottom {
-                        continue;
-                    }
+                let start = top + 2.0 - scroll.amount.trunc();
+                let drawn_rows = || {
+                    rows(servers.len(), games.len())
+                        .enumerate()
+                        .map(move |(i, row)| {
+                            let y = start + i as f32 * ROW_HEIGHT;
+                            (i, row, [left, y, ROW_WIDTH, ROW_HEIGHT])
+                        })
+                        .skip_while(move |&(_, _, [_, y, _, h])| y + h < top)
+                        .take_while(move |&(_, _, [_, y, _, _])| y <= bottom)
+                };
+                for (i, row, rect) in drawn_rows() {
+                    let y = rect[1];
                     let index = match row {
                         Row::Server(k) => Some(k),
                         Row::Lan(k) => Some(servers.len() + k),
@@ -1088,7 +1190,6 @@ impl Screen {
                         && y + ROW_HEIGHT / 2.0 > top
                         && y + ROW_HEIGHT / 2.0 < bottom
                     {
-                        let rect = [left, y, ROW_WIDTH, ROW_HEIGHT];
                         // The control socket's widget tree names the row.
                         let name = match row {
                             Row::Server(k) => servers[k].name.as_str(),
@@ -1244,19 +1345,34 @@ impl Screen {
                             batch.text(atlas, &game.motd, cx + 35.0, cy + 12.0, gray, false);
                             // NetworkServerEntry.extractContent: `hideServerAddress`
                             // draws HIDDEN_ADDRESS_TEXT in the address's place.
-                            let hidden;
                             let address = if hide_address {
-                                hidden =
-                                    crate::lang::get_or("selectServer.hiddenAddress", "(Hidden)");
-                                &hidden
+                                crate::lang::get_or("selectServer.hiddenAddress", "(Hidden)")
                             } else {
-                                &game.address
+                                game.shown_address()
                             };
-                            batch.text(atlas, address, cx + 35.0, cy + 23.0, gray, false);
+                            batch.text(atlas, &address, cx + 35.0, cy + 23.0, gray, false);
                         }
                     }
                 }
                 batch.clip_since(first, 0.0, top, w, bottom);
+                drop(icons);
+                drop(pings);
+                // Use the very same placements as the list above, but leave
+                // its ping locks and batch clip behind before invoking mods.
+                if let Some(decorate) = decorate_server_row {
+                    for (_, row, rect) in drawn_rows() {
+                        let Row::Server(k) = row else { break };
+                        if let Some(row) =
+                            SavedServerRow::visible(&servers[k], rect, (top, bottom, w), cursor)
+                        {
+                            let hovered = row.mouse.is_some();
+                            let tooltip = decorate(row, batch);
+                            if hovered {
+                                row_tooltip = tooltip;
+                            }
+                        }
+                    }
+                }
                 crate::ui::separators(batch, atlas, top, bottom, false);
                 crate::ui::scrollbar(
                     batch,
@@ -1395,6 +1511,7 @@ impl Screen {
                 );
             }
             Self::Disconnected {
+                title,
                 reason,
                 retry,
                 lines,
@@ -1406,12 +1523,7 @@ impl Screen {
                 let wrapped = wrap(&reason, (w.ceil() - 50.0).max(1.0), atlas);
                 lines.set(wrapped.len());
                 let l = disconnected_layout(h, wrapped.len(), retry.is_some());
-                centered(
-                    batch,
-                    &crate::lang::get_or("disconnect.lost", "Connection Lost"),
-                    l.title,
-                    rgba(170, 170, 170, 255),
-                );
+                centered(batch, &title.text(), l.title, rgba(170, 170, 170, 255));
                 for (i, line) in wrapped.iter().enumerate() {
                     centered(batch, line, l.message + i as f32 * 9.0, u32::MAX);
                 }
@@ -1421,6 +1533,7 @@ impl Screen {
                 }
             }
         }
+        row_tooltip
     }
     /// `DirectJoinServerScreen.keyPressed`: Enter joins the typed address
     /// while the Join Server button is active. On the server list it is
@@ -2048,7 +2161,7 @@ pub fn remember_direct_join(saves: &Path, address: &str) {
 
 /// Direct Connection's address; a full invite code pasted there joins the
 /// friend (a short relay code could be a host name, so it needs Join a Friend).
-fn direct_address(address: &str) -> String {
+pub(crate) fn direct_address(address: &str) -> String {
     let code: String = address.chars().filter(|c| !c.is_whitespace()).collect();
     if crate::net::is_invite(&code, true) {
         format!("{}{code}", crate::net::FRIEND)
@@ -2239,6 +2352,7 @@ mod tests {
             lan: Scanner::for_tests(vec![crate::lan::discovery::LanGame {
                 motd: "LAN".into(),
                 address: address.into(),
+                join: address.parse().ok(),
             }]),
             scroll: Default::default(),
             held: None,
@@ -2391,6 +2505,7 @@ mod tests {
         };
         assert_eq!(at(&friend, 427.0, 253.0), [(113.0, 177.0), (113.0, 201.0)]);
         let lost = Screen::Disconnected {
+            title: DisconnectTitle::Lost,
             reason: Text::empty(),
             retry: None,
             lines: std::cell::Cell::new(1),
@@ -2491,6 +2606,29 @@ mod tests {
         );
         assert_eq!(row_at(3, 0, (60.0, 40.0), size, 0.0), None);
         assert_eq!(row_at(3, 0, (100.0, 32.0), size, 0.0), None);
+    }
+
+    #[test]
+    fn saved_row_hover_uses_the_visible_part_of_the_drawn_rect() {
+        let server = ServerEntry::new("Example", "127.0.0.1");
+        // At high GUI scale the window can be narrower than the row. A scrolled
+        // row can touch either list edge or lie entirely behind the header.
+        let viewport = (33.0, 180.0, 270.0);
+        let top = [-17.0, 25.0, ROW_WIDTH, ROW_HEIGHT];
+        let clip = |rect, mouse| SavedServerRow::visible(&server, rect, viewport, mouse);
+        let row = clip(top, (0.0, 33.0)).unwrap();
+        assert_eq!(row.rect, top);
+        assert_eq!(row.visible_rect, [0.0, 33.0, 270.0, 28.0]);
+        assert_eq!(row.mouse, Some([0.0, 33.0]));
+        assert!(clip(top, (1.0, 32.9)).unwrap().mouse.is_none());
+        assert!(clip(top, (270.0, 33.0)).unwrap().mouse.is_none());
+        assert!(clip([-17.0, -3.0, ROW_WIDTH, ROW_HEIGHT], (1.0, 33.0)).is_none());
+        let bottom = [-17.0, 169.0, ROW_WIDTH, ROW_HEIGHT];
+        assert_eq!(
+            clip(bottom, (1.0, 179.9)).unwrap().visible_rect,
+            [0.0, 169.0, 270.0, 11.0]
+        );
+        assert!(clip(bottom, (1.0, 180.0)).unwrap().mouse.is_none());
     }
 
     #[test]
@@ -2920,6 +3058,7 @@ mod tests {
         let saves = horizon_std::env::temp_dir()
             .join(format!("horizon-mp-disconnect-back-{}", std::process::id()));
         let lost = |to_title| Screen::Disconnected {
+            title: DisconnectTitle::Lost,
             reason: Text::literal("Disconnected"),
             retry: None,
             lines: std::cell::Cell::new(1),
@@ -2948,6 +3087,7 @@ mod tests {
         );
         let ((), _missed) = crate::lang::scoped(language, || {
             let translated = Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason: Text::translate("mymod.kicked", &[]),
                 retry: None,
                 lines: std::cell::Cell::new(1),
@@ -2958,12 +3098,79 @@ mod tests {
                 "Connexion perdue. Expulsé par le mod"
             );
             let plain = Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason: Text::literal("You were kicked"),
                 retry: None,
                 lines: std::cell::Cell::new(1),
                 to_title: false,
             };
             assert_eq!(plain.narration().title, "Connexion perdue. You were kicked");
+        });
+    }
+
+    /// #20899: `DisconnectedScreen`'s title names where the connection ended. Before the
+    /// socket opens it is `ConnectScreen.startConnecting`'s title (a transfer's, quick play's or
+    /// `connect.failed`); during the login `ClientHandshakePacketListenerImpl.onDisconnect`'s
+    /// (a transfer's or `connect.failed`); after `handleLoginFinished` the connection is lost.
+    #[test]
+    fn the_disconnect_title_names_where_the_connection_ended() {
+        use crate::net::Reached;
+        // en_us.json of 26.3.
+        let english = crate::lang::Language::of(
+            "en_us",
+            [
+                ("disconnect.lost".into(), "Connection Lost".into()),
+                (
+                    "connect.failed".into(),
+                    "Failed to connect to the server".into(),
+                ),
+                (
+                    "connect.failed.transfer".into(),
+                    "Connection failed while transferring to the server".into(),
+                ),
+                (
+                    "quickplay.error.title".into(),
+                    "Failed to Quick Play".into(),
+                ),
+            ],
+        );
+        let ((), _missed) = crate::lang::scoped(english, || {
+            let narrated = |reached, transferred, quick_play| {
+                Screen::Disconnected {
+                    title: DisconnectTitle::after(reached, transferred, quick_play),
+                    reason: Text::literal("Server is full"),
+                    retry: None,
+                    lines: std::cell::Cell::new(1),
+                    to_title: false,
+                }
+                .narration()
+                .title
+            };
+            let failed = "Failed to connect to the server. Server is full";
+            let transfer = "Connection failed while transferring to the server. Server is full";
+            let lost = "Connection Lost. Server is full";
+            for (reached, transferred, quick_play, expected) in [
+                (Reached::Connecting, false, false, failed),
+                (Reached::Connecting, true, false, transfer),
+                (Reached::Connecting, true, true, transfer),
+                (
+                    Reached::Connecting,
+                    false,
+                    true,
+                    "Failed to Quick Play. Server is full",
+                ),
+                (Reached::Login, false, false, failed),
+                (Reached::Login, false, true, failed),
+                (Reached::Login, true, false, transfer),
+                (Reached::LoggedIn, false, false, lost),
+                (Reached::LoggedIn, true, true, lost),
+            ] {
+                assert_eq!(
+                    narrated(reached, transferred, quick_play),
+                    expected,
+                    "{reached:?}, transferred {transferred}, quick play {quick_play}"
+                );
+            }
         });
     }
 
@@ -2991,6 +3198,7 @@ mod tests {
             let reason = Text::translate("mymod.kicked", &[]);
             assert_eq!(reason.plain(), "Expulsé par le mod");
             Screen::Disconnected {
+                title: DisconnectTitle::Lost,
                 reason,
                 retry: None,
                 lines: std::cell::Cell::new(1),

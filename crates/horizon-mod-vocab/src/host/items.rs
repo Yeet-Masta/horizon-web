@@ -216,7 +216,8 @@ pub trait ItemsBackend {
         target: EntityRef,
         base_damage: f32,
     ) -> Option<f32>;
-    /// Side: client. The item's standard tooltip lines before mod callbacks or drawing.
+    /// Side: client. The item's inventory tooltip lines (including mod callbacks, or base lines when
+    /// called re-entrantly from inside a tooltip callback).
     #[access(WorldOnly)]
     fn item_resource_tooltip(
         &self,
@@ -484,6 +485,17 @@ pub trait ItemsBackendMut {
         amount: u32,
         tx: &Transaction,
     ) -> Result<u32, StackWriteError>;
+    /// Side: server.
+    /// Update the live stack at a worn or held place (`Equipment`, `PlayerHand`, `PlayerSlot`)
+    /// in place to `resource`'s components (keeping its item and count), without re-equipping it
+    /// or replaying equip sounds, game events or attribute updates.
+    #[access(WorldOnly)]
+    fn game_edit(
+        &mut self,
+        place: &ItemPlace,
+        resource: &ItemResource,
+        tx: &Transaction,
+    ) -> Result<bool, StackWriteError>;
     /// Side: server.
     /// Drops `stack` at the middle of the block at `pos`, as a block entity's handler gives up
     /// what it can't put back.

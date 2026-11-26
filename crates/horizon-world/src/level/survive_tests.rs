@@ -165,3 +165,117 @@ fn a_soils_answer_comes_before_the_plants_may_place_on() {
     level.set_raw(ground, grass);
     assert!(!b.can_survive(&mut level, &mut ticks, pos, dandelion));
 }
+
+#[test]
+fn declared_growing_plant_pairs_survive_and_pop_in_both_directions() {
+    let Some(f) = fixture() else { return };
+    let root = horizon_std::env::var_os("HORIZON_RESOURCES")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.local/horizon-client")
+                .join(horizon_core::VANILLA_VERSION)
+        });
+    let mut b = Behaviours::load(&f.registry, &root).expect("behaviours");
+    let id = |name: &str| b.block(f.registry.default_state(name).expect(name));
+    let stone = f.registry.default_state("minecraft:stone").unwrap();
+    let air = b.air();
+    let down_head = id("minecraft:weeping_vines");
+    let down_body = id("minecraft:twisting_vines_plant");
+    let up_head = id("minecraft:twisting_vines");
+    let up_body = id("minecraft:weeping_vines_plant");
+    let kelp_head = id("minecraft:kelp");
+    let kelp_body = id("minecraft:kelp_plant");
+
+    let set_family =
+        |b: &mut Behaviours, head: BlockId, body: BlockId, direction: Direction, kelp: bool| {
+            for block in [head, body] {
+                let data = &mut b.blocks[block.0 as usize];
+                data.growth_direction = direction;
+                data.growing_plant_head = Some(head);
+                data.growing_plant_body = Some(body);
+                data.growing_plant_kelp = kelp;
+            }
+        };
+    set_family(&mut b, down_head, down_body, Direction::Down, false);
+    set_family(&mut b, up_head, up_body, Direction::Up, false);
+
+    let mut level = TestLevel::new(&b);
+    let mut ticks = Ticks::new(0);
+    ticks.add_empty_chunk(ChunkPos::new(0, 0)).unwrap();
+
+    for (head, body, direction, x) in [
+        (up_head, up_body, Direction::Up, 2),
+        (down_head, down_body, Direction::Down, 6),
+    ] {
+        let (support_pos, head_pos, body_pos) = if direction == Direction::Up {
+            (
+                BlockPos::new(x, 1, 2),
+                BlockPos::new(x, 2, 2),
+                BlockPos::new(x, 3, 2),
+            )
+        } else {
+            (
+                BlockPos::new(x, 5, 2),
+                BlockPos::new(x, 4, 2),
+                BlockPos::new(x, 3, 2),
+            )
+        };
+        level.set_raw(support_pos, stone);
+        level.set_raw(head_pos, b.table.default_state(head));
+        level.set_raw(body_pos, b.table.default_state(body));
+        let head_state = level.block_state(head_pos);
+        let body_state = level.block_state(body_pos);
+        assert!(b.can_survive(&mut level, &mut ticks, head_pos, head_state));
+        assert!(b.can_survive(&mut level, &mut ticks, body_pos, body_state));
+
+        b.set_block(&mut level, &mut ticks, support_pos, air, flags::UPDATE_ALL);
+        assert_eq!(
+            level.block_state(head_pos),
+            air,
+            "head should pop: {direction:?}"
+        );
+        assert_eq!(
+            level.block_state(body_pos),
+            air,
+            "body should pop: {direction:?}"
+        );
+    }
+
+    let forbidden_support = (0..b.table.block_count())
+        .map(|n| BlockId(n as u16))
+        .find(|block| {
+            b.tags.cannot_support_kelp.contains(*block)
+                && b.is_face_sturdy(b.table.default_state(*block), Direction::Up)
+        })
+        .expect("the vanilla cannot_support_kelp tag has a sturdy support block");
+    let forbidden_state = b.table.default_state(forbidden_support);
+    let support_pos = BlockPos::new(10, 1, 2);
+    let head_pos = BlockPos::new(10, 2, 2);
+    level.set_raw(support_pos, forbidden_state);
+    level.set_raw(head_pos, b.table.default_state(kelp_head));
+    let head_state = level.block_state(head_pos);
+
+    set_family(&mut b, kelp_head, kelp_body, Direction::Up, false);
+    assert!(
+        b.can_survive(&mut level, &mut ticks, head_pos, head_state),
+        "a declared family with kelp=false must allow tagged supports"
+    );
+
+    set_family(&mut b, kelp_head, kelp_body, Direction::Up, true);
+    assert!(
+        !b.can_survive(&mut level, &mut ticks, head_pos, head_state),
+        "kelp-like custom families must reject tagged supports"
+    );
+
+    for block in [kelp_head, kelp_body] {
+        let data = &mut b.blocks[block.0 as usize];
+        data.growing_plant_head = None;
+        data.growing_plant_body = None;
+        data.growing_plant_kelp = false;
+    }
+    assert!(
+        !b.can_survive(&mut level, &mut ticks, head_pos, head_state),
+        "vanilla kelp must keep its class-based support restriction"
+    );
+}

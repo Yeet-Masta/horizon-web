@@ -12,6 +12,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
             &atlas,
             0xf0f0,
             &data,
+            &Default::default(),
             &[],
             Default::default(),
             keep.then_some(&mut parts),
@@ -63,6 +64,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
         &atlas,
         0xf0f0,
         &data,
+        &Default::default(),
         Default::default(),
         Some(&mut skinned),
         &mut Vec::new(),
@@ -77,6 +79,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
         &atlas,
         0xf0f0,
         &data,
+        &Default::default(),
         &[],
         Some(&mut layered),
         &mut Vec::new(),
@@ -120,6 +123,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
             &atlas,
             0xf0f0,
             &data,
+            &Default::default(),
             &[],
             hidden,
             None,
@@ -134,7 +138,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
         "the leg's face leaves the CPU draw"
     );
     let mut poses = Poses::pooled();
-    let name = hide_parts(&mut poses, &absent).unwrap_err();
+    let name = hide_parts(&mut poses, &absent, false).unwrap_err();
     assert_eq!(name, "nose");
     assert_eq!(cpu(&cow, absent), 0, "unknown names refuse the draw");
     let gpu = |mob: &Mob, hidden| {
@@ -148,6 +152,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
             &atlas,
             0xf0f0,
             &data,
+            &Default::default(),
             hidden,
             None,
             &mut Vec::new(),
@@ -210,6 +215,7 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
                 &atlas,
                 0xf0f0,
                 &data,
+                &Default::default(),
                 extra,
                 Some(body_color(&villager, 0.5)),
                 hidden,
@@ -252,7 +258,11 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
     let table = super::super::villager::ResolvedProfessions::vanilla();
     super::villager_client::install(&table, &Default::default());
     layered.extra.profession = super::super::villager::ProfessionState::Vanilla(5);
-    assert_eq!(layers(&layered, 0.0).len(), 3, "type, profession and level");
+    assert_eq!(
+        layers(&layered, 0.0, &Default::default()).len(),
+        3,
+        "type, profession and level"
+    );
     let mut nose = mod_api::HiddenParts::default();
     nose.hide_named("nose").unwrap();
     assert_eq!(
@@ -287,4 +297,51 @@ fn posed_parts_are_the_poses_the_draw_made_and_change_nothing() {
     assert_eq!(cpu(&layered, nose), cpu(&layered, Default::default()) - 12);
     assert_eq!(gpu(&layered, nose), gpu(&layered, Default::default()) - 12);
     super::villager_client::install(&table, &Default::default());
+}
+
+#[test]
+fn a_player_s_hidden_cape_leaves_the_body_as_it_is() {
+    let (mob, data) = humanoid_zombie();
+    let atlas = |_: &str| Some([0.0, 0.0, 1.0, 1.0]);
+    let draw = |mob: &Mob, hidden| {
+        let mut out = Vec::new();
+        render_with_hidden(
+            mob,
+            0.5,
+            glam::DVec3::ZERO,
+            &atlas,
+            0xf0f0,
+            &data,
+            &Default::default(),
+            &[],
+            hidden,
+            None,
+            &mut out,
+        );
+        out.len()
+    };
+    let mut cape = mod_api::HiddenParts::default();
+    cape.hide_named(CAPE_PART).unwrap();
+    // A model with no cape layer has no part of that name: refused, as any unknown name.
+    assert_eq!(draw(&mob, cape), 0);
+    assert!(!hides_cape(&mob, &cape));
+    // With the cape layer (a player's), the body draws every part and the cape is left out.
+    let mut kind = (*mob.kind).clone();
+    let layer = serde_json::json!({ "children": { "body": { "children": { "cape": {} } } } });
+    kind.layers.insert(
+        "player#cape".into(),
+        std::sync::Arc::new(Part::parse("root", &layer)),
+    );
+    let mut player = Mob::new(
+        1,
+        std::sync::Arc::new(kind),
+        horizon_core::geometry::Vec3::ZERO,
+        0.0,
+    );
+    player.age = mob.age;
+    let whole = draw(&player, Default::default());
+    assert!(whole > 0);
+    assert_eq!(draw(&player, cape), whole);
+    assert!(hides_cape(&player, &cape));
+    assert!(!hides_cape(&player, &Default::default()));
 }

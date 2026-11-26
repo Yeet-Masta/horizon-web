@@ -25,6 +25,10 @@ level on a vanilla type returns that type's values, a registered dimension retur
 a stale handle. On a client, it reads the displayed level's received dimension type,
 including custom types sent by another server.
 
+For mob gameplay, a data pack's dimension type can set `minecraft:visual/cloud_height` and
+`minecraft:visual/cloud_color` in `attributes`. A color with zero alpha means mobs never count as
+being in clouds. Omitting either attribute keeps that value from the base dimension type.
+
 ## Registering a dimension
 
 `register_dimension` gives every world a level of the mod's own. Call it once, at startup, in
@@ -179,6 +183,28 @@ for a structure id or `#tag` and returns its structure and locate position. This
 synchronous, `/locate`-cost search, not a cheap loaded-chunk lookup: cache results and avoid
 per-tick use. The radius counts placement-cell rings (at most 100); stronghold rings are
 checked regardless of radius. It does not load or generate chunks.
+
+## Loaded chunk diagnostics
+
+On a server, `level.loaded_chunks(host)` enumerates the resident chunks. For each handle,
+`chunk.full_status(host)` reads the last propagated loading level: `EntityTicking` at 31
+or below, `BlockTicking` at 32, `Full` at 33 and `Inaccessible` above that. This is the
+loading track, not a guarantee that simulation is ticking there. `chunk.status(host)` still
+reports generation status (`ChunkStatus::Full` for a resident chunk).
+
+`chunk.tickets(host)` returns the direct tickets as `{ kind, level }`, sorted by name and level.
+Player loading is `player_loading` on chunks inside the server's view range; `player_simulation`
+is on player chunks themselves. `portal` is on the arrival chunk and `dragon` is on the arena
+chunk while watched. Each viewed area contributes `viewed` inside its square (33 if loaded-only,
+31 if ticking). `/forceload` contributes `forced`, and each active persistent or transient mod
+ticket contributes its controller id (for example `mymod:quarry`); both use level 31.
+The list shows live forced and timed portal tickets, and player, dragon and viewed sources
+from the last scheduler update. A non-ticking view pass can stream chunks without updating
+the loading lattice. No block, entity or operation identities are returned.
+
+Propagated tickets do not appear in the list: an otherwise unheld neighbour of a forced chunk
+can be `BlockTicking` with `Some(vec![])`. Both reads work on parked server levels, load
+nothing and return `None` for clients, stale or unavailable levels, and unloaded chunks.
 
 ## Watered-area tickets
 

@@ -9,6 +9,8 @@
 //! resources (`block-behaviours.json`, `gameplay-facts.json`,
 //! `block-tags.json`, `cached-collision.nbt`; see
 //! `crates/horizon-prepare`).
+//! Hot-path block tags are resolved with the tables; [`Behaviours::tag`]
+//! still looks up arbitrary tags by name.
 //!
 //! # Driving a level
 //!
@@ -116,7 +118,12 @@ use horizon_core::{
     connection_kind::ConnectionKind, dimension::Dimension, neighbour_update::NeighbourUpdate,
 };
 use horizon_std::sync::RwLock;
-use std::{collections::HashMap, io, path::Path, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    io,
+    path::Path,
+    sync::Arc,
+};
 
 pub use block_maps::BlockMaps;
 pub mod classes;
@@ -440,6 +447,15 @@ pub enum LevelEvent {
         event: &'static str,
         state: Option<BlockStateId>,
     },
+    /// `Level.sendParticles` of one `TrailParticleOption` from the block's
+    /// centre (`Vec3.atCenterOf(pos)`) towards `target`, drawn for `duration`
+    /// ticks in `color` (RGB).
+    TrailParticle {
+        pos: BlockPos,
+        target: [f64; 3],
+        color: u32,
+        duration: i32,
+    },
 }
 
 /// What spreads from one block to another (`LevelAccess::allow_spread`).
@@ -551,6 +567,9 @@ pub trait LevelAccess: BlockEntityNeighbors {
         true
     }
     fn observe_sponge_absorb(&self, _pos: BlockPos) {}
+    /// A feature grew from `source` (a sapling or a fungus) and changed `placed`, in order. The
+    /// blocks are already in the world; nothing is answered. Asked only when the feature placed.
+    fn structure_grow(&self, _source: BlockPos, _placed: &[[i32; 3]]) {}
     fn allow_block_fade(&self, _pos: BlockPos, _from: BlockStateId, _to: BlockStateId) -> bool {
         true
     }
@@ -691,6 +710,15 @@ pub trait LevelAccess: BlockEntityNeighbors {
         _changed: BlockId,
         _moved: bool,
     ) {
+    }
+    /// Whether the block `state` must not run its template's own behaviour now: a mod block
+    /// whose mod is installed and switched off. Its hooks are off, and the template's ticks,
+    /// shape updates, neighbour reactions, block events and entity contacts would rewrite or
+    /// remove it, so it keeps still until the mod is on again. Only the authoritative level
+    /// answers true: a client replays what its server decided. Asked on hot paths: a vanilla
+    /// block must answer at once. The default is false.
+    fn template_suppressed(&self, _state: BlockStateId) -> bool {
+        false
     }
     /// `BlockState.randomTick` from `ServerLevel.tickChunk`, before the block
     /// handles it. The level may change the block (`Behaviours::set_block`
@@ -1321,6 +1349,10 @@ pub trait LevelAccess: BlockEntityNeighbors {
     fn shulker_is_closed(&self, _pos: BlockPos) -> Option<bool> {
         None
     }
+    /// The current lid progress used by the box's collision shape.
+    fn shulker_lid_progress(&self, _pos: BlockPos) -> Option<f32> {
+        None
+    }
     /// Load saved block-entity data into the block entity of the block just
     /// placed at `pos` (`BlockEntity.loadWithComponents`): a bee nest a grown
     /// tree placed gets its bees. Levels without block entities drop it.
@@ -1358,6 +1390,31 @@ pub trait GameplayStateSource {
     fn sound_id(&self, name: &str) -> &str;
 }
 
+/// Named hot-path tags, resolved from `all_tags` on either load path.
+/// Missing tags stay absent rather than being replaced with empty sets.
+struct HotTags {
+    fire: Option<Arc<data::BlockSet>>,
+    lava_fire_spread: Option<Arc<data::BlockSet>>,
+    all_hanging_signs: Option<Arc<data::BlockSet>>,
+    wall_hanging_signs: Option<Arc<data::BlockSet>>,
+    speleothems: Option<Arc<data::BlockSet>>,
+    nether_portal_frame: Option<Arc<data::BlockSet>>,
+}
+
+impl HotTags {
+    fn resolve(all_tags: &HashMap<String, Arc<data::BlockSet>>) -> Self {
+        let tag = |name| all_tags.get(name).cloned();
+        Self {
+            fire: tag("minecraft:fire"),
+            lava_fire_spread: tag("minecraft:blocks_lava_fire_spread"),
+            all_hanging_signs: tag("minecraft:all_hanging_signs"),
+            wall_hanging_signs: tag("minecraft:wall_hanging_signs"),
+            speleothems: tag("minecraft:speleothems"),
+            nether_portal_frame: tag("minecraft:nether_portal_frame"),
+        }
+    }
+}
+
 /// Immutable vanilla block-behaviour tables. Build once with [`Behaviours::load`].
 pub struct Behaviours {
     pub table: StateTable,
@@ -1365,6 +1422,7 @@ pub struct Behaviours {
     pub named: Named,
     pub tags: Tags,
     all_tags: HashMap<String, Arc<data::BlockSet>>,
+    hot_tags: HotTags,
     facts: Vec<StateFacts>,
     shapes: Vec<VoxelShape>,
     shape_info: Vec<data::ShapeInfo>,
@@ -1428,6 +1486,18 @@ impl Behaviours {
     }
     pub fn block(&self, state: BlockStateId) -> BlockId {
         self.table.block(state)
+    }
+    /// The states whose own block template asks the ground it stands on: the live game
+    /// dispatches that ask on `Class::Vegetation` (`Sim::can_survive`, then
+    /// `Sim::may_place_on`, `survive.rs`), whose `canSurvive` asks the soil's parts and
+    /// then the plant's. A block whose chain holds no such class never asks, whatever
+    /// stands under it, so only these states reach a survival table's ground hooks
+    /// (#17943).
+    pub fn states_asking_their_ground(&self) -> BTreeSet<BlockStateId> {
+        (0..self.table.state_count())
+            .map(|id| BlockStateId(id as u32))
+            .filter(|state| self.data(*state).is(classes::Class::Vegetation))
+            .collect()
     }
     pub fn item_binding(&self, item: &str) -> Option<&ItemBinding> {
         self.items.get(item)

@@ -290,9 +290,12 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
                 predicate_fields(id, map, t, reg)
             })
         }
-        "minecraft:item_modifier" => element_or_list(t, &|x| {
-            dispatch(x, reg, "minecraft:loot_function_type", &|_, _, _| Ok(()))
-        }),
+        "minecraft:item_modifier" => {
+            element_or_list(t, &|x| {
+                dispatch(x, reg, "minecraft:loot_function_type", &|_, _, _| Ok(()))
+            })?;
+            validate_modifier_patches(t)
+        }
         "minecraft:slot_source" => slot_sources::decode(t, reg),
         // Dialog types: CommonDialogData's title, then each type's own.
         "minecraft:dialog" => dispatch(t, reg, "minecraft:dialog_type", &|id, map, t| {
@@ -321,6 +324,40 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
         },
         _ => Ok(()),
     }
+}
+
+/// Check inline component patches before the modifier can change any slots,
+/// including when it is part of a sequence.
+fn validate_modifier_patches(tag: &Tag) -> Result<(), String> {
+    if let Tag::List(list) = tag {
+        return list.iter().try_for_each(validate_modifier_patches);
+    }
+    let ty = tag.get("type").and_then(as_string);
+    match ty
+        .as_deref()
+        .map(|id| id.strip_prefix("minecraft:").unwrap_or(id))
+    {
+        Some("set_components") => {
+            if let Some(Tag::Compound(patch)) = tag.get("components") {
+                horizon_items::item_data::component_values::validate_modifier_patch(patch)?;
+            }
+        }
+        Some("sequence") => {
+            if let Some(functions @ Tag::List(_)) = tag.get("functions") {
+                validate_modifier_patches(functions)?;
+            }
+        }
+        Some("filtered") => {
+            for child in ["on_pass", "on_fail"]
+                .into_iter()
+                .filter_map(|key| tag.get(key))
+            {
+                validate_modifier_patches(child)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A partial check of `LootTable.DIRECT_CODEC`: only the holders of its
@@ -429,12 +466,23 @@ fn read_non_empty(reader: &mut Reader) -> Option<String> {
 /// ResourceOrIdArgument.parse: a registry id (checked) or an inline SNBT
 /// value decoded with the registry's codec.
 pub fn resource_or_id(reader: &mut Reader, reg: &Registries, registry: &str) -> CmdResult<()> {
+    parse_resource_or_id(reader, Some((reg, registry)))
+}
+
+/// `ResourceOrIdArgument.parse` without an element lookup on the client.
+pub(crate) fn resource_or_id_syntax(reader: &mut Reader) -> CmdResult<()> {
+    parse_resource_or_id(reader, None)
+}
+
+fn parse_resource_or_id(reader: &mut Reader, lookup: Option<(&Registries, &str)>) -> CmdResult<()> {
     let start = reader.cursor;
     let mut r = reader.clone();
     r.skip_whitespace();
     if let Some(id) = read_non_empty(&mut r) {
         reader.cursor = r.cursor;
-        if !reg.ids(registry).contains(&id) {
+        if let Some((reg, registry)) = lookup
+            && !reg.ids(registry).contains(&id)
+        {
             return Err(CommandError::tr_at(
                 "argument.resource_or_id.no_such_element",
                 &[&id, &registry],
@@ -445,6 +493,9 @@ pub fn resource_or_id(reader: &mut Reader, reg: &Registries, registry: &str) -> 
     }
     reader.cursor = start;
     let tag = super::snbt::parse_tag_argument(reader)?;
+    let Some((reg, registry)) = lookup else {
+        return Ok(());
+    };
     decode(registry, &tag, reg)
         .map_err(|m| CommandError::tr_at("argument.resource_or_id.failed_to_parse", &[&m], reader))
 }
@@ -452,6 +503,87 @@ pub fn resource_or_id(reader: &mut Reader, reg: &Registries, registry: &str) -> 
 #[cfg(test)]
 mod predicate_tests {
     use super::*;
+
+    #[test]
+    fn inline_set_components_decodes_typed_stack_size_in_range() {
+        let reg = Registries::default();
+        let decode_modifier = |text: &str| {
+            let (tag, _) = horizon_core::nbt::parse_snbt(text).unwrap();
+            decode("minecraft:item_modifier", &tag, &reg)
+        };
+        for size in ["1b", "16b", "99"] {
+            assert!(
+                decode_modifier(&format!(
+                    r#"{{type:"set_components",components:{{max_stack_size:{size}}}}}"#
+                ))
+                .is_ok()
+            );
+        }
+        for size in [0, 100] {
+            let modifier = format!(
+                r#"{{type:"minecraft:set_components",components:{{"minecraft:max_stack_size":{size}}}}}"#
+            );
+            assert_eq!(
+                decode_modifier(&modifier),
+                Err(format!(
+                    r#"Value must be within range [1;99]: {size} missed input: {{"minecraft:max_stack_size":{size}}}"#
+                ))
+            );
+            assert!(
+                decode_modifier(&format!(
+                    r#"{{type:"minecraft:sequence",functions:[{modifier}]}}"#
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn inline_set_components_rejects_stack_size_outside_range_in_nested_patches() {
+        let reg = Registries::default();
+        let (tag, _) = horizon_core::nbt::parse_snbt(
+            r#"{type:"set_components",components:{bundle_contents:[{id:"compass",components:{max_stack_size:100}}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            decode("minecraft:item_modifier", &tag, &reg),
+            Err(concat!(
+                "Value must be within range [1;99]: 100 missed input: {max_stack_size:100}",
+                r#" missed input: {bundle_contents:[{components:{max_stack_size:100},id:"compass"}]}"#,
+            ).into())
+        );
+        for size in [99, 100] {
+            let modifier = r#"{
+                type:"set_components",
+                components:{container:[{slot:0,item:{id:"bundle",components:{bundle_contents:[
+                    {id:"compass",components:{max_stack_size:SIZE}}
+                ]}}}]}
+            }"#
+            .replace("SIZE", &size.to_string());
+            let (tag, _) = horizon_core::nbt::parse_snbt(&modifier).unwrap();
+            assert_eq!(
+                decode("minecraft:item_modifier", &tag, &reg).is_ok(),
+                size == 99
+            );
+        }
+    }
+
+    #[test]
+    fn inline_set_components_rejects_transient_map_post_processing() {
+        let reg = Registries::default();
+        for patch in [
+            r#"{map_post_processing:"lock"}"#,
+            r#"{"!minecraft:map_post_processing":{}}"#,
+        ] {
+            let command = format!(r#"{{type:"set_components",components:{patch}}}"#);
+            let (tag, _) = horizon_core::nbt::parse_snbt(&command).unwrap();
+            let error = "'minecraft:map_post_processing' is not a persistent component";
+            assert_eq!(
+                decode("minecraft:item_modifier", &tag, &reg),
+                Err(format!("{error}; {error} missed input: {patch}")),
+            );
+        }
+    }
 
     #[test]
     fn inline_constant_combinators_require_decodable_children() {

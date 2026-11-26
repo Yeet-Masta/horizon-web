@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import uuid
 
+import fast_bins
 import lab
 import test_rust_parity as base
 from integration_env import run_game
@@ -74,10 +75,18 @@ def fixture():
         extra += ',Size:0' if rider == 'slime' else ''
         child_nbt = (f'id:"minecraft:{rider}",UUID:{array(child)},Tags:["h299_{name}_rider"],'
                      f'PersistenceRequired:1b,Silent:1b,NoAI:{int(noai_r)}b{extra}')
+        # Gravity runs after the first move. With zero vertical motion that
+        # move clears OnGround, so the rider's first path request can fail
+        # and put its patrol goal on a 200-tick cooldown.
+        motion = ',Motion:[0.0d,-0.08d,0.0d]' if name == 'patrol' else ''
         cmd(f'summon {vehicle} 8.5 -60 {z} {{UUID:{array(parent)},Tags:["h299_{name}"],'
-            f'PersistenceRequired:1b,Silent:1b,OnGround:1b,NoAI:{int(noai_v)}b,Passengers:[{{{child_nbt}}}]}}', True)
+            f'PersistenceRequired:1b,Silent:1b,OnGround:1b{motion},NoAI:{int(noai_v)}b,Passengers:[{{{child_nbt}}}]}}', True)
     for step, ticks in enumerate([2, 400, 600]):
         cmd(f'tick step {ticks}', True)
+        if step == 0:
+            ops.append({'op': 'tick', 'n': 1})
+            cmd(f'execute as {identity(1)} if entity @s[nbt={{OnGround:1b}}]', True)
+            ticks -= 1
         ops.append({'op': 'tick', 'n': ticks})
         ops.append({'op': 'cmd', 'cmd': '/execute store result score #clock audit run time query gametime', 'record': False})
         cmd('scoreboard players operation #clock audit -= #start audit')
@@ -167,7 +176,7 @@ def main():
         if result.returncode:
             raise RuntimeError(f'{name}: {result.returncode}; see {out / (name+".log")}')
     if args.binary is None:
-        run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], 'build', cwd=lab.ROOT)
+        run(fast_bins.command('horizon-client'), 'build', cwd=lab.ROOT)
         binary = lab.cargo_target()/'fast'/('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     else:
         binary = args.binary.resolve(strict=True)

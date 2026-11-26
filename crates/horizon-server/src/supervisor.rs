@@ -18,7 +18,11 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
     process::{Child, ExitStatus},
-    sync::{Arc, atomic::Ordering, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -165,11 +169,38 @@ fn prepare_world(shared: &Arc<Shared>, dir: &Path, config: &Config) -> Result<()
     Ok(())
 }
 
+/// `[proxy]` on: starts its listener on the public port and says which port the game listens on, behind it.
+/// With it off, a `forwarding.secret` the proxy left is removed (the game would refuse everyone else with it).
+fn start_proxy(shared: &Arc<Shared>, dir: &Path, config: &Config) -> Result<Option<u16>, String> {
+    if !config.proxy.enabled {
+        crate::proxy::remove_own_secret(dir);
+        return Ok(None);
+    }
+    let mut config = config.clone();
+    if config.proxy.game_port == 0 {
+        let free = std::net::TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|e| format!("[proxy] has no free port: {e}"))?;
+        config.proxy.game_port = free.local_addr().map_err(|e| e.to_string())?.port();
+    }
+    let log = shared.clone();
+    let proxy = crate::proxy::start(dir, &config, move |level, line| note(&log, level, line))?;
+    *shared.proxy.lock().unwrap() = Some(proxy);
+    note(
+        shared,
+        "INFO",
+        &format!(
+            "Proxy on port {}: the game listens on 127.0.0.1:{} behind it",
+            config.server.port, config.proxy.game_port
+        ),
+    );
+    Ok(Some(config.proxy.game_port))
+}
+
 enum Exit {
     /// Asked to stop, or the game ended by itself without an error (`stop` typed in its console, the EULA
     /// not agreed, the port taken): not restarted.
     Stopped,
-    /// Asked to restart (`horizon-server restart`).
+    /// Asked to restart (`horizon-server restart`, `/restart`).
     Restart,
     Crashed(ExitStatus),
     /// Started on another release, the game wasn't up in time and was stopped.
@@ -234,14 +265,24 @@ pub fn run(dir: &Path) -> Result<(), String> {
     crate::discord::start(shared.clone(), config.discord.clone());
     schedule_backups(shared.clone());
     check_updates(shared.clone());
-    let console = console_lines();
+    // `[proxy]` is decided here, once: its listener lives as long as the supervisor.
+    let game_port = start_proxy(&shared, dir, &config)?;
+    let force_stop = Arc::new(AtomicBool::new(false));
+    let console = console_lines(force_stop.clone());
+    // Announce only after the control channel is ready. Hosting panels use this
+    // to distinguish this protocol from older supervisors.
+    println!("[horizon] force-stop-v1");
     let mut crashes: Vec<Instant> = Vec::new();
     let mut watch: Option<Watch> = None;
     let (mut program, mut resources) = (program, resources);
     loop {
         // Read again before every start: edits to server.toml apply on the next restart, and so does a
         // switch to another release.
-        let config = Config::load(dir)?;
+        let mut config = Config::load(dir)?;
+        config.proxy.enabled = game_port.is_some();
+        if let Some(port) = game_port {
+            config.proxy.game_port = port;
+        }
         // Queued while the game ran, stopped or was already stopping: applied before this start,
         // whatever ended the last game, not left for some later restart.
         if let Some(w) = apply_queued(&shared, dir, &config) {
@@ -266,6 +307,10 @@ pub fn run(dir: &Path) -> Result<(), String> {
             ),
         );
         shared.set_phase(Phase::Starting);
+        if force_stop.load(Ordering::SeqCst) {
+            handle_force_stop(&shared);
+            return Ok(());
+        }
         let transfers = config.transfer.engine_arg();
         // The claims on the folders the game leases live as long as the game: the next start takes
         // them again on the release `current` points at then.
@@ -303,6 +348,11 @@ pub fn run(dir: &Path) -> Result<(), String> {
             w.deadline = Instant::now() + w.timeout;
         }
         let exit = supervise(&shared, &mut child, &console, &mut watch);
+        // A game that ended for good has no one to start it again: its players are sent away. Any other end is
+        // a restart or a crash: they were held, or are now.
+        let for_good = matches!(exit, Exit::Stopped)
+            && (watch.is_none() || shared.shutdown.load(Ordering::SeqCst));
+        shared.proxy(|p| p.game_exited(for_good));
         {
             let mut state = shared.state.lock().unwrap();
             state.engine_pid = None;
@@ -360,6 +410,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
             state.last_crash = Some(status.to_string());
         }
         if !config.engine.restart_on_crash {
+            shared.proxy(|p| p.game_exited(true));
             return Err(format!(
                 "the game stopped unexpectedly ({status}); engine.restart_on_crash is off"
             ));
@@ -368,6 +419,7 @@ pub fn run(dir: &Path) -> Result<(), String> {
         crashes.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
         crashes.push(now);
         if crashes.len() >= MAX_CRASHES {
+            shared.proxy(|p| p.game_exited(true));
             return Err(format!(
                 "the game stopped unexpectedly {MAX_CRASHES} times in {} minutes: not restarting it. \
                  See logs/latest.log and crash-reports/",
@@ -386,7 +438,14 @@ pub fn run(dir: &Path) -> Result<(), String> {
         shared.set_phase(Phase::Restarting);
         let until = Instant::now() + wait;
         while Instant::now() < until {
+            // The supervise loop is not running during backoff: a panel's force-stop must
+            // still end the supervisor here instead of starting another engine.
+            if force_stop.load(Ordering::SeqCst) {
+                handle_force_stop(&shared);
+                return Ok(());
+            }
             if signals::requests() > 0 || shared.stop.load(Ordering::SeqCst) {
+                shared.proxy(|p| p.game_exited(true));
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(100));
@@ -546,13 +605,10 @@ fn roll_back(shared: &Shared, dir: &Path, config: &Config, w: &Watch, reason: &s
     );
 }
 
-/// The game is up: it logged `Done` and answered a status request (the sampler's, for this process).
+/// Readiness was confirmed for the current game process after its `Done` line.
 fn up(shared: &Shared) -> bool {
     let state = shared.state.lock().unwrap();
-    state.phase == Phase::Running
-        && state.engine_pid.is_some()
-        && state.sample["pid"].as_u64() == state.engine_pid.map(u64::from)
-        && !state.sample["game"].is_null()
+    state.phase == Phase::Running && state.engine_pid.is_some()
 }
 
 /// Looks for a newer release a minute after the start and then every 6 hours (installed servers only;
@@ -599,13 +655,16 @@ fn backoff(crashes: usize) -> Duration {
 }
 
 /// The supervisor's own stdin, line by line (nothing when it has none, as under a service manager).
-fn console_lines() -> mpsc::Receiver<String> {
+fn console_lines(force_stop: Arc<AtomicBool>) -> mpsc::Receiver<String> {
     let (tx, rx) = mpsc::channel();
     let _ = thread::Builder::new()
         .name("console".into())
         .spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 let Ok(line) = line else { break };
+                if line.trim().trim_start_matches('/') == "horizon:force-stop" {
+                    force_stop.store(true, Ordering::SeqCst);
+                }
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -614,19 +673,75 @@ fn console_lines() -> mpsc::Receiver<String> {
     rx
 }
 
-/// Copies the game's output to ours and to the API's log, line by line; the game's `Done` line means it
-/// is up.
-/// The message of a game's INFO log line (`[12:00:00] [Server thread/INFO]: Done (…`), from the
-/// first `/INFO]: ` on; "" for any other line.
+/// Copies the game's output to ours and to the API's log, line by line. The message of a game's INFO
+/// log line (`[12:00:00] [Server thread/INFO]: Done (…`), from the first `/INFO]: ` on; "" for any other line.
 fn info_message(line: &str) -> &str {
     line.split_once("/INFO]: ").map_or("", |(_, m)| m)
 }
 
-fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool) {
+fn is_done_message(message: &str) -> bool {
+    message.starts_with("Done (")
+}
+
+/// Marks the process ready only if it is still the current process in its startup phase.
+fn mark_running(shared: &Shared, pid: u32) -> bool {
+    let mut state = shared.state.lock().unwrap();
+    if state.engine_pid != Some(pid) || state.phase != Phase::Starting {
+        return false;
+    }
+    state.phase = Phase::Running;
+    drop(state);
+    shared.emit("phase", json!({ "phase": "running" }));
+    crate::management::started(shared);
+    true
+}
+
+/// After vanilla's startup line, wait for a usable status reply. Older game builds do not have the
+/// temporary startup endpoint, and No AI deliberately omits the control endpoint, so a missing or
+/// refused endpoint is a valid readiness signal only before this process has answered once.
+fn wait_for_ready(shared: Arc<Shared>, pid: u32) {
+    let mut seen_endpoint = false;
+    loop {
+        let starting = {
+            let state = shared.state.lock().unwrap();
+            state.engine_pid == Some(pid) && state.phase == Phase::Starting
+        };
+        if !starting {
+            return;
+        }
+
+        match engine::Control::connect(&shared.dir) {
+            Ok(mut control) => {
+                seen_endpoint = true;
+                if control
+                    .ask("server-status")
+                    .is_ok_and(|reply| reply.get("error").is_none())
+                {
+                    mark_running(&shared, pid);
+                    return;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) && !seen_endpoint =>
+            {
+                mark_running(&shared, pid);
+                return;
+            }
+            Err(_) => {}
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn pump(shared: &Arc<Shared>, pid: u32, from: impl Read + Send + 'static, to_stderr: bool) {
     let shared = shared.clone();
     let _ = thread::Builder::new()
         .name("engine-log".into())
         .spawn(move || {
+            let mut readiness_started = false;
             for line in BufReader::new(from).lines() {
                 let Ok(line) = line else { break };
                 if to_stderr {
@@ -636,25 +751,21 @@ fn pump(shared: &Arc<Shared>, from: impl Read + Send + 'static, to_stderr: bool)
                     // The game's own message, not text a player put in it: chat is logged after
                     // `/INFO]: <name> `, so a player typing `/INFO]: Stopping server` matches nothing.
                     let message = info_message(&line);
-                    if message.starts_with("Done (") {
-                        let up = {
-                            let mut state = shared.state.lock().unwrap();
-                            let starting = state.phase == Phase::Starting;
-                            if starting {
-                                state.phase = Phase::Running;
-                            }
-                            starting
-                        };
-                        if up {
-                            shared.emit("phase", serde_json::json!({ "phase": "running" }));
-                            crate::management::started(&shared);
-                        }
-                    } else if message.starts_with("Stopping server")
-                        || message.starts_with("Stopping in ")
+                    if is_done_message(message) && !readiness_started {
+                        readiness_started = true;
+                        let ready = shared.clone();
+                        let _ = thread::Builder::new()
+                            .name("engine-readiness".into())
+                            .spawn(move || wait_for_ready(ready, pid));
+                    } else if (message.starts_with("Stopping server")
+                        || message.starts_with("Stopping in "))
+                        && shared.state.lock().unwrap().engine_pid == Some(pid)
                     {
                         // The game's own `stop` (a command in the game, not the supervisor's), or the
                         // start of the wait `[transfer]` makes before it, so a proxy hears of it then.
                         crate::management::stopping(&shared);
+                        // `/restart` in the game too: its players are held before its kick comes.
+                        shared.proxy(|proxy| proxy.game_stopping_if_current(pid));
                     }
                 }
                 shared.log_line(line);
@@ -772,53 +883,78 @@ fn supervise(
     console: &mpsc::Receiver<String>,
     watch: &mut Option<Watch>,
 ) -> Exit {
+    let pid = child.id();
+    shared.proxy(|proxy| proxy.game_starting(pid));
     if let Some(out) = child.stdout.take() {
-        pump(shared, out, false);
+        pump(shared, pid, out, false);
     }
     if let Some(err) = child.stderr.take() {
-        pump(shared, err, true);
+        pump(shared, pid, err, true);
     }
-    let mut stdin = child.stdin.take();
+    let mut stdin = EngineWriter::new(child.stdin.take());
     let mut stopping: Option<Instant> = None;
     let mut restart = false;
     let mut not_up = false;
     let mut handled = signals::requests();
+    let mut announced = false;
     loop {
-        if let Some(w) = watch.as_ref() {
-            if up(shared) {
-                came_up(shared, w);
-                *watch = None;
-            } else if Instant::now() > w.deadline && stopping.is_none() {
-                note(
-                    shared,
-                    "WARN",
-                    &format!("The game on {} isn't up in time: stopping it", w.to),
-                );
-                not_up = true;
-                stopping = Some(Instant::now());
-                let _ = child.kill();
+        let child_status = match child.try_wait() {
+            Ok(status) => status,
+            Err(e) => {
+                note(shared, "ERROR", &format!("Lost track of the game: {e}"));
+                return Exit::Stopped;
+            }
+        };
+        if child_status.is_none() {
+            if !announced && up(shared) {
+                announced = true;
+                shared.proxy(crate::proxy::Proxy::game_up);
+            }
+            if let Some(w) = watch.as_ref() {
+                if up(shared) {
+                    came_up(shared, w);
+                    *watch = None;
+                } else if Instant::now() > w.deadline && stopping.is_none() {
+                    note(
+                        shared,
+                        "WARN",
+                        &format!("The game on {} isn't up in time: stopping it", w.to),
+                    );
+                    not_up = true;
+                    stopping = Some(Instant::now());
+                    let _ = child.kill();
+                }
             }
         }
         while let Ok(line) = console.try_recv() {
             let command = line.trim().trim_start_matches('/');
+            if command == "horizon:force-stop" {
+                handle_force_stop(shared);
+                restart = false;
+                not_up = false;
+                stopping = Some(Instant::now());
+                if let Err(error) = child.kill() {
+                    note(
+                        shared,
+                        "WARN",
+                        &format!("Could not force-stop the game: {error}"),
+                    );
+                }
+                continue;
+            }
             // `stop` on the supervisor's own stdin (`run` in a terminal, a hosting panel's console) ends the
             // supervisor too, as before: such hosts wait for the process to exit. A `stop` that reaches the game
             // another way (in game, RCON, `horizon-server cmd`) leaves the supervisor and its API up.
             if command == "stop" {
                 shared.shutdown.store(true, Ordering::SeqCst);
+                shared.proxy(crate::proxy::Proxy::closing);
             }
             if command == "stop" && stopping.is_none() {
                 stopping = Some(Instant::now());
                 shared.set_phase(Phase::Stopping);
                 crate::management::stopping(shared);
             }
-            if let Some(input) = stdin.as_mut()
-                && writeln!(input, "{line}")
-                    .and_then(|()| input.flush())
-                    .is_err()
-            {
-                stdin = None;
-            }
+            stdin.send(shared, &line);
         }
         let requests = signals::requests();
         let signal = requests > handled;
@@ -830,19 +966,22 @@ fn supervise(
         if shared.restart.swap(false, Ordering::SeqCst) && stopping.is_none() {
             restart = true;
             note(shared, "INFO", "Restarting the server");
+            // Before the game stops, so that its kick is not what the players see.
+            shared.proxy(crate::proxy::Proxy::game_stopping);
             stopping = Some(Instant::now());
             shared.set_phase(Phase::Restarting);
             crate::management::stopping(shared);
-            send_stop(&mut stdin);
+            stdin.send(shared, "stop");
         }
         if asked {
             restart = false;
+            shared.proxy(crate::proxy::Proxy::closing);
             if stopping.is_none() {
                 note(shared, "INFO", "Stopping the server");
                 stopping = Some(Instant::now());
                 shared.set_phase(Phase::Stopping);
                 crate::management::stopping(shared);
-                send_stop(&mut stdin);
+                stdin.send(shared, "stop");
             } else if signal {
                 // A second Ctrl-C (or signal) from a person: at once. A repeated API or management
                 // stop does nothing more, as vanilla's second halt does: the game is saving.
@@ -862,16 +1001,22 @@ fn supervise(
             let _ = child.kill();
             stopping = Some(Instant::now());
         }
-        match child.try_wait() {
-            Ok(Some(_)) if not_up => return Exit::NotUp,
-            Ok(Some(_)) if restart => return Exit::Restart,
-            Ok(Some(status)) if stopping.is_some() || status.success() => return Exit::Stopped,
-            Ok(Some(status)) => return Exit::Crashed(status),
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(e) => {
-                note(shared, "ERROR", &format!("Lost track of the game: {e}"));
-                return Exit::Stopped;
+        match child_status {
+            Some(_) if not_up => return Exit::NotUp,
+            Some(_) if restart => return Exit::Restart,
+            // `/restart` in game, on the console or through RCON: the game saved, stopped and says so by its exit
+            // code. A shutdown asked for since wins: it is not started again.
+            Some(status)
+                if status.code() == Some(engine::RESTART_EXIT_CODE)
+                    && !shared.shutdown.load(Ordering::SeqCst) =>
+            {
+                note(shared, "INFO", "Restarting the server");
+                shared.set_phase(Phase::Restarting);
+                return Exit::Restart;
             }
+            Some(status) if stopping.is_some() || status.success() => return Exit::Stopped,
+            Some(status) => return Exit::Crashed(status),
+            None => thread::sleep(Duration::from_millis(50)),
         }
     }
 }
@@ -882,7 +1027,7 @@ fn wait_stopped(shared: &Arc<Shared>, console: &mpsc::Receiver<String>) -> bool 
     loop {
         while let Ok(line) = console.try_recv() {
             match line.trim().trim_start_matches('/') {
-                "stop" => shared.shutdown.store(true, Ordering::SeqCst),
+                "stop" | "horizon:force-stop" => shared.shutdown.store(true, Ordering::SeqCst),
                 "start" => shared.restart.store(true, Ordering::SeqCst),
                 _ => note(
                     shared,
@@ -905,9 +1050,68 @@ fn wait_stopped(shared: &Arc<Shared>, console: &mpsc::Receiver<String>) -> bool 
     }
 }
 
-fn send_stop(stdin: &mut Option<std::process::ChildStdin>) {
-    if let Some(input) = stdin.as_mut() {
-        let _ = writeln!(input, "stop").and_then(|()| input.flush());
+/// The shared effect of a panel's force-stop. The caller kills the engine child; there is no
+/// point waiting for it to save when the panel asked for an immediate stop.
+fn handle_force_stop(shared: &Arc<Shared>) {
+    shared.shutdown.store(true, Ordering::SeqCst);
+    shared.restart.store(false, Ordering::SeqCst);
+    shared.set_phase(Phase::Stopping);
+    crate::management::stopping(shared);
+}
+
+/// Writes console lines to the engine on a separate thread with a bounded queue. A full pipe
+/// must never hold up the supervise loop, which is the only place that reads force-stop.
+struct EngineWriter {
+    sender: Option<mpsc::SyncSender<String>>,
+    warned_full: bool,
+}
+
+impl EngineWriter {
+    fn new(stdin: Option<std::process::ChildStdin>) -> Self {
+        let Some(stdin) = stdin else {
+            return Self {
+                sender: None,
+                warned_full: false,
+            };
+        };
+        let (sender, receiver) = mpsc::sync_channel(64);
+        thread::Builder::new()
+            .name("engine-stdin".into())
+            .spawn(move || {
+                let mut stdin = stdin;
+                for line in receiver {
+                    if writeln!(stdin, "{line}")
+                        .and_then(|()| stdin.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn the engine stdin writer");
+        Self {
+            sender: Some(sender),
+            warned_full: false,
+        }
+    }
+
+    fn send(&mut self, shared: &Arc<Shared>, line: &str) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        match sender.try_send(line.to_owned()) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) if !self.warned_full => {
+                self.warned_full = true;
+                note(
+                    shared,
+                    "WARN",
+                    "The game is not reading stdin; dropping console input",
+                );
+            }
+            Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => self.sender = None,
+        }
     }
 }
 
@@ -927,7 +1131,7 @@ mod tests {
         let world = dir.join("world");
         std::fs::create_dir_all(&world).unwrap();
         std::fs::write(world.join("level.dat"), b"before").unwrap();
-        std::fs::write(dir.join("server.toml"), crate::config::TEMPLATE).unwrap();
+        std::fs::write(dir.join("server.toml"), config::TEMPLATE).unwrap();
         let name = backup::file_name(std::time::SystemTime::now(), None).unwrap();
         backup::create(&dir, &config, &name).unwrap();
         std::fs::write(world.join("level.dat"), b"after").unwrap();
@@ -959,9 +1163,12 @@ mod tests {
         assert!(!stopping(
             "[12:00:00] [Server thread/INFO]: [Kim: Stopping server]"
         ));
-        assert!(
-            info_message("[12:00:00] [Server thread/INFO]: Done (2.1s)!").starts_with("Done (")
-        );
+        assert!(is_done_message(info_message(
+            "[12:00:00] [Server thread/INFO]: Done (2.1s)!"
+        )));
+        assert!(!is_done_message(info_message(
+            "[12:00:00] [Server thread/INFO]: <Kim> Done (2.1s)!"
+        )));
     }
 
     #[test]
@@ -973,7 +1180,7 @@ mod tests {
         broken[8192..8196].copy_from_slice(&u32::MAX.to_be_bytes());
         std::fs::write(&entity, &broken).unwrap();
         let terrain = std::fs::read(ow.join("region/r.2.0.mca")).unwrap();
-        std::fs::write(dir.join("server.toml"), crate::config::TEMPLATE).unwrap();
+        std::fs::write(dir.join("server.toml"), config::TEMPLATE).unwrap();
         let mut config = Config::load(&dir).unwrap();
         config.prune_chunks.mode = horizon_server_launch::prune::Mode::Delete;
         config.prune_chunks.spawn_radius = 4;
@@ -991,7 +1198,7 @@ mod tests {
             std::env::temp_dir().join(format!("horizon-server-prune-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("server.toml"), crate::config::TEMPLATE).unwrap();
+        std::fs::write(dir.join("server.toml"), config::TEMPLATE).unwrap();
         let config = Config::load(&dir).unwrap();
         assert_eq!(
             config.prune_chunks.mode,
@@ -1152,7 +1359,7 @@ mod tests {
     }
 
     #[test]
-    fn up_means_done_and_a_status_reply_from_this_game() {
+    fn up_means_this_process_passed_its_readiness_check() {
         let shared = Shared::with_install(Path::new("."), None);
         let set = |phase, pid: Option<u32>, sample: serde_json::Value| {
             let mut state = shared.state.lock().unwrap();
@@ -1165,20 +1372,213 @@ mod tests {
         );
         assert!(!up(&shared));
         set(Phase::Running, Some(7), json!({ "pid": 7, "game": null }));
-        assert!(!up(&shared));
-        // A sample of the game before the restart doesn't count.
+        // No AI has no status endpoint; Running is set only after Done for this process.
+        assert!(up(&shared));
+        // A running phase without a current process cannot satisfy an update check.
         set(
-            Phase::Running,
+            Phase::Starting,
             Some(8),
             json!({ "pid": 7, "game": { "tps": 20.0 } }),
         );
         assert!(!up(&shared));
         set(
             Phase::Running,
-            Some(8),
+            None,
             json!({ "pid": 8, "game": { "tps": 20.0 } }),
         );
-        assert!(up(&shared));
+        assert!(!up(&shared));
+    }
+
+    #[test]
+    fn pump_waits_for_a_non_error_status_after_done() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::mpsc,
+        };
+
+        let dir =
+            std::env::temp_dir().join(format!("horizon-server-readiness-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            launch::control_path(&dir),
+            json!({ "port": port, "token": "t" }).to_string(),
+        )
+        .unwrap();
+
+        let (error_tx, error_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut first = listener.accept().unwrap().0;
+            let mut reader = BufReader::new(first.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            first.write_all(b"{\"ok\":true}\n").unwrap();
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "server-status");
+            first
+                .write_all(b"{\"error\":\"the dedicated server is still starting\"}\n")
+                .unwrap();
+            error_tx.send(()).unwrap();
+            continue_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            drop(reader);
+            drop(first);
+
+            let mut second = listener.accept().unwrap().0;
+            let mut reader = BufReader::new(second.try_clone().unwrap());
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            second.write_all(b"{\"ok\":true}\n").unwrap();
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "server-status");
+            second.write_all(b"{\"tps\":20.0}\n").unwrap();
+        });
+
+        let shared = Shared::with_install(&dir, None);
+        let pid = std::process::id();
+        shared.state.lock().unwrap().engine_pid = Some(pid);
+        pump(
+            &shared,
+            pid,
+            std::io::Cursor::new(b"[12:00:00] [Server thread/INFO]: Done (2.1s)!\n".to_vec()),
+            false,
+        );
+        error_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(shared.phase(), Phase::Starting);
+        continue_tx.send(()).unwrap();
+
+        let state = shared.state.lock().unwrap();
+        let (state, timeout) = shared
+            .event_added
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.phase != Phase::Running
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "the successful status reply marks ready"
+        );
+        assert_eq!(state.phase, Phase::Running);
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pump_does_not_mark_ready_after_a_seen_endpoint_disappears() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            net::TcpListener,
+            sync::mpsc,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-lost-readiness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let control_path = launch::control_path(&dir);
+        std::fs::write(
+            &control_path,
+            json!({ "port": port, "token": "t" }).to_string(),
+        )
+        .unwrap();
+
+        let (error_tx, error_rx) = mpsc::channel();
+        let (close_tx, close_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            stream.write_all(b"{\"ok\":true}\n").unwrap();
+            request.clear();
+            reader.read_line(&mut request).unwrap();
+            assert_eq!(request.trim(), "server-status");
+            stream
+                .write_all(b"{\"error\":\"the dedicated server is still starting\"}\n")
+                .unwrap();
+            error_tx.send(()).unwrap();
+            close_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            drop(reader);
+            drop(stream);
+            drop(listener);
+            closed_tx.send(()).unwrap();
+        });
+
+        let shared = Shared::with_install(&dir, None);
+        let pid = std::process::id();
+        shared.state.lock().unwrap().engine_pid = Some(pid);
+        pump(
+            &shared,
+            pid,
+            std::io::Cursor::new(b"[12:00:00] [Server thread/INFO]: Done (2.1s)!\n".to_vec()),
+            false,
+        );
+        error_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(shared.phase(), Phase::Starting);
+
+        close_tx.send(()).unwrap();
+        closed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        std::fs::remove_file(control_path).unwrap();
+
+        let state = shared.state.lock().unwrap();
+        let (state, timeout) = shared
+            .event_added
+            .wait_timeout_while(state, Duration::from_millis(800), |state| {
+                state.phase == Phase::Starting
+            })
+            .unwrap();
+        assert!(
+            timeout.timed_out(),
+            "lost endpoint must not mark the game ready"
+        );
+        assert_eq!(state.phase, Phase::Starting);
+        drop(state);
+
+        shared.state.lock().unwrap().phase = Phase::Stopping;
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pump_accepts_done_when_no_control_endpoint_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-server-no-control-readiness-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+        let shared = Shared::with_install(&dir, None);
+        let pid = std::process::id();
+        shared.state.lock().unwrap().engine_pid = Some(pid);
+        pump(
+            &shared,
+            pid,
+            std::io::Cursor::new(b"[12:00:00] [Server thread/INFO]: Done (2.1s)!\n".to_vec()),
+            false,
+        );
+        let state = shared.state.lock().unwrap();
+        let (state, timeout) = shared
+            .event_added
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.phase != Phase::Running
+            })
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "Done without a control endpoint is ready"
+        );
+        assert_eq!(state.phase, Phase::Running);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stand-in for the game: a shell script, its stdin and output piped as the engine's are.
@@ -1192,6 +1592,46 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "daily"]
+    fn panel_force_stop_reaps_an_unresponsive_engine() {
+        let shared = Shared::with_install(Path::new("."), None);
+        let mut child = game("exec sleep 30");
+        let (sender, console) = mpsc::channel();
+        sender.send("horizon:force-stop".to_string()).unwrap();
+        let start = Instant::now();
+        assert!(matches!(
+            supervise(&shared, &mut child, &console, &mut None),
+            Exit::Stopped
+        ));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(child.try_wait().unwrap().is_some());
+        assert!(shared.shutdown.load(Ordering::SeqCst));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "daily"]
+    fn panel_force_stop_reaps_an_unresponsive_engine_with_a_full_stdin_pipe() {
+        let shared = Shared::with_install(Path::new("."), None);
+        let mut child = game("exec sleep 30");
+        let (sender, console) = mpsc::channel();
+        // `sleep` never reads stdin. Fill the pipe and the writer's queue before asking for a
+        // force-stop: the supervise loop must reach it without waiting on a full pipe.
+        for _ in 0..200 {
+            sender.send("x".repeat(4096)).unwrap();
+        }
+        sender.send("horizon:force-stop".to_string()).unwrap();
+        let start = Instant::now();
+        assert!(matches!(
+            supervise(&shared, &mut child, &console, &mut None),
+            Exit::Stopped
+        ));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[cfg(unix)]
@@ -1247,6 +1687,26 @@ mod tests {
         assert!(ended.recv_timeout(Duration::from_millis(300)).is_err());
         stop(&shared);
         assert_eq!(ended.recv_timeout(Duration::from_secs(5)), Ok(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "daily"]
+    fn the_restart_exit_code_starts_the_game_again_and_others_do_not() {
+        let dir = std::env::temp_dir().join(format!("horizon-server-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (_console, console) = mpsc::channel();
+        let run = |script: &str| {
+            let shared = Shared::with_install(&dir, None);
+            let mut child = game(script);
+            (supervise(&shared, &mut child, &console, &mut None), shared)
+        };
+        let (exit, shared) = run(&format!("exit {}", engine::RESTART_EXIT_CODE));
+        assert!(matches!(exit, Exit::Restart));
+        assert_eq!(shared.state.lock().unwrap().phase, Phase::Restarting);
+        assert!(matches!(run("exit 0").0, Exit::Stopped));
+        assert!(matches!(run("exit 1").0, Exit::Crashed(_)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

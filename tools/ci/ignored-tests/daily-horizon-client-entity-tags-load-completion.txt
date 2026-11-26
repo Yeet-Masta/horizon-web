@@ -1,0 +1,7 @@
+# Prepared-resource tests for #16348 (entity-tags-load-completion).
+# PACKAGE TEST TARGET daily REASON; exact logical libtest identities, sorted.
+horizon-client game::native_command_completion_tests::a_guests_tag_remove_completes_from_the_parsed_targets lib daily resources
+horizon-client game::persist::tests::a_loaded_orbs_duplicate_tags_save_once lib daily resources
+horizon-client game::tag_load_tests::a_repeated_tag_loads_once_for_every_compound_horizon_keeps lib daily resources
+horizon-client game::tag_load_tests::data_merge_writes_the_tag_set_of_an_armour_stand lib daily resources
+horizon-client game::tag_load_tests::tag_remove_completes_from_the_targets_own_tags lib daily resources

@@ -36,6 +36,9 @@ use winit::{
     window::{Window, WindowId},
 };
 
+#[path = "../fixtures/celestial_sky.rs"]
+mod celestial_sky;
+
 /// The HUD's scale: the window's own, no forced Unicode font.
 const GUI: client::hud::GuiScale = client::hud::GuiScale {
     requested: 0,
@@ -139,6 +142,7 @@ fn install_mod() {
         hand_drawn: |_| {},
         render_needs: |_| {},
         world_drawn_hooked: || false,
+        hand_drawn_hooked: || false,
     });
 }
 
@@ -250,8 +254,18 @@ fn fixture(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
     let out = std::env::args().nth(1).ok_or("output directory required")?;
     let out = Path::new(&out);
     std::fs::create_dir_all(out)?;
-    install_mod();
+    let celestial = std::env::args().any(|a| a == "--celestial");
+    if celestial {
+        celestial_sky::install();
+    } else {
+        install_mod();
+    }
     let white = [255; 16 * 16 * 4];
+    let atlas = if celestial {
+        celestial_sky::atlas()
+    } else {
+        white
+    };
     let zero = [0; 4];
     let mut renderer = pollster::block_on(Renderer::new(
         window,
@@ -262,7 +276,7 @@ fn fixture(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         1,
         &[],
         &[],
-        (&white, 16, 16),
+        (&atlas, 16, 16),
         (&zero, 1, 1),
         (&zero, 1, 1),
         (&zero, 1),
@@ -271,11 +285,15 @@ fn fixture(window: Arc<Window>) -> Result<(), Box<dyn std::error::Error>> {
         None,
         GraphicsApi::Vulkan,
         false,
-        true,
+        (true, false),
         &client::graphics::Graphics::default(),
         Default::default(),
         Default::default(),
     ))?;
+    if celestial {
+        celestial_sky::check(&mut renderer, out);
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--bench") {
         return bench(&mut renderer, out);
     }
@@ -917,6 +935,7 @@ fn fixture_frame(hud: &HudBatch) -> Frame<'_> {
         water_plane: None,
         cave_culling: false,
         title: false,
+        gui_only: false,
         sky_blocked: false,
         skybox: false,
         end_sky: false,

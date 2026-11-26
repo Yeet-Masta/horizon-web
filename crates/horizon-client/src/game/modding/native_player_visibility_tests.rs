@@ -4,7 +4,10 @@
 use super::native_entity_refs::tests::with_client_game;
 use super::native_guest_turn_tests::with_guests;
 use horizon_protocol::packets::play::Clientbound as C;
-use mod_api::{EntityRef, PlayerRef, PlayerWorldRefusal as Refusal, WorldEpoch};
+use mod_api::{
+    EntityRef, EntityVisibilityRefusal as Visibility, PlayerRef, PlayerWorldRefusal as Refusal,
+    WorldEpoch,
+};
 
 /// The API's value for a block state of the world.
 fn api_state(game: &super::Game<'_>, name: &str) -> mod_api::BlockState {
@@ -209,6 +212,62 @@ fn player_sees_follows_the_trackers_rules() {
         guests.update_connection(13, |g| g.game_mode = 3);
         assert_eq!(a.sees(game, b), Ok(false), "a spectator");
         assert_eq!(b.sees(game, a), Ok(true));
+        // A player being sent again is out of the tracker's world and the Tab list: not seen meanwhile,
+        // whatever the viewer's level, and seen again (at the level a mod hid them at) when it ends.
+        let guests = &mut game.lan.as_mut().unwrap().hub.guests;
+        guests.update_connection(13, |g| g.game_mode = 0);
+        assert_eq!(a.sees(game, b), Ok(true));
+        assert!(game.player_refresh(b));
+        assert_eq!(a.sees(game, b), Ok(false), "refreshing");
+        assert_eq!(b.sees(game, a), Ok(true), "the others are unaffected");
+        let like_the_list = game.lan.as_ref().unwrap().hub.sees(3, 13);
+        assert_eq!(a.sees(game, b), Ok(like_the_list));
+        let hub = &mut game.lan.as_mut().unwrap().hub;
+        hub.ticks += 2;
+        hub.end_refreshes();
+        assert_eq!(a.sees(game, b), Ok(true));
+    });
+}
+
+/// An entity a mod hid from one viewer is hidden from that viewer alone, reads back, makes
+/// `sees` answer false for a player and is shown again; the viewer's own player is refused.
+#[test]
+#[ignore = "daily"]
+fn an_entity_is_hidden_from_one_viewer_alone() {
+    with_guests(|game| {
+        let (a, b) = (game.player(12).unwrap(), game.player(13).unwrap());
+        assert_eq!(b.entity().visible_to(game, a), Ok(true));
+        assert_eq!(b.entity().set_visible_to(game, a, false), Ok(true));
+        assert_eq!(
+            b.entity().set_visible_to(game, a, false),
+            Ok(false),
+            "no change"
+        );
+        assert_eq!(b.entity().visible_to(game, a), Ok(false));
+        assert_eq!(
+            a.entity().visible_to(game, b),
+            Ok(true),
+            "the other way is untouched"
+        );
+        assert_eq!(a.sees(game, b), Ok(false));
+        assert_eq!(b.sees(game, a), Ok(true));
+        assert_eq!(
+            a.entity().set_visible_to(game, a, false),
+            Err(Visibility::StaleEntity),
+            "a viewer's own player is never tracked to it"
+        );
+        assert_eq!(b.entity().set_visible_to(game, a, true), Ok(true));
+        assert_eq!(b.entity().visible_to(game, a), Ok(true));
+        assert_eq!(a.sees(game, b), Ok(true));
+        assert_eq!(
+            b.entity().set_visible_to(game, stale(a), false),
+            Err(Visibility::Stale)
+        );
+        let machine = fake(game);
+        assert_eq!(
+            b.entity().set_visible_to(game, machine, false),
+            Err(Visibility::NoConnection)
+        );
     });
 }
 

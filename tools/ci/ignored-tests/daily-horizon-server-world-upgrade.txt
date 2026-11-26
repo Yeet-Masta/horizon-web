@@ -1,0 +1,2 @@
+# World-upgrade management tests for horizon-server.
+horizon-server management::tests::startup_upgrade_events_reach_a_management_client lib daily network

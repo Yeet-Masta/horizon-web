@@ -73,7 +73,14 @@ impl Launcher {
             SelfUpdate::Ready(v) => format!(
                 "{}  ·  {}",
                 backend::VERSION,
-                trf("{version} available", &[("version", v)])
+                if horizon_launcher::update_handoff::installs_on_close() {
+                    trf(
+                        "{version} installs when you close Horizon",
+                        &[("version", v)],
+                    )
+                } else {
+                    trf("{version} available", &[("version", v)])
+                }
             ),
             SelfUpdate::Stuck(Some(e)) => format!(
                 "{}  ·  {}",
@@ -110,7 +117,7 @@ impl Launcher {
         };
         let launcher_action = match &self.self_update {
             SelfUpdate::Ready(_) => Some(
-                button("update-settings", "Update", Kind::Secondary, &t)
+                button("update-settings", "Update now", Kind::Secondary, &t)
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.apply_launcher_update(cx);
                         cx.notify();
@@ -344,6 +351,11 @@ impl Launcher {
                 .children(name.map(|name| div().font_weight(FontWeight::BOLD).child(name)))
                 .child(tr("These mods are programs that run inside your game. Like any program you install, they can read and change your files. Allow them only if you trust who made them."))
                 .children(horizon_launcher::rust_toolchain::installed().is_none().then(|| trf("Horizon will first download a compiler ({size}) to build them.", &[("size", &size)])))
+                .children(bytes.is_some().then(|| {
+                    div().flex().flex_col().gap(px(4.))
+                        .child(crate::location_page::data_path(tr("Build data"), &backend::build_dir()))
+                        .children(crate::location_page::move_hint())
+                }))
                 .child(tr("You can take this permission back in Settings > Storage."))
                 .children(self.consent_error.clone().map(|error| div().text_color(t.danger).child(error)))
                 .children(bytes.is_none().then(|| div().text_color(t.danger).child(tr("Native mods can't be built on this computer, so they can't be allowed here."))))
@@ -366,7 +378,7 @@ impl Launcher {
                                     this.build_native_on(base, back_up)
                                 }
                                 PendingConsent::Toggle(entry) => this.mods_switch(&entry),
-                                PendingConsent::Install(source, id, known) => this.mods_install(source, id, known),
+                                PendingConsent::Install(request) => this.mods_install(request),
                                 PendingConsent::Github(found, only) => this.github_install(found, only),
                                 PendingConsent::Local(id) => {
                                     this.mods.message = horizon_launcher::browser::java::set_enabled(&this.mods.home(), &id, true).err().map(Err);
@@ -504,6 +516,8 @@ impl Launcher {
     pub(crate) fn proxy_row(&self, n: usize, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
         let focused = self.proxy_focused;
+        let glass = glass_ui::flat();
+        let placeholder = tr("For example http://127.0.0.1:7890");
         let field = div()
             .id("proxy")
             .track_focus(&self.proxy_focus)
@@ -519,14 +533,18 @@ impl Launcher {
             .font_family(theme::MONO)
             .text_size(px(12.))
             .cursor_text()
-            .child(line_edit::content(
-                &self.proxy_input,
-                &t,
-                focused,
-                false,
-                false,
-                tr("For example http://127.0.0.1:7890"),
-            ))
+            .child(if glass {
+                line_edit::content_in_width(&self.proxy_input, &t, focused, placeholder)
+            } else {
+                line_edit::content_with(
+                    &self.proxy_input,
+                    &t,
+                    focused,
+                    false,
+                    false,
+                    placeholder.into(),
+                )
+            })
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 window.focus(&this.proxy_focus, cx);
                 cx.notify();
@@ -556,7 +574,7 @@ impl Launcher {
                 ))
                 .into_any_element(),
         };
-        if glass_ui::flat() {
+        if glass {
             return glass_ui::setting_row_stacked(
                 tr("Proxy"),
                 Some(detail),

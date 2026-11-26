@@ -5,6 +5,9 @@ mod loading;
 #[path = "functions/registry_graph.rs"]
 mod registry_graph;
 use horizon_std::fs::PathExt as _;
+#[path = "functions/slot_sources.rs"]
+mod slot_sources;
+
 use super::{
     Game,
     commands::{
@@ -21,32 +24,149 @@ use horizon_client::{
 };
 use horizon_core::nbt::Tag;
 use mod_api::__private::reload::ReloadStageError;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-/// A `TimerQueue` event.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct Scheduled {
-    /// `ns:function`, or `#ns:tag` for a function tag.
-    pub id: String,
-    pub time: i64,
-    pub seq: u64,
+/// Vanilla `TimerQueue`: scheduled function/tag events ordered by `(time, seq)`
+/// with an `(id, time)` index so non-due ticks inspect only the earliest entry,
+/// due-event bursts pop in `O(log n)`, duplicate `(id, time)` scheduling is
+/// suppressed in `O(1)`, and `remove(id)` clears only that id's entries.
+#[derive(Clone, Debug, Default)]
+pub(super) struct TimerQueue {
+    /// Pending events ordered by `(trigger_time, seq)`.
+    queue: BTreeMap<(i64, u64), Arc<str>>,
+    /// Maps each scheduled `id` (`ns:function` or `#ns:tag`) to `trigger_time -> seq`.
+    by_id: HashMap<Arc<str>, HashMap<i64, u64>>,
+    next_seq: u64,
 }
+
+impl TimerQueue {
+    pub(super) fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn clear(&mut self) {
+        self.queue.clear();
+        self.by_id.clear();
+    }
+
+    /// Schedule `id` at `time`, ignoring an existing `(id, time)` entry as in
+    /// vanilla `TimerQueue.schedule`.
+    pub(super) fn schedule(&mut self, id: &str, time: i64) -> bool {
+        if let Some((existing, times)) = self.by_id.get_key_value(id) {
+            if times.contains_key(&time) {
+                return false;
+            }
+            let key = Arc::clone(existing);
+            self.next_seq = self.next_seq.wrapping_add(1);
+            let seq = self.next_seq;
+            self.by_id
+                .get_mut(id)
+                .expect("id checked present")
+                .insert(time, seq);
+            self.queue.insert((time, seq), key);
+            return true;
+        }
+        self.next_seq = self.next_seq.wrapping_add(1);
+        let seq = self.next_seq;
+        let key: Arc<str> = Arc::from(id);
+        let mut times = HashMap::with_capacity(1);
+        times.insert(time, seq);
+        self.by_id.insert(Arc::clone(&key), times);
+        self.queue.insert((time, seq), key);
+        true
+    }
+
+    /// Remove every pending entry for `id` (`TimerQueue.remove`), returning how
+    /// many were removed.
+    pub(super) fn remove(&mut self, id: &str) -> usize {
+        let Some(times) = self.by_id.remove(id) else {
+            return 0;
+        };
+        let count = times.len();
+        for (time, seq) in times {
+            self.queue.remove(&(time, seq));
+        }
+        count
+    }
+
+    /// Whether at least one event is due at or before `now`.
+    pub(super) fn has_due(&self, now: i64) -> bool {
+        self.queue
+            .first_key_value()
+            .is_some_and(|(&(time, _), _)| time <= now)
+    }
+
+    /// Pop the earliest event due at or before `now` in `(time, seq)` order.
+    pub(super) fn pop_due(&mut self, now: i64) -> Option<Arc<str>> {
+        let entry = self.queue.first_entry()?;
+        let (time, _) = *entry.key();
+        if time > now {
+            return None;
+        }
+        let id = entry.remove();
+        if let Some(times) = self.by_id.get_mut(&id) {
+            times.remove(&time);
+            if times.is_empty() {
+                self.by_id.remove(&id);
+            }
+        }
+        Some(id)
+    }
+
+    /// Pending events in `(time, seq)` order: `(id, time, seq)`.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (&str, i64, u64)> {
+        self.queue
+            .iter()
+            .map(|(&(time, seq), id)| (id.as_ref(), time, seq))
+    }
+
+    /// Distinct scheduled event ids (`TimerQueue.getEventsIds`).
+    pub(super) fn event_ids(&self) -> impl Iterator<Item = &str> {
+        self.by_id.keys().map(Arc::as_ref)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct FnState {
     pub store: DataStore,
+    /// The `#minecraft:tick` functions, resolved once per store (`ServerFunctionManager`
+    /// keeps `ticking` from the last reload): `None` until the first tick after the store was
+    /// replaced.
+    ticking: Option<Arc<[String]>>,
     packs: Vec<Arc<DataPack>>,
     /// Enabled pack ids, in load order (later overrides earlier).
     enabled: Vec<String>,
     loaded: bool,
     /// Run the `minecraft:load` tag on the next tick.
     load_pending: bool,
-    pub schedule: Vec<Scheduled>,
+    pub schedule: TimerQueue,
     /// The world's saved queue has been read once: it is the live
     /// `TimerQueue` `SavedData`, so a later reload keeps it as it is.
     schedule_loaded: bool,
-    next_seq: u64,
     /// A dedicated server's `function-permission-level`.
     pub permission: Option<u8>,
+}
+impl FnState {
+    /// Installs a reloaded store; what was resolved from the old one is dropped.
+    fn replace_store(&mut self, store: DataStore) {
+        self.store = store;
+        self.ticking = None;
+    }
+    /// The functions of `#minecraft:tick`, resolved when first asked for after a reload.
+    fn ticking(&mut self) -> Arc<[String]> {
+        let store = &self.store;
+        Arc::clone(
+            self.ticking
+                .get_or_insert_with(|| store.tag_functions("minecraft:tick").into()),
+        )
+    }
 }
 /// What a function reported through `return`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +213,7 @@ pub(super) struct PackStack {
     pub(super) content: DataPack,
     pub packs: Vec<Arc<DataPack>>,
     pub enabled: Vec<String>,
+    pub(super) feature_flags: Box<[String]>,
     /// The predicate tags `PackStack::validate` bound (loading.rs).
     tags: std::sync::OnceLock<registry_graph::BoundTags>,
 }
@@ -123,6 +244,7 @@ pub(super) fn pack_stack(
         builtin,
         packs: packs.into_iter().map(Arc::new).collect(),
         enabled,
+        feature_flags: enabled_features.into(),
         tags: Default::default(),
     }
 }
@@ -210,6 +332,13 @@ impl FnState {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackLoad {
+    OpenWorld,
+    LibraryOnly,
+    Reload,
+}
+
 impl Game<'_> {
     // ---- loading -----------------------------------------------------------
 
@@ -230,7 +359,7 @@ impl Game<'_> {
         // Function admission parses commands immediately, including block arguments.
         // Populate static registries on first open; admission synchronizes pack IDs.
         self.build_registries();
-        self.reload_datapacks(false, enabled_features)
+        self.load_datapacks(enabled_features, PackLoad::OpenWorld)
     }
 
     pub(super) fn reload_datapacks(
@@ -238,9 +367,25 @@ impl Game<'_> {
         run_load: bool,
         enabled_features: &[String],
     ) -> Result<PackStack, ReloadStageError> {
+        let mode = if run_load {
+            PackLoad::Reload
+        } else {
+            PackLoad::LibraryOnly
+        };
+        self.load_datapacks(enabled_features, mode)
+    }
+
+    /// `ServerFunctionLibrary.reload`: the world's registry and tags must be
+    /// available to the command compilation context before functions load.
+    fn load_datapacks(
+        &mut self,
+        enabled_features: &[String],
+        mode: PackLoad,
+    ) -> Result<PackStack, ReloadStageError> {
         horizon_client::mod_content::check_jars(
             &self.options.resources,
             &horizon_client::logging::game_home().join("jars"),
+            self.options.mods.jar_side,
         )
         .map_err(|error| {
             ReloadStageError::OriginalJars(
@@ -248,7 +393,7 @@ impl Game<'_> {
             )
         })?;
         let next_root = self
-            .stage_condition_inventory()
+            .stage_condition_inventory(enabled_features)
             .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
         let resources = next_root
             .as_ref()
@@ -288,7 +433,7 @@ impl Game<'_> {
             .prepare_loop_context(&resources)
             .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
         let prepared = self.apply_server_reload_callbacks(prepared);
-        let world = if run_load && self.remote.is_none() {
+        let world = if mode == PackLoad::Reload && self.remote.is_none() {
             Some(
                 self.prepare_world_reload(&stack, &resources)
                     .map_err(|error| ReloadStageError::DataSource(error.to_string()))?,
@@ -300,20 +445,24 @@ impl Game<'_> {
             self.options.resources = root.prepared().to_owned();
             self.pack.data_source = root.data().clone();
             self.pack.data_changes = root.data_changes().clone();
+            self.mods.root_feature_flags = self.mods.candidate_feature_flags();
             self.mods.data_switched = true;
         }
         self.install_loop_context(context);
-        if !run_load {
+        if mode != PackLoad::Reload {
             self.fns = Default::default();
         }
         self.fns.packs = stack.packs.clone();
         self.fns.enabled = stack.enabled.clone();
         self.pack.additional_data = additional.into();
+        // Explicit reloads and fresh world opens both bind the content tables
+        // before admission. A library-only load keeps the caller's world tables.
+        if mode == PackLoad::OpenWorld {
+            self.open_world_tables(&stack, &resources)
+                .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
+        }
         self.fns.loaded = true;
         self.fns.load_pending = true;
-        // An explicit reload (`/reload`, `/datapack`) also rebuilds the
-        // content tables, as `ReloadableServerResources` does; on world open
-        // `finish_open_world` builds them right after this.
         if let Some(world) = world {
             self.install_world_tables(world);
         }
@@ -340,24 +489,28 @@ impl Game<'_> {
         if let Ok(tags) = stack.validate() {
             tags.expand_predicates(&mut store.predicates);
         }
-        // On explicit reload the actual content tables have already refreshed.
         // The candidate's named predicates/modifiers must also be available to
         // argument codecs before any of its functions can be exposed.
         self.sync_enchantment_registries();
-        // A function's `loot ... loot <id>` names the reloaded packs' tables.
-        self.sync_loot_table_ids();
         // `ReloadableServerRegistries.reload` binds the packs' tags before
         // `ServerFunctionLibrary` compiles its functions: an item or block
         // argument's `#tag` resolves against them.
         self.sync_pack_tag_ids();
-        let mut registries = self.ui.registries.clone();
+        // The same candidate the prepare step checked: on a world's first open its item tags
+        // are not in the live tables yet.
+        let mut registries = match self.candidate_slot_source_registries(&store) {
+            Ok(registries) => registries,
+            Err(error) => {
+                log::error!("Horizon: slot sources changed after their check: {error}");
+                return;
+            }
+        };
         registries.permission = self.fns.command_level();
         registries.functions = store.functions.keys().cloned().collect();
         registries.function_tags = store.function_tags.keys().cloned().collect();
         registries.predicates = store.predicates.keys().cloned().collect();
         registries.item_modifiers = store.item_modifiers.keys().cloned().collect();
-        // On world open the content tables get the world's packs only after this: the
-        // candidate's own loot tables are named here, as its predicates and modifiers are.
+        // A library-only load also needs the candidate's loot-table names.
         let pack_tables = store
             .files
             .keys()
@@ -367,17 +520,6 @@ impl Game<'_> {
             .extend(pack_tables.map(str::to_owned));
         registries.loot_tables.sort();
         registries.loot_tables.dedup();
-        let sources = registries
-            .by_registry
-            .entry("minecraft:slot_source".into())
-            .or_default();
-        sources.ids = store.slot_sources.keys().cloned().collect();
-        sources.tags = store
-            .slot_source_tags
-            .keys()
-            .filter(|id| store.slot_source_tag(id).is_ok())
-            .cloned()
-            .collect();
         for (id, ids) in [
             ("minecraft:predicate", &registries.predicates),
             ("minecraft:item_modifier", &registries.item_modifiers),
@@ -408,7 +550,7 @@ impl Game<'_> {
         for (id, e) in &store.errors {
             log::warn!("Horizon: failed to load function {id}: {e}");
         }
-        self.fns.store = store;
+        self.fns.replace_store(store);
         self.sync_function_registries(stack);
     }
     /// The item and block tags the world's packs define, as `TagLoader` binds
@@ -426,6 +568,12 @@ impl Game<'_> {
         };
         let item_tags = tags(&self.items().item_tags);
         let block_tags = tags(&self.items().block_tags);
+        if self.world_adopted
+            && self.remote.is_none()
+            && let Some(tables) = self.save.tables.get()
+        {
+            tables.install_component_item_tags(&item_tags);
+        }
         let reg = &mut self.ui.registries;
         reg.item_tags.clone_from(&item_tags);
         reg.block_tags.clone_from(&block_tags);
@@ -473,7 +621,6 @@ impl Game<'_> {
             .filter(|id| self.fns.store.slot_source_tag(id).is_ok())
             .cloned()
             .collect();
-        reg.schedules = self.fns.schedule.iter().map(|s| s.id.clone()).collect();
 
         reg.datapacks_enabled = std::iter::once("vanilla".to_owned())
             .chain(self.fns.enabled.iter().cloned())
@@ -529,7 +676,7 @@ impl Game<'_> {
     }
 
     fn sync_schedule_registry(&mut self) {
-        self.ui.registries.schedules = self.fns.schedule.iter().map(|s| s.id.clone()).collect();
+        self.ui.registries.schedules = self.fns.schedule.event_ids().map(str::to_owned).collect();
     }
 
     // ---- scheduled events ------------------------------------------------------
@@ -551,30 +698,28 @@ impl Game<'_> {
                 continue;
             };
             let _ = cb;
-            self.fns.next_seq += 1;
-            self.fns.schedule.push(Scheduled {
-                id: id.to_string_lossy(),
-                time: *time,
-                seq: self.fns.next_seq,
-            });
+            self.fns.schedule.schedule(&id.to_string_lossy(), *time);
         }
     }
     pub(super) fn save_schedule(&self) {
         if !self.fns.loaded || self.remote.is_some() {
             return;
         }
-        let mut events = self.fns.schedule.clone();
-        events.sort_by_key(|e| (e.time, e.seq));
-        let list = events
+        if self.fns.schedule.is_empty() && !self.schedule_path().fs_exists() {
+            return;
+        }
+        let list = self
+            .fns
+            .schedule
             .iter()
-            .map(|e| {
-                let (kind, name) = match e.id.strip_prefix('#') {
+            .map(|(id, time, _)| {
+                let (kind, name) = match id.strip_prefix('#') {
                     Some(tag) => ("minecraft:function_tag", tag),
-                    None => ("minecraft:function", e.id.as_str()),
+                    None => ("minecraft:function", id),
                 };
                 Tag::compound([
-                    ("trigger_time", Tag::Long(e.time)),
-                    ("id", Tag::String(e.id.as_str().into())),
+                    ("trigger_time", Tag::Long(time)),
+                    ("id", Tag::String(id.into())),
                     (
                         "callback",
                         Tag::compound([
@@ -585,9 +730,6 @@ impl Game<'_> {
                 ])
             })
             .collect();
-        if events.is_empty() && !self.schedule_path().fs_exists() {
-            return;
-        }
         let _ = save::write_dat(
             &self.schedule_path(),
             Tag::compound([
@@ -614,8 +756,8 @@ impl Game<'_> {
                 self.run_function_by_id(&f, None, source);
             }
         }
-        for f in self.fns.store.tag_functions("minecraft:tick") {
-            self.run_function_by_id(&f, None, source);
+        for f in self.fns.ticking().iter() {
+            self.run_function_by_id(f, None, source);
         }
     }
     /// `ServerLevel.tickTime`'s `getScheduledEvents().tick`: the scheduled
@@ -626,26 +768,19 @@ impl Game<'_> {
             return;
         }
         self.exec = ExecState::default();
-        let source = self.server_source();
         let now = self.world.game_time;
-        loop {
-            let due = self
-                .fns
-                .schedule
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.time <= now)
-                .min_by_key(|(_, e)| (e.time, e.seq))
-                .map(|(i, _)| i);
-            let Some(i) = due else { break };
-            let event = self.fns.schedule.remove(i);
-            match event.id.strip_prefix('#') {
+        if !self.fns.schedule.has_due(now) {
+            return;
+        }
+        let source = self.server_source();
+        while let Some(id) = self.fns.schedule.pop_due(now) {
+            match id.strip_prefix('#') {
                 Some(tag) => {
                     for f in self.fns.store.tag_functions(tag) {
                         self.run_function_by_id(&f, None, source);
                     }
                 }
-                None => self.run_function_by_id(&event.id, None, source),
+                None => self.run_function_by_id(&id, None, source),
             }
         }
     }
@@ -719,7 +854,19 @@ impl Game<'_> {
         if let Err((key, a)) = self.parse_macro_lines(f, &lines) {
             return Err(failure(&key, &a));
         }
-        if self.exec.functions.len() >= 128 {
+        // `CallFunction.execute` queues the body one frame deeper with no depth
+        // limit; vanilla only stops it at the command quota
+        // (`ExecutionContext.runCommandQueue`). Here each call is a native
+        // frame, so `max_command_sequence_length` (up to `i32::MAX`) alone
+        // could overflow the guest stack. One level (`run_function`,
+        // `execute_line`, `run_chain` and the `function` command) measured
+        // about 9.7 KiB in a debug build; at a 16 KiB budget the guest stack
+        // holds 8192 levels. A deeper call returns `NoReturn` and its body does
+        // not run.
+        const FUNCTION_CALL_STACK_BYTES: usize = 16 * 1024;
+        const MAX_FUNCTION_DEPTH: usize =
+            horizon_guest_stack::GUEST_STACK_BYTES / FUNCTION_CALL_STACK_BYTES;
+        if self.exec.functions.len() >= MAX_FUNCTION_DEPTH {
             return Ok(Outcome::NoReturn);
         }
         self.exec.functions.push(f.id.clone());
@@ -825,11 +972,19 @@ impl Game<'_> {
         let source = self.command_source.unwrap_or_else(|| self.player_source());
         let mut out = Vec::new();
         for f in functions {
-            out.push(match self.run_function(&f, args, source)? {
+            let result = match self.run_function(&f, args, source)? {
                 Outcome::NoReturn => None,
                 Outcome::Value(v) => Some(v),
                 Outcome::Fail => Some(0),
-            });
+            };
+            out.push(result);
+            // `ExecuteCommand.addIsolatedCall` queues the tag's functions with
+            // `returnParentFrame`: a `return` (value or fail) runs
+            // `Frame.discard` on the isolated frame, so the tag's remaining
+            // functions never start.
+            if result.is_some() {
+                break;
+            }
         }
         Ok(out)
     }
@@ -1026,9 +1181,7 @@ impl Game<'_> {
             let Some(Arg::Resource(name)) = ctx.get("function").cloned() else {
                 return Ok(0);
             };
-            let before = self.fns.schedule.len();
-            self.fns.schedule.retain(|e| e.id != name);
-            let count = before - self.fns.schedule.len();
+            let count = self.fns.schedule.remove(&name);
             if count == 0 {
                 return Err(err("commands.schedule.cleared.failure", &[&name]));
             }
@@ -1065,22 +1218,9 @@ impl Game<'_> {
             }
         };
         if replace {
-            self.fns.schedule.retain(|e| e.id != schedule_id);
+            self.fns.schedule.remove(&schedule_id);
         }
-        if !self
-            .fns
-            .schedule
-            .iter()
-            .any(|e| e.id == schedule_id && e.time == tick_time)
-        {
-            self.fns.next_seq += 1;
-            let seq = self.fns.next_seq;
-            self.fns.schedule.push(Scheduled {
-                id: schedule_id,
-                time: tick_time,
-                seq,
-            });
-        }
+        self.fns.schedule.schedule(&schedule_id, tick_time);
         let key = if name.starts_with('#') {
             "commands.schedule.created.tag"
         } else {
@@ -2485,11 +2625,7 @@ mod tests {
             assert!(game.stations().recipe_index.contains("test:sample"));
 
             // Changing packs must not reload an old timer from disk.
-            game.fns.schedule.push(Scheduled {
-                id: "test:start".into(),
-                time: 1000,
-                seq: 1,
-            });
+            game.fns.schedule.schedule("test:start", 1000);
             game.save_schedule();
             game.fns.schedule.clear();
             assert!(game.run_command("datapack disable \"file/test\""));
@@ -3749,6 +3885,93 @@ mod required_tag_tests {
             horizon_std::fs::remove_dir_all(dir).unwrap();
         });
     }
+
+    #[test]
+    fn the_tick_tag_is_resolved_once_per_loaded_store() {
+        let function = |id: &str| Function {
+            id: id.into(),
+            lines: Vec::new(),
+            parameters: Vec::new(),
+        };
+        let store_with = |ids: &[&str]| {
+            let mut store = DataStore::default();
+            for id in ids {
+                store.functions.insert((*id).into(), function(id));
+            }
+            store.function_tags.insert(
+                "minecraft:tick".into(),
+                ids.iter().map(|id| ((*id).to_owned(), true, false)).collect(),
+            );
+            store
+        };
+        let mut fns = FnState::default();
+        fns.replace_store(store_with(&["t:a"]));
+        assert_eq!(&*fns.ticking(), ["t:a"]);
+        // Later ticks read the list resolved at the load, not the store's tag again...
+        fns.store.function_tags.clear();
+        for _ in 0..3 {
+            assert_eq!(&*fns.ticking(), ["t:a"]);
+        }
+        // ...until a reload replaces the store.
+        fns.replace_store(store_with(&["t:b", "t:c"]));
+        assert_eq!(&*fns.ticking(), ["t:b", "t:c"]);
+    }
+
+    #[test]
+    fn timer_queue_orders_dedups_removes_and_handles_reentrant_bursts() {
+        let mut q = TimerQueue::default();
+        assert!(!q.has_due(0));
+        assert_eq!(q.pop_due(0), None);
+
+        // Out-of-order trigger times and same-tick FIFO tie-breaking.
+        assert!(q.schedule("ns:later", 20));
+        assert!(q.schedule("ns:first", 10));
+        assert!(q.schedule("ns:second", 10));
+        assert!(q.schedule("ns:overdue", 5));
+        // Duplicate (id, time) is ignored without changing its sequence position.
+        assert!(!q.schedule("ns:first", 10));
+        // Append: same id at a different time is kept alongside the earlier one.
+        assert!(q.schedule("ns:first", 15));
+        assert_eq!(q.len(), 5);
+
+        // Before the earliest due tick, nothing pops.
+        assert!(!q.has_due(4));
+        assert_eq!(q.pop_due(4), None);
+
+        // Due burst at tick 10 drains (5, overdue), then (10, first), then (10, second).
+        // Simulate re-entrant `/schedule clear` + self-reschedule mid-burst.
+        assert!(q.has_due(10));
+        assert_eq!(q.pop_due(10).as_deref(), Some("ns:overdue"));
+        assert_eq!(q.pop_due(10).as_deref(), Some("ns:first"));
+        // Re-entrantly cancel `ns:second` (also due at 10) and reschedule `ns:first` at 10.
+        assert_eq!(q.remove("ns:second"), 1);
+        assert_eq!(q.remove("ns:missing"), 0);
+        // `ns:first` still has its tick-15 entry, and tick-10 was popped so it can be scheduled again.
+        assert!(q.schedule("ns:first", 10));
+        assert_eq!(q.pop_due(10).as_deref(), Some("ns:first"));
+        assert_eq!(q.pop_due(10), None);
+
+        // Remaining entries iterate in `(time, seq)` order and clear by id removes all of them.
+        assert!(q.schedule("ns:first", 25));
+        let remaining: Vec<_> = q
+            .iter()
+            .map(|(id, time, _)| (id.to_owned(), time))
+            .collect();
+        assert_eq!(
+            remaining,
+            vec![
+                ("ns:first".to_owned(), 15),
+                ("ns:later".to_owned(), 20),
+                ("ns:first".to_owned(), 25),
+            ]
+        );
+        assert_eq!(q.remove("ns:first"), 2);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.event_ids().collect::<Vec<_>>(), vec!["ns:later"]);
+        assert_eq!(q.pop_due(20).as_deref(), Some("ns:later"));
+        assert!(q.is_empty());
+        assert!(q.event_ids().next().is_none());
+    }
 }
 
 #[cfg(test)]
@@ -3765,3 +3988,7 @@ mod schedule_reload_tests;
 #[cfg(test)]
 #[path = "functions/loading_tests.rs"]
 mod loading_tests;
+
+#[cfg(test)]
+#[path = "functions/recursion_tests.rs"]
+mod recursion_tests;

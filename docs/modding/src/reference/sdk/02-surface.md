@@ -47,13 +47,17 @@ one of three classes:
 - **Breaking**: it can stop any mod that uses the item from compiling or meaning the same. A record removed; a
   contract changed (a hook's side or kind, a retyped field or argument, a signature, a method no longer on wasm); a
   variant added to an exhaustive enum; a required item added to a trait mods implement; an impl a type no longer
-  has; a behaviour removed.
+  has; a behaviour removed. Anything that makes the game refuse a wasm mod built before it: an existing call gone or
+  with another signature hash (its arguments or answer, or a field of a borrowing record they reach, reordered too), a
+  call reaching other owned types, a wire layout change of an owned type an existing call or the core reaches, hidden
+  ones too (an enum variant inserted or appended too), and a change to the wire core (`core:wire`: a transport
+  value or control payload, a hand-written codec, the NBT tag ids or limits, or a prepared hook's ABI).
 - **Conditional**: it breaks only some mods, which the [fit test](04-fit.md) finds from each mod's source (except a
   behaviour's `version`, which no fit report shows: a mod relies on a behaviour without naming it). A field
   added to a struct mods can build, or an argument added to a hook (only a mod that writes it out in full); a struct
   no longer constructible; a public path that goes (only a mod that writes that path); a hook's `version` (only a mod
   whose manifest names it) or a behaviour's `version` (only a mod that relies on it); a type's wire form or layout
-  (wasm mods only).
+  when no existing call reaches it (wasm mods only).
 - **Additive**: a new record (a behaviour too), and changes that only widen an item: now on wasm, an impl gained, a new public path, an
   item no longer required, an enum no longer `#[non_exhaustive]`.
 
@@ -61,10 +65,24 @@ Each change says what changed in words a mod author can act on, for example
 ``argument `player`: `PlayerRef` → `ServerPlayerRef` ``. `cargo horizon-mod sdk diff <build> <build>` prints the
 same report for two published builds.
 
-When the `verify` check runs on a pull request that changes Rust, its summary carries this report, comparing the
-merge base with the head. It reports, and fails the check only when:
+When the `verify (mod API)` check runs on a pull request, its summary carries this report, comparing the merge
+base with the head; `--calls` adds the calls and core each build's wasm mods are checked by (`horizon-stage surface
+ROOT OUT --calls CALLS` writes them). `--layouts` adds what both builds compiled: the core layout and every call's
+hash, exactly as the game compares them (`crates/horizon-mod-api/examples/wire_layouts.rs` prints them). Every
+compiled change is reported under the call's id or `core:wire`, even when the source shows a cause (a type the call
+reaches, for example): one hash per call cannot tell whether that cause is all of it, so a note names the call or
+`core:wire` too. One note can list all of a change's ids. This also catches what the source shows nothing of, a
+crossing type's name (the `Wire` derive hashes it, a shape leaves it out) or a change to the generator itself. The
+base's compiled layouts come from a store that only main's pushes fill, one file per commit (a symlink, another schema,
+no calls or a call count other than the one written beside them is a miss), or are built by checking the base out in place, with
+the base's own copy of the example. A base older than the example is compared by source alone, with a warning. A pull
+request that changes the gate's own code gets a warning that its result needs a maintainer's look. A source change the
+compiled hashes do not see still counts: a newtype that crosses `via` the type it wraps changes the
+shape and not the layout, and needs a note. It reports, and fails the check only when:
 
 - the head's tree cannot be exported;
+- with the gate on, no comparison can run: the base cannot be found or fetched, the head's tool cannot read it, or
+  the head's compiled layouts, or those of a base that has the example, cannot be built;
 - a change note cannot be read, or names an item that did not change;
 - a breaking change has no change note: every breaking record the report lists, members included (a removed field is
   its own line), is named by a note the pull request adds. Conditional and additive changes need none. The gate is

@@ -14,8 +14,9 @@ substituted macro lines are checked against this session tree; commands no longe
 are refused when functions next load. Starting the hub reuses the session registration rather
 than asking again.
 
-Literal words use lowercase letters, digits, `_` and `-`. Only the first word may
-additionally begin with one `/`: register `/set <x:word>` and type `//set stone` in chat.
+Literal words use ASCII letters, digits, `_` and `-`, matched with their case as Brigadier's
+(`cu callItemClear`). Only the first word may additionally begin with one `/`: register
+`/set <x:word>` and type `//set stone` in chat.
 The command's literals retain `/set`. A slash alone, repeated leading slashes and
 slashes in later literal words are refused.
 
@@ -58,6 +59,7 @@ as vanilla's parser so `~`, `^` and the dimension list complete as in a vanilla 
 | `rotation` | `minecraft:rotation` | `Rotation([f32; 2])`, yaw then pitch |
 | `dimension` | `minecraft:dimension` | `Dimension(LevelRef)` |
 | `nbt` | `minecraft:nbt_compound_tag` | `Nbt(Compound)` |
+| `player_name` | `minecraft:game_profile`, completed from the online players | `String` (the typed name, online or not; a selector is refused) |
 
 `~` and `^` resolve against the command source's position and rotation, as `block_pos` does. A
 `dimension` the world has not loaded is refused with `argument.dimension.invalid` before a
@@ -205,8 +207,13 @@ ones, and completes the choices that start with the typed text.
 
 `CommandArgumentKind::Word` takes one word of ASCII letters, digits and `_ - . +`; the
 word ends at the first other character, a space included, so a value with `:` or `/`
-needs `Greedy`, which takes the rest of the line. `suggest` receives that text as typed so
-far: one word, or the whole tail of the line up to the cursor. Players whose client does not know
+needs `Greedy`, which takes the rest of the line, or the `token:` form of a `Word` type:
+`<who:token:mymod:account>` reads the registered type `mymod:account` as every character up to the
+next space and lets more arguments follow (`eco give * 5`, `eco give ** 5`, an id such as
+`mod:acct/1`). A token is never empty and takes no quotes; a vanilla client that does not know
+the type parses it as a word and may show a `*` in red, while the server takes it as written.
+`suggest` receives that text as typed so far: one word or token, or the whole tail of the line
+up to the cursor. Players whose client does not know
 the type parse and complete the command: the server sends the argument as a Brigadier string
 of that shape with `minecraft:ask_server`, and their chat asks the server for the
 suggestions.
@@ -266,6 +273,13 @@ trees again (`/op`, `/deop`) and the completions follow from then on; a provider
 whose answers depend on its own policy calls `host.commands().refresh_commands()`
 after it changes them.
 
+`Command::op(usage, level).denied_message("text")` sets a plain text for a player below
+the command's lowest usage level: they get it in chat instead of vanilla's unknown-command answer, and it is only
+shown when that player still types the command. The first usage of a root that sets a text
+answers for the whole root; each usage's own level still decides who may run it, and a player who may run
+some usage but not the one typed gets vanilla's answer. The text is
+not styled and is not translated. Paper's `messages.no-permission` is the nearest equivalent.
+
 ## Custom selector tokens
 
 Side: server. Register a token such as `@allies` once from `Hooks::register` with
@@ -295,3 +309,7 @@ server's names, tooltip keys, base limits and sort order, even without the serve
 installed locally. This replaces the previous server's inventory at connection startup.
 Vanilla clients do not receive this Horizon-specific metadata and can still send commands
 containing the token without local completion.
+
+## Console lines
+
+`console_command` hears every line the dedicated console or an RCON client is about to run, without its slash and before the line is read: `source` is `console` or `rcon`, and a cancel runs nothing and prints nothing. It is the place to keep a secret out of the command path. A command a mod runs itself with `run_command_with_output` is not heard.

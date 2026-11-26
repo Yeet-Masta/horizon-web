@@ -4,12 +4,12 @@ use mod_api::__private::game::Fields;
 /// and start the engine. Keep the validated startup lease alive for the whole run.
 pub fn main_with(
     mods: Vec<mod_api::ModEntry>,
-    slots: &[crate::SlotListener],
+    // Always empty: the injection points were removed (#19576).
+    _slots: &[crate::SlotListener],
     built: &'static [mod_api::__private::native::BuiltMod],
     startup: horizon_client::entry::Startup,
 ) {
-    horizon_engine_slots::install_seal(mod_points::__private::seal)
-        .expect("engine seal provider must be installed once before startup");
+    install_native_profile_spans();
     // Platform instrumentation must precede registration and the first mod guard.
     if let Err(error) = mod_api::__private::initialize() {
         eprintln!("Horizon: refusing startup because mod instrumentation is unavailable: {error}");
@@ -149,15 +149,6 @@ pub fn main_with(
                 .collect();
             let ids: Vec<_> = mods.iter().map(|entry| entry.fields().id).collect();
             mod_api::__private::install(mods.into());
-            for &id in &ids {
-                for slot in slots.iter().filter(|slot| slot.id() == id) {
-                    if let Err(error) = mod_points::register(slot) {
-                        log::error!("Horizon: {id}: {error}");
-                        horizon_client::logging::flush();
-                        std::process::exit(1);
-                    }
-                }
-            }
             (ids, wasm)
         },
         horizon_client::entry::CodeRuntime {
@@ -212,4 +203,36 @@ pub fn main_with(
         },
         startup,
     );
+}
+
+/// A mod's profiler scope is the game's span, boxed only while something would see it: with
+/// spans off and no sampler it costs one check and no allocation.
+fn install_native_profile_spans() {
+    mod_api::__private::install_profile_spans(|name| {
+        use horizon_client::spans;
+        spans::observed().then(|| Box::new(spans::guard(name)) as Box<dyn std::any::Any>)
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn native_mod_scope_reaches_the_game_profiler() {
+        use horizon_client::spans;
+        super::install_native_profile_spans();
+        spans::record_here(true);
+        {
+            let _outer = spans::guard("outer");
+            let _inner = mod_api::profiling::guard("mod_tick_section");
+            assert!(spans::take_raw().is_empty());
+        }
+        let recorded = spans::take_raw();
+        spans::record_here(false);
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            (recorded[0].name, recorded[0].depth),
+            ("mod_tick_section", 1)
+        );
+        assert_eq!((recorded[1].name, recorded[1].depth), ("outer", 0));
+    }
 }

@@ -3,6 +3,11 @@
 //! `SkinManager` lookup (which texture a player shows, and when the default
 //! one) and `SkinTextureDownloader.processLegacySkin`.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 /// `Property.hasSignature` and the services key check, as authlib's
 /// `SignatureState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,13 +69,27 @@ fn discovery_texture_uris(doc: &serde_json::Value) -> Option<Vec<String>> {
 /// `java.util.Base64.getDecoder().decode`.
 pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     use base64::{
-        Engine,
-        engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+        Engine, alphabet,
+        engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
     };
-    STANDARD
-        .decode(text)
-        .or_else(|_| STANDARD_NO_PAD.decode(text))
-        .ok()
+    const JAVA_DECODER_PADDED: GeneralPurpose = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::RequireCanonical),
+    );
+    const JAVA_DECODER_NO_PAD: GeneralPurpose = GeneralPurpose::new(
+        &alphabet::STANDARD,
+        GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(DecodePaddingMode::RequireNone),
+    );
+    let engine = if text.contains('=') {
+        &JAVA_DECODER_PADDED
+    } else {
+        &JAVA_DECODER_NO_PAD
+    };
+    engine.decode(text).ok()
 }
 
 // Limit owned string allocations as well as table entries: obsolete, rejected profile
@@ -185,6 +204,27 @@ pub fn unpack(value: &str, signature: Signature, valid_uris: &[impl AsRef<str>])
         *slot = Some(url.to_owned());
     }
     out
+}
+
+/// A `textures` property's value for `textures`: the base64 JSON payload [`unpack`] reads
+/// back. It names only the texture URLs, no profile id or name, and carries no signature.
+pub fn pack(textures: &Textures) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut entries = serde_json::Map::new();
+    if let Some(url) = &textures.skin {
+        let mut skin = serde_json::json!({ "url": url });
+        if textures.slim {
+            skin["metadata"] = serde_json::json!({ "model": "slim" });
+        }
+        entries.insert("SKIN".into(), skin);
+    }
+    if let Some(url) = &textures.cape {
+        entries.insert("CAPE".into(), serde_json::json!({ "url": url }));
+    }
+    if let Some(url) = &textures.elytra {
+        entries.insert("ELYTRA".into(), serde_json::json!({ "url": url }));
+    }
+    STANDARD.encode(serde_json::json!({ "textures": entries }).to_string())
 }
 
 /// The skin URL of a `minecraft:profile` component's property list. Player
@@ -333,6 +373,11 @@ pub struct Resolver {
     entries: std::collections::HashMap<NameOrId, Entry>,
     done: std::sync::mpsc::Receiver<(NameOrId, Option<ResolvedProfile>)>,
     send: std::sync::mpsc::Sender<(NameOrId, Option<ResolvedProfile>)>,
+    /// Fetch threads still running; [`MAX_FETCHES`] bounds them.
+    active: Arc<AtomicUsize>,
+    /// New lookups left this minute; one comes back each second.
+    lookups: u32,
+    last_lookup_refill: horizon_std::time::Instant,
     last_sweep: horizon_std::time::Instant,
     heads: HeadProfiles,
 }
@@ -344,6 +389,15 @@ struct Entry {
 /// `ProfileResolver.Cached`'s cache bounds.
 const MAX_PROFILES: usize = 256;
 const PROFILE_TTL: horizon_std::time::Duration = horizon_std::time::Duration::from_secs(10 * 60);
+/// The most profile fetches that may run at once. Each is an OS thread and an HTTP request; a
+/// mod calling `resolve_id` in a loop must not exhaust them.
+const MAX_FETCHES: usize = 16;
+/// The fetch slots a mod's lookups may use. The last one is kept for the game's own lookups
+/// (`/fetchprofile`, skins), so a mod polling every tick cannot stall them.
+const MOD_FETCHES: usize = MAX_FETCHES - 1;
+/// New profile lookups that may start a minute. Mojang rate-limits by IP, so one mod must not be
+/// able to spend the server's whole allowance at once; one slot comes back each second.
+const LOOKUPS_PER_MINUTE: u32 = 60;
 
 /// `StringUtil.isValidPlayerName` (the check `fetchByName` makes first).
 fn valid_player_name(name: &str) -> bool {
@@ -401,9 +455,42 @@ impl Resolver {
             entries: Default::default(),
             done,
             send,
+            active: Arc::new(AtomicUsize::new(0)),
+            lookups: LOOKUPS_PER_MINUTE,
+            last_lookup_refill: horizon_std::time::Instant::now(),
             last_sweep: horizon_std::time::Instant::now(),
             heads: HeadProfiles::default(),
         }
+    }
+    /// Adds back the slots `elapsed` earns, capped at the minute's budget, and advances the
+    /// timestamp by every whole second: after an idle period the budget must not refill again
+    /// on each of the next calls.
+    fn refill_lookup_budget(&mut self, elapsed: horizon_std::time::Duration) {
+        let seconds = elapsed.as_secs();
+        if seconds == 0 {
+            return;
+        }
+        self.lookups = (self.lookups + seconds.min(u64::from(LOOKUPS_PER_MINUTE)) as u32)
+            .min(LOOKUPS_PER_MINUTE);
+        self.last_lookup_refill += horizon_std::time::Duration::from_secs(seconds);
+    }
+    /// Takes one of the minute's new-lookup slots, adding back one a second.
+    fn take_lookup_budget(&mut self) -> bool {
+        self.refill_lookup_budget(self.last_lookup_refill.elapsed());
+        if self.lookups == 0 {
+            return false;
+        }
+        self.lookups -= 1;
+        true
+    }
+    /// Whether a new fetch may start: within the caller's worker cap, and for a mod within the
+    /// minute's budget. Takes a budget slot when it answers true.
+    fn may_start_fetch(&mut self, paced: bool) -> bool {
+        let cap = if paced { MOD_FETCHES } else { MAX_FETCHES };
+        if self.active.load(Ordering::Relaxed) >= cap {
+            return false;
+        }
+        !paced || self.take_lookup_budget()
     }
     /// `CacheBuilder.expireAfterAccess` with `maximumSize`.
     fn sweep(&mut self) {
@@ -423,8 +510,19 @@ impl Resolver {
             self.entries.remove(&oldest);
         }
     }
-    /// How the resolution of `key` stands, starting it the first time.
+    /// How the resolution of `key` stands, starting it the first time. A mod's lookups share
+    /// the minute's budget and leave the last fetch slot to the game; the game's own callers use
+    /// [`Resolver::state_for_game`].
     pub fn state(&mut self, key: &NameOrId) -> Resolve {
+        self.state_with(key, true)
+    }
+    /// As [`Resolver::state`], for the game's own lookups (`/fetchprofile`, skins): they skip
+    /// the mod budget and may use the fetch slot mods leave free, so a mod polling every tick
+    /// cannot stall them.
+    pub fn state_for_game(&mut self, key: &NameOrId) -> Resolve {
+        self.state_with(key, false)
+    }
+    fn state_with(&mut self, key: &NameOrId, paced: bool) -> Resolve {
         while let Ok((key, resolved)) = self.done.try_recv() {
             self.entries.insert(
                 key,
@@ -442,26 +540,53 @@ impl Resolver {
                 None => Resolve::Pending,
             };
         }
-        // `fetchByName` refuses an invalid name without a fetch; like every
-        // other empty answer that is the cached result.
-        let resolved = matches!(key, NameOrId::Name(name) if !valid_player_name(name));
-        self.entries.insert(
-            key.clone(),
-            Entry {
-                touched: horizon_std::time::Instant::now(),
-                resolved: resolved.then_some(None),
-            },
-        );
-        if resolved {
+        // `fetchByName` refuses an invalid name without a fetch. Answer without
+        // caching: distinct invalid names must not fill the cache between sweeps.
+        if matches!(key, NameOrId::Name(name) if !valid_player_name(name)) {
             return Resolve::Done(None);
         }
+        // At the cap, leave the key uncached and answer `Pending`: the caller polls, and a later
+        // call starts the fetch once a thread is free. Mods also leave the last slot to the
+        // game and spend the minute's budget; at either limit they answer `Pending` without
+        // caching, so a later call retries.
+        if !self.may_start_fetch(paced) {
+            return Resolve::Pending;
+        }
+        let entry_key = key.clone();
+        self.entries.insert(
+            entry_key.clone(),
+            Entry {
+                touched: horizon_std::time::Instant::now(),
+                resolved: None,
+            },
+        );
+        self.active.fetch_add(1, Ordering::Relaxed);
+        let active = Arc::clone(&self.active);
         let (key, send) = (key.clone(), self.send.clone());
-        horizon_std::thread::spawn(move || {
-            let resolved = crate::auth::discovery()
-                .ok()
-                .and_then(|doc| resolve_profile(&key, &doc));
-            let _ = send.send((key, resolved));
-        });
+        let spawned = horizon_std::thread::Builder::new()
+            .name("profile-fetch".into())
+            .spawn(move || {
+                /// Releases the fetch slot when the thread ends, including on a panic.
+                struct Fetch(Arc<AtomicUsize>);
+                impl Drop for Fetch {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                let _fetch = Fetch(active);
+                let resolved = crate::auth::discovery()
+                    .ok()
+                    .and_then(|doc| resolve_profile(&key, &doc));
+                let _ = send.send((key, resolved));
+            });
+        if spawned.is_err() {
+            // The OS refused a thread: release the slots and let a later call retry.
+            self.active.fetch_sub(1, Ordering::Relaxed);
+            if paced {
+                self.lookups = (self.lookups + 1).min(LOOKUPS_PER_MINUTE);
+            }
+            self.entries.remove(&entry_key);
+        }
         Resolve::Pending
     }
 }
@@ -641,7 +766,7 @@ pub fn head_skin(
         if p.info.textures.is_some() {
             return None;
         }
-        match resolver.state(key) {
+        match resolver.state_for_game(key) {
             Resolve::Done(Some(profile)) => {
                 let (_, value, signature) = profile
                     .properties
@@ -1451,6 +1576,117 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packed_textures_unpack_to_themselves() {
+        let textures = super::Textures {
+            skin: Some("https://textures.minecraft.net/texture/skin1".into()),
+            slim: true,
+            cape: Some("https://textures.minecraft.net/texture/cape2".into()),
+            elytra: None,
+            signed: false,
+        };
+        let value = super::pack(&textures);
+        let back = super::unpack(&value, super::Signature::Unsigned, &super::TEXTURE_URIS);
+        assert_eq!(back, textures);
+        // No skin, no cape: nothing to name.
+        let none = super::pack(&super::Textures::default());
+        assert_eq!(
+            super::unpack(&none, super::Signature::Unsigned, &super::TEXTURE_URIS),
+            super::Textures::default()
+        );
+    }
+
+    #[test]
+    fn an_invalid_name_is_answered_without_being_cached() {
+        let mut resolver = super::Resolver::new();
+        let key = super::NameOrId::Name("not a name!".into());
+        assert!(matches!(resolver.state(&key), super::Resolve::Done(None)));
+        assert!(resolver.entries.is_empty());
+    }
+
+    #[test]
+    fn the_fetch_cap_answers_pending_without_caching() {
+        let mut resolver = super::Resolver::new();
+        resolver
+            .active
+            .store(super::MAX_FETCHES, std::sync::atomic::Ordering::Relaxed);
+        let key = super::NameOrId::Id(7);
+        assert!(matches!(resolver.state(&key), super::Resolve::Pending));
+        assert!(!resolver.entries.contains_key(&key));
+        resolver
+            .active
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[test]
+    fn the_lookup_budget_answers_pending_without_caching() {
+        let mut resolver = super::Resolver::new();
+        resolver.lookups = 0;
+        resolver.last_lookup_refill =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(1);
+        let key = super::NameOrId::Id(7);
+        assert!(matches!(resolver.state(&key), super::Resolve::Pending));
+        assert!(!resolver.entries.contains_key(&key));
+    }
+
+    #[test]
+    fn new_lookups_are_paced_per_minute() {
+        let mut resolver = super::Resolver::new();
+        resolver.last_lookup_refill =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(60);
+        for _ in 0..super::LOOKUPS_PER_MINUTE {
+            assert!(resolver.take_lookup_budget());
+        }
+        assert!(!resolver.take_lookup_budget());
+        resolver.last_lookup_refill = horizon_std::time::Instant::now()
+            .checked_sub(horizon_std::time::Duration::from_secs(2))
+            .expect("the process has run for two seconds");
+        assert!(resolver.take_lookup_budget());
+        assert!(resolver.take_lookup_budget());
+        assert!(!resolver.take_lookup_budget());
+    }
+
+    #[test]
+    fn an_idle_period_refills_the_budget_once() {
+        let mut resolver = super::Resolver::new();
+        resolver.lookups = 0;
+        let before = resolver.last_lookup_refill;
+        resolver.refill_lookup_budget(horizon_std::time::Duration::from_secs(3600));
+        assert_eq!(resolver.lookups, super::LOOKUPS_PER_MINUTE);
+        assert_eq!(
+            resolver.last_lookup_refill.duration_since(before),
+            horizon_std::time::Duration::from_secs(3600),
+            "the whole idle period is consumed, not just the minute the budget caps at"
+        );
+        for _ in 0..super::LOOKUPS_PER_MINUTE {
+            assert!(resolver.take_lookup_budget());
+        }
+        assert!(!resolver.take_lookup_budget());
+    }
+
+    #[test]
+    fn a_game_lookup_keeps_a_fetch_slot_and_skips_the_mod_budget() {
+        let mut resolver = super::Resolver::new();
+        resolver
+            .active
+            .store(super::MOD_FETCHES, std::sync::atomic::Ordering::Relaxed);
+        resolver.lookups = 0;
+        resolver.last_lookup_refill =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(1);
+        assert!(
+            !resolver.may_start_fetch(true),
+            "mods leave the last fetch slot to the game"
+        );
+        assert!(
+            resolver.may_start_fetch(false),
+            "the game skips the mod budget and may use the last slot"
+        );
+        resolver
+            .active
+            .store(super::MAX_FETCHES, std::sync::atomic::Ordering::Relaxed);
+        assert!(!resolver.may_start_fetch(false));
+    }
+
     #[test]
     fn head_profile_cache_matches_uncached_and_is_bounded() {
         use base64::Engine;
@@ -2608,5 +2844,44 @@ mod download_bound_tests {
             horizon_std::env::temp_dir(),
         ));
         assert!(d.resources.is_empty() && d.resource_order.is_empty());
+    }
+
+    #[test]
+    fn base64_decode_allows_java_nonzero_trailing_bits() {
+        // Canonical base64 of b"f" is "Zg==" (low 4 bits of 'g' are 0).
+        // Replacing 'g' (32 = 0b10_0000) with 'v' (47 = 0b10_1111) sets all 4 trailing bits;
+        // java.util.Base64.getDecoder().decode ignores them and yields b"f".
+        assert_eq!(
+            super::base64_decode("Zv==").as_deref(),
+            Some(b"f".as_slice())
+        );
+        assert_eq!(super::base64_decode("Zv").as_deref(), Some(b"f".as_slice()));
+        // Java rejects incomplete padding whenever '=' is present.
+        assert_eq!(super::base64_decode("Zv="), None);
+        assert_eq!(super::base64_decode("Zg="), None);
+
+        // A real textures JSON payload whose trailing bits are nonzero still unpacks the skin URL.
+        let json =
+            r#"{"textures":{"SKIN":{"url":"https://textures.minecraft.net/texture/abcdef"}}}"#;
+        assert_eq!(json.len() % 3, 2);
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let mut bytes = STANDARD.encode(json.as_bytes()).into_bytes();
+        assert_eq!(bytes.last(), Some(&b'='));
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let last_sym_idx = bytes.len() - 2;
+        let val = alphabet
+            .iter()
+            .position(|&b| b == bytes[last_sym_idx])
+            .unwrap();
+        // Flip the 2 unused low bits to nonzero (0b11).
+        bytes[last_sym_idx] = alphabet[val | 0b11];
+        let encoded = String::from_utf8(bytes).unwrap();
+        assert!(STANDARD.decode(&encoded).is_err());
+
+        let textures = super::unpack(&encoded, super::Signature::Signed, &super::TEXTURE_URIS);
+        assert_eq!(
+            textures.skin.as_deref(),
+            Some("https://textures.minecraft.net/texture/abcdef")
+        );
     }
 }

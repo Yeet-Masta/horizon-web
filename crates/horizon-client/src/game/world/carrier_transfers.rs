@@ -1135,7 +1135,10 @@ mod tests {
                 ));
             });
             // The block entity's container does not open.
-            assert!(game.refuse_locked_container((4, 64, 4), "minecraft:chest"));
+            assert!(matches!(
+                game.refuse_locked_container((4, 64, 4), "minecraft:chest"),
+                Some(crate::game::storage::ContainerRefusal::CarrierFence)
+            ));
             // Every mod write through the level gate refuses.
             let level = game.level(game.dim.id()).unwrap();
             assert!(!game.native_level_write_allowed(level, fenced));
@@ -1143,7 +1146,10 @@ mod tests {
             // No operation, no refusals: the checks cost one set load.
             game.world.carrier_fences.unlock_cell(fenced);
             assert!(game.native_level_write_allowed(level, fenced));
-            assert!(!game.refuse_locked_container((4, 64, 4), "minecraft:chest"));
+            assert!(
+                game.refuse_locked_container((4, 64, 4), "minecraft:chest")
+                    .is_none()
+            );
         });
     }
 

@@ -1,7 +1,7 @@
 //! Shulkers (`Shulker`): fixed to a block face, peeking out of their shell,
 //! firing homing bullets at players within 20 blocks, teleporting when
-//! their face is lost or when badly hurt, and shrugging off arrows while
-//! closed.
+//! their face is lost or when badly hurt, and shrugging off arrows (tridents
+//! too) while closed.
 use super::{
     Damage, Mob, MobEvent, MobWorld, Species, Who,
     anim::{Poses, State},
@@ -539,6 +539,9 @@ pub fn keep_eased_peek(slot: &mut Mob, old: &Mob) {
 /// [`shell_tick`].
 pub fn tick(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEvent>) {
     m.velocity = Vec3::ZERO;
+    // `LivingEntity.travel` still moves it by that zero motion: the move meets
+    // nothing below, so `setOnGroundWithMovement` clears a loaded `OnGround`.
+    m.on_ground = false;
     m.body_yaw = 0.0;
     shell_tick(m, w, events);
 }
@@ -912,30 +915,30 @@ impl Goal for Peek {
     }
 }
 /// The shell's texture: plain or dyed.
-pub fn texture(m: &Mob) -> String {
+pub fn texture(m: &Mob) -> &'static str {
     const COLORS: [&str; 16] = [
-        "white",
-        "orange",
-        "magenta",
-        "light_blue",
-        "yellow",
-        "lime",
-        "pink",
-        "gray",
-        "light_gray",
-        "cyan",
-        "purple",
-        "blue",
-        "brown",
-        "green",
-        "red",
-        "black",
+        "entity/shulker/shulker_white",
+        "entity/shulker/shulker_orange",
+        "entity/shulker/shulker_magenta",
+        "entity/shulker/shulker_light_blue",
+        "entity/shulker/shulker_yellow",
+        "entity/shulker/shulker_lime",
+        "entity/shulker/shulker_pink",
+        "entity/shulker/shulker_gray",
+        "entity/shulker/shulker_light_gray",
+        "entity/shulker/shulker_cyan",
+        "entity/shulker/shulker_purple",
+        "entity/shulker/shulker_blue",
+        "entity/shulker/shulker_brown",
+        "entity/shulker/shulker_green",
+        "entity/shulker/shulker_red",
+        "entity/shulker/shulker_black",
     ];
     // Shulker.getColor: the saved byte is signed; 16 and above are undyed, and
     // DyeColor.byId sends a negative id to white (OutOfBoundsStrategy.ZERO).
     match m.extra.color as i8 {
-        16.. => "entity/shulker/shulker".into(),
-        c => format!("entity/shulker/shulker_{}", COLORS[c.max(0) as usize]),
+        16.. => "entity/shulker/shulker",
+        c => COLORS[c.max(0) as usize],
     }
 }
 /// `attachFace.getOpposite().getRotation()` by attach face: the open
@@ -1308,7 +1311,8 @@ mod tests {
     }
 
     /// `Shulker.hurtServer` returns false for an `AbstractArrow` while
-    /// `isClosed` (raw peek 0). An open shell takes the same arrow.
+    /// `isClosed` (raw peek 0). A thrown trident is one. An open shell takes
+    /// the same arrow.
     #[test]
     fn a_closed_shell_refuses_an_arrow() {
         let mut fixture = crate::health::TestLevel::new(0);
@@ -1318,19 +1322,24 @@ mod tests {
             ..Default::default()
         };
         let mut level = fixture.level().attacked_by(&attack);
-        let source = Damage::of(super::super::DamageKind::Arrow);
-        let mut closed = shulker();
-        closed.extra.counter = 0;
-        let health = closed.health;
-        assert!(
-            !closed.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]),
-            "a closed shell rejects the arrow"
-        );
-        assert_eq!(closed.health, health);
-        let mut open = shulker();
-        open.extra.counter = 30;
-        assert!(open.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]));
-        assert!(open.health < health);
+        for kind in [
+            super::super::DamageKind::Arrow,
+            super::super::DamageKind::Trident,
+        ] {
+            let source = Damage::of(kind);
+            let mut closed = shulker();
+            closed.extra.counter = 0;
+            let health = closed.health;
+            assert!(
+                !closed.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]),
+                "a closed shell rejects {kind:?}"
+            );
+            assert_eq!(closed.health, health);
+            let mut open = shulker();
+            open.extra.counter = 30;
+            assert!(open.damage_projectile(&mut level, 2.0, source, None, [0.0, 1.0]));
+            assert!(open.health < health);
+        }
     }
 
     #[test]

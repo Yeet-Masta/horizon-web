@@ -16,12 +16,34 @@ import collections
 import json
 import os
 import pathlib
+import posixpath
 import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "web" / "hazards.json"
 CODES = {"clippy::disallowed_methods", "clippy::disallowed_types"}
+# The top-level directories a call's file sits under: a path is kept from there on, so the
+# baseline matches whichever checkout (or OS) wrote it and whichever reads it.
+TOPS = ("crates/", "third_party/", "web/", "tools/")
+
+
+def key(path):
+    """`path` relative to the repository, with `/`: clippy names a file relatively or by its
+    absolute path (verbatim, `//?/C:/...` once turned, on Windows), and the baseline may come
+    from another checkout."""
+    path = path.replace("\\", "/")
+    if path.startswith("//?/"):
+        path = path[4:]
+    path = posixpath.normpath(path)
+    root = ROOT.as_posix().rstrip("/") + "/"
+    if path.lower().startswith(root.lower()):
+        return path[len(root):]
+    if not path.startswith(TOPS):
+        at = [i for i in (path.find("/" + top) for top in TOPS) if i >= 0]
+        if at:
+            return path[min(at) + 1:]
+    return path
 
 
 def clippy_messages():
@@ -53,7 +75,7 @@ def hazards(lines):
             continue
         span = next(s for s in msg["spans"] if s["is_primary"])
         method = msg["message"].split("`")[1]
-        found[(span["file_name"], method)].append(span["line_start"])
+        found[(key(span["file_name"]), method)].append(span["line_start"])
     return found
 
 
@@ -71,7 +93,10 @@ def main():
         BASELINE.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
         print(f"web_hazards: {sum(len(v) for v in found.values())} calls kept in {BASELINE.relative_to(ROOT)}")
         return 0
-    known = json.loads(BASELINE.read_text()) if BASELINE.exists() else {}
+    known = collections.defaultdict(dict)
+    for path, methods in (json.loads(BASELINE.read_text()) if BASELINE.exists() else {}).items():
+        for method, count in methods.items():
+            known[key(path)][method] = known[key(path)].get(method, 0) + count
     new = []
     for (path, method), at in sorted(found.items()):
         allowed = known.get(path, {}).get(method, 0)

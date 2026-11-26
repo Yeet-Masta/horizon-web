@@ -5,14 +5,26 @@
 //! - `recording.tmcpr`: binary stream of chronological timestamped network packets:
 //!   `[timestamp_ms: u32 big-endian][packet_length: u32 big-endian][packet_data: VarInt(packet_id) + payload]`
 //! - Optional `recording.tmcpr.crc32`: CRC32 of the packet stream.
+//! - Optional `markers.json`: the timeline's markers, in ReplayMod's format.
+//! - Optional `horizon/mod-data/<package id>.bin`: one opaque entry per mod.
+//!   A legacy `camera.json` is an alias for `replay_studio`'s entry.
 
-use super::spline::CameraTrack;
+use crate::file_id::{FileIdentity, reparse_point};
+#[cfg(not(target_family = "wasm"))]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+#[cfg(not(target_family = "wasm"))]
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use horizon_protocol::buf::{Reader, write_varint};
-use horizon_std::fs::{self, File, OpenOptions, PathExt as _};
+use horizon_std::{
+    fs::{self, File, OpenOptions, PathExt as _},
+    time::SystemTime,
+};
+use mod_api::REPLAY_EDIT_MAX_BYTES;
 use serde::{Deserialize, Serialize};
 use std::{
     io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// The most `metaData.json` may inflate to: real files are a few hundred bytes.
@@ -20,6 +32,14 @@ const MAX_METADATA_BYTES: u64 = 1 << 20;
 /// The most `recording.tmcpr` may inflate to. The reader streams to disk, but
 /// still caps archive expansion to protect disk space from hostile archives.
 const MAX_STREAM_BYTES: u64 = 1 << 30;
+/// A validated stream plus room for compression overhead and other entries.
+/// Editing bigger ZIPs is refused; ordinary playback doesn't need to copy them.
+const MAX_ARCHIVE_EDIT_BYTES: u64 = MAX_STREAM_BYTES + (64 << 20);
+const MAX_EDIT_ENTRY_COMPRESSED_BYTES: u64 = REPLAY_EDIT_MAX_BYTES as u64 + (64 << 10);
+const MARKERS_ENTRY: &str = "markers.json";
+const LEGACY_STUDIO_ENTRY: &str = "camera.json";
+/// The package id of the editor whose data was previously written as `camera.json`.
+pub const REPLAY_STUDIO_OWNER: &str = "replay_studio";
 /// Keep one seek anchor for every group of this many packets.
 const STREAM_INDEX_STRIDE: usize = 1024;
 /// How much recording time a stream and its metadata may hold in memory before
@@ -102,7 +122,7 @@ impl TimestampedPacket {
     }
 }
 
-/// An editor bookmark stored with a replay, without player identity data.
+/// A bookmark stored with a replay, without player identity data.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Marker {
@@ -121,6 +141,7 @@ fn sibling(dest: &Path, suffix: &str) -> PathBuf {
     dest.with_file_name(name)
 }
 
+#[cfg(not(windows))]
 fn create_private_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -193,21 +214,11 @@ impl McprWriter {
     /// Create a new replay writer that writes packets to a temporary stream file
     /// and finalizes into `dest_path` when finished.
     ///
-    /// Any recording a crash left in the destination's folder is packaged first
-    /// (see [`recover_crashed_recordings`]).
+    /// A crash's leftovers in the destination's folder are not packaged here:
+    /// [`recover_crashed_recordings_in_background`] does that off the caller's thread.
     pub fn new(dest_path: PathBuf, metadata: Metadata) -> io::Result<Self> {
         if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
-            if !parent.as_os_str().is_empty() {
-                match recover_crashed_recordings(parent) {
-                    Ok(report) if !report.recovered.is_empty() => log::info!(
-                        "Studio: recovered {} recording(s) a crash left behind",
-                        report.recovered.len()
-                    ),
-                    Ok(_) => {}
-                    Err(e) => log::warn!("Studio: could not look for crashed recordings: {e}"),
-                }
-            }
         }
         let temp_tmcpr_path = sibling(&dest_path, "tmcpr.tmp");
         let temp_meta_path = metadata_beside(&temp_tmcpr_path);
@@ -373,107 +384,6 @@ impl McprWriter {
         }
     }
 
-    /// Atomically replace the optional camera path without touching the packet
-    /// stream, metadata, or other archive entries.
-    pub fn replace_camera_track(path: &Path, track: &CameraTrack) -> io::Result<()> {
-        let part = sibling(path, "camera.part");
-        let result = (|| {
-            let file = File::open(path)?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let mut output = zip::ZipWriter::new(create_private_file(&part)?);
-            for index in 0..archive.len() {
-                let mut entry = archive.by_index(index).map_err(io::Error::other)?;
-                let name = entry
-                    .name()
-                    .map(|name| name.into_owned())
-                    .map_err(io::Error::other)?;
-                if name == "camera.json" {
-                    continue;
-                }
-                let options = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated)
-                    .large_file(entry.size() >= u32::MAX as u64);
-                if entry.is_dir() {
-                    output
-                        .add_directory(name, options)
-                        .map_err(io::Error::other)?;
-                } else {
-                    output.start_file(name, options).map_err(io::Error::other)?;
-                    io::copy(&mut entry, &mut output)?;
-                }
-            }
-            if !track.is_empty() {
-                output
-                    .start_file(
-                        "camera.json",
-                        zip::write::SimpleFileOptions::default()
-                            .compression_method(zip::CompressionMethod::Deflated),
-                    )
-                    .map_err(io::Error::other)?;
-                serde_json::to_writer_pretty(&mut output, track).map_err(io::Error::other)?;
-            }
-            let file = output.finish().map_err(io::Error::other)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&part, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&part);
-        }
-        result
-    }
-
-    /// Atomically replace the optional editor markers without touching packet data.
-    pub fn replace_markers(path: &Path, markers: &[Marker]) -> io::Result<()> {
-        let part = sibling(path, "markers.part");
-        let result = (|| {
-            let file = File::open(path)?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            let mut output = zip::ZipWriter::new(create_private_file(&part)?);
-            for index in 0..archive.len() {
-                let mut entry = archive.by_index(index).map_err(io::Error::other)?;
-                let name = entry
-                    .name()
-                    .map(|name| name.into_owned())
-                    .map_err(io::Error::other)?;
-                if name == "markers.json" {
-                    continue;
-                }
-                let options = zip::write::SimpleFileOptions::default()
-                    .compression_method(zip::CompressionMethod::Deflated)
-                    .large_file(entry.size() >= u32::MAX as u64);
-                if entry.is_dir() {
-                    output
-                        .add_directory(name, options)
-                        .map_err(io::Error::other)?;
-                } else {
-                    output.start_file(name, options).map_err(io::Error::other)?;
-                    io::copy(&mut entry, &mut output)?;
-                }
-            }
-            if !markers.is_empty() {
-                output
-                    .start_file(
-                        "markers.json",
-                        zip::write::SimpleFileOptions::default()
-                            .compression_method(zip::CompressionMethod::Deflated),
-                    )
-                    .map_err(io::Error::other)?;
-                serde_json::to_writer_pretty(&mut output, markers).map_err(io::Error::other)?;
-            }
-            let file = output.finish().map_err(io::Error::other)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&part, path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&part);
-        }
-        result
-    }
-
     fn package(&self, part: &Path) -> io::Result<()> {
         package_stream(
             &self.metadata,
@@ -530,7 +440,7 @@ fn package_stream(
     write!(zip, "{:08x}", checksum.finalize())?;
 
     if !markers.is_empty() {
-        zip.start_file("markers.json", options)?;
+        zip.start_file(MARKERS_ENTRY, options)?;
         serde_json::to_writer_pretty(&mut zip, markers).map_err(io::Error::other)?;
     }
 
@@ -622,8 +532,11 @@ struct SparseIndexEntry {
     group_start: u64,
 }
 
-/// Disk-backed inflated stream removed when the reader closes.
+/// Disk-backed inflated stream. The system removes it once its handle closes
+/// (deleted on close on Windows, unlinked at once elsewhere), so it never
+/// outlives the reader, not even a process that ends without unwinding.
 struct TemporaryStream {
+    #[cfg(test)]
     path: PathBuf,
     reader: BufReader<File>,
 }
@@ -639,9 +552,10 @@ impl TemporaryStream {
                 "horizon-mcpr-{}-{nanos}-{attempt}.tmcpr",
                 horizon_std::process::id()
             ));
-            match create_private_file(&path) {
+            match create_temporary_file(&path) {
                 Ok(file) => {
                     return Ok(Self {
+                        #[cfg(test)]
                         path,
                         reader: BufReader::with_capacity(64 * 1024, file),
                     });
@@ -656,10 +570,34 @@ impl TemporaryStream {
     }
 }
 
-impl Drop for TemporaryStream {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+/// A new private file the system deletes when its last handle closes.
+#[cfg(windows)]
+fn create_temporary_file(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .attributes(FILE_ATTRIBUTE_TEMPORARY)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn create_temporary_file(path: &Path) -> io::Result<File> {
+    let file = create_private_file(path)?;
+    fs::remove_file(path)?;
+    Ok(file)
+}
+
+/// The error a reader gives up with once its `cancel` flag is set.
+fn cancelled() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Interrupted,
+        "reading the recording was cancelled",
+    )
 }
 
 /// Reader for opening and streaming `.mcpr` replay files.
@@ -673,10 +611,236 @@ pub struct McprReader {
     /// Sparse frame index; timestamps are normalized to never go backwards.
     packet_index: Vec<SparseIndexEntry>,
     total_packets: usize,
-    /// Optional camera keyframes stored by the Studio editor.
-    pub camera_track: Option<CameraTrack>,
-    /// User-created editor bookmarks stored in the replay archive.
+    /// The last frame's timestamp (normalized): where the packet stream ends.
+    last_timestamp_ms: u32,
+    archive: zip::ZipArchive<File>,
+    revision: ArchiveRevision,
+    /// Bookmarks stored in the replay archive, in timeline order.
     pub markers: Vec<Marker>,
+}
+
+/// Identity and revision at the time the archive was read or last saved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ArchiveRevision {
+    identity: FileIdentity,
+    len: u64,
+    modified: SystemTime,
+}
+
+impl ArchiveRevision {
+    fn of(file: &File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        Ok(Self {
+            identity: FileIdentity::of(file)?,
+            len: metadata.len(),
+            modified: metadata.modified()?,
+        })
+    }
+
+    fn stale() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the recording changed since the replay opened it",
+        )
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn check(self, parent: &Dir, name: &Path) -> io::Result<()> {
+        if !parent.symlink_metadata(name)?.is_file() {
+            return Err(Self::stale());
+        }
+        let mut options = CapOpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            // Never block if a non-regular file took the name after the stat.
+            options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        }
+        let file = parent.open_with(name, &options)?.into_std();
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || reparse_point(&metadata) || Self::of(&file)? != self {
+            return Err(Self::stale());
+        }
+        Ok(())
+    }
+}
+
+/// A private sibling that will never grow past the physical archive limit.
+/// The ZIP writer can seek back to patch headers, so the cap is on the offset,
+/// not the total number of bytes written.
+struct CappedWrite<W> {
+    inner: W,
+    offset: u64,
+    max: u64,
+}
+
+impl<W> CappedWrite<W> {
+    fn new(inner: W, max: u64) -> Self {
+        Self {
+            inner,
+            offset: 0,
+            max,
+        }
+    }
+}
+
+impl<W: Write> Write for CappedWrite<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.len() as u64 > self.max.saturating_sub(self.offset) {
+            return Err(edit_too_large());
+        }
+        let written = self.inner.write(buf)?;
+        self.offset += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<W: Seek> Seek for CappedWrite<W> {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.offset = self.inner.seek(position)?;
+        Ok(self.offset)
+    }
+}
+
+fn edit_too_large() -> io::Error {
+    io::Error::new(io::ErrorKind::FileTooLarge, "replay storage limit exceeded")
+}
+
+fn mod_data_entry(owner: &str) -> io::Result<String> {
+    // Package ids are already authenticated by the host. Keep the ZIP namespace
+    // unambiguous even for internal callers (no aliases or path separators).
+    if !(1..=64).contains(&owner.len())
+        || !owner
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid mod id",
+        ));
+    }
+    Ok(format!("horizon/mod-data/{owner}.bin"))
+}
+
+/// Rewrite one entry (and remove its legacy alias, if any). Copy unrelated
+/// entries in compressed form: neither the packet stream nor unknown ZIP
+/// entries are inflated or recompressed. Playback keeps its own stream open.
+/// The web build has no directory descriptors to swap the file in through: no edit.
+#[cfg(target_family = "wasm")]
+fn replace_entry(
+    _archive: &mut zip::ZipArchive<File>,
+    _revision: ArchiveRevision,
+    _path: &Path,
+    _name: &str,
+    _legacy: Option<&str>,
+    _contents: Option<&[u8]>,
+) -> io::Result<(zip::ZipArchive<File>, ArchiveRevision)> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(target_family = "wasm"))]
+fn replace_entry(
+    archive: &mut zip::ZipArchive<File>,
+    revision: ArchiveRevision,
+    path: &Path,
+    name: &str,
+    legacy: Option<&str>,
+    contents: Option<&[u8]>,
+) -> io::Result<(zip::ZipArchive<File>, ArchiveRevision)> {
+    if revision.len > MAX_ARCHIVE_EDIT_BYTES {
+        return Err(edit_too_large());
+    }
+    if archive.has_duplicate_names() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "duplicate archive entries",
+        ));
+    }
+    let file_name = Path::new(path.file_name().ok_or(io::ErrorKind::InvalidInput)?);
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = Dir::open_ambient_dir(parent, cap_std::ambient_authority())?;
+    revision.check(&parent, file_name)?;
+
+    let part = sibling(Path::new(".horizon-replay"), "part");
+    let mut options = CapOpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = parent.open_with(&part, &options)?.into_std();
+    let result = (|| {
+        let mut output = zip::ZipWriter::new(CappedWrite::new(file, MAX_ARCHIVE_EDIT_BYTES));
+        output.set_raw_comment(archive.comment().into())?;
+        if let Some(data) = archive.raw_zip64_extensible_data_sector() {
+            output.set_raw_zip64_extensible_data_sector(data.into());
+        }
+        let mut remaining = MAX_ARCHIVE_EDIT_BYTES;
+        for index in 0..archive.len() {
+            let entry = archive.by_index_raw(index)?;
+            let entry_name = entry.name_raw();
+            if entry_name == name.as_bytes() || legacy.is_some_and(|l| entry_name == l.as_bytes()) {
+                continue;
+            }
+            // The raw copier does not preserve encryption flags in this ZIP build.
+            if entry.encrypted() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "cannot preserve an encrypted replay entry",
+                ));
+            }
+            remaining = remaining
+                .checked_sub(entry.compressed_size())
+                .ok_or_else(edit_too_large)?;
+            output.raw_copy_file(entry)?;
+        }
+        if let Some(contents) = contents {
+            output.start_file(
+                name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )?;
+            output.write_all(contents)?;
+        }
+        let file = output.finish()?.inner;
+        file.sync_all()?;
+        #[cfg(windows)]
+        let file = {
+            // Windows can defer the final modification time until the write handle closes.
+            let identity = FileIdentity::of(&file)?;
+            drop(file);
+            let mut options = CapOpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            let file = parent.open_with(&part, &options)?.into_std();
+            if FileIdentity::of(&file)? != identity {
+                return Err(ArchiveRevision::stale());
+            }
+            file
+        };
+        let saved_revision = ArchiveRevision::of(&file)?;
+        let saved = zip::ZipArchive::new(file)?;
+        // Check again after the copy: don't publish over a replacement that
+        // arrived while the sibling was being written.
+        revision.check(&parent, file_name)?;
+        parent.rename(&part, &parent, file_name)?;
+        Ok((saved, saved_revision))
+    })();
+    if result.is_err() {
+        let _ = parent.remove_file(&part);
+    }
+    result
 }
 
 fn read_entry(archive: &mut zip::ZipArchive<File>, name: &str, max: u64) -> io::Result<Vec<u8>> {
@@ -694,34 +858,70 @@ fn read_entry(archive: &mut zip::ZipArchive<File>, name: &str, max: u64) -> io::
     Ok(bytes)
 }
 
-fn read_optional_json<T: for<'de> Deserialize<'de>>(
+fn read_optional_entry(
     archive: &mut zip::ZipArchive<File>,
     name: &str,
     max: u64,
-) -> io::Result<Option<T>> {
+) -> io::Result<Option<Vec<u8>>> {
     match archive.by_name(name) {
         Ok(entry) => {
-            let mut bytes = Vec::new();
+            if entry.size() > max || entry.compressed_size() > MAX_EDIT_ENTRY_COMPRESSED_BYTES {
+                return Err(edit_too_large());
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
             entry.take(max + 1).read_to_end(&mut bytes)?;
             if bytes.len() as u64 > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{name} is larger than {max} bytes"),
-                ));
+                return Err(edit_too_large());
             }
-            serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            Ok(Some(bytes))
         }
         Err(zip::result::ZipError::FileNotFound) => Ok(None),
         Err(error) => Err(io::Error::new(io::ErrorKind::InvalidData, error)),
     }
 }
 
+fn read_optional_json<T: for<'de> Deserialize<'de>>(
+    archive: &mut zip::ZipArchive<File>,
+    name: &str,
+    max: u64,
+) -> io::Result<Option<T>> {
+    read_optional_entry(archive, name, max)?
+        .map(|bytes| {
+            serde_json::from_slice(&bytes)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        })
+        .transpose()
+}
+
+fn marker_entry(markers: &[Marker]) -> io::Result<Option<Vec<u8>>> {
+    if markers.is_empty() {
+        return Ok(None);
+    }
+    let mut json = CappedWrite::new(Vec::new(), REPLAY_EDIT_MAX_BYTES as u64);
+    serde_json::to_writer_pretty(&mut json, markers).map_err(io::Error::from)?;
+    Ok(Some(json.inner))
+}
+
 impl McprReader {
     /// Open an `.mcpr` replay archive from disk.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let file = File::open(path)?;
+        Self::from_file(File::open(path)?)
+    }
+
+    /// Read an `.mcpr` replay archive from a file already open, as a caller that checked where
+    /// the file is opened it: nothing is looked up by path again.
+    pub fn from_file(file: File) -> io::Result<Self> {
+        Self::from_file_cancellable(file, &AtomicBool::new(false))
+    }
+
+    /// As [`McprReader::from_file`], giving up with `Interrupted` soon after `cancel` is set:
+    /// inflating the stream and indexing it both check it as they go.
+    pub fn from_file_cancellable(file: File, cancel: &AtomicBool) -> io::Result<Self> {
+        // A request superseded before its worker started doesn't parse the archive at all.
+        if cancel.load(Ordering::Relaxed) {
+            return Err(cancelled());
+        }
+        let revision = ArchiveRevision::of(&file)?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -752,6 +952,9 @@ impl McprReader {
         let mut stream_crc = crc32fast::Hasher::new();
         let mut buffer = [0; 64 * 1024];
         loop {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(cancelled());
+            }
             let count = stream_entry.read(&mut buffer)?;
             if count == 0 {
                 break;
@@ -782,11 +985,13 @@ impl McprReader {
                 ));
             }
         }
-        let camera_track =
-            read_optional_json::<CameraTrack>(&mut archive, "camera.json", MAX_METADATA_BYTES)?;
-        let markers =
-            read_optional_json::<Vec<Marker>>(&mut archive, "markers.json", MAX_METADATA_BYTES)?
-                .unwrap_or_default();
+        let mut markers = read_optional_json::<Vec<Marker>>(
+            &mut archive,
+            MARKERS_ENTRY,
+            REPLAY_EDIT_MAX_BYTES as u64,
+        )?
+        .unwrap_or_default();
+        markers.sort_by_key(|marker| marker.time_ms);
         // A recording that stopped mid-write ends in a frame that isn't whole:
         // indexing and playback both stop before it.
         let mut packet_index = Vec::new();
@@ -795,6 +1000,9 @@ impl McprReader {
         let mut group_start = 0u64;
         let mut total_packets = 0usize;
         while let Some(frame) = frame_at(&mut stream.reader, offset, stream_size)? {
+            if total_packets.is_multiple_of(STREAM_INDEX_STRIDE) && cancel.load(Ordering::Relaxed) {
+                return Err(cancelled());
+            }
             if total_packets == 0 || frame.timestamp_ms > latest {
                 latest = frame.timestamp_ms;
                 group_start = offset;
@@ -818,9 +1026,77 @@ impl McprReader {
             end: offset,
             packet_index,
             total_packets,
-            camera_track,
+            last_timestamp_ms: latest,
+            archive,
+            revision,
             markers,
         })
+    }
+
+    pub(super) fn archive_identity(&self) -> FileIdentity {
+        self.revision.identity
+    }
+
+    /// Read a single owner on demand; arbitrary mod entries never affect playback.
+    pub(super) fn read_mod_data(&mut self, owner: &str) -> io::Result<Option<Vec<u8>>> {
+        let name = mod_data_entry(owner)?;
+        let max = REPLAY_EDIT_MAX_BYTES as u64;
+        match read_optional_entry(&mut self.archive, &name, max)? {
+            None if owner == REPLAY_STUDIO_OWNER => {
+                read_optional_entry(&mut self.archive, LEGACY_STUDIO_ENTRY, max)
+            }
+            data => Ok(data),
+        }
+    }
+
+    pub(super) fn write_mod_data(
+        &mut self,
+        path: &Path,
+        owner: &str,
+        data: Option<&[u8]>,
+    ) -> io::Result<()> {
+        if data.is_some_and(|data| data.len() > REPLAY_EDIT_MAX_BYTES) {
+            return Err(edit_too_large());
+        }
+        let legacy = (owner == REPLAY_STUDIO_OWNER).then_some(LEGACY_STUDIO_ENTRY);
+        self.edit(path, &mod_data_entry(owner)?, legacy, data)
+    }
+
+    pub(super) fn replace_markers(&mut self, path: &Path, markers: Vec<Marker>) -> io::Result<()> {
+        let json = marker_entry(&markers)?;
+        self.edit(path, MARKERS_ENTRY, None, json.as_deref())?;
+        self.markers = markers;
+        Ok(())
+    }
+
+    pub(super) fn insert_marker(&mut self, path: &Path, marker: Marker) -> io::Result<()> {
+        let at = self
+            .markers
+            .partition_point(|entry| entry.time_ms <= marker.time_ms);
+        self.markers.insert(at, marker);
+        let result = marker_entry(&self.markers)
+            .and_then(|json| self.edit(path, MARKERS_ENTRY, None, json.as_deref()));
+        if result.is_err() {
+            self.markers.remove(at);
+        }
+        result
+    }
+
+    fn edit(
+        &mut self,
+        path: &Path,
+        name: &str,
+        legacy: Option<&str>,
+        data: Option<&[u8]>,
+    ) -> io::Result<()> {
+        (self.archive, self.revision) =
+            replace_entry(&mut self.archive, self.revision, path, name, legacy, data)?;
+        Ok(())
+    }
+
+    /// The last packet's timestamp, 0 for a recording without packets.
+    pub fn last_timestamp_ms(&self) -> u32 {
+        self.last_timestamp_ms
     }
 
     /// Total number of packets indexed in the recording.
@@ -994,6 +1270,26 @@ pub fn recover_crashed_recordings(dir: &Path) -> io::Result<RecoveryReport> {
         }
     }
     Ok(report)
+}
+
+/// [`recover_crashed_recordings`] on a thread of its own, so starting a recording never waits
+/// for the packaging of older ones. Run it after the new stream exists: that stream is locked
+/// and carries this process's pid, so recovery leaves it (and any archive of this process still
+/// being finished) alone. What it does is logged.
+pub fn recover_crashed_recordings_in_background(dir: PathBuf) {
+    let spawned = horizon_std::thread::spawn_thread("Recording recovery", move || {
+        match recover_crashed_recordings(&dir) {
+            Ok(report) if !report.recovered.is_empty() => log::info!(
+                "Studio: recovered {} recording(s) a crash left behind",
+                report.recovered.len()
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("Studio: could not look for crashed recordings: {e}"),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("Studio: could not look for crashed recordings: {e}");
+    }
 }
 
 /// Whether the writer of `stream` may still be running.
@@ -1273,34 +1569,49 @@ mod tests {
     }
 
     #[test]
-    fn camera_track_is_saved_without_changing_recorded_packets() {
-        let scratch = Scratch::new("camera_track");
-        let path = scratch.0.join("camera.mcpr");
+    fn oversized_mod_data_is_refused_without_touching_the_archive() {
+        let scratch = Scratch::new("owned_data_cap");
+        let path = scratch.0.join("replay.mcpr");
         let mut writer = McprWriter::new(path.clone(), Metadata::default()).unwrap();
         writer.write_packet(0, 1, &[10, 20, 30]).unwrap();
         writer.finish(0).unwrap();
 
-        let track = CameraTrack {
-            keyframes: vec![super::super::spline::CameraKeyframe::new(
-                125,
-                [1.0, 64.0, -2.0],
-                45.0,
-                -10.0,
-                70.0,
-            )],
-        };
-        McprWriter::replace_camera_track(&path, &track).unwrap();
+        let oversize = vec![0; REPLAY_EDIT_MAX_BYTES + 1];
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut zip = zip::ZipWriter::new_append(file).unwrap();
+        zip.start_file(
+            "horizon/mod-data/editor.bin",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(&oversize).unwrap();
+        zip.finish().unwrap();
+
+        // An oversized optional entry doesn't keep the replay from opening.
+        let original = fs::read(&path).unwrap();
         let mut reader = McprReader::open(&path).unwrap();
-        assert_eq!(reader.camera_track, Some(track));
+        assert_eq!(
+            reader.read_mod_data("editor").unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(
+            reader
+                .write_mod_data(&path, "editor", Some(&oversize))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
 
         let packet = reader.next_packet().unwrap().unwrap();
         assert_eq!(
             (packet.timestamp_ms, packet.id, packet.payload),
             (0, 1, vec![10, 20, 30])
         );
-
-        McprWriter::replace_camera_track(&path, &CameraTrack::default()).unwrap();
-        assert!(McprReader::open(&path).unwrap().camera_track.is_none());
     }
 
     #[test]
@@ -1312,7 +1623,7 @@ mod tests {
         writer.add_marker(250, "Bookmark".into());
         writer.finish(250).unwrap();
 
-        let first = McprReader::open(&path).unwrap();
+        let mut first = McprReader::open(&path).unwrap();
         assert_eq!(
             first.markers,
             vec![Marker {
@@ -1324,7 +1635,7 @@ mod tests {
             time_ms: 400,
             label: "Cut".into(),
         }];
-        McprWriter::replace_markers(&path, &replacement).unwrap();
+        first.replace_markers(&path, replacement.clone()).unwrap();
         let mut reopened = McprReader::open(&path).unwrap();
         assert_eq!(reopened.markers, replacement);
         assert_eq!(
@@ -1378,6 +1689,52 @@ mod tests {
 
         drop(reader);
         assert!(!temp_path.exists(), "temporary stream is removed on close");
+    }
+
+    /// The inflated stream lives only as long as its handle, which the system closes even for
+    /// a process that never unwinds; a reader whose cancel flag is set gives up before reading.
+    #[test]
+    fn the_temporary_stream_goes_with_its_handle_and_a_cancelled_read_stops() {
+        let stream = TemporaryStream::create().unwrap();
+        let path = stream.path.clone();
+        // Elsewhere than Windows the name is gone at once; on Windows, once the handle closes.
+        #[cfg(not(windows))]
+        assert!(!path.exists());
+        let TemporaryStream { reader, .. } = stream;
+        drop(reader);
+        assert!(!path.exists(), "nothing of the stream is left by name");
+
+        let scratch = Scratch::new("cancel");
+        let mut tmcpr = Vec::new();
+        frame(&mut tmcpr, 0, 2, &[0x01, 1]);
+        let path = scratch.0.join("r.mcpr");
+        archive(
+            &path,
+            &serde_json::to_vec(&Metadata::default()).unwrap(),
+            &tmcpr,
+        );
+        let cancel = AtomicBool::new(true);
+        let Err(error) = McprReader::from_file_cancellable(File::open(&path).unwrap(), &cancel)
+        else {
+            panic!("a cancelled read gives up");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+
+        // Cancelled before it started: not even a broken archive is parsed.
+        let broken = scratch.0.join("broken.mcpr");
+        fs::write(&broken, b"PK not a zip").unwrap();
+        let Err(error) = McprReader::from_file_cancellable(File::open(&broken).unwrap(), &cancel)
+        else {
+            panic!("a cancelled read gives up");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        let Err(error) = McprReader::from_file_cancellable(
+            File::open(&broken).unwrap(),
+            &AtomicBool::new(false),
+        ) else {
+            panic!("a broken archive is refused");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -1556,6 +1913,38 @@ mod tests {
         assert_eq!(first.payload, vec![10, 20]);
         assert_eq!(reader.next_packet().unwrap().unwrap().id, 0x02);
         assert_eq!(reader.next_packet().unwrap(), None);
+    }
+
+    /// Starting a recording packages the crash's leftovers on a thread of its own: the new
+    /// writer's stream is left alone, and the old one becomes a recording without the caller
+    /// waiting for it.
+    #[test]
+    fn leftovers_are_recovered_in_the_background_beside_a_new_recording() {
+        let scratch = Scratch::new("background");
+        let mut tmcpr = Vec::new();
+        frame(&mut tmcpr, 5, 1, &[0x01]);
+        let stream = leftover(&scratch, "old", None, &tmcpr);
+        let mut writer = McprWriter::new(scratch.0.join("new.mcpr"), Metadata::default()).unwrap();
+        writer.write_packet(0, 0x01, &[]).unwrap();
+        assert!(
+            stream.exists(),
+            "making a writer does not wait for recovery"
+        );
+
+        recover_crashed_recordings_in_background(scratch.0.clone());
+        let deadline =
+            horizon_std::time::Instant::now() + horizon_std::time::Duration::from_secs(30);
+        while stream.exists() && horizon_std::time::Instant::now() < deadline {
+            horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(10));
+        }
+        assert!(!stream.exists(), "the leftover was recovered");
+        assert!(scratch.0.join("old.mcpr").exists());
+        assert!(
+            writer.stream_path().exists(),
+            "the live recording's stream was left alone"
+        );
+        writer.finish(1).unwrap();
+        assert!(scratch.0.join("new.mcpr").exists());
     }
 
     /// A leftover from before the sidecar existed is still packaged, with the

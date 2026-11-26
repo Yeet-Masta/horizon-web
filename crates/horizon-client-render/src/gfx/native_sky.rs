@@ -140,7 +140,8 @@ impl NativeSky {
         }
         let (module, layout) = build(device, globals, (frame, kept.as_ref()), stage)?;
         let present = present_constants(&module, constants);
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&super::dx12_compiler::module_label(&stage.label)),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -153,7 +154,8 @@ impl NativeSky {
             &present,
             format,
         );
-        if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(Self {

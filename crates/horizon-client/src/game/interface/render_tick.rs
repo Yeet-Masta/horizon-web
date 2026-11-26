@@ -600,6 +600,12 @@ impl Game<'_> {
         self.hold_fullbright();
         if running || !self.clock.still() {
             self.fog.tick_flicker();
+            if let Some(e) = self.eye_position() {
+                // Gui.tick eases the HUD vignette every client tick, including under /tick freeze.
+                // HORIZON_STILL holds it with the frozen world, like the fog flicker.
+                let brightness = self.eye_brightness(e);
+                self.screen_fx.tick_vignette(brightness);
+            }
         }
         if running {
             self.texture_ticks += 1;
@@ -665,9 +671,8 @@ impl Game<'_> {
         let mut laps = horizon_client::spans::laps();
         let eye = self.eye_position();
         if let Some(e) = eye {
-            let brightness = self.eye_brightness(e);
             let inside_portal = self.client_portal_effect();
-            self.screen_fx.tick(brightness, inside_portal);
+            self.screen_fx.tick_portal(inside_portal);
             // LocalPlayer.aiStep: processPortalCooldown after the transition
             // effect (a local world's player counts down in handlePortal).
             if self.remote.is_some() && self.portals.player.cooldown > 0 {
@@ -960,6 +965,13 @@ impl Game<'_> {
     /// `Util.getMillis` for what the frame shows (the world border's scroll, the hearts' blink,
     /// the glint's under the switch): under `HORIZON_STILL`, the world's ticks in milliseconds.
     pub(super) fn visual_millis(&self) -> i64 {
+        self.export.as_ref().map_or_else(
+            || self.visual_offset + self.base_visual_millis(),
+            super::export::Session::visual_millis,
+        )
+    }
+
+    pub(super) fn base_visual_millis(&self) -> i64 {
         if self.clock.still() {
             self.visual_ticks() as i64 * 50
         } else {
@@ -1054,8 +1066,8 @@ mod tests {
             BlockScreenEffect, ClientHost, ExtractBlockScreenEffectEvent, Flow, Hooks, ModEntry,
             Mods,
         };
-        static SEEN: std::sync::Mutex<Vec<(BlockScreenEffect, BlockStateId, BlockPos)>> =
-            std::sync::Mutex::new(Vec::new());
+        static SEEN: horizon_std::sync::Mutex<Vec<(BlockScreenEffect, BlockStateId, BlockPos)>> =
+            horizon_std::sync::Mutex::new(Vec::new());
         struct Mod(BlockStateId);
         #[mod_api::__subscriptions]
         impl Hooks for Mod {

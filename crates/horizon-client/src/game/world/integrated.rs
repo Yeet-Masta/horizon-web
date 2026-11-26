@@ -46,6 +46,10 @@ use std::{
 #[path = "integrated/capture.rs"]
 pub(super) mod capture;
 
+#[path = "integrated/export_clock.rs"]
+mod export_clock;
+pub(super) use export_clock::ExportLockstep;
+
 /// How long the window waits for the server thread to answer a `call`.
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// The error of a `call` without an answer: the server stopped, or it was
@@ -57,6 +61,17 @@ pub(super) const NO_ANSWER: &str =
 /// It reserves the same guest limit and host headroom as the main thread.
 const SERVER_THREAD_STACK: usize =
     horizon_guest_stack::GUEST_STACK_BYTES + horizon_guest_stack::HOST_HEADROOM;
+
+/// `horizon_threads::server_core::take`, told in the log: the server thread keeps one physical
+/// core while cooperating workers avoid it, until the hold drops as the thread ends.
+pub(super) fn take_server_core() -> Option<horizon_threads::server_core::ServerCore> {
+    let core = horizon_threads::server_core::take()?;
+    log::info!(
+        "Horizon: the server thread is pinned to CPUs {:?}",
+        core.cpus()
+    );
+    Some(core)
+}
 
 /// The server thread's stack size: [`SERVER_THREAD_STACK`], or what `RUST_MIN_STACK` asks for
 /// when that is larger. std reads the variable only for a thread spawned without a size, and
@@ -84,6 +99,9 @@ struct Flags {
     fail_tick: AtomicBool,
     /// `Minecraft.pause`: a single-player pause screen is open.
     paused: AtomicBool,
+    /// The manual clock exposed as a native internal. Game exports own `export_ticks`.
+    export_clock: AtomicBool,
+    export_ticks: export_clock::Slot,
     stop: AtomicBool,
     finished: AtomicBool,
     failure: Mutex<Option<String>>,
@@ -123,13 +141,27 @@ struct Flags {
 }
 
 impl Flags {
+    fn run_tick(&self, tick: impl FnOnce() -> Result<()>) -> std::result::Result<(), String> {
+        let message = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(tick)) {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => error.to_string(),
+            Err(panic) => format!(
+                "the server thread panicked: {}",
+                super::dedicated::panic_message(panic.as_ref())
+            ),
+        };
+        *self.failure.lock().unwrap() = Some(message.clone());
+        self.request_stop();
+        Err(message)
+    }
+
     #[cfg(not(target_family = "wasm"))]
     fn emergency_save(&self, server: horizon_std::thread::ThreadId, timeout: Duration) -> bool {
         if horizon_std::thread::current().id() == server || self.finished.load(Ordering::Acquire) {
             return true;
         }
         log::warn!("Horizon: saving the world before the crash");
-        self.stop.store(true, Ordering::Relaxed);
+        self.request_stop();
         let started = Instant::now();
         while !self.finished.load(Ordering::Acquire) {
             let Some(left) = timeout.checked_sub(started.elapsed()) else {
@@ -150,6 +182,7 @@ struct Finished(Arc<Flags>);
 impl Drop for Finished {
     fn drop(&mut self) {
         self.0.finished.store(true, Ordering::Release);
+        self.0.export_ticks.interrupt();
     }
 }
 
@@ -241,6 +274,7 @@ impl Integrated {
         self.call(move |g| {
             if let Some(host) = g.lan.as_mut() {
                 host.hub.ops.remove(&uuid);
+                host.hub.split_players.remove(&uuid);
             }
         });
     }
@@ -249,12 +283,14 @@ impl Integrated {
     pub fn join_split(&self, name: &str) -> Option<horizon_protocol::connection::Pipe> {
         let uuid = horizon_protocol::crypto::offline_uuid(name);
         self.flags.split_players.lock().unwrap().push(uuid);
+        self.flags.export_ticks.interrupt();
         let pipe = self
             .call(move |g| {
                 let host = g.lan.as_mut()?;
                 let owner = host.owner.as_ref()?.uuid;
                 let level = host.hub.ops.get(&owner).copied().unwrap_or(0);
                 host.hub.ops.insert(uuid, level);
+                host.hub.split_players.insert(uuid);
                 host.hub.lan.connect_local().ok()
             })
             .flatten();
@@ -278,6 +314,11 @@ impl Integrated {
     pub fn set_legacy_rules(&self, on: bool) {
         self.flags.legacy_rules.store(on, Ordering::Relaxed);
     }
+    #[cfg(test)]
+    pub(super) fn set_test_published(&self, port: u16) {
+        self.flags.published.store(port, Ordering::Relaxed);
+    }
+
     /// `IntegratedServer.getPort` while `isPublished`.
     pub fn published(&self) -> Option<u16> {
         Some(self.flags.published.load(Ordering::Relaxed)).filter(|&p| p != 0)
@@ -313,6 +354,32 @@ impl Integrated {
             Err(RecvTimeoutError::Disconnected) => None,
         }
     }
+    /// The original manual export clock remains available to declared native internals.
+    #[allow(dead_code, reason = "native mods can declare this internal")]
+    pub(super) fn export_clock(&self, active: bool) {
+        if !active || self.flags.export_ticks.active().is_none() {
+            self.flags.export_clock.store(active, Ordering::Release);
+        }
+    }
+
+    /// Run a tick for a caller holding the original manual export clock.
+    #[allow(dead_code, reason = "native mods can declare this internal")]
+    pub(super) fn export_tick(&self) -> Result<()> {
+        let flags = Arc::clone(&self.flags);
+        self.call(move |game| {
+            if !flags.export_clock.load(Ordering::Acquire) || flags.export_ticks.active().is_some()
+            {
+                return Err("the manual export clock is unavailable".to_owned());
+            }
+            if game.agent.hold_server {
+                return Err("the integrated server is held".to_owned());
+            }
+            flags.run_tick(|| game.tick_for_export(&flags))
+        })
+        .ok_or("the server did not answer an export tick")??;
+        Ok(())
+    }
+
     /// `execute`: run `f` on the server thread between two ticks, without
     /// waiting for it. False once the server has stopped.
     pub fn post(&self, f: impl FnOnce(&mut Game<'_>) + Send + 'static) -> bool {
@@ -324,7 +391,7 @@ impl Integrated {
     }
     /// Stop on the server thread; the window polls completion while drawing.
     pub fn request_stop(&self) {
-        self.flags.stop.store(true, Ordering::Relaxed);
+        self.flags.request_stop();
     }
     pub fn stopped(&self) -> bool {
         self.thread
@@ -576,6 +643,8 @@ impl Game<'_> {
             let _finished = Finished(server_flags.clone());
             // MinecraftServer.spin's Thread.setPriority(8).
             horizon_threads::favour_current();
+            // A core of its own, its SMT sibling left empty, while it runs.
+            let _core = take_server_core();
             let result = serve(
                 &res,
                 pack,
@@ -835,9 +904,24 @@ impl Game<'_> {
     fn integrated_tick_loop(&mut self, flags: &Flags) -> Result<()> {
         let mut next = Instant::now();
         let mut was_paused = false;
-        let mut failure = None;
-        while !flags.stop.load(Ordering::Relaxed) {
-            self.run_tasks();
+        let mut was_lockstep = false;
+        while !flags.stop.load(Ordering::Acquire) {
+            self.run_tasks(flags);
+            if flags.stop.load(Ordering::Acquire) {
+                break;
+            }
+            if let Some(clock) = flags.export_ticks.active() {
+                was_lockstep = true;
+                if !self.run_export_turn(flags, &clock) {
+                    break;
+                }
+                continue;
+            }
+            if std::mem::take(&mut was_lockstep) {
+                // Time wall-clock scheduling from the release of the export clock.
+                next = Instant::now();
+                was_paused = false;
+            }
             if self.agent.hold_server {
                 // Keep servicing control requests so the fixture can release the barrier.
                 // Unlike /tick freeze, no player's queued packets are applied here.
@@ -845,76 +929,61 @@ impl Game<'_> {
                 continue;
             }
             self.server_tick_deadline = Some(next + self.clock.tick_duration());
-            let paused = flags.paused.load(Ordering::Relaxed);
-            let ticked =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                    #[cfg(test)]
-                    if flags.fail_tick.swap(false, Ordering::Relaxed) {
-                        self.level.name = "saved after integrated tick panic".into();
-                        self.experience.total = 37;
-                        panic!("integrated tick fixture");
-                    }
-                    if paused && !was_paused {
-                        // IntegratedServer.tickServer: the tick the game pauses saves
-                        // everything (saveEverything, without flushing), as an
-                        // autosave does.
-                        log::info!("Saving and pausing game...");
-                        self.save_game_with(false)?;
-                    }
-                    was_paused = paused;
-                    if paused {
-                        // Only the connections run.
-                        self.tick_server_measured(true)?;
-                    } else {
-                        self.follow_distances(flags);
-                        let cpu = horizon_client::spans::thread_cpu();
-                        let started = Instant::now();
-                        self.tick_server_measured(false)?;
-                        // MinecraftServer.tickServer's tick times, for /tick query.
-                        self.clock.record(started.elapsed());
-                        // Parallel Tick's Auto decides here, between ticks, how the next one runs.
-                        let on_cpu = horizon_client::spans::thread_cpu().zip(cpu);
-                        horizon_client::parallel::after_tick(
-                            started.elapsed().as_secs_f32() * 1000.0,
-                            on_cpu.map(|(end, start)| (end - start).as_secs_f32() * 1000.0),
-                        );
-                        self.debug_charts.log_tick(started, started.elapsed());
-                        flags.smoothed_tick_ms.store(
-                            self.debug_charts.smoothed_tick_ms.to_bits(),
-                            Ordering::Relaxed,
-                        );
-                        if let (Some(terrain), Ok(mut terrains)) =
-                            (self.end.locator(), flags.terrain.lock())
-                        {
-                            terrains.insert(self.dim.id(), terrain);
-                        }
-                    }
-                    Ok(())
-                }));
-            match ticked {
-                Ok(Ok(())) => super::world_loading::set_open_progress(1.0),
-                Ok(Err(error)) => {
-                    failure = Some(error);
-                    break;
+            let export_clock = flags.export_clock.load(Ordering::Acquire);
+            let paused = export_clock || flags.paused.load(Ordering::Relaxed);
+            let ticked = flags.run_tick(|| {
+                #[cfg(test)]
+                if flags.fail_tick.swap(false, Ordering::Relaxed) {
+                    self.level.name = "saved after integrated tick panic".into();
+                    self.experience.total = 37;
+                    panic!("integrated tick fixture");
                 }
-                Err(payload) => {
-                    failure = Some(
-                        format!(
-                            "the server thread panicked: {}",
-                            super::dedicated::panic_message(payload.as_ref())
-                        )
-                        .into(),
+                if paused && !was_paused && !export_clock {
+                    // IntegratedServer.tickServer: the tick the game pauses saves
+                    // everything (saveEverything, without flushing), as an
+                    // autosave does.
+                    log::info!("Saving and pausing game...");
+                    self.save_game_with(false)?;
+                }
+                was_paused = paused;
+                if paused {
+                    // Only the connections run.
+                    self.tick_server_measured(true)?;
+                } else {
+                    self.follow_distances(flags);
+                    let cpu = horizon_client::spans::thread_cpu();
+                    let started = Instant::now();
+                    self.tick_server_measured(false)?;
+                    // MinecraftServer.tickServer's tick times, for /tick query.
+                    self.clock.record(started.elapsed());
+                    // Parallel Tick's Auto decides here, between ticks, how the next one runs.
+                    let on_cpu = horizon_client::spans::thread_cpu().zip(cpu);
+                    horizon_client::parallel::after_tick(
+                        started.elapsed().as_secs_f32() * 1000.0,
+                        on_cpu.map(|(end, start)| (end - start).as_secs_f32() * 1000.0),
                     );
-                    break;
+                    self.debug_charts.log_tick(started, started.elapsed());
+                    flags.smoothed_tick_ms.store(
+                        self.debug_charts.smoothed_tick_ms.to_bits(),
+                        Ordering::Relaxed,
+                    );
+                    if let (Some(terrain), Ok(mut terrains)) =
+                        (self.end.locator(), flags.terrain.lock())
+                    {
+                        terrains.insert(self.dim.id(), terrain);
+                    }
                 }
+                Ok(())
+            });
+            if ticked.is_err() {
+                break;
             }
+            super::world_loading::set_open_progress(1.0);
             self.apply_publish();
             self.publish_load_view();
             self.wait_for_next_server_tick(&mut next, paused);
         }
-        if failure.is_none() {
-            self.finish_server_capture();
-        }
+        let failure = flags.failure.lock().unwrap().clone();
         if let Some(error) = failure {
             let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.finish_server_capture();
@@ -926,7 +995,7 @@ impl Game<'_> {
                 );
             }
             let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.stop_after_crash(&error.to_string())
+                self.stop_after_crash(&error)
             }));
             match stopped {
                 Ok(Ok(())) => {}
@@ -936,8 +1005,9 @@ impl Game<'_> {
                     super::dedicated::panic_message(payload.as_ref())
                 ),
             }
-            return Err(error);
+            return Err(error.into());
         }
+        self.finish_server_capture();
         Ok(())
     }
 
@@ -1051,7 +1121,7 @@ impl Game<'_> {
         };
         startup::time("server.lan_host", || self.lan_host(settings, net, config))?;
         let commands = self.allow_commands();
-        let pipe = {
+        {
             let host = self
                 .lan
                 .as_mut()
@@ -1064,8 +1134,7 @@ impl Game<'_> {
                 uuid: owner,
                 saved: Some(saved),
             });
-            host.hub.lan.connect_local()?
-        };
+        }
         self.serving = Some(Serving {
             flags: flags.clone(),
             tasks,
@@ -1079,6 +1148,15 @@ impl Game<'_> {
         view.start(Stage::LoadInitialChunks, 0);
         startup::time("server.prepare_levels", || self.prepare_levels())?;
         view.finish(Stage::LoadInitialChunks);
+        // The local login timer starts with the connection. Don't start it while
+        // saved tickets are still loading and the client has no pipe to use.
+        let pipe = self
+            .lan
+            .as_ref()
+            .ok_or("the integrated server did not start")?
+            .hub
+            .lan
+            .connect_local()?;
         let _ = ready.send(Ok((pipe, self.level.name.clone())));
         startup::time("server.settle_spawn", || self.settle_spawn())
     }
@@ -1135,10 +1213,12 @@ pub(super) struct ServerOptions {
 impl Game<'_> {
     /// IntegratedServer.teardownPublishedState, also reached when a shutdown
     /// callback unwinds before the normal stop path can retire the server.
-    pub(super) fn stop_serving(&mut self) {
+    pub(in crate::game) fn stop_serving(&mut self) {
         if let Some(s) = self.serving.take() {
             s.flags.published.store(0, Ordering::Relaxed);
         }
+        // What a mod switched on for this server (packet counting, mob sampling) ends with it.
+        self.stop_mod_diagnostics();
     }
 
     /// Whether this game is an integrated server's.
@@ -1258,15 +1338,25 @@ impl Game<'_> {
     }
 
     /// The window's requests, between two ticks.
-    fn run_tasks(&mut self) {
+    fn run_tasks(&mut self, flags: &Flags) {
         let tasks: Vec<Task> = match &self.serving {
             Some(s) => s.tasks.try_iter().collect(),
             None => return,
         };
         for task in tasks {
-            task(self);
-            self.apply_publish();
+            if !self.run_task(flags, task) {
+                break;
+            }
         }
+    }
+
+    fn run_task(&mut self, flags: &Flags, task: Task) -> bool {
+        task(self);
+        if flags.stop.load(Ordering::Acquire) {
+            return false;
+        }
+        self.apply_publish();
+        true
     }
     /// `IntegratedServer.getPort` while published.
     pub(super) fn published_port(&self) -> Option<u16> {
@@ -1297,6 +1387,7 @@ impl Game<'_> {
         };
         log::info!("Published LAN server on port {port}");
         s.flags.published.store(port, Ordering::Relaxed);
+        s.flags.export_ticks.interrupt();
         s.pending = Some(Publish::Open(listener, LanSettings { port, ..settings }));
         self.apply_publish();
         Ok(port)
@@ -1590,6 +1681,12 @@ impl Game<'_> {
         if self.options.split_guest || !horizon_client::crash::server_crashed() {
             return;
         }
+        if self.pending_mod_export() {
+            self.abort_export(Some("the integrated server crashed during export".into()));
+            if self.pending_mod_export() {
+                return;
+            }
+        }
         // A crash while the world is still loading leaves the server in `integrated_starting`.
         let starting = self
             .integrated_starting
@@ -1605,9 +1702,31 @@ impl Game<'_> {
 }
 
 #[cfg(test)]
+pub(super) fn with_export_clock(test: impl FnOnce(&Integrated)) {
+    export_clock::tests::with_clock(|server, _| test(server));
+}
+
+#[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use mod_api::prelude::*;
+
+    #[test]
+    fn failed_server_ticks_record_the_reason_and_request_shutdown() {
+        let tick_cases: [(fn() -> Result<()>, &str); 2] = [
+            (|| Err("export tick error".into()), "export tick error"),
+            (
+                || panic!("export tick panic"),
+                "the server thread panicked: export tick panic",
+            ),
+        ];
+        for (tick, expected) in tick_cases {
+            let flags = Flags::default();
+            assert_eq!(flags.run_tick(tick).unwrap_err(), expected);
+            assert!(flags.stop.load(Ordering::Acquire));
+            assert_eq!(flags.failure.lock().unwrap().as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     #[ignore = "daily"]

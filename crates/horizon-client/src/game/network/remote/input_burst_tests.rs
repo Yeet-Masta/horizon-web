@@ -16,10 +16,10 @@ fn counts(packets: &[String]) -> [usize; 3] {
     .map(|id| packets.iter().filter(|p| *p == id).count())
 }
 
-/// A player's burst between two ticks, keys and buttons: the number key selects at the tick's
-/// pick, the click punches, then the drop keys and the swap act in the order pressed, the first
-/// drop telling the server of the new slot (`ensureHasSentCarriedItem`). One press of each a tick
-/// for twenty ticks acts once a tick, on its own tick.
+/// A player's burst between two ticks, keys and buttons: as in vanilla's `Minecraft.handleKeybinds`,
+/// the number key selects first, the drop keys and the swap act next in the order pressed (the first
+/// drop telling the server of the new slot via `ensureHasSentCarriedItem`), and the click punches
+/// after them. One press of each a tick for twenty ticks acts once a tick, on its own tick.
 #[test]
 #[ignore = "daily"]
 fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
@@ -42,11 +42,11 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
         assert_eq!(
             sent(packets),
             [
-                "minecraft:punch",
                 "minecraft:set_carried_item",
                 "minecraft:player_action",
                 "minecraft:player_action",
-                "minecraft:player_action"
+                "minecraft:player_action",
+                "minecraft:punch",
             ]
         );
         assert_eq!(game.selected, 1);
@@ -58,9 +58,38 @@ fn a_players_burst_acts_on_the_next_tick_in_the_order_pressed() {
             game.remote_handle_input();
             assert_eq!(
                 sent(packets),
-                ["minecraft:punch", "minecraft:player_action"]
+                ["minecraft:player_action", "minecraft:punch"]
             );
         }
+    });
+}
+
+/// Number-key selection, swap (F) and drop (Q) act before attack/use in the same tick, matching
+/// vanilla's `Minecraft.handleKeybinds` order (`pick` -> number keys -> F/Q/E -> attack/use/pick).
+/// The swap goes out as pressed; the drop after it is the first to tell the server of the new slot.
+#[test]
+#[ignore = "daily"]
+fn swap_and_drop_run_before_attack() {
+    with_pressing_game(|game, packets, _| {
+        game.set_mode_id(1);
+        game.forced_hit = None;
+        game.inventory[1] = Some(ItemStack::new("minecraft:stone", 64));
+        game.play_mouse(MouseButton::Left, true).unwrap();
+        game.play_mouse(MouseButton::Left, false).unwrap();
+        game.key_pressed(KeyCode::Digit2, KeyCode::Digit2).unwrap();
+        game.key_pressed(KeyCode::KeyF, KeyCode::KeyF).unwrap();
+        game.key_pressed(KeyCode::KeyQ, KeyCode::KeyQ).unwrap();
+        game.remote_handle_input();
+        assert_eq!(
+            sent(packets),
+            [
+                "minecraft:player_action",
+                "minecraft:set_carried_item",
+                "minecraft:player_action",
+                "minecraft:punch",
+            ]
+        );
+        assert_eq!(game.selected, 1);
     });
 }
 
@@ -128,5 +157,92 @@ fn a_full_queue_refuses_the_entry_and_the_call_returns() {
         acted[2] = triggered.lock().unwrap().len();
         assert_eq!(acted, [1024, 1024, 1024]);
         assert!(game.hotbar_presses.entries().is_empty());
+    });
+}
+
+/// Sprint hits on targets whose `Entity.hurtClient` returns true (boats, minecarts, End crystals,
+/// shulker bullets) slow the attacker's horizontal velocity by 0.6 and end sprinting; targets
+/// whose `hurtClient` is false (primed TNT) leave sprint and velocity untouched.
+#[test]
+#[ignore = "daily"]
+fn sprint_hit_on_boat_cart_crystal_or_shulker_bullet_slows_attacker() {
+    with_pressing_game(|game, _, _| {
+        game.boats.push(crate::game::boats::Boat::new(
+            801,
+            "oak".into(),
+            Vec3::new(0.0, 65.0, 2.0),
+            0.0,
+        ));
+        game.carts.push(crate::game::minecarts::Minecart::new(
+            802,
+            crate::game::minecarts::CartKind::Rideable,
+            Vec3::new(0.0, 65.0, 2.0),
+        ));
+        game.crystals.push(crate::game::dragon::Crystal {
+            attachment_lifetime: Default::default(),
+            join: Default::default(),
+            id: 803,
+            position: Vec3::new(0.0, 65.0, 2.0),
+            show_bottom: false,
+            time: 0,
+            beam: None,
+            invulnerable: false,
+            fall: (false, 0.0),
+            motion: Vec3::ZERO,
+            rotation: [0.0, 0.0],
+        });
+        let mut bullet = horizon_client::projectiles::Projectile::new(
+            horizon_client::projectiles::ProjectileKind::ShulkerBullet {
+                target: None,
+                dir: Some(1),
+                steps: 0,
+                delta: [0.0; 3],
+                seed: 0,
+            },
+            Vec3::new(0.0, 65.0, 2.0),
+            None,
+        );
+        bullet.id = 804;
+        game.creatures.projectiles.push(bullet);
+        game.add_primed_tnt(
+            horizon_core::position::BlockPos::new(0, 65, 2),
+            0.0,
+            80,
+            None,
+            None,
+        );
+        let tnt_id = game.tnts[0].id as i32;
+
+        for (label, id, should_slow) in [
+            ("boat", 801, true),
+            ("minecart", 802, true),
+            ("end_crystal", 803, true),
+            ("shulker_bullet", 804, true),
+            ("primed_tnt", tnt_id, false),
+        ] {
+            game.hand_strength.ticker = 20;
+            let p = game.player.as_mut().unwrap();
+            p.sprinting = true;
+            p.velocity = Vec3::new(1.0, 0.25, -0.5);
+            assert!(game.remote_attack_entity(id, 2.0), "{label}");
+            let p = game.player.as_ref().unwrap();
+            if should_slow {
+                assert!(!p.sprinting, "{label} should stop sprinting");
+                assert!((p.velocity.x - 0.6).abs() < 1e-6, "{label}: {:?}", p.velocity);
+                assert!(
+                    (p.velocity.y - 0.25).abs() < 1e-6,
+                    "{label}: {:?}",
+                    p.velocity
+                );
+                assert!(
+                    (p.velocity.z - -0.3).abs() < 1e-6,
+                    "{label}: {:?}",
+                    p.velocity
+                );
+            } else {
+                assert!(p.sprinting, "{label} must not stop sprinting");
+                assert!((p.velocity.x - 1.0).abs() < 1e-6, "{label}: {:?}", p.velocity);
+            }
+        }
     });
 }

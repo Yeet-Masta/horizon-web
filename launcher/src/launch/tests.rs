@@ -22,6 +22,22 @@ fn variables_are_read_and_written_back() {
     assert!(parse_env("").unwrap().is_empty());
 }
 
+/// `parse_env` ends a word at any whitespace, so a value with a tab, a no-break space or a line
+/// break is written in quotes too. Unquoted, it was refused on Save, or read back as two variables.
+#[test]
+fn a_value_with_any_whitespace_is_read_back() {
+    for value in [
+        "a\tb",
+        "two\u{a0}words",
+        "full\u{3000}width",
+        "line1\nline2",
+        "1\u{a0}B=2",
+    ] {
+        let env = BTreeMap::from([("NAME".to_string(), value.to_string())]);
+        assert_eq!(parse_env(&env_line(&env)), Ok(env), "{value:?}");
+    }
+}
+
 #[test]
 fn the_java_heap_slider_reaches_the_computers_memory() {
     assert_eq!(memory_at(1., 16384), 16384);
@@ -277,8 +293,13 @@ fn sleeper_actor() {
 #[cfg(windows)]
 fn actor(name: &str, words: &[&str]) -> Command {
     let mut c = Command::new(std::env::current_exe().unwrap());
-    c.args(["--exact", &format!("launch::tests::{name}"), "--"])
-        .args(words);
+    c.args([
+        "--include-ignored",
+        "--exact",
+        &format!("launch::tests::{name}"),
+        "--",
+    ])
+    .args(words);
     c
 }
 

@@ -210,8 +210,15 @@ pub(super) enum PendingWorldEntry {
         realm: bool,
         /// A transfer's carried-over server cookies (`TransferState`).
         cookies: Option<horizon_client::net::Cookies>,
+        /// Quick play's join (`--quickPlayMultiplayer`, `--server`).
+        quick_play: bool,
     },
     StudioReplay(std::path::PathBuf),
+    /// A mod's replay, already read (`replay_open`): it is carried, never reopened by name.
+    PreparedReplay {
+        driver: Box<horizon_client::studio::ReplayDriver>,
+        origin: super::native_replay::ReplayOrigin,
+    },
 }
 
 pub(super) struct WorldRestLoader {

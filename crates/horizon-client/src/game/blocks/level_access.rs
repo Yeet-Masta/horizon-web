@@ -195,6 +195,12 @@ impl LevelAccess for GameLevel<'_> {
         self.native_block_grow_feature(self.dimension, pos, &mut feature, &mut cancel);
         feature.filter(|_| !cancel).map(std::borrow::Cow::Owned)
     }
+    fn structure_grow(&self, source: BlockPos, placed: &[[i32; 3]]) {
+        if self.native_authoritative && mod_api::__private::listened(mod_api::HookId::StructureGrow)
+        {
+            self.native_structure_grow(self.dimension, source, placed);
+        }
+    }
     fn crop_grow_pre(&mut self, pos: BlockPos, state: BlockStateId, vanilla: bool) -> bool {
         if !self.native_authoritative || !mod_api::__private::listened(mod_api::HookId::CropGrowPre)
         {
@@ -547,6 +553,12 @@ impl LevelAccess for GameLevel<'_> {
             self.native_analog_output(self.dimension, pos, state, direction, &mut output);
         }
         output.clamp(0, 15)
+    }
+    /// Only the server's switch counts: a client replays what its server sent (a piston's block
+    /// event), whatever its own copy of the mod list says.
+    #[inline]
+    fn template_suppressed(&self, state: BlockStateId) -> bool {
+        self.native_authoritative && super::code_block_owners::suppressed(self.registry, state)
     }
     fn before_random_tick(
         &mut self,
@@ -1108,11 +1120,28 @@ impl LevelAccess for GameLevel<'_> {
             .get(&[pos.x, pos.y, pos.z])
             .map(|s| s.status == horizon_client::block_entity_anim::ShulkerStatus::Closed)
     }
+    fn shulker_lid_progress(&self, pos: BlockPos) -> Option<f32> {
+        self.world
+            .shulkers
+            .get(&[pos.x, pos.y, pos.z])
+            .map(|s| s.progress)
+    }
     fn remove_block_entity(&mut self, pos: BlockPos, old: BlockStateId, side_effects: bool) -> u8 {
         if let Some(change) = &mut self.command_block_transition
             && change.preserve(self.world, pos, old)
         {
             // Returning 0 skips remove_entity's side effects once; command blocks have no contents or drops.
+            return 0;
+        }
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        // A cauldron action may already have put the incoming holder in storage
+        // so the mod could fill it within the savepoint. It is not the old holder.
+        let key = (pos.x, pos.y, pos.z);
+        if self.facts.get(old).name.as_ref() == "minecraft:cauldron"
+            && self.facts.get(self.block_state(pos)).name.as_ref() == WATER_CAULDRON
+            && matches!(self.world.block_entities.get(&key), Some(BlockEntity::Mod(entity))
+                if Some(entity.id()) == type_for(WATER_CAULDRON))
+        {
             return 0;
         }
         self.remove_entity(pos, old, side_effects)
@@ -1128,8 +1157,10 @@ impl LevelAccess for GameLevel<'_> {
         };
         let name = &block.name;
         let tag = Tag::Compound(nbt);
-        if let Some((key, entity)) = horizon_client::save::decode_block_entity_for_block(&tag, name)
+        if let Some((key, mut entity)) =
+            horizon_client::save::decode_block_entity_for_block(&tag, name)
         {
+            entity.clean_stacks(&self.items.component_defaults);
             self.world.block_entities.insert(key, entity);
             if tag.get("LootTable").is_some() {
                 self.emit(LevelEvent::ContainerLootTable { pos, tag });

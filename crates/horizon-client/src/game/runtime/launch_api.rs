@@ -102,7 +102,25 @@ pub mod exit_code {
     pub const USAGE: i32 = 2;
     /// A panic; a crash report was saved.
     pub const PANIC: i32 = 101;
+    /// A dedicated server's `/restart`: saved and stopped, to be started again by `horizon-server`
+    /// (crates/horizon-server/src/engine.rs holds the same number).
+    pub const RESTART: i32 = 75;
+
+    static RESTART_REQUESTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// `/restart` stopped a dedicated server: entry.rs exits with `exit_code::RESTART` once it is saved.
+    pub fn restart_requested() -> bool {
+        RESTART_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_restart_requested() {
+        RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
+
+/// Set by `horizon-server` in the game's environment: something outlives the game and starts it again.
+pub const SUPERVISED_ENV: &str = "HORIZON_SUPERVISED";
 
 const EXIT_CODES: &[(i32, &str)] = &[
     (
@@ -120,6 +138,10 @@ const EXIT_CODES: &[(i32, &str)] = &[
     (
         exit_code::PANIC,
         "The game panicked. A crash report was saved.",
+    ),
+    (
+        exit_code::RESTART,
+        "A dedicated server saved and stopped on `/restart`: horizon-server starts it again.",
     ),
 ];
 
@@ -266,7 +288,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(o.fullscreen && o.session_stdin);
-        assert_eq!(o.game_dir, Some(std::env::current_dir().unwrap().join("g")));
+        assert_eq!(
+            o.game_dir,
+            Some(horizon_std::env::current_dir().unwrap().join("g"))
+        );
         assert!(parse(&["--launch-api"]).unwrap().is_none());
         assert!(parse(&["--no-such-option"]).is_err());
     }
@@ -274,15 +299,18 @@ mod tests {
     #[test]
     #[ignore = "daily"]
     fn developer_offline_never_consumes_inherited_sessions() {
-        if let Some(file) = std::env::var_os("OFFLINE_SESSION_TEST_FILE") {
+        if let Some(file) = horizon_std::env::var_os("OFFLINE_SESSION_TEST_FILE") {
             assert!(parse(&["--developer-single-player"]).is_err());
-            assert_eq!(std::fs::read(file).unwrap(), b"unconsumed session sentinel");
+            assert_eq!(
+                horizon_std::fs::read(file).unwrap(),
+                b"unconsumed session sentinel"
+            );
             return;
         }
         let root = tempfile::tempdir().unwrap();
         let file = root.path().join("session.json");
-        std::fs::write(&file, b"unconsumed session sentinel").unwrap();
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
+        horizon_std::fs::write(&file, b"unconsumed session sentinel").unwrap();
+        let result = std::process::Command::new(horizon_std::env::current_exe().unwrap())
             .args([
                 "--include-ignored",
                 "--exact",
@@ -299,7 +327,7 @@ mod tests {
             String::from_utf8_lossy(&result.stdout)
         );
         assert_eq!(
-            std::fs::read(&file).unwrap(),
+            horizon_std::fs::read(&file).unwrap(),
             b"unconsumed session sentinel"
         );
     }
@@ -334,13 +362,14 @@ mod tests {
     #[test]
     fn game_uses_the_command_selection_context() {
         use horizon_mod_package::selection::{LaunchArguments, content_packages};
-        use std::{collections::BTreeSet, fs, process::Command};
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        use horizon_std::fs;
+        use std::{collections::BTreeSet, process::Command};
+        let nonce = horizon_std::time::SystemTime::now()
+            .duration_since(horizon_std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("launch-selection-{}-{nonce}", std::process::id()));
+        let root = horizon_std::env::temp_dir()
+            .join(format!("launch-selection-{}-{nonce}", std::process::id()));
         for (file, id) in [
             ("horizon-mods/base.hmod", "base"),
             ("other/horizon-mods/other.hmod", "other"),

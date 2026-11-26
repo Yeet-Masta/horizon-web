@@ -37,19 +37,21 @@ impl Launcher {
                     }
                     if let Ok(list) = &r {
                         horizon_launcher::nightly::note_published(list);
+                        // Nightlies of one day are ordered by when they came out, known now.
+                        self.installed = backend::installed();
                     }
                     self.releases = r.map_or_else(Load::Failed, Load::Ready);
                     self.notes.clear();
                 }
                 Msg::ReleasesFromNetwork(list) => {
                     horizon_launcher::nightly::note_published(&list);
+                    self.installed = backend::installed();
                     self.stable_failed = None;
                     self.releases = Load::Ready(list);
                     self.notes.clear();
                 }
                 Msg::StableRetry(next) => {
-                    // The same download under its new build: it stays the instance's, and keeps
-                    // the version picked on Versions.
+                    // The same download under its new tag still belongs to the instance's update.
                     if self.stable_install.take().is_some() {
                         self.instance_install = Some(next.tag.clone());
                         self.stable_install = Some(next);
@@ -60,6 +62,7 @@ impl Launcher {
                     self.multiplayer.stale();
                     telemetry::set_official_server(&links.official_server);
                     self.links = links;
+                    self.follow_min_launcher(cx);
                 }
                 // The page reads is_prepared when drawn; `changed` redraws it.
                 Msg::Reused(_) => self.installed = backend::installed(),
@@ -182,8 +185,9 @@ impl Launcher {
                     self.installing = None;
                     self.bar = (0., 0.);
                     self.installed = backend::installed();
-                    let as_update = self.update_install.take().filter(|t| *t == tag);
+                    let as_update = self.update_install.take_if(|t| *t == tag);
                     let for_instance = self.instance_install.take_if(|t| *t == tag).is_some();
+                    let manual_target = self.manual_install_for.take();
                     let stable = self.stable_install.take_if(|r| r.tag == tag);
                     if let (Ok(()), Some(started)) = (&result, self.install_started.take()) {
                         let name = if as_update.is_some() {
@@ -205,30 +209,64 @@ impl Launcher {
                             if self.updates.horizon.as_ref().is_some_and(|r| r.tag == tag) {
                                 self.updates.horizon = None;
                             }
-                            // An instance's own version leaves the other instances on theirs.
-                            // Judged now, not when the download started: a version picked on
-                            // Versions meanwhile stays picked.
                             let before: Vec<String> = self
                                 .installed
                                 .iter()
                                 .filter(|t| **t != tag)
                                 .cloned()
                                 .collect();
-                            let select = as_update.is_none_or(|_| {
-                                backend::select_after_update(
-                                    self.settings.selected.as_deref(),
-                                    &before,
-                                )
-                            }) && (!for_instance || self.launcher_version().is_none());
-                            if select {
-                                self.settings.selected = Some(tag);
+                            // Keep compatibility fields current for older launchers, including
+                            // changes saved by the command line during the download.
+                            let saved = Settings::load_for_install(&before);
+                            if self.settings_save_error.is_none()
+                                && saved
+                                    .selected
+                                    .as_ref()
+                                    .is_some_and(|s| self.installed.contains(s))
+                            {
+                                self.settings.selection_from(&saved);
                             }
-                            // Pruning reads settings from disk: protect the selection only once
-                            // it has been saved there. A failed save leaves all versions in place.
-                            if self.save_settings() {
+                            // An instance's own version leaves the selection where it is, unless
+                            // an instance on the Nightly channel is pinned to it and the
+                            // selection follows the newest. Home's Stable update never moves it.
+                            let instance = (for_instance || stable.is_some()).then(|| {
+                                stable.is_none()
+                                    && horizon_launcher::instances::list().iter().any(|i| {
+                                        i.java.is_none()
+                                            && i.channel
+                                                == horizon_launcher::instances::Channel::Nightly
+                                            && i.version.as_deref() == Some(tag.as_str())
+                                    })
+                            });
+                            let saved = if let Some(target) = manual_target {
+                                match horizon_launcher::instances::finish_manual_install(
+                                    &target, &tag,
+                                ) {
+                                    Ok(()) => {
+                                        self.reload_instances();
+                                        true
+                                    }
+                                    Err(e) => {
+                                        self.install_error = Some((tag.clone(), e));
+                                        false
+                                    }
+                                }
+                            } else {
+                                self.settings.apply_install(
+                                    &tag,
+                                    &before,
+                                    &self.installed,
+                                    backend::InstallCause {
+                                        update: as_update.is_some(),
+                                        instance,
+                                    },
+                                );
+                                self.save_settings()
+                            };
+                            if saved {
                                 let tx = self.tx.clone();
                                 std::thread::spawn(move || {
-                                    let _ = tx.send(Msg::Pruned(backend::prune_old_versions()));
+                                    let _ = tx.send(Msg::Pruned(backend::prune_old_versions(&tag)));
                                 });
                             }
                         }
@@ -240,22 +278,22 @@ impl Launcher {
                             self.install_error = Some((tag, e));
                         }
                     }
-                    if let Some(next) = self.install_next.take() {
-                        self.install_for_instance(next);
-                    }
+                    self.start_next_install();
+                    // After the selection and the queued install: a build waiting for this
+                    // install sees both.
+                    self.native_look_again(None, None);
                 }
                 Msg::Removed(tag, result) => {
                     self.removing.retain(|t| *t != tag);
                     self.installed = backend::installed();
-                    let selected = if self.settings_save_error.is_some() {
-                        self.settings.selected.take()
-                    } else {
-                        Settings::load().selected
-                    };
-                    self.settings.selected = selection_after_removal(&self.installed, selected);
+                    if self.settings_save_error.is_none() {
+                        self.settings.selection_from(&Settings::load());
+                    }
+                    self.settings.keep_installed_selection(&self.installed);
                     if let Err(e) = result {
                         self.install_error = Some((tag, e));
                     }
+                    self.start_next_install();
                 }
                 Msg::DiskUse(disk) => self.disk = disk,
                 Msg::Storage(result) => self.storage_arrived(result),
@@ -263,8 +301,8 @@ impl Launcher {
                     self.importing_build = false;
                     self.installed = backend::installed();
                     match result {
-                        // `build_import::import` saved the selection; this keeps the window's copy.
-                        Ok(tag) => self.settings.selected = Some(tag),
+                        // Import already used the build for the selected instance on disk.
+                        Ok(_) => self.reload_instances(),
                         Err(e) => self.import_error = Some(e),
                     }
                 }
@@ -288,12 +326,15 @@ impl Launcher {
                     native_registry_consent::show(window, inventory, reply, cx)
                 }
                 Msg::NativeProgress(step, progress) => {
-                    self.native_step = Some(step);
-                    self.native_progress = Some(progress);
+                    if !self.native_stopping {
+                        self.native_step = Some(step);
+                        self.native_progress = Some(progress);
+                    }
                 }
                 Msg::Native(result) => {
                     // The last step of a build that worked says how it went.
-                    let last = self.native_step.take();
+                    let stopping = std::mem::take(&mut self.native_stopping);
+                    let last = self.native_step.take().filter(|_| !stopping);
                     self.native_progress = None;
                     self.first_build = None;
                     // Build and play: the game starts once the build worked, and only for the
@@ -326,7 +367,7 @@ impl Launcher {
                         // Read against the mods this build was given, not the instance now
                         // selected.
                         let built = std::mem::take(&mut self.native_built_mods);
-                        self.native_failed(String::from(e), &built);
+                        self.native_failed(e.said(native_mods::Caller::Window), &built);
                     }
                     let play_now = wanted.is_some()
                         && built.is_some()
@@ -354,6 +395,7 @@ impl Launcher {
                         }
                         Err(e) => SelfUpdate::Failed(e),
                     };
+                    self.follow_min_launcher(cx);
                 }
                 Msg::PackLine(line) => {
                     self.pack_log.push_back(line);
@@ -394,17 +436,12 @@ impl Launcher {
                         Job::Prepare => {
                             self.preparing = false;
                             let tag = self.prepare_tag.take();
-                            let mut error =
+                            let error =
                                 prepare_outcome(error, tag.as_deref(), backend::check_prepared);
-                            // Play pressed before the version was prepared plays now.
-                            if let Some((tag, instance)) = self.play_when_prepared.take() {
-                                if error.is_none() && backend::check_prepared(&tag) {
-                                    self.starting_pack = None;
-                                    self.start_client(tag, Some(instance));
-                                } else if error.is_none() {
-                                    // Without this the button just reads "Prepare & play" again.
-                                    error = Some(not_prepared_after(&tag));
-                                }
+                            // A Play waiting for this preparation starts below once nothing
+                            // else is starting; one it failed for cannot.
+                            if error.is_some() {
+                                self.play_when_prepared = None;
                             }
                             if let (None, Some(started)) = (&error, self.prepare_started.take()) {
                                 self.perf.record_since("launcher.prepare_ms", started);
@@ -420,9 +457,33 @@ impl Launcher {
                                     .filter(|_| e.starts_with("Exited with"));
                                 tail.map_or(e.clone(), |t| format!("{e}: {t}"))
                             });
+                            self.prepare_fix = prepare_fix_after(
+                                self.prepare_error.is_some(),
+                                backend::prepare_offers_mojang(),
+                                tag.as_deref(),
+                            );
+                            // Deleted while it was being prepared: said as Prepare says it.
+                            if let Some(tag) =
+                                tag.as_deref().filter(|_| self.prepare_error.is_some())
+                            {
+                                self.version_still_installed(tag);
+                            }
+                            let (ended, error) = (
+                                tag.map(|t| backend::prepared_in(&t)),
+                                self.prepare_error.clone(),
+                            );
+                            self.start_next_install();
+                            self.native_look_again(ended.as_deref(), error.as_deref());
                         }
                         Job::Client => {
-                            self.client = None;
+                            // The exit thread reaped the game; its child keeps the status.
+                            let client = self.client.take();
+                            let leases_refused = client
+                                .as_ref()
+                                .is_some_and(|client| client.leases_refused.load(Ordering::SeqCst));
+                            let native_crash = client
+                                .and_then(|client| client.child.lock().ok()?.try_wait().ok()?)
+                                .is_some_and(backend::native_crash_exit);
                             // Any session file the game didn't read (it crashed first).
                             account::discard_unread_sessions();
                             self.come_back(cx);
@@ -446,21 +507,39 @@ impl Launcher {
                             }
                             // The run's own game folder: an instance's or a pack's keeps its reports.
                             let home = self.client_home.clone().unwrap_or_else(backend::game_home);
-                            let report = self
-                                .client_started
-                                .take()
-                                .and_then(|since| backend::crash_report_since(&home, since));
-                            let switched = if error.is_some() && report.is_none() {
-                                self.switched_from_vulkan()
+                            let since = self.client_started.take();
+                            let report =
+                                horizon_launcher::refusals::crash_report(leases_refused, || {
+                                    since
+                                        .and_then(|since| backend::crash_report_since(&home, since))
+                                });
+                            let switched = if native_crash && report.is_none() {
+                                self.switched_after_start_crash()
                             } else {
                                 None
                             };
-                            if let Some(api) = switched {
+                            // The game may have changed its graphics settings, or the launcher
+                            // just did: the instance's notice is read again.
+                            self.api_notice.replace(None);
+                            if let Some((crashed, api)) = switched {
+                                let line = format!(
+                                    "Horizon launcher: the {crashed} renderer crashed while starting in {}, so graphicsApi was switched from auto to {api}",
+                                    home.display()
+                                );
+                                // Windows only, as the record and the notice are.
+                                if std::env::consts::OS == "windows" {
+                                    eprintln!("{line}");
+                                    console_page::keep_line(
+                                        &mut self.prepare_log,
+                                        &mut self.log_revision,
+                                        line,
+                                    );
+                                }
                                 self.client_error = Some(trf(
-                                    "Horizon's Vulkan renderer crashed while starting on this \
+                                    "Horizon's {crashed} renderer crashed while starting on this \
                                      graphics card, so the game now uses {api}. Press Play to \
                                      start it again. Video Settings > Graphics API switches back.",
-                                    &[("api", api)],
+                                    &[("crashed", crashed), ("api", api)],
                                 ));
                             } else if error.is_some() || report.is_some() {
                                 let summary = report
@@ -473,8 +552,10 @@ impl Launcher {
                                             .iter()
                                             .rev()
                                             .find(|l| !l.trim().is_empty());
+                                        // A full sentence (a lease refusal) reads on into the line.
                                         error.as_ref().map(|e| {
-                                            tail.map_or(e.clone(), |t| format!("{e}: {t}"))
+                                            let gap = if e.ends_with('.') { " " } else { ": " };
+                                            tail.map_or(e.clone(), |t| format!("{e}{gap}{t}"))
                                         })
                                     })
                                     .unwrap_or_default();
@@ -482,6 +563,7 @@ impl Launcher {
                                     report,
                                     summary,
                                     copied: false,
+                                    leases_refused,
                                 });
                             }
                         }
@@ -493,7 +575,7 @@ impl Launcher {
         // A start that ended (the game started, or it failed) is on no step.
         self.play_step.settle(self.starting_client.is_some());
         changed |= self.servers_tick();
-        changed |= self.mods_tick();
+        changed |= self.mods_tick(window, cx);
         changed |= self.github_tick();
         changed |= self.native_log_read(cx);
         changed |= self.toast_tick();
@@ -523,6 +605,9 @@ impl Launcher {
         {
             self.check_updates();
         }
+        // A Play that waited for its version, or for another start (a pre-launch command's
+        // Stop among it) to finish, starts as soon as nothing else is starting.
+        changed |= self.start_queued_play();
         if changed {
             cx.notify();
         }
@@ -539,6 +624,31 @@ fn prepare_outcome(
     error.or_else(|| tag.filter(|tag| !ready(tag)).map(not_prepared_after))
 }
 
+/// What the error of the preparation of `tag` offers: the download from Mojang when the folders
+/// lacked a library ([`backend::prepare_offers_mojang`]), for that version even if another is
+/// selected by the time it is pressed.
+fn prepare_fix_after(failed: bool, offers_mojang: bool, tag: Option<&str>) -> Option<PrepareFix> {
+    tag.filter(|_| failed && offers_mojang)
+        .map(|tag| PrepareFix::Mojang(tag.to_owned()))
+}
+
+/// What Home's Prepare notice says, and the action it offers. The selected instance's pinned
+/// version that is missing (`pin`) comes first: Play refuses it, so an older error about another
+/// version, with that version's action, would point the player the wrong way. Then the last
+/// preparation's `error` with its `fix`; `gone` words the missing version.
+pub(crate) fn prepare_notice_choice(
+    pin: Option<&str>,
+    error: Option<String>,
+    fix: Option<PrepareFix>,
+    gone: impl Fn(&str) -> String,
+) -> Option<(String, Option<PrepareFix>)> {
+    match (pin, error) {
+        (Some(pin), _) => Some((gone(pin), Some(PrepareFix::Reinstall(pin.to_owned())))),
+        (None, Some(error)) => Some((error, fix)),
+        (None, None) => None,
+    }
+}
+
 /// What Home says when a preparation ended without an error but `tag` still isn't prepared: the
 /// game can't start, and the button alone would only offer the same step again.
 fn not_prepared_after(tag: &str) -> String {
@@ -551,6 +661,37 @@ fn not_prepared_after(tag: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mojang_download_offer_keeps_the_version_that_failed() {
+        assert_eq!(
+            prepare_fix_after(true, true, Some("v-a")),
+            Some(PrepareFix::Mojang("v-a".into()))
+        );
+        assert_eq!(prepare_fix_after(true, false, Some("v-a")), None);
+        assert_eq!(prepare_fix_after(false, true, Some("v-a")), None);
+    }
+
+    /// Prepare failed for A, then an instance pinned to the missing B was selected: B's notice
+    /// and Reinstall, never A's Mojang retry.
+    #[test]
+    fn a_missing_pin_outranks_an_older_prepare_error() {
+        let gone = |tag: &str| format!("{tag} is gone");
+        let a_failed = || Some("A's files are incomplete".to_string());
+        let a_fix = || Some(PrepareFix::Mojang("v-a".into()));
+        assert_eq!(
+            prepare_notice_choice(Some("v-b"), a_failed(), a_fix(), gone),
+            Some((
+                "v-b is gone".into(),
+                Some(PrepareFix::Reinstall("v-b".into()))
+            ))
+        );
+        assert_eq!(
+            prepare_notice_choice(None, a_failed(), a_fix(), gone),
+            Some(("A's files are incomplete".into(), a_fix()))
+        );
+        assert_eq!(prepare_notice_choice(None, None, None, gone), None);
+    }
 
     #[test]
     fn a_preparation_that_leaves_its_version_unprepared_says_so() {

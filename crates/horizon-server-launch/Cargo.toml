@@ -17,8 +17,11 @@ serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 toml_edit = "0.25"
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

@@ -497,6 +497,19 @@ impl Game<'_> {
 
     // ---- ServerBossEvent delivery ------------------------------------------------
 
+    /// Mirrors the four boss-bar sources checked in [`Self::boss_events_for`]:
+    /// custom `/bossbar`s, dimensions with an Ender Dragon fight, active Overworld raids,
+    /// and live Wither mobs.
+    fn has_boss_bar_sources(&self) -> bool {
+        !self.bosses.bars.bars.is_empty()
+            || self.dimension_type().has_ender_dragon_fight
+            || (self.dim == Dim::Overworld && !self.raiding.raids.map.is_empty())
+            || self
+                .mobs
+                .iter()
+                .any(|m| !m.removed && m.alive() && m.species() == Species::Wither)
+    }
+
     /// Tell every viewer the boss events they should be seeing. The window
     /// that simulates the world applies them to its own overlay; everyone
     /// else gets `ClientboundBossEventPacket`s.
@@ -505,6 +518,9 @@ impl Game<'_> {
             return;
         }
         self.load_bossbars();
+        if !self.has_boss_bar_sources() && self.bosses.sent.is_empty() {
+            return;
+        }
         self.update_dragon_bar_name();
         let now = boss_overlay::now_millis();
         let viewers = self.boss_viewers();
@@ -554,7 +570,8 @@ impl Game<'_> {
         }
     }
     fn boss_viewers(&self) -> Vec<Viewer> {
-        let mut out = Vec::new();
+        let mut out =
+            Vec::with_capacity(1 + self.lan.as_ref().map_or(0, |host| host.hub.guests.len()));
         // While `as_guest` has swapped a guest in, the host's own position
         // is not in place. Their overlay updates once the tick puts it back.
         let local =
@@ -691,14 +708,17 @@ impl Game<'_> {
     /// The packets that take `viewer` from what it was last sent to `desired`
     /// (`ServerBossEvent`'s broadcasts).
     fn diff_boss_events(&mut self, viewer: &Viewer, desired: Vec<Offer>) -> Vec<play::BossEvent> {
-        let full = viewer.local;
-        let dim = self.dim;
+        if desired.is_empty() && !self.bosses.sent.contains_key(&viewer.uuid) {
+            return Vec::new();
+        }
         let sent = self.bosses.sent.entry(viewer.uuid).or_default();
         let mut out = Vec::new();
         let event = |id, action| play::BossEvent { id, action };
-        sent.retain(|id, prev| {
-            let owned = full || prev.scope == Scope::Global || prev.scope == Scope::Level(dim);
-            let keep = !owned || desired.iter().any(|e| e.id == *id);
+        // Every offer in this Game's `sent` map was issued by this Game;
+        // `sent` survives a level swap, so a level-scoped bar whose level is
+        // no longer current must still be removed, not silently kept.
+        sent.retain(|id, _| {
+            let keep = desired.iter().any(|e| e.id == *id);
             if !keep {
                 out.push(event(*id, BossAction::Remove));
             }
@@ -742,6 +762,10 @@ impl Game<'_> {
                 ));
             }
             sent.insert(id, offer);
+        }
+        let empty = sent.is_empty();
+        if empty {
+            self.bosses.sent.remove(&viewer.uuid);
         }
         out
     }
@@ -793,6 +817,8 @@ struct Offer {
     darken: bool,
     music: bool,
     fog: bool,
+    /// Kept for the offer's recorded scope; removal no longer keys on it.
+    #[allow(dead_code)]
     scope: Scope,
 }
 
@@ -875,6 +901,74 @@ pub(super) mod audience_tests {
                     .any(|v| v.uuid == 1 && v.here && v.at == [0.0, 100.0, 0.0])
             );
             assert!(!viewers.iter().any(|v| v.uuid == 2));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn non_end_dimension_with_dragon_fight_does_not_skip_boss_bars() {
+        use horizon_core::LevelKey;
+        use horizon_world::dimension_type::DimensionFacts;
+
+        crate::game::in_own_process(
+            "game::bossbars::audience_tests::non_end_dimension_with_dragon_fight_does_not_skip_boss_bars",
+            || {
+                struct ResetLevelFacts;
+                impl Drop for ResetLevelFacts {
+                    fn drop(&mut self) {
+                        DimensionFacts::set_levels(Vec::new());
+                    }
+                }
+
+                super::super::native_entity_refs::tests::with_game(|game| {
+                    assert_eq!(game.dim, super::Dim::Overworld);
+                    assert!(!game.dimension_type().has_ender_dragon_fight);
+                    assert!(!game.has_boss_bar_sources());
+
+                    let _guard = ResetLevelFacts;
+                    let mut own = DimensionFacts::overworld().clone();
+                    own.has_ender_dragon_fight = true;
+                    DimensionFacts::set_levels(vec![(LevelKey::OVERWORLD, own)]);
+                    assert!(game.dimension_type().has_ender_dragon_fight);
+                    assert!(game.has_boss_bar_sources());
+                });
+            },
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn removing_all_boss_bars_prunes_sent_entries_and_reenables_skip() {
+        use horizon_client::{boss_overlay, motion::PlayerMotion, scoreboard as sb};
+        use horizon_core::geometry::Vec3;
+
+        super::super::native_entity_refs::tests::with_game(|game| {
+            game.player =
+                Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.load_bossbars();
+            assert!(!game.has_boss_bar_sources());
+            assert!(game.bosses.sent.is_empty());
+
+            assert!(game.bosses.add_bar("test:skip_reset", sb::literal("Test")));
+            let ints = game.level.player_uuid.unwrap_or_else(|| game.acting_uuid());
+            game.bosses
+                .bars
+                .get_mut("test:skip_reset")
+                .unwrap()
+                .players
+                .push(ints);
+            game.publish_boss_bars();
+            assert!(!game.bosses.sent.is_empty());
+            assert!(!game.boss_overlay.bars(boss_overlay::now_millis()).is_empty());
+
+            game.bosses.remove_bar("test:skip_reset");
+            game.publish_boss_bars();
+            assert!(!game.has_boss_bar_sources());
+            assert!(
+                game.bosses.sent.is_empty(),
+                "empty viewer maps must be pruned so publish_boss_bars can skip again"
+            );
+            assert!(game.boss_overlay.bars(boss_overlay::now_millis()).is_empty());
         });
     }
 }

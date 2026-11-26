@@ -27,6 +27,14 @@ pub fn ports_dir() -> PathBuf {
     backend::game_home().join("ports")
 }
 
+/// Stage downloads in the system temp folder so relocation never copies them.
+pub fn downloads() -> Result<tempfile::TempDir, String> {
+    tempfile::Builder::new()
+        .prefix("horizon-modpack-download-")
+        .tempdir()
+        .map_err(|e| e.to_string())
+}
+
 /// A pack's folder name: its name in lowercase words joined by dashes.
 pub fn slug(name: &str) -> String {
     let words: Vec<String> = name
@@ -360,23 +368,66 @@ pub(crate) struct Listed {
 /// window's thread, and a pack's reports and carried mods can be tens of thousands of files
 /// (#18074).
 pub(crate) fn listed_in(ports: &Path) -> Vec<Listed> {
-    let mut packs: Vec<Listed> = fs::read_dir(ports)
+    listed_results(ports)
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| {
-            let work = e.path();
-            let pack: Pack = pipeline::read_json(&work.join("pack.json")).ok()?;
-            let slug = e.file_name().to_string_lossy().into_owned();
-            let title = match pack.name.is_empty() {
-                true => slug.clone(),
-                false => pack.name,
-            };
-            Some(Listed { slug, title, work })
-        })
-        .collect();
-    packs.sort_by_key(|p| p.title.to_ascii_lowercase());
-    packs
+        .collect()
+}
+
+pub(crate) fn listed_checked_in(ports: &Path) -> Result<Vec<Listed>, String> {
+    listed_results(ports)?.collect()
+}
+
+fn listed_results(
+    ports: &Path,
+) -> Result<impl Iterator<Item = Result<Listed, String>> + '_, String> {
+    Ok(pack_folders(ports)?.map(|work| read_listed(work?)))
+}
+
+pub(crate) fn read_listed(work: PathBuf) -> Result<Listed, String> {
+    let pack: Pack = pipeline::read_json(&work.join("pack.json"))?;
+    let slug = work
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let title = if pack.name.is_empty() {
+        slug.clone()
+    } else {
+        pack.name
+    };
+    Ok(Listed { slug, title, work })
+}
+
+/// Missing pack roots are empty. A directory belongs to the scan once it has a manifest.
+/// Use symlink metadata so a dangling manifest link still reaches the reader and reports an error.
+pub(crate) fn pack_folders(
+    dir: &Path,
+) -> Result<impl Iterator<Item = Result<PathBuf, String>> + '_, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !dir.is_symlink() => None,
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+    };
+    Ok(entries.into_iter().flatten().filter_map(move |entry| {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => return Some(Err(format!("{}: {e}", dir.display()))),
+        };
+        let path = entry.path();
+        match fs::metadata(&path) {
+            Ok(meta) if !meta.is_dir() => return None,
+            Ok(_) => {}
+            Err(e) => return Some(Err(format!("{}: {e}", path.display()))),
+        }
+        let manifest = path.join("pack.json");
+        match fs::symlink_metadata(&manifest) {
+            Ok(_) => Some(Ok(path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => Some(Err(format!("{}: {e}", manifest.display()))),
+        }
+    }))
 }
 
 /// The carried-over mods in a work folder (`mods/<id>/carry/` with its manifest).
@@ -495,7 +546,10 @@ pub fn profile_home(work: &Path) -> PathBuf {
 /// copied in the first time, so keys and video settings carry over) and its carried-over mods.
 /// A modpack from Horizon's registry (`horizon-packs/<id>/`) plays its own profile the same way.
 pub fn apply_profile(cmd: &mut Command, work: &Path) -> Result<(), String> {
-    if horizon_pack::is_pack(work) {
+    let parent = work.parent();
+    if parent == Some(ports_dir().as_path()) {
+        read_listed(work.to_owned())?;
+    } else if parent == Some(horizon_pack::packs_dir().as_path()) || horizon_pack::is_pack(work) {
         return horizon_pack::apply(cmd, work);
     }
     // Only mods that load together: the game would refuse the later of two sharing a namespace.
@@ -643,6 +697,39 @@ pub(crate) mod tests {
             "CurseForge  ·  Minecraft 1.21.1  ·  neoforge 21.1.133"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn downloads_use_separate_temporary_folders_and_clean_up_on_drop() {
+        let first = downloads().unwrap();
+        let second = downloads().unwrap();
+        assert_eq!(first.path().parent(), Some(std::env::temp_dir().as_path()));
+        assert_ne!(first.path(), second.path());
+        let finished = first.path().to_owned();
+        fs::write(finished.join("pack.mrpack"), b"download").unwrap();
+        drop(first);
+        assert!(!finished.exists());
+        assert!(second.path().is_dir(), "another download stays active");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checked_pack_scan_reports_dangling_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("pack");
+        fs::create_dir(&work).unwrap();
+        let manifest = work.join("pack.json");
+        symlink(work.join("missing.json"), &manifest).unwrap();
+        let error = listed_checked_in(root.path()).err().unwrap();
+        assert!(error.contains(&manifest.display().to_string()), "{error}");
+
+        fs::remove_file(manifest).unwrap();
+        let dangling = root.path().join("dangling");
+        symlink(root.path().join("missing"), &dangling).unwrap();
+        let error = listed_checked_in(root.path()).err().unwrap();
+        assert!(error.contains(&dangling.display().to_string()), "{error}");
     }
 
     #[test]

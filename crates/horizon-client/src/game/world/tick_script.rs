@@ -36,6 +36,16 @@ impl TickScript {
     pub(super) fn playing(&self) -> bool {
         self.running.is_some()
     }
+    /// A scenario playing, with no ticks: a scripted run for tests.
+    #[cfg(test)]
+    pub(in crate::game) fn play_empty(&mut self) {
+        self.running = Some(Running {
+            name: String::new(),
+            ticks: 0,
+            steps: BTreeMap::new(),
+            tick: 0,
+        });
+    }
     /// Whether the variable is set (the frame asks before every tick).
     pub(super) fn armed(&self) -> bool {
         self.path.is_some()

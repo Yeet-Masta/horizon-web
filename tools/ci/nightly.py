@@ -12,6 +12,8 @@
     nightly.py sdk-index <sha> <out>     writes sdk-<sha>'s sdk.json to <out>, checked against its SHA256SUMS
     nightly.py sdk-previous <sha> <out>  prints the SDK published before <sha> on its history, and writes its
                                    surface.json to <out>, checked; prints nothing when there is none
+    nightly.py base <sha>          checks <sha> by the Nightly's base rule (green_base, with DRY_RUN and
+                                   NIGHTLY_OFF_MAIN) and prints it in full: prebuilt-game.yml's commit gets that rule
 
 A nightly builds main plus the pull requests the trusted reviewers picked (the set: tools/ci/nightly_set.py), merged
 in their order and pushed as nightly/build-<date>-<n>; with no set, main alone. Main is its newest commit where
@@ -211,6 +213,8 @@ def build_set(main: Ref, prs: list[dict], left_out: list[str], today: str, force
             name = ns.next_build(today, done)
         if not ns.push(sha, name, token):
             stop(repo, issue, f"could not push {name}")
+        if dry_run:  # at once, so the workflow's cleanup deletes it even if pick fails after this
+            output(pushed=name)
         record = {"ref": name, "sha": sha, "main": main.sha, "at": dt.datetime.now(dt.timezone.utc).isoformat(
             timespec="seconds"), "event": event, "dry_run": dry_run, "run": os.environ.get("GITHUB_RUN_ID", ""),
             "prs": [{k: e[k] for k in ("number", "head", "title", "author", "asked_by")} for e in kept],
@@ -334,17 +338,54 @@ def require_sdk(sha: str) -> None:
     published_index(sha)
 
 
-def green_base(repo: str, issue: str) -> Ref:
-    """The main commit a nightly builds on: NIGHTLY_BASE, else main's newest commit where checks and parity-main
-    passed (what releases ship), so a merge that breaks main never reaches a nightly: it builds on the commit before."""
-    sha = os.environ.get("NIGHTLY_BASE", "").strip() or train.green_main_head(parity=True)
+def green_base(repo: str, issue: str, base: str = "") -> Ref:
+    """The main commit a nightly builds on: `base` or NIGHTLY_BASE, else main's newest commit where checks and
+    parity-main passed (what releases ship), so a merge that breaks main never reaches a nightly: it builds on the
+    commit before.
+    Only a dry run with NIGHTLY_OFF_MAIN (the `off_main` input) builds a base off main, from a dry-run/* branch
+    ([`off_main_base`]); the input set with a base on main stops too, so the run's name never says "off main"
+    wrongly."""
+    sha = base or os.environ.get("NIGHTLY_BASE", "").strip() or train.green_main_head(parity=True)
     if not sha:
         stop(repo, issue, "the build stopped: no recent commit of main passed both checks and parity-main, so "
                           "none is green to build on. The next build after they pass takes it.")
-    if not is_ancestor(sha, "refs/remotes/origin/main"):
-        stop(repo, issue, f"the build stopped: {sha[:9]} is not on main.")
+    off_main = os.environ.get("NIGHTLY_OFF_MAIN") == "true"
+    if is_ancestor(sha, "refs/remotes/origin/main"):
+        if off_main:
+            stop(repo, issue, f"the build stopped: off_main is set, but {sha[:9]} is on main.")
+    elif not (off_main and os.environ.get("DRY_RUN") == "true"):
+        stop(repo, issue, f"the build stopped: {sha[:9]} is not on main."
+             + (f" A dry run can build it with off_main=true: {HOW}" if os.environ.get("DRY_RUN") == "true" else ""))
+    else:
+        return off_main_base(repo, issue, sha)
     sha = git("rev-parse", sha)
     return Ref("main", sha, dt.datetime.fromisoformat(git("show", "-s", "--format=%cI", sha)))
+
+
+DRY_RUN_PREFIX = "dry-run/"
+BRANCHES = "refs/nightly-base/"
+HOW = (f"Push the commit to {DRY_RUN_PREFIX}<name>, dispatch the workflow from main with base=<full sha> (the "
+       "prebuilt game's: commit=<full sha>) and off_main=true, and delete the branch afterwards.")
+
+
+def off_main_base(repo: str, issue: str, base: str) -> Ref:
+    """A dry run's base off main (the `off_main` input): a commit a dry-run/* branch holds. Only people with push
+    rights create those, and pushing there is them saying "this commit may be dry-run built"; other branches don't
+    count, since some hold outside code nobody reviewed (fork snapshots, Dependabot's). GitHub serves a fork's commits
+    by SHA from this repository too, so having or fetching the commit proves nothing: only the dry-run/* heads are
+    fetched, fresh, and one of them must contain it; the SHA itself and refs/pull/* are never fetched."""
+    git("fetch", "--quiet", "--no-tags", "--prune", "origin", f"+refs/heads/{DRY_RUN_PREFIX}*:{BRANCHES}*")
+    found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"],
+                           capture_output=True, text=True)
+    sha = found.stdout.strip()
+    branches = [] if found.returncode else [
+        DRY_RUN_PREFIX + ref.removeprefix(BRANCHES) for ref in git(
+            "for-each-ref", "--contains", sha, "--format=%(refname)", BRANCHES).splitlines()]
+    if not branches:
+        stop(repo, issue, f"the build stopped: no {DRY_RUN_PREFIX}* branch of {repo or 'this repository'} holds "
+                          f"{base[:9]}, so a dry run does not build it. {HOW}")
+    print(f"dry run off main: base {sha} is not on main; branch `{branches[0]}` holds it")
+    return Ref("off main", sha, dt.datetime.fromisoformat(git("show", "-s", "--format=%cI", sha)))
 
 
 def pick(force: bool) -> None:
@@ -380,6 +421,49 @@ def pick(force: bool) -> None:
     build_set(main, prs, left_out, today, force, dry_run)
 
 
+def archive_mod_index(dated: str) -> None:
+    """Keep the displaced Nightly's signed SDK index, without copying the game archives."""
+    names = (SDK_INDEX, "SHA256SUMS", "SHA256SUMS.v2.sig")
+
+    def download(tag: str, folder: Path) -> None:
+        gh("release", "download", tag, "--dir", str(folder),
+           *(arg for name in names for arg in ("--pattern", name)))
+
+    def verify(version: str, folder: Path) -> None:
+        subprocess.run(["cargo", "run", "--locked", "--quiet", "-p", "horizon-release-sign", "--", "verify",
+                        "--repository", train.REPO, "--tag", version, "--signature", "SHA256SUMS.v2.sig",
+                        "--only", SDK_INDEX, str(folder)], check=True)
+
+    with tempfile.TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        download(dated, folder)
+        sha = json.loads((folder / SDK_INDEX).read_bytes())["build"]["commit"]
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise SystemExit(f"{dated}'s SDK index does not name a full commit")
+        version = f"{dated}-{sha[:7]}"
+        verify(version, folder)
+        archive = f"mod-index-{version}"
+        paths = [str(folder / name) for name in names]
+        existing = gh("release", "view", archive, "--json", "isDraft", check=False)
+        if not existing:
+            gh("release", "create", archive, "--target", sha, "--prerelease", "--latest=false",
+               "--title", f"Mod SDK index for {version}", "--notes", "Signed metadata for native mod builds.", *paths)
+            return
+        release = json.loads(existing)
+        if release["isDraft"]:
+            # A failed upload can leave the draft that gh release create used to stage its assets.
+            gh("release", "upload", archive, "--clobber", *paths)
+            gh("release", "edit", archive, "--draft=false", "--prerelease", "--latest=false")
+            return
+        # A rerun of the same build can sign different game archives while keeping the same SDK.
+        kept = folder / "kept"
+        kept.mkdir()
+        download(archive, kept)
+        verify(version, kept)
+        if (kept / SDK_INDEX).read_bytes() != (folder / SDK_INDEX).read_bytes():
+            raise SystemExit(f"{archive} differs from {dated}; keeping the dated release")
+
+
 def rotate() -> None:
     """The current `nightly` becomes nightly-<its date>, so tonight's can take the tag."""
     current = gh("release", "view", "nightly", "--json", "name", check=False)
@@ -387,7 +471,10 @@ def rotate() -> None:
         return
     m = TITLE_DATE.search(json.loads(current)["name"])
     dated = f"nightly-{m.group(1)}" if m else f"nightly-{dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)}"
-    if gh("release", "view", dated, "--json", "tagName", check=False):
+    previous = gh("release", "view", dated, "--json", "assets", check=False)
+    if previous:
+        if any(asset["name"] == SDK_INDEX for asset in json.loads(previous)["assets"]):
+            archive_mod_index(dated)
         gh("release", "delete", dated, "--cleanup-tag", "--yes")  # a second nightly the same day replaces the first
     gh("release", "edit", "nightly", "--tag", dated)
     gh("api", "-X", "DELETE", f"repos/{os.environ['GITHUB_REPOSITORY']}/git/refs/tags/nightly", check=False)
@@ -478,6 +565,7 @@ def main() -> None:
     sub.add_parser("require-sdk").add_argument("sha")
     sub.add_parser("sdk-archives")
     sub.add_parser("sdk-assets")
+    sub.add_parser("base").add_argument("sha")
     index = sub.add_parser("sdk-index")
     index.add_argument("sha")
     index.add_argument("out", type=Path)
@@ -498,6 +586,8 @@ def main() -> None:
         print("\n".join(SDK_ARCHIVES))
     elif args.cmd == "sdk-assets":
         print("\n".join(SDK_ASSETS))
+    elif args.cmd == "base":
+        print(green_base(os.environ.get("GITHUB_REPOSITORY", ""), "", args.sha.strip()).sha)
     elif args.cmd == "sdk-index":
         args.out.write_bytes(published_index(args.sha))
     elif args.cmd == "sdk-previous":

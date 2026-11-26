@@ -1,4 +1,5 @@
 """Parity harnesses name repository files and the game binary's package; both broke silently when the mod API merge (#17145) moved files and the binary."""
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -27,6 +28,61 @@ class ParityHarnessSources(unittest.TestCase):
         wrong = [name for name, command in builds
                  if "horizon-game" not in PACKAGE.findall(command)]
         self.assertEqual(wrong, [])
+
+    def test_fast_programs_are_built_with_the_shared_selection(self):
+        # tools/fast_bins.py: a fast program built with its own -p list compiles the game's chain once more in the
+        # parity prebuild. Not parity harnesses, so the prebuild never builds their selection:
+        allowed = {
+            "mod_dimensions_e2e.py": "adds horizon-mod-dimension-game, a game with a test mod built in",
+            "profile_client_e2e.py": "adds horizon-perf and builds every program of its packages",
+        }
+        # old_world_e2e.py builds an example in the same run, which the check leaves out: examples turn on
+        # horizon-client-lib's dev-dependencies and must stay apart from the shared selection anyway.
+        found = {script.name for script in sorted((ROOT / "tools").glob("**/*.py"))
+                 for node in ast.walk(ast.parse(script.read_text(encoding="utf-8")))
+                 if isinstance(node, ast.List) and hand_built_fast_program(node)}
+        self.assertEqual(found - set(allowed), set())
+        self.assertEqual(set(allowed) - found, set(), "no longer builds by hand: leave it out of the allowed list")
+
+    def test_harnesses_build_in_the_fast_profile(self):
+        # tools/parity.py builds every profile without thin LTO and with 16 codegen units, so a release build compiles
+        # the fast profile's code once more in the parity prebuild. Not parity harnesses, so they keep release:
+        allowed = {
+            "bench_sprite_mips.py": "a benchmark, building a generated crate that has no fast profile",
+            "compare_prepare.py": "compares the shipped horizon-prepare",
+            "measure_attribute_memory.py": "a memory measurement of the release build",
+            "port_harness.py": "builds horizon-prepare for version ports",
+            "prebuilt_game.py": "the staging tool of the packaged game",
+            "prepare_native_client.py": "prepares the game's resources with the shipped horizon-prepare",
+            "test_wire_wasm_depth.py": "builds a generated wasm crate that has no fast profile",
+        }
+        found = {script.name for script in sorted((ROOT / "tools").glob("**/*.py"))
+                 for node in ast.walk(ast.parse(script.read_text(encoding="utf-8")))
+                 if isinstance(node, ast.List) and release_build(node)}
+        self.assertEqual(found - set(allowed), set())
+        self.assertEqual(set(allowed) - found, set(), "no longer builds in release: leave it out of the allowed list")
+        # tools/parity.py reads -r as --release too.
+        commands = ["['cargo', 'build', '-r', '-p', 'x']", "['cargo', 'run', '--profile', 'release']",
+                    "['cargo', 'test', '--profile=release']", "['cargo', 'build', '--profile', 'fast', '-p', 'x']",
+                    "['cargo', 'run', '--profile', 'fast', '--example', 'probe', '--', '-r']"]
+        self.assertEqual([release_build(ast.parse(command, mode="eval").body) for command in commands],
+                         [True, True, True, False, False])
+
+
+def release_build(node):
+    """A literal Cargo command in the release profile. Words after `--` are the program's own arguments."""
+    words = [element.value for element in node.elts if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+    words = words[:words.index("--")] if "--" in words else words
+    return words[:1] == ["cargo"] and bool({"--release", "-r", "--profile=release"} & set(words)
+                                       or any(a == "--profile" and b == "release" for a, b in zip(words, words[1:])))
+
+
+def hand_built_fast_program(node):
+    """A literal Cargo command building programs in the fast profile with -p flags of its own, no example."""
+    words = [element.value for element in node.elts if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+    fast = "--profile=fast" in words or any(a == "--profile" and b == "fast" for a, b in zip(words, words[1:]))
+    return words[:1] == ["cargo"] and fast and bool({"-p", "--package"} & set(words)) \
+        and bool({"--bin", "--bins"} & set(words)) and not {"--example", "--examples"} & set(words)
 
 
 if __name__ == "__main__":

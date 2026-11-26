@@ -13,8 +13,8 @@ horizon-server: host a Horizon (Minecraft Java Edition 26.3) server
 Usage: horizon-server [--dir DIR] <command>
 
   init        Set up a server here: the EULA, the world, the port, who may join (asks, or takes flags:
-              --eula --world NAME --seed SEED --port N --whitelist/--no-whitelist --player NAME... --op NAME
-              --offline --yes)
+              --eula --world NAME --seed SEED --level-type ID --generator-settings JSON|@FILE --port N
+              --whitelist/--no-whitelist --player NAME... --op NAME --offline --yes)
   run         Run the server in the foreground; type console commands, Ctrl-C stops it cleanly. It
               restarts the game if it crashes.
   start       Run the server in the background, or resume a stopped supervisor (output goes to logs/supervisor.log)
@@ -107,6 +107,9 @@ Horizon server settings (docs/server.md). The server writes them into server.pro
 | `game_mode` | `"survival"` | `gamemode` | survival, creative, adventure or spectator |
 | `difficulty` | `"easy"` | `difficulty` | peaceful, easy, normal or hard |
 | `hardcore` | `false` | `hardcore` | one life: a player who dies becomes a spectator |
+| `level_type` | `"minecraft:normal"` | `level-type` | a new world's preset: minecraft:flat, large_biomes, amplified, single_biome_surface |
+| `generator_settings` | `"{}"` | `generator-settings` | a JSON object; minecraft:flat reads its layers and biome from it |
+| `generate_structures` | `true` | `generate-structures` | villages, temples, strongholds and the like in a new world |
 
 ### `[properties]`
 
@@ -194,7 +197,7 @@ HTTP and JSON on 127.0.0.1. A running server writes its address and a random tok
 | `GET` | `/api/v1/backups/download` | `?name=<file>` | the zip | Download a backup |
 | `GET` | `/api/v1/crash-reports` | nothing | `{"reports": [{"name", "bytes"}]}`, newest first (the `.txt` files in `crash-reports/`) | List the game's crash reports |
 | `GET` | `/api/v1/crash-reports/read` | `?name=<file>` (a name `crash-reports` lists) | the report's text (`text/plain`) | Read one crash report |
-| `POST` | `/api/v1/restore` | `{"name": "<backup>", "dimension": "minecraft:the_nether"}` (`dimension` optional) | `{"name": "<backup>", "dimension": "<id>" or null}` | Restart the game with that backup's world, or only one dimension of it (what it replaces is kept in backups/) |
+| `POST` | `/api/v1/restore` | `{"name": "<backup>", "dimension": "minecraft:the_nether"}` (`name` must be a nonblank string; `dimension` is optional) | `{"name": "<backup>", "dimension": "<id>" or null}`; `400` if no backup name is given | Restart the game with that backup's world, or only one dimension of it (what it replaces is kept in backups/) |
 | `POST` | `/api/v1/update` | `{"tag": "...", "timeout": seconds}` (both optional) | `{"ok": true}`; `status` says how it went (`update`) | Restart on that installed release, or download the newest first; goes back if the game isn't up within the timeout |
 | `GET` | `/api/v1/metrics/prometheus` | nothing | the latest sample as Prometheus text: `horizon_up`, `horizon_tps`, `horizon_mspt{stat}`, `horizon_players_online`, `horizon_memory_rss_bytes`, `horizon_loaded_chunks{dimension}` and `horizon_entities{dimension}` (players and block entities apart)... | Metrics for a monitoring tool to scrape |
 | `GET` | `/api/v1/players` | nothing | `online` (name, uuid, address, ping_ms, dimension, position, op_level), `max_players`, `ops`, `whitelist` (`enabled`, `players`), `bans`, `ip_bans` (with reason, source, created, expires) | Who is online, and vanilla's lists |

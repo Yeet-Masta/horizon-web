@@ -234,6 +234,14 @@ pub struct NamedTag {
     pub tag: Tag,
 }
 
+/// The most tags a saved file or a structure template may hold. An element can take one byte
+/// of the file (an empty compound in a list) and deflate to a thousandth of that, while its
+/// [`Tag`] takes 32 bytes: without a cap, a 1 MiB chunk asked for 32 GiB and the process
+/// aborted. A file with this many tags is over 100 MiB of NBT, past anything a world holds.
+pub const MAX_SAVED_NODES: usize = 1 << 25;
+/// Most list slots reserved before the elements are read.
+const LIST_PREALLOCATION: usize = 1 << 12;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_bytes: usize,
@@ -275,11 +283,11 @@ impl Limits {
     /// Chunks, entities, POI and the world's `.dat` files: vanilla reads and
     /// writes them with `NbtAccounter.unlimitedHeap()` (`NbtIo.read`), so a
     /// chunk past the default node cap (a few thousand full containers) still
-    /// loads. The byte cap stays as the only guard on the decompressed data.
+    /// loads. Past the byte cap, [`MAX_SAVED_NODES`] bounds what the tree takes in memory.
     pub fn saved() -> Self {
         Self {
             max_bytes: 1 << 30,
-            max_nodes: usize::MAX,
+            max_nodes: MAX_SAVED_NODES,
             max_depth: 512,
         }
     }
@@ -288,11 +296,11 @@ impl Limits {
     /// `NbtAccounter.unlimitedHeap()` (TemplateSource.readStructure), and
     /// mods ship templates past the default node cap (YUNG's Better Ocean
     /// Monuments' start piece, 115x64x126 blocks, holds millions of tags).
-    /// The byte cap stays as the only guard on the decompressed file.
+    /// [`MAX_SAVED_NODES`] is far past those and bounds the memory of the tree.
     pub fn templates() -> Self {
         Self {
             max_bytes: 1 << 28,
-            max_nodes: usize::MAX,
+            max_nodes: MAX_SAVED_NODES,
             max_depth: 512,
         }
     }
@@ -507,7 +515,10 @@ impl<'a> Reader<'a, '_> {
     fn list_payload(&mut self, depth: usize) -> Result<Tag, Error> {
         let (element_id, len) = self.list_header()?;
         self.charge(4 * len as u64)?;
-        let mut values = Vec::with_capacity(len);
+        // The declared length is only checked against the budget, so nested lists could each
+        // reserve all of it before reading an element: reserve a bounded share and let the
+        // vector grow with the elements actually read.
+        let mut values = Vec::with_capacity(len.min(LIST_PREALLOCATION));
         for _ in 0..len {
             let mut value = self.payload(element_id, depth + 1)?;
             if let Tag::Compound(map) = &mut value
@@ -903,9 +914,12 @@ fn read_network_with_reader(reader: &mut Reader<'_, '_>) -> Result<(Tag, usize),
     Ok((tag, reader.offset))
 }
 
-struct Writer {
-    bytes: Vec<u8>,
-    limits: Limits,
+struct Writer<'a> {
+    bytes: &'a mut Vec<u8>,
+    start: usize,
+    max_len: usize,
+    max_nodes: usize,
+    max_depth: usize,
     nodes: usize,
     /// `NbtIo.StringFallbackDataOutput`, the disk writer's: a string too long
     /// for modified UTF-8 is written empty and the rest of the tree goes on.
@@ -915,15 +929,26 @@ struct Writer {
     /// is written as the canonical one. The network writer keeps its bits.
     canonical_nan: bool,
 }
-impl Writer {
+impl Writer<'_> {
+    fn root(&mut self, name: Option<&JavaString>, tag: &Tag) -> Result<(), Error> {
+        let id = tag.id();
+        self.put(&[id])?;
+        if id != 0
+            && let Some(name) = name
+        {
+            self.string(name)?;
+        }
+        self.payload(tag, 0)
+    }
+
     fn error(&self, reason: &'static str) -> Error {
         Error {
-            offset: self.bytes.len(),
+            offset: self.bytes.len() - self.start,
             reason,
         }
     }
     fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        if bytes.len() > self.limits.max_bytes.saturating_sub(self.bytes.len()) {
+        if bytes.len() > self.max_len - self.bytes.len() {
             return Err(self.error("byte limit exceeded"));
         }
         self.bytes.extend_from_slice(bytes);
@@ -951,8 +976,7 @@ impl Writer {
         };
         self.put(&len.to_be_bytes())?;
         // One byte per unit (most strings): written at once while they fit.
-        if usize::from(len) == string.0.len()
-            && usize::from(len) <= self.limits.max_bytes.saturating_sub(self.bytes.len())
+        if usize::from(len) == string.0.len() && usize::from(len) <= self.max_len - self.bytes.len()
         {
             self.bytes.extend(string.0.iter().map(|&c| c as u8));
             return Ok(());
@@ -971,11 +995,11 @@ impl Writer {
         Ok(())
     }
     fn payload(&mut self, tag: &Tag, depth: usize) -> Result<(), Error> {
-        if self.nodes >= self.limits.max_nodes {
+        if self.nodes >= self.max_nodes {
             return Err(self.error("node limit exceeded"));
         }
         self.nodes += 1;
-        if matches!(tag, Tag::List(_) | Tag::Compound(_)) && depth >= self.limits.max_depth {
+        if matches!(tag, Tag::List(_) | Tag::Compound(_)) && depth >= self.max_depth {
             return Err(self.error("depth limit exceeded"));
         }
         match tag {
@@ -1021,10 +1045,10 @@ impl Writer {
                     let wrapper = matches!(value, Tag::Compound(c) if c.len() == 1 && c.contains_key(&JavaString::default()));
                     if id == 10 && (value.id() != 10 || wrapper) {
                         // Emit one synthetic compound layer without cloning the tree.
-                        if depth + 1 >= self.limits.max_depth {
+                        if depth + 1 >= self.max_depth {
                             return Err(self.error("depth limit exceeded"));
                         }
-                        if self.nodes >= self.limits.max_nodes {
+                        if self.nodes >= self.max_nodes {
                             return Err(self.error("node limit exceeded"));
                         }
                         self.nodes += 1;
@@ -1072,32 +1096,52 @@ pub fn write_named(root: &NamedTag, limits: Limits) -> Result<Vec<u8>, Error> {
 }
 
 fn write_named_parts(name: &JavaString, tag: &Tag, limits: Limits) -> Result<Vec<u8>, Error> {
-    let mut writer = Writer {
-        bytes: Vec::new(),
-        limits,
-        nodes: 0,
-        empty_long_strings: true,
-        canonical_nan: true,
-    };
-    writer.put(&[tag.id()])?;
-    if tag.id() != 0 {
-        writer.string(name)?;
-    }
-    writer.payload(tag, 0)?;
-    Ok(writer.bytes)
+    let mut out = Vec::new();
+    write_into(Some(name), tag, limits, &mut out)?;
+    Ok(out)
 }
 
 pub fn write_network(tag: &Tag, limits: Limits) -> Result<Vec<u8>, Error> {
-    let mut writer = Writer {
-        bytes: Vec::new(),
-        limits,
+    let mut out = Vec::new();
+    write_network_into(tag, limits, &mut out)?;
+    Ok(out)
+}
+
+/// Append a file root with the same encoding as [`write_named`].
+/// Limits and error offsets are relative to the root; on error, `out`'s contents are unchanged.
+pub fn write_named_into(root: &NamedTag, limits: Limits, out: &mut Vec<u8>) -> Result<(), Error> {
+    write_into(Some(&root.name), &root.tag, limits, out)
+}
+
+/// Append network NBT with the same encoding as [`write_network`].
+/// Limits and error offsets are relative to the tag; on error, `out`'s contents are unchanged.
+pub fn write_network_into(tag: &Tag, limits: Limits, out: &mut Vec<u8>) -> Result<(), Error> {
+    write_into(None, tag, limits, out)
+}
+
+fn write_into(
+    name: Option<&JavaString>,
+    tag: &Tag,
+    limits: Limits,
+    out: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let start = out.len();
+    let result = Writer {
+        bytes: out,
+        start,
+        // This absolute limit is never less than the length of the borrowed buffer.
+        max_len: start.saturating_add(limits.max_bytes),
+        max_nodes: limits.max_nodes,
+        max_depth: limits.max_depth,
         nodes: 0,
-        empty_long_strings: false,
-        canonical_nan: false,
-    };
-    writer.put(&[tag.id()])?;
-    writer.payload(tag, 0)?;
-    Ok(writer.bytes)
+        empty_long_strings: name.is_some(),
+        canonical_nan: name.is_some(),
+    }
+    .root(name, tag);
+    if result.is_err() {
+        out.truncate(start);
+    }
+    result
 }
 
 /// Validate an opaque native component against network limits and a stable disk round trip.
@@ -1488,6 +1532,21 @@ mod tests {
         assert_eq!(read_named(&bytes, Limits::templates()).unwrap().0, root);
     }
     #[test]
+    fn a_saved_list_of_more_tags_than_the_cap_is_refused() {
+        // `{a: [{}, {}, ...]}`: each empty compound is one byte of the file.
+        let bytes = |count: usize| {
+            let mut bytes = vec![10, 0, 0, 9, 0, 1, b'a', 10];
+            bytes.extend_from_slice(&(count as u32).to_be_bytes());
+            bytes.resize(bytes.len() + count + 1, 0);
+            bytes
+        };
+        for limits in [Limits::saved(), Limits::templates()] {
+            let error = read_named(&bytes(MAX_SAVED_NODES), limits).unwrap_err();
+            assert_eq!(error.reason, "node limit exceeded");
+        }
+        assert!(read_named(&bytes(1_000_001), Limits::saved()).is_ok());
+    }
+    #[test]
     fn depth_boundary_and_every_truncated_prefix() {
         let mut tag = Tag::Int(1);
         for _ in 0..512 {
@@ -1697,6 +1756,149 @@ mod tests {
             0x80
         );
     }
+
+    fn assert_append_encodings(root: &NamedTag, network: &[u8], named: &[u8]) {
+        let limits = Limits::default();
+        let prefix = [0xe5, 0x12, 0x36];
+        let mut out = prefix.to_vec();
+        write_network_into(&root.tag, limits, &mut out).unwrap();
+        assert_eq!(out, [prefix.as_slice(), network].concat());
+        write_named_into(root, limits, &mut out).unwrap();
+        assert_eq!(out, [prefix.as_slice(), network, named].concat());
+        assert_eq!(write_network(&root.tag, limits).unwrap(), network);
+        assert_eq!(write_named(root, limits).unwrap(), named);
+    }
+
+    #[test]
+    fn append_writers_keep_network_nan_bits_and_canonicalize_named_nans() {
+        let root = NamedTag {
+            name: "r".into(),
+            tag: Tag::compound([
+                ("d", Tag::Double(0x7ff0_0000_0000_0001)),
+                ("f", Tag::Float(0xff80_0001)),
+            ]),
+        };
+        assert_append_encodings(
+            &root,
+            &[
+                10, 6, 0, 1, b'd', 0x7f, 0xf0, 0, 0, 0, 0, 0, 1, 5, 0, 1, b'f', 0xff, 0x80, 0, 1, 0,
+            ],
+            &[
+                10, 0, 1, b'r', 6, 0, 1, b'd', 0x7f, 0xf8, 0, 0, 0, 0, 0, 0, 5, 0, 1, b'f', 0x7f,
+                0xc0, 0, 0, 0,
+            ],
+        );
+    }
+
+    #[test]
+    fn append_writers_keep_the_modified_utf8_boundary() {
+        // A NUL costs two bytes and a lone surrogate costs three.
+        let mut units = vec![0; 32_766];
+        units.push(0xd800);
+        let mut network = vec![8, 0xff, 0xff];
+        network.extend([0xc0, 0x80].repeat(32_766));
+        network.extend([0xed, 0xa0, 0x80]);
+        let mut named = vec![8, 0, 1, b's'];
+        named.extend_from_slice(&network[1..]);
+        assert_append_encodings(
+            &NamedTag {
+                name: "s".into(),
+                tag: Tag::String(JavaString(units.clone())),
+            },
+            &network,
+            &named,
+        );
+
+        units.push(u16::from(b'x'));
+        let root = NamedTag {
+            name: "r".into(),
+            tag: Tag::compound([("a", Tag::String(JavaString(units))), ("z", Tag::Byte(7))]),
+        };
+        let limits = Limits::default();
+        let mut out = vec![0xe5];
+        let error = Error {
+            offset: 5,
+            reason: "modified UTF-8 exceeds 65535 bytes",
+        };
+        assert_eq!(
+            write_network_into(&root.tag, limits, &mut out),
+            Err(error.clone())
+        );
+        assert_eq!(out, [0xe5]);
+        assert_eq!(write_network(&root.tag, limits), Err(error));
+
+        let named = [10, 0, 1, b'r', 8, 0, 1, b'a', 0, 0, 1, 0, 1, b'z', 7, 0];
+        write_named_into(&root, limits, &mut out).unwrap();
+        assert_eq!(out, [&[0xe5][..], &named].concat());
+        assert_eq!(write_named(&root, limits).unwrap(), named);
+    }
+
+    #[test]
+    fn append_writers_enforce_fresh_limits_and_roll_back_partial_writes() {
+        let root = NamedTag {
+            name: "r".into(),
+            tag: Tag::List(vec![Tag::compound([("k", Tag::String("hi".into()))])]),
+        };
+        let check = |write: fn(&NamedTag, Limits, &mut Vec<u8>) -> Result<(), Error>,
+                     expected: &[u8],
+                     list_header_len| {
+            let limits = Limits {
+                max_bytes: expected.len(),
+                max_nodes: 3,
+                max_depth: 2,
+            };
+            let prefix = [0xe5; 32];
+            let mut out = prefix.to_vec();
+            for (limited, offset, reason) in [
+                (
+                    Limits {
+                        max_bytes: expected.len() - 2,
+                        ..limits
+                    },
+                    expected.len() - 2,
+                    "byte limit exceeded",
+                ),
+                (
+                    Limits {
+                        max_nodes: 1,
+                        ..limits
+                    },
+                    list_header_len,
+                    "node limit exceeded",
+                ),
+                (
+                    Limits {
+                        max_depth: 1,
+                        ..limits
+                    },
+                    list_header_len,
+                    "depth limit exceeded",
+                ),
+            ] {
+                assert_eq!(
+                    write(&root, limited, &mut out),
+                    Err(Error { offset, reason })
+                );
+                assert_eq!(out, prefix);
+            }
+            write(&root, limits, &mut out).unwrap();
+            write(&root, limits, &mut out).unwrap();
+            assert_eq!(out, [prefix.as_slice(), expected, expected].concat());
+        };
+        check(
+            |root, limits, out| write_network_into(&root.tag, limits, out),
+            &[9, 10, 0, 0, 0, 1, 8, 0, 1, b'k', 0, 2, b'h', b'i', 0],
+            6,
+        );
+        check(
+            write_named_into,
+            &[
+                9, 0, 1, b'r', 10, 0, 0, 0, 1, 8, 0, 1, b'k', 0, 2, b'h', b'i', 0,
+            ],
+            9,
+        );
+    }
+
     #[test]
     fn snbt_parses_typed_values() {
         let text = "{a:1b,b:[I;1,2],c:'x y',d:[{e:2.5f}],f:true,g:id}";

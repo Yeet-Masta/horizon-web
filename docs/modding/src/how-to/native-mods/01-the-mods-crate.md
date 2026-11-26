@@ -36,8 +36,9 @@ Only after this fetch does the launcher resolve the actual staged workspace **of
 The game's locked packages, checksums and dependency graph stay immutable. A different mod-owned
 version may coexist where Cargo permits it. If a requested version would replace a game version,
 the build refuses it rather than updating the game. A native library with conflicting providers
-cannot be silently substituted. Feature selections must not introduce unpinned packages or
-change the game's graph.
+cannot be silently substituted. The mod compiles its own copy of every registry package it uses,
+so its features may differ from the game's: the edges they add must be in the mod's lock, and they
+must not introduce unpinned packages or move a locked version.
 
 Git dependencies other than the proven launcher-owned SDK declaration, alternate registries,
 paths escaping the mod, linked dependency paths, `[patch]`, `[replace]`, and mod-owned Cargo source
@@ -68,6 +69,27 @@ Cargo directories. Host-only build tools and proc macros are not packaged into t
 native providers or output filenames, escaping outputs, relative native search paths, and bundled
 framework outputs are refused explicitly. System libraries remain system dependencies. These
 restrictions do not trigger a source fallback.
+
+## Local crates
+
+A mod may split its code into local crates inside its folder, under `src/` (the package carries only `.rs` and
+`.toml` files there), joined to the root crate by path dependencies. Their manifests follow the same rules, and
+none of them may hold `[workspace]`. A local crate may depend on `horizon-mod-api` and `horizon-mod-points` itself,
+naming the mod's one SDK copy from its own folder:
+
+```toml
+# src/engine/Cargo.toml
+horizon-mod-api = { path = "../../.horizon/sdk/api/crates/horizon-mod-api" }
+```
+
+The launcher takes that dependency out and compiles the crate against the pinned SDK's libraries, as it does the
+root crate. Any other path to the SDK is refused under `E_SDK_SOURCE`, naming the path it expects. As in the root
+crate, the SDK comes with its pinned features: asking for others (`features`, or `default-features = false`) is
+refused under `E_NATIVE_FEATURES`. The SDK is always there, so a local crate can't make it `optional` either: no
+feature can switch it off. A proc-macro crate runs on the build machine, where the SDK's libraries don't
+link, so it may not name the SDK at all: keep the API calls in the crates its macros expand into.
+`horizon-internals` is the root crate's alone: the facade is generated for the mod's crate. A mod with local
+crates builds with Cargo against the SDK, the route registry dependencies take.
 
 ## Build restrictions
 

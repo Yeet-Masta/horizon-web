@@ -52,22 +52,34 @@ pub(super) fn projectile_predicate_supported(tag: &horizon_core::nbt::Tag) -> bo
 }
 /// `InventoryScreen.containerTick`: a survival inventory left open when the
 /// player gains infinite materials becomes the creative one, so the player
-/// stays in a menu. Vanilla has no other branch: a spectator's open inventory
-/// stays open too.
+/// stays in a menu. `CreativeModeInventoryScreen.containerTick` is the way
+/// back: without infinite materials, in any mode (spectator included), the
+/// creative screen is replaced by the survival one. Vanilla has no other
+/// branch: a spectator's open survival inventory stays open.
 fn inventory_after_mode(screen: Screen, creative: bool) -> Screen {
-    if screen == Screen::Inventory && creative {
-        Screen::Creative
+    match screen {
+        Screen::Inventory if creative => Screen::Creative,
+        Screen::Creative if !creative => Screen::Inventory,
+        _ => screen,
+    }
+}
+
+/// Vertical velocity upon entering spectator mode: clears the residual downward gravity
+/// velocity held while standing on solid ground so `no_physics` does not pull the player down.
+fn spectator_entry_velocity_y(on_ground: bool, velocity_y: f64) -> f64 {
+    if on_ground && velocity_y < 0.0 {
+        0.0
     } else {
-        screen
+        velocity_y
     }
 }
 
 impl Game<'_> {
-    /// `InventoryScreen.containerTick` on a mode change: the inventory the player has
-    /// open follows the mode. (`CreativeModeInventoryScreen.containerTick`, the way back
-    /// to survival, is not ported yet.)
+    /// `InventoryScreen.containerTick` and `CreativeModeInventoryScreen.containerTick`
+    /// on a mode change: the inventory the player has open follows the mode.
     fn mode_changed_under_inventory(&mut self) {
-        match inventory_after_mode(self.screen, self.creative) {
+        let from = self.screen;
+        match inventory_after_mode(from, self.creative) {
             Screen::Creative => {
                 if let Some(c) = self.carried.take() {
                     let _ = self.add_stack_to_inventory(c);
@@ -77,7 +89,10 @@ impl Game<'_> {
                 self.creative_screen.reopen();
                 self.refresh_saved_hotbars();
             }
-            next if next != self.screen => self.screen = next,
+            // `ItemPickerMenu` and the new `InventoryScreen` share
+            // `player.inventoryMenu`, and `removed` does nothing on a client
+            // player: the carried stack stays on the cursor.
+            next if next != from => self.set_screen(next),
             _ => {}
         }
     }
@@ -125,8 +140,11 @@ impl Game<'_> {
             self.mining = None;
             self.stop_active_item_use();
             self.left = false;
+            // Dismount first so a mounted player's post-dismount ground state decides
+            // whether any residual downward velocity is cleared.
             self.dismount_for_spectator();
             if let Some(p) = self.player.as_mut() {
+                p.velocity.y = spectator_entry_velocity_y(p.ground.on_ground, p.velocity.y);
                 p.flying = true;
                 p.spectator = true;
             }
@@ -172,6 +190,7 @@ impl Game<'_> {
         self.mode_changed_under_inventory();
     }
 }
+
 impl Game<'_> {
     /// `ItemStack.canBreakBlockInAdventureMode` / `canPlaceOnBlockInAdventureMode`
     /// for the main-hand stack: some predicate of its `can_break` or
@@ -432,9 +451,13 @@ mod tests {
         assert!(stays == Screen::Inventory, "survival keeps its inventory");
         // Vanilla's only branch is `hasInfiniteMaterials`: a spectator's open
         // inventory stays open.
+        // `CreativeModeInventoryScreen.containerTick`: no infinite materials
+        // replaces the creative screen with the survival one, spectator
+        // included; infinite materials keep it.
+        assert!(inventory_after_mode(Screen::Creative, false) == Screen::Inventory);
+        assert!(inventory_after_mode(Screen::Creative, true) == Screen::Creative);
         for screen in [
             Screen::Playing,
-            Screen::Creative,
             Screen::Paused,
             Screen::Stats,
             Screen::Advancements,
@@ -457,5 +480,102 @@ mod tests {
             loads_chunks(true, false),
             "survival, creative or adventure, rule on"
         );
+    }
+
+    /// `AbstractContainerMenu.removed` does nothing on a client player and
+    /// both screens share `player.inventoryMenu`: leaving creative keeps the
+    /// carried stack on the cursor.
+    #[test]
+    #[ignore = "daily"]
+    fn leaving_creative_keeps_the_carried_stack() {
+        use horizon_client::{command::args::GameMode, items::ItemStack};
+        let mut game = crate::game::native_machines::tests::server_game();
+        game.set_mode(GameMode::Creative);
+        game.screen = Screen::Creative;
+        game.carried = Some(ItemStack {
+            item: "minecraft:stone".into(),
+            count: 3,
+            damage: 0,
+            extra: None,
+        });
+        game.set_mode(GameMode::Survival);
+        assert!(game.screen == Screen::Inventory);
+        let kept = game.carried.as_ref().expect("the cursor stack is kept");
+        assert_eq!((&*kept.item, kept.count), ("minecraft:stone", 3));
+    }
+
+    /// `CreativeModeInventoryScreen.containerTick` is the other way back: the
+    /// tick swaps to the survival screen and the cursor stack stays.
+    #[test]
+    #[ignore = "daily"]
+    fn the_tick_swap_out_of_creative_keeps_the_carried_stack() {
+        use horizon_client::items::ItemStack;
+        let mut game = crate::game::native_machines::tests::server_game();
+        // The window's lead runs on a client's own game only.
+        game.options.execution_role = crate::game::execution_role::ExecutionRole::Client;
+        game.screen = Screen::Creative;
+        game.creative = false;
+        game.carried = Some(ItemStack {
+            item: "minecraft:stone".into(),
+            count: 3,
+            damage: 0,
+            extra: None,
+        });
+        let _ = game.tick();
+        assert!(game.screen == Screen::Inventory);
+        assert_eq!(game.carried.as_ref().map(|c| c.count), Some(3));
+    }
+
+    #[test]
+    fn entering_spectator_on_ground_clears_residual_gravity_velocity() {
+        assert_eq!(super::spectator_entry_velocity_y(true, -0.0784), 0.0);
+        assert_eq!(super::spectator_entry_velocity_y(true, 0.42), 0.42);
+        assert_eq!(super::spectator_entry_velocity_y(false, -0.35), -0.35);
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn switching_to_spectator_on_ground_preserves_y_position() {
+        if horizon_std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let start_y = 64.0_f64;
+            let mut player = horizon_client::motion::PlayerMotion::new(
+                game.motion,
+                horizon_core::geometry::Vec3::new(0.5, start_y, 0.5),
+            )
+            .unwrap();
+            player.ground.on_ground = true;
+            // Stationary ground ticks leave residual downward gravity velocity (`-gravity * drag`).
+            player.velocity.y = -0.0784;
+            game.player = Some(player);
+            game.set_mode(horizon_client::command::args::GameMode::Survival);
+            game.set_mode(horizon_client::command::args::GameMode::Spectator);
+
+            let mut player = game.player.take().unwrap();
+            for _ in 0..5 {
+                horizon_client::motion::MotionWorld {
+                    entities: &[],
+                    player: &mut player,
+                    scene: &mut game.world,
+                    assets: &game.pack.assets,
+                    collision_binding: game.collision,
+                    resources: game.motion,
+                    health: &game.health_resources,
+                    loop_context: &game.loop_context,
+                    damage_hooks: &game.damage_hooks,
+                    tag_items: Some(game.res.items()),
+                    block_registries: Some(&game.pack.block_registries),
+                }
+                .controlled_simulation_tick(Default::default())
+                .unwrap();
+            }
+
+            assert!(player.spectator);
+            assert!(player.flying);
+            assert_eq!(player.velocity.y, 0.0);
+            assert_eq!(player.position.y, start_y);
+        });
     }
 }

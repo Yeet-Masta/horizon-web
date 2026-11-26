@@ -410,10 +410,29 @@ impl FixedStep {
         let ticks = self.timer.advance_game_time(now_ms, |_| target_millis);
         ticks.clamp(0, 10) as u32
     }
+    /// Install the fixed clock's interpolation phase without re-quantizing its time or
+    /// capping the number of ticks. Keep the wall-clock timer's baseline current too.
+    pub fn advance_set(
+        &mut self,
+        sim: horizon_std::time::Duration,
+        ticks: u32,
+        partial: f32,
+    ) -> u32 {
+        self.now += sim;
+        self.timer.last_ms = self.now_ms();
+        self.timer.delta_ticks = ticks as f32 + partial - self.timer.delta_tick_residual;
+        self.timer.delta_tick_residual = partial;
+        self.timer.paused_delta_tick_residual = partial;
+        ticks
+    }
     /// Restart pacing from now (after loading, so no backlog replays).
     pub fn reset(&mut self) {
         self.timer = Timer::new(20.0, self.now_ms());
         self.timer.update_pause_state(self.pause);
+    }
+    /// `DeltaTracker.getGameTimeDeltaTicks` for the frame the game is drawing.
+    pub fn game_time_delta_ticks(&self) -> f32 {
+        self.timer.game_time_delta_ticks()
     }
     /// The partial tick for interpolation (`getGameTimeDeltaPartialTick(false)`).
     pub fn fraction(&self) -> f64 {
@@ -643,6 +662,18 @@ mod tests {
         clock.set_frozen(true);
         clock.world_runs();
         assert_eq!(clock.tick_target_millis(), 50.0);
+    }
+
+    #[test]
+    fn a_fixed_frame_sets_exact_time_and_interpolation_past_the_wall_clock_cap() {
+        let mut clock = FixedStep::client();
+        let elapsed = horizon_std::time::Duration::from_nanos(625_000_321);
+        let partial = 0.500_006_44;
+        assert_eq!(clock.advance_set(elapsed, 12, partial), 12);
+        assert_eq!(clock.now, elapsed);
+        assert_eq!(clock.window_fraction(), partial);
+        assert_eq!(clock.advance(horizon_std::time::Duration::ZERO, 50.0), 0);
+        assert_eq!(clock.window_fraction(), partial);
     }
 
     #[test]

@@ -104,17 +104,18 @@ FontManager.UnresolvedBuilderBundle.resolve	port	crates/horizon-client-render/sr
 FontOption.Filter.apply	port	crates/horizon-client-render/src/font.rs::Filter::passes	option match per provider
 FontOption.Filter.merge	inline	crates/horizon-client-render/src/font.rs::providers	filter merge while expanding references
 FontSet.reload	port	crates/horizon-client-render/src/font.rs::Font::load_set	providers into the font set
-FontSet.resetTextures	port	crates/horizon-client-render/src/font.rs::Font::reset_cache	glyph cache and atlas cursor cleared
+FontSet.resetTextures	port	crates/horizon-client-render/src/font/pages.rs::PageSet::new	lazy page generation reserves MISSING then WHITE before the first request; Font::reset_cache releases the old generation
 FontSet.selectProviders	port	crates/horizon-client-render/src/font.rs::Font::glyphs_by_width	gap: minor: width buckets hold only Space and atlas bitmap glyphs, so TrueType and unihex never appear as obfuscated characters
 FontSet.hasFishyAdvance	port	crates/horizon-client-render/src/font.rs::fishy_advance	an advance under 0 or over 32; the glyph is still drawn (SelectedGlyphs.any) and only the obfuscated text's nonFishy glyph skips it; Horizon keeps one advance per glyph where vanilla tests the baked and the unbaked one
 FontSet.computeGlyphInfo	port	crates/horizon-client-render/src/font.rs::Font::resolve	any is the first provider's glyph, fishy or not (Font::glyph_of, drawn and measured); nonFishy is the first with a good advance, then the missing glyph (Font::glyph_non_fishy, what getRandomGlyph draws)
-FontSet.DelayedBake.get	skip:java		lazy bake into the atlas; Font::resolve bakes at once
+FontSet.DelayedBake.get	port	crates/horizon-client-render/src/font/pages.rs::PageSet::request	bakes the chosen glyph only when requested and shares a bake between matching glyph selections
+FontTexture.add	port	crates/horizon-client-render/src/font/pages.rs::FontPages::upload	the glyph's original RGBA or luminance texels on its 256 by 256 page; Stitcher::stitch insets its UVs
 FontTexture.dumpContents	skip:debug		writes the atlas to a PNG for debugging
-GlyphRenderTypes.createForGrayscaleTexture	skip:ui		one textured quad path for all glyphs (hud.rs text_styled)
-GlyphRenderTypes.createForColorTexture	skip:ui		one textured quad path for all glyphs (hud.rs text_styled)
-GlyphRenderTypes.select	port	crates/horizon-client/src/game/interface/names.rs::Game::name_tag_geometry	gap: minor: normal and see-through only; polygon-offset text has no draw path
-GlyphStitcher.reset	port	crates/horizon-client-render/src/font.rs::Font::reset_cache	atlas cursor rewound
-GlyphStitcher.stitch	port	crates/horizon-client-render/src/font.rs::Region::place	rectangle placed in the atlas region
+GlyphRenderTypes.createForGrayscaleTexture	port	crates/horizon-client-render/src/hud/pack_text.rs::load_shaders	text variants with IS_GRAYSCALE on a one-channel font texture
+GlyphRenderTypes.createForColorTexture	port	crates/horizon-client-render/src/hud/pack_text.rs::load_shaders	text variants on an RGBA font texture
+GlyphRenderTypes.select	port	crates/horizon-client-render/src/gfx/core_text.rs::CoreText::draw_runs	normal, polygon-offset and see-through variants select a pipeline and texture by page
+GlyphStitcher.reset	port	crates/horizon-client-render/src/font/pages.rs::FontPages::reset	reload drops the old pages and render bindings
+GlyphStitcher.stitch	port	crates/horizon-client-render/src/font/pages.rs::Stitcher::stitch	tries matching pages in allocation order before making another page
 PlainTextRenderable.render	port	crates/horizon-client-render/src/hud.rs::HudBatch::text_styled	shadow pass first, then the front text
 PlayerGlyphProvider.Instance.renderSprite	port	crates/horizon-client-render/src/hud.rs::HudBatch::draw_inline_object	the face is the resolved skin's 8x8 head sprite (profile id first, then name, else the default skin), drawn at the text pen
 PlayerGlyphProvider.Instance.renderQuad	port	crates/horizon-client-render/src/hud.rs::HudBatch::draw_inline_object	the second quad is the same skin 32 texels right for the hat layer, drawn only when the object asks for the hat
@@ -145,7 +146,7 @@ BakedSheetGlyph.createEffect	skip:java		factory for an effect instance
 BakedSheetGlyph.EffectInstance.right	inline	crates/horizon-client-render/src/hud.rs::HudBatch::text_styled	underline end: pen x plus advance
 BakedSheetGlyph.EffectInstance.bottom	inline	crates/horizon-client-render/src/hud.rs::HudBatch::text_styled	underline row, 1 px at pen y plus 8
 BakedSheetGlyph.GlyphInstance.activeRight	inline	crates/horizon-client-render/src/hud.rs::HudBatch::text_styled	advance including the bold offset
-SpecialGlyphs.generate	port	crates/horizon-client-render/src/font.rs::Font::white	gap: minor: white texel only; the missing-box outline is drawn in HudBatch::text_styled, not generated
+SpecialGlyphs.generate	port	crates/horizon-client-render/src/font/pages.rs::PageSet::new	5 by 8 missing border and white bitmap on the first color page
 BitmapProvider.Definition.validateDimensions	missing		minor: no check of the bitmap grid; a ragged grid loads
 BitmapProvider.Definition.validate	missing		minor: no check that ascent is at most height
 BitmapProvider.Definition.getActualGlyphWidth	port	crates/horizon-client-render/src/font.rs::used_width	rightmost column with any visible pixel

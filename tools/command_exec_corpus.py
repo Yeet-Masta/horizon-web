@@ -30,6 +30,18 @@ def setup(*commands):
     return [cmd(c, False) for c in commands]
 
 
+# Feedback names: an item summoned with no item reads as air; a named ominous
+# item spawner is called by its CustomName.
+SUMMON_NAME_CASES = [
+    cmd('/summon minecraft:item 4.5 210 4.5'),
+    cmd('/summon minecraft:item 4.5 210 4.5 {}'),
+    cmd('/kill @e[type=minecraft:item]'),
+    cmd('/summon minecraft:ominous_item_spawner 4.5 210 8.5 {CustomName:"sw",Tags:["n"]}'),
+    cmd('/tp @e[type=minecraft:ominous_item_spawner,tag=n] 4.5 215 8.5'),
+    cmd('/kill @e[type=minecraft:ominous_item_spawner,tag=n]'),
+]
+
+
 def weather_predicate_cases():
     return [('any', None, None), ('rain', True, None), ('dry', False, None),
             ('thunder', None, True), ('quiet', None, False),
@@ -761,6 +773,7 @@ def entities():
         cmd('/summon minecraft:ominous_item_spawner 4.5 210 8.5'),
         cmd('/data get entity @e[type=minecraft:ominous_item_spawner,limit=1] item'),
         cmd('/kill @e[type=minecraft:ominous_item_spawner]'),
+        *SUMMON_NAME_CASES,
         cmd('/summon minecraft:ominous_item_spawner 4.5 210 8.5 {spawn_item_after_ticks:5L}'),
         {'op': 'tick', 'n': 10},
         cmd('/execute if entity @e[type=minecraft:ominous_item_spawner]'),
@@ -900,6 +913,9 @@ def scores():
         cmd('/scoreboard objectives setdisplay list harness'),
         cmd('/scoreboard objectives setdisplay sidebar harness'),
         cmd('/scoreboard objectives modify harness displayname "Shown"'),
+        cmd('/scoreboard objectives modify harness displayname {"text":"Shown"}'),
+        cmd('/scoreboard objectives modify harness displayname {"text":"Shown","bold":true}'),
+        cmd('/scoreboard objectives modify harness displayname [{"text":"Shown","bold":true}]'),
         cmd('/scoreboard objectives modify harness rendertype hearts'),
         cmd('/execute store result score @s harness run scoreboard players get @s harness'),
         cmd('/execute if score @s harness matches 15'),
@@ -2005,7 +2021,19 @@ def loot_world_pack_tables():
         cmd('/function parity:pack_loot_give'),
         cmd('/clear @s minecraft:emerald 0'),
         cmd('/loot give @s loot parity:missing'),
-        *setup('/clear @s', '/setblock 2 220 2 minecraft:air'),
+        # An int provider's constant is read by Codec.INT, which cuts 2.5 to 2.
+        *setup('/clear @s'),
+        cmd('/loot give @s loot parity:pack_fraction'),
+        cmd('/clear @s minecraft:emerald 0'),
+        # EnchantedCountIncreaseFunction: grow(Math.round(level * count)), so 5 + round(-1.5) is 4.
+        *setup('/clear @s', '/kill @e[type=minecraft:endermite]',
+               '/summon minecraft:endermite 2.5 221 2.5 {NoAI:1b,Tags:["pack_round"]}',
+               '/item replace entity @s weapon.mainhand with minecraft:iron_sword'
+               '[minecraft:enchantments={"minecraft:looting":1}]'),
+        cmd('/loot give @s kill @e[type=minecraft:endermite,tag=pack_round,limit=1]'),
+        cmd('/clear @s minecraft:emerald 0'),
+        *setup('/clear @s', '/tp @e[type=minecraft:endermite,tag=pack_round] 2.5 -100 2.5',
+               '/setblock 2 220 2 minecraft:air'),
     ]
 
 
@@ -3157,6 +3185,7 @@ def social():
         cmd('/help execute'),
         cmd('/help scoreboard players'),
         cmd('/help nonexistent'),
+        cmd('/help give @s minecraft:stone 64'),
         *setup('/scoreboard objectives remove trig', '/scoreboard objectives remove plain'),
     ]
 
@@ -6607,6 +6636,15 @@ def advancement_loot_fixtures(group_names):
         tables['parity:pack_loot'] = {'type': 'minecraft:chest', 'pools': [{'rolls': 1, 'entries': [
             {'type': 'minecraft:item', 'name': 'minecraft:emerald',
              'modifier': {'type': 'minecraft:set_count', 'count': 3}}]}]}
+        tables['parity:pack_fraction'] = {'type': 'minecraft:chest', 'pools': [{'rolls': 1, 'entries': [
+            {'type': 'minecraft:item', 'name': 'minecraft:emerald',
+             'modifier': {'type': 'minecraft:set_count', 'count': 2.5}}]}]}
+        # No other group summons an endermite, so its table is this group's to replace.
+        tables['minecraft:entities/endermite'] = {'type': 'minecraft:entity', 'pools': [{'rolls': 1, 'entries': [
+            {'type': 'minecraft:item', 'name': 'minecraft:emerald', 'modifier': [
+                {'type': 'minecraft:set_count', 'count': 5},
+                {'type': 'minecraft:enchanted_count_increase', 'enchantment': 'minecraft:looting',
+                 'count': -1.5}]}]}]}
     try:
         from . import player_food_predicate_corpus as player_food
     except ImportError:
@@ -8376,6 +8414,47 @@ def text_component_key_order():
     return ops + setup('/tick unfreeze', '/data remove storage horizon:key_order name', f'/kill @e[type=!player,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
                        f'/forceload remove {x0} {z0}')
 
+def primed_tnt_base_fields():
+    """PrimedTnt keeps Entity's own fields: Entity.load sets the saved Rotation (setXRot clamps xRot % 360 to
+    +-90, then setRot takes both % 360), PrimedTnt.tick's handlePortal counts PortalCooldown down, and
+    applyEffectsFromBlocks sets a fire immune entity's Fire to -getFireImmuneTicks(), 0, every tick
+    (PrimedTnt.tick never runs baseTick). Read before a tick, after /data merge, after a tick, and after the
+    chunk is unloaded and loaded again."""
+    x0, y0, z0 = 5664, 250, 5664
+    chunk = [[(x0 >> 4) + dx, (z0 >> 4) + dz] for dx in range(-2, 3) for dz in range(-2, 3)]
+    ops = [cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk},
+           cmd(f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 - 1} {z0 + 15} stone', expect_result=256)]
+    cases = ['Rotation:[-170.5f,-90.0f],Fire:40s,PortalCooldown:1200',
+             'Rotation:[45.0f,135.0f],Fire:-20s,PortalCooldown:3',
+             'Rotation:[400.0f,-400.0f],HasVisualFire:1b']
+    for n, extra in enumerate(cases, 1):
+        ops.append(cmd(f'/summon tnt {x0 + 3 * n}.5 {y0} {z0 + 8}.5 {{UUID:[I;16530,0,{n},1],fuse:400,{extra}}}',
+                       expect_result=1))
+
+    def reads():
+        for n, _ in enumerate(cases, 1):
+            for key in ('Rotation', 'Fire', 'PortalCooldown'):
+                ops.append(cmd(f'/data get entity 00004092-0000-0000-0000-{n:04x}00000001 {key}'))
+
+    reads()
+    # /data merge runs Entity.load on the live TNT: the same angles, and the merged PortalCooldown, from a portal
+    # state or none.
+    ops.append(cmd('/data merge entity 00004092-0000-0000-0000-000100000001 {PortalCooldown:0}'))
+    ops.append(cmd('/data merge entity 00004092-0000-0000-0000-000300000001 {Rotation:[400.0f,135.0f],PortalCooldown:50}'))
+    # getIntOr takes any numeric tag, on a live portal state (TNT 2) or none (TNT 1).
+    ops.append(cmd('/data merge entity 00004092-0000-0000-0000-000200000001 {PortalCooldown:40s}'))
+    ops.append(cmd('/data merge entity 00004092-0000-0000-0000-000100000001 {PortalCooldown:7.9d}'))
+    reads()
+    ops.append({'op': 'tick', 'n': 1})
+    reads()
+    ops.extend([cmd(f'/forceload remove {x0} {z0}', False), {'op': 'tick', 'n': 60},
+                cmd(f'/execute unless loaded {x0} {y0} {z0}', expect_result=1),
+                cmd(f'/forceload add {x0} {z0}', False), {'op': 'wait_chunks', 'chunks': chunk}])
+    reads()
+    return ops + setup(f'/kill @e[type=tnt,x={x0},y={y0 - 8},z={z0},dx=16,dy=24,dz=16]',
+                       f'/fill {x0} {y0 - 1} {z0} {x0 + 15} {y0 + 4} {z0 + 15} air',
+                       f'/forceload remove {x0} {z0}')
+
 def orb_fall_distance():
     """#14440: an experience orb's fall (`Entity.fallDistance`). `Entity.move` casts a move of a block or
     more over fall-resetting blocks and water, then `checkFallDamage` adds the drop outside water and on
@@ -9037,6 +9116,7 @@ def groups():
         ('vehicle saved ground and fall', vehicle_saved_ground_and_fall()),
         ('ravager saved movement speed', ravager_saved_movement_speed()),
         ('text component key order', text_component_key_order()),
+        ('primed tnt base fields', primed_tnt_base_fields()),
         # Last: it leaves the player in other food than it found.
         (player_food.GROUP, player_food.cases(cmd, setup)),
     ]

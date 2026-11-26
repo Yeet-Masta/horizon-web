@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import subprocess
@@ -224,6 +225,22 @@ class RefusalTests(unittest.TestCase):
             self.assertFalse(ns.guarded(path, PATTERNS), path)
         self.assertTrue(ns.guarded("tools/ci/x.py", ns.guarded_patterns("")))  # even without CODEOWNERS
 
+    def test_the_sdk_and_self_update_code_and_the_build_setup_are_guarded(self):
+        # Siblings of the single files CODEOWNERS named first: they verify SDKs, install the launcher's own
+        # update, resolve what is downloaded, or set how the release archives are built.
+        for path in ("launcher/src/backend/release_selection.rs", "launcher/src/update_handoff.rs",
+                     "launcher/src/native_mods/sdk_cache.rs", "crates/cargo-horizon-mod/src/sdk_fetch.rs",
+                     "xtask/src/main.rs", ".cargo/config.toml"):
+            self.assertTrue(ns.guarded(path, ns.guarded_patterns("")), path)  # even if CODEOWNERS lost it
+            # The real CODEOWNERS names the council for it: read here, apart from the fallback list.
+            owned = [line.split() for line in (ROOT / ".github/CODEOWNERS").read_text().splitlines()
+                     if line.strip() and not line.lstrip().startswith("#")]
+            self.assertTrue(any(owners[1:] == ["@horizon-rust/council"] and (
+                path == owners[0].lstrip("/") or (owners[0].endswith("/") and path.startswith(owners[0].lstrip("/"))))
+                for owners in owned), f"CODEOWNERS gives {path} no council rule")
+        for path in ("launcher/src/backend/settings.rs", "launcher/src/nightly.rs"):
+            self.assertFalse(ns.guarded(path, PATTERNS), path)
+
     def test_wildcard_and_slashless_directory_patterns_guard_descendants(self):
         patterns = ns.guarded_patterns('/packages/** @council\n/council-only @council\n/scripts/*.py @council\n')
         self.assertTrue(ns.guarded('packages/x/y.rs', patterns))
@@ -286,7 +303,7 @@ class RefusalTests(unittest.TestCase):
         def gh(*args, **kwargs):
             if args[1] == "repos/owner/repo/pulls/123":
                 return json.dumps({"state": "open", "head": {"sha": "a" * 40}, "title": "paths",
-                                   "user": {"login": "dev"}, "base": {"ref": "main"}})
+                                   "user": {"login": "dev"}, "base": {"ref": "main"}, "changed_files": 3})
             return "\n".join(paths) if "--jq" in args else json.dumps(pages)
 
         with mock.patch.object(ns, "gh", gh):
@@ -296,6 +313,30 @@ class RefusalTests(unittest.TestCase):
         self.assertIn("only the council merges", ns.check(candidate, 123, patterns))
         self.assertIsNone(ns.check(pr(124, files=["unowned/café.rs"]), 124, patterns))
 
+
+    def test_a_listing_cut_at_the_cap_is_refused(self):
+        # GitHub lists at most 3000 files; a guarded file past that would be unseen, so the pick fails closed.
+        items = [{"filename": f"unowned/f{i}.txt"} for i in range(ns.LISTING_CAP)]
+
+        def gh_for(changed):
+            def gh(*args, **kwargs):
+                if args[1] == "repos/owner/repo/pulls/123":
+                    return json.dumps({"state": "open", "head": {"sha": "a" * 40}, "title": "big",
+                                       "user": {"login": "dev"}, "base": {"ref": "main"},
+                                       "changed_files": changed})
+                return json.dumps([items])
+            return gh
+
+        for changed in (ns.LISTING_CAP + 40, ns.LISTING_CAP):
+            with mock.patch.object(ns, "gh", gh_for(changed)):
+                candidate = ns.lookup("owner/repo")(123)
+            self.assertIn("can't be checked", ns.check(candidate, 123, PATTERNS), changed)
+        items[:] = items[:5]
+        # Below the cap too: five listed of six changed is an incomplete listing, whatever the cap.
+        with mock.patch.object(ns, "gh", gh_for(6)):
+            self.assertIn("can't be checked", ns.check(ns.lookup("owner/repo")(123), 123, PATTERNS))
+        with mock.patch.object(ns, "gh", gh_for(5)):
+            self.assertIsNone(ns.check(ns.lookup("owner/repo")(123), 123, PATTERNS))
 
     def test_a_set_with_a_refused_pull_request_changes_nothing(self):
         state = {"prs": []}
@@ -439,7 +480,12 @@ class AssemblyTests(unittest.TestCase):
         for path in paths:
             target = Path(self.repo, path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("new\n")
+            try:
+                target.write_text("new\n")
+            except OSError as error:
+                if error.errno != errno.EILSEQ:
+                    raise
+                self.skipTest("this file system refuses a file name that isn't UTF-8 (macOS's APFS)")
         head = self.commit("paths Git would quote")
         changed = ns.changed_files(self.main, head, cwd=self.repo)
         self.assertCountEqual(changed, paths)

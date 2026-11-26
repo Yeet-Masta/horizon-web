@@ -3,6 +3,7 @@
 use super::{Arg, Context, Game, R, Target, err, wrap_degrees};
 use crate::game::living_attributes::AttributeWrite;
 use crate::game::minecarts::CartHit;
+use crate::game::vehicle_teleport::TeleportMotion;
 use horizon_client::{
     mobs::{Damage, DamageKind, MobEvent, NamedDamage, Who, finalize},
     text::Text,
@@ -12,6 +13,10 @@ use horizon_core::random::RandomSource;
 use horizon_protocol::packets::play::{self, Clientbound as C};
 use horizon_world::attribute_map::ValueKind;
 use horizon_world::damage_source::Catalog as DamageCatalog;
+
+#[cfg(test)]
+#[path = "playsound_command_tests.rs"]
+mod playsound_command_tests;
 
 /// Queue bookkeeping for synchronous command damage, preserving prior requests
 /// and unrelated events. The existing game policy handles each extracted request.
@@ -98,6 +103,7 @@ impl Game<'_> {
             "mob_attack" => DamageKind::MobAttack,
             "mob_attack_no_aggro" => DamageKind::MobAttackNoAggro,
             "arrow" => DamageKind::Arrow,
+            "trident" => DamageKind::Trident,
             "thrown" | "mob_projectile" => DamageKind::Thrown,
             "fireball" | "unattributed_fireball" => DamageKind::Fireball,
             "wither_skull" => DamageKind::WitherSkull,
@@ -110,7 +116,14 @@ impl Game<'_> {
             "lava" => DamageKind::Lava,
             "drown" => DamageKind::Drown,
             "dry_out" => DamageKind::DryOut,
-            "magic" | "indirect_magic" | "dragon_breath" => DamageKind::Magic,
+            "magic" | "indirect_magic" => DamageKind::Magic,
+            // `DamageCommand.damage`: keep `dragonBreath` and its `#no_knockback` tag.
+            "dragon_breath" => DamageKind::Named(horizon_client::mobs::NamedDamage::new(
+                "minecraft:dragon_breath",
+                horizon_client::mobs::NamedDamage::BYPASSES_ARMOR
+                    | horizon_client::mobs::NamedDamage::PANIC_CAUSES
+                    | horizon_client::mobs::NamedDamage::NO_KNOCKBACK,
+            )),
             "sting" => DamageKind::Sting,
             "cactus" => DamageKind::Cactus,
             "sweet_berry_bush" => DamageKind::SweetBerryBush,
@@ -197,9 +210,9 @@ impl Game<'_> {
         cause: Option<Target>,
         from: Option<[f64; 3]>,
     ) -> bool {
-        // Resolve the damage registry at the shared command/API boundary before
-        // any target-specific path can mutate state or map it to a DamageKind.
-        if self.motion.health.damage.id(ty).is_none() {
+        // Check the world's damage registry before a target-specific path can
+        // mutate state or map the source to a DamageKind.
+        if self.health_resources.damage.id(ty).is_none() {
             return false;
         }
         let attacker = cause.or(by).and_then(|t| self.network_entity_id(t));
@@ -301,22 +314,57 @@ impl Game<'_> {
                     _ => None,
                 };
                 let damage = Damage {
-                    kind: Self::damage_kind(&self.motion.health.damage, ty),
+                    kind: Self::damage_kind(&self.health_resources.damage, ty),
                     attacker,
                     from,
                     attacker_species,
                 };
+                // `Shulker.hurtServer`: damage tagged `is_projectile` whose direct entity is a shulker
+                // bullet is a hit by one, whatever sent it.
+                let bullet = matches!(by, Some(Target::Projectile(p)) if self
+                    .creatures
+                    .projectiles
+                    .iter()
+                    .any(|q| q.id == p
+                        && matches!(q.kind, horizon_client::projectiles::ProjectileKind::ShulkerBullet { .. })))
+                    && self.health_resources.damage.id(ty).is_some_and(|kind| {
+                        self.health_resources
+                            .damage
+                            .in_tag(kind, "minecraft:is_projectile")
+                    });
                 // DamageSource.getEntity is the causing player, even when
                 // another client issued the command or supplied the direct entity.
                 let guest = match cause.or(by) {
                     Some(Target::Guest(conn)) if self.lan_acting != Some(conn) => Some(conn),
                     _ => None,
                 };
-                if let Some(conn) = guest {
+                // `DamageSource.getDirectEntity`: the command's `by` entity, which the
+                // damage type cannot name (`/damage ... trident by @s` has a player direct).
+                let direct_type = match by {
+                    None => Some(None),
+                    Some(t) => {
+                        let ty = self.target_type(t);
+                        (!ty.is_empty()).then_some(Some(ty))
+                    }
+                };
+                // Keep the source in scope across the replaceable mob damage call.
+                let previous_bullet_damage =
+                    std::mem::replace(&mut self.command_damage_by_shulker_bullet, bullet);
+                let hurt = if let Some(conn) = guest {
                     let attack = self.current_attack();
                     let hurt = self
                         .as_guest(conn, |g| {
-                            g.with_attack(attack, |g| g.command_damage_mob(id, amount, damage))
+                            let hurt = g.with_attack(attack, |g| {
+                                g.command_damage_mob(id, amount, damage)
+                            });
+                            // `DamageSource.getDirectEntity` as the command built it, for
+                            // the death message's advancement and loot views.
+                            if hurt && let Some(direct) = &direct_type
+                                && let Some(m) = g.mobs.iter_mut().find(|m| m.id == id)
+                            {
+                                m.last_direct = Some(direct.clone());
+                            }
+                            hurt
                         })
                         .unwrap_or(false);
                     if hurt && let Some(host) = self.lan.as_mut() {
@@ -324,8 +372,16 @@ impl Game<'_> {
                     }
                     hurt
                 } else {
-                    self.command_damage_mob(id, amount, damage)
-                }
+                    let hurt = self.command_damage_mob(id, amount, damage);
+                    if hurt && let Some(direct) = &direct_type
+                        && let Some(m) = self.mobs.iter_mut().find(|m| m.id == id)
+                    {
+                        m.last_direct = Some(direct.clone());
+                    }
+                    hurt
+                };
+                self.command_damage_by_shulker_bullet = previous_bullet_damage;
+                hurt
             }
             Target::Item(id) => self.hurt_item_entity(id, amount, ty, by, cause.or(by), from),
             Target::Boat(_) | Target::Cart(_) => {
@@ -335,7 +391,7 @@ impl Game<'_> {
                 id,
                 amount,
                 ty,
-                Self::damage_kind(&self.motion.health.damage, ty),
+                Self::damage_kind(&self.health_resources.damage, ty),
                 (
                     by,
                     cause.or(by),
@@ -345,7 +401,7 @@ impl Game<'_> {
             Target::Crystal(id) => self.command_damage_crystal(
                 id,
                 ty,
-                Self::damage_kind(&self.motion.health.damage, ty),
+                Self::damage_kind(&self.health_resources.damage, ty),
                 by,
                 cause.or(by),
                 from,
@@ -366,7 +422,7 @@ impl Game<'_> {
         causing: Option<Target>,
         position: Option<[f64; 3]>,
     ) -> bool {
-        let registry = &self.motion.health.damage;
+        let registry = &self.health_resources.damage;
         let Some(kind) = registry.id(damage_type) else {
             return false;
         };
@@ -435,8 +491,9 @@ impl Game<'_> {
     /// `DamageCommand.damage`: retain the accepted hit's player context and run
     /// `Zombie.hurtServer`'s reinforcement requests before the command returns.
     /// Health-changing hits also raise their damage vibration before return.
-    fn command_damage_mob(&mut self, id: u32, amount: f32, damage: Damage) -> bool {
+    pub(super) fn command_damage_mob(&mut self, id: u32, amount: f32, damage: Damage) -> bool {
         let attack = self.combat.attack();
+        let by_shulker_bullet = self.command_damage_by_shulker_bullet;
         let mut reinforcements = Vec::new();
         let mut health_changed = false;
         let hurt = self.mobs.iter_mut().find(|m| m.id == id).is_some_and(|m| {
@@ -448,6 +505,9 @@ impl Game<'_> {
                 damage,
             );
             health_changed = hurt && m.health != old_health;
+            if hurt && by_shulker_bullet {
+                horizon_client::mobs::shulker::hit_by_bullet(m);
+            }
             if hurt {
                 reinforcements = take_new_reinforcements(&mut m.outbox, queued);
             }
@@ -524,7 +584,15 @@ impl Game<'_> {
                     host.hub.send_to(conn, &packet);
                 }
             }
-            None => self.audio.play_on(source, sound, Some(at), volume, pitch),
+            None => {
+                // PlaySoundCommand sends one packet per target and never a
+                // level sound: this client's own player plays it from the
+                // same seed, and it is not captured for the guests.
+                let capture = self.audio.capture.take();
+                self.audio
+                    .play_seeded(sound, Some(at), volume, pitch, seed, Some(source));
+                self.audio.capture = capture;
+            }
         }
     }
     /// `StopSoundCommand`: each target's connection gets the packet; the
@@ -1755,12 +1823,13 @@ impl Game<'_> {
         let respect = matches!(ctx.get("respectTeams"), Some(Arg::Bool(true)));
         let max_y = match ctx.get("maxHeight") {
             Some(Arg::Int(h)) => *h,
-            _ => self.world.top_y(),
+            _ => self.world.shape.max_y(),
         };
-        if max_y < self.world.bottom_y() {
+        let min_y = self.world.shape.min_y;
+        if max_y < min_y {
             return Err(err(
                 "commands.spreadplayers.failed.invalid.height",
-                &[&max_y, &self.world.bottom_y()],
+                &[&max_y, &min_y],
             ));
         }
         let targets = super::without_knots(self.entities(ctx, "targets", false)?)?;
@@ -1912,7 +1981,9 @@ impl Game<'_> {
                 index - 1
             };
             let p = points[i];
-            let y = self.spread_spawn_y(p, max_y);
+            let y = self
+                .spread_spawn_y(p, max_y)
+                .unwrap_or_else(|| max_y.saturating_add(1));
             let mut to = [p[0].floor() + 0.5, f64::from(y), p[1].floor() + 0.5];
             let mut skip = false;
             if mod_api::__private::listened(mod_api::HookId::SpreadPlayersTeleport)
@@ -1937,7 +2008,16 @@ impl Game<'_> {
                     to = moved;
                 }
             }
-            if !skip {
+            if !skip
+                && !self.teleport_across(
+                    t,
+                    self.source_level(),
+                    to,
+                    None,
+                    false,
+                    TeleportMotion::Stop,
+                )?
+            {
                 self.teleport_to(t, to, None, false);
                 self.teleport_stops(t);
             }
@@ -1971,33 +2051,47 @@ impl Game<'_> {
         Ok(points.len() as i32)
     }
     /// `SpreadPlayersCommand.Position.getSpawnY`.
-    fn spread_spawn_y(&self, p: [f64; 2], max_y: i32) -> i32 {
+    /// Vanilla's `Level.getBlockState` loads the candidate column during this scan.
+    fn spread_spawn_y(&mut self, p: [f64; 2], max_y: i32) -> Option<i32> {
         let (x, z) = (p[0].floor() as i32, p[1].floor() as i32);
+        let chunk = (x >> 4, z >> 4);
+        // Level.isInValidBoundsHorizontal checks ChunkPyramid.MAX_CHUNK_COORDINATE_VALUE.
+        const MAX_CHUNK_COORDINATE: i32 = 2_097_061;
+        if chunk.0.abs().max(chunk.1.abs()) > MAX_CHUNK_COORDINATE {
+            return None;
+        }
+        self.streaming.load_full_chunk(&mut self.world, chunk);
         let air = |y: i32| {
+            if !self.world.shape.contains_y(y) {
+                return true;
+            }
             let name: &str = &self.res.facts().get(self.world.block(x, y, z)).name;
             matches!(
                 name,
                 "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
             )
         };
-        let mut y = max_y + 1;
+        let mut y = max_y.min(self.world.shape.max_y()) + 1;
         let mut air2 = air(y);
         y -= 1;
         let mut air1 = air(y);
-        while y > self.world.bottom_y() {
+        while y > self.world.shape.min_y {
             y -= 1;
             let current = air(y);
             if !current && air1 && air2 {
-                return y + 1;
+                return Some(y + 1);
             }
             air2 = air1;
             air1 = current;
         }
-        max_y + 1
+        None
     }
     /// `SpreadPlayersCommand.Position.isSafe`.
-    fn spread_safe(&self, p: [f64; 2], max_y: i32) -> bool {
-        let y = self.spread_spawn_y(p, max_y) - 1;
+    fn spread_safe(&mut self, p: [f64; 2], max_y: i32) -> bool {
+        let Some(spawn_y) = self.spread_spawn_y(p, max_y) else {
+            return false;
+        };
+        let y = spawn_y - 1;
         let (x, z) = (p[0].floor() as i32, p[1].floor() as i32);
         let name = self.res.facts().get(self.world.block(x, y, z)).name.clone();
         let liquid = matches!(&*name, "minecraft:water" | "minecraft:lava");
@@ -2057,6 +2151,10 @@ fn command_operation(ctx: &Context) -> horizon_world::attributes::Operation {
 #[cfg(test)]
 #[path = "attribute_missing_tests.rs"]
 mod attribute_missing_tests;
+
+#[cfg(test)]
+#[path = "swing_command_tests.rs"]
+mod swing_command_tests;
 
 #[cfg(test)]
 mod allay_owner_damage_tests {
@@ -2246,6 +2344,7 @@ mod vehicle_damage_command_tests {
     use horizon_client::chunk::Chunk;
     use horizon_core::position::ChunkPos;
     use std::sync::Arc;
+    /// A server game with commands allowed and chunk 0 0 force-loaded.
     pub(super) fn with_game(test: impl FnOnce(&mut Game<'_>)) {
         let root =
             std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
@@ -2783,3 +2882,7 @@ mod attribute_modifier_command_tests {
 #[cfg(test)]
 #[path = "attribute_equipment_tests.rs"]
 mod attribute_equipment_tests;
+
+#[cfg(test)]
+#[path = "guest_vehicle_relation_tests.rs"]
+mod guest_vehicle_relation_tests;

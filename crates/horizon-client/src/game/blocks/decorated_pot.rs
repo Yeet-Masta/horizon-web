@@ -154,7 +154,7 @@ impl Game<'_> {
         let Some(mut tag) = self.pot_tag(pos) else {
             return Some(Answer::Pass);
         };
-        let mut pot_item = tag.get("item").and_then(save::item_from_nbt);
+        let mut pot_item = super::machines::pot_item(&tag, self.items());
         let insertable = held.filter(|stack| match &pot_item {
             None => true,
             Some(p) => p.same_item_same_components(stack) && p.count < self.max_stack(p),
@@ -201,7 +201,7 @@ impl Game<'_> {
             .send_particles(&plume, plume_at, [0.0; 3], 0.0, 7);
         self.lan_send_particles(super::lan_particles::QueuedParticle {
             dimension: self.dim.id(),
-            options: plume,
+            options: plume.into(),
             state: None,
             at: plume_at,
             spread: [0.0; 3],

@@ -10,12 +10,10 @@ pub trait Hooks {
     /// `&self`, so it reads and draws only. The Win and Options screens call
     /// it on their own path, after their drawing.
     ///
-    /// It does not fire for the screens drawn over gameplay after it (a
-    /// server dialog, the server pack, link and code-of-conduct prompts, a
-    /// book, a sign editor): those keep `Screen::Playing`, which it skips (the
-    /// server pack prompt hides an open screen too, and that screen does not
-    /// fire under it), and draw over what it drew, while vanilla's
-    /// `ScreenEvent.Render.Post` fires for them. The title's own screens
+    /// Book and sign editors fire at their own draw boundary, even when
+    /// `screen_render_pre` cancelled their stock drawing. A server dialog or
+    /// modal prompt is not an editor and does not fire this hook.
+    /// The title's own screens
     /// (`title`, `world_select`, `world_create`, `multiplayer`…) fire it too,
     /// their `screen.id` from the title state machine and the whole window
     /// their `rect`, and no dialog or prompt over them.

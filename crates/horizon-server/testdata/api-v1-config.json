@@ -52,7 +52,10 @@
         "world": {
           "difficulty": "easy",
           "game_mode": "survival",
+          "generate_structures": true,
+          "generator_settings": "{}",
           "hardcore": false,
+          "level_type": "minecraft:normal",
           "name": "world",
           "seed": ""
         }

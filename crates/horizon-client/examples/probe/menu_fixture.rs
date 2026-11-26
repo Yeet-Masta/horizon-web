@@ -8,7 +8,7 @@ use horizon_client::{
     containers::{Furnace, FurnaceKind},
     crafting::Recipes,
     furnace::FurnaceCooking,
-    item_data::{canon_stack, parse_stack},
+    item_data::{canon_stack, parse_stack_in},
     items::Items,
     menu::{Env, Input, Kind, Menu},
 };
@@ -95,6 +95,8 @@ pub fn main() -> horizon_client::Result<()> {
     let input = fs::read_to_string(args.get(2).ok_or("missing INPUT")?)?;
     let defaults = horizon_world::item_defaults::read(root)?;
     let items = Items::catalog(root, &PackOverlay::NONE, &defaults)?;
+    // Stacks decode as the game's world load decodes them: against its item prototypes.
+    let parse_stack = |snbt: &str| parse_stack_in(snbt, &items.component_defaults);
     let recipes = Recipes::load(
         root,
         &items,

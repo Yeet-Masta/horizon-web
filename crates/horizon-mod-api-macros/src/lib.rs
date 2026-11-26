@@ -1,6 +1,5 @@
 //! Derive hook subscriptions from a trait implementation.
 mod payload;
-mod point;
 mod wire;
 
 /// Derive a typed payload's value codec from its fields.
@@ -248,28 +247,12 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     }
     let export = if export && part.is_none() {
         let ty = &implementation.self_ty;
-        let registrations: proc_macro2::TokenStream =
-            match std::env::var("HORIZON_GUEST_REGISTRATIONS") {
-                Ok(source) => match source.parse::<proc_macro2::TokenStream>() {
-                    Ok(tokens) => tokens,
-                    Err(error) => {
-                        return syn::Error::new_spanned(
-                            &implementation,
-                            format!("guest registrations: {error}"),
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                },
-                Err(_) => quote!(),
-            };
         quote! {
             pub fn hooks() -> Box<dyn mod_api::Hooks> { Box::new(<#ty as Default>::default()) }
             /// The mod's hooks for the guest runtime in `mod_api::wire::guest`, when built to wasm.
             #[cfg(target_arch = "wasm32")]
             #[unsafe(no_mangle)]
             fn __horizon_mod_hooks() -> Box<dyn mod_api::Hooks> {
-                #registrations
                 hooks()
             }
         }
@@ -279,8 +262,9 @@ fn expand(mut implementation: ItemImpl, export: bool) -> TokenStream {
     quote!(#implementation #export).into()
 }
 
-/// Generate the panicking defaults of a host area from each method's access declaration.
+/// Generate host area defaults from each method's access declaration.
 /// The same declarations drive game forwarders in the build-time API generator.
+/// `#[default_on_unavailable]` opts into a default value in place of a panic.
 #[proc_macro_attribute]
 pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     let mut area = parse_macro_input!(input as syn::ItemTrait);
@@ -320,16 +304,26 @@ pub fn host_area(_attribute: TokenStream, input: TokenStream) -> TokenStream {
             Ok(level) => level,
             Err(error) => return error.to_compile_error().into(),
         };
+        let default_on_unavailable = method
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("default_on_unavailable"));
         method.attrs.retain(|attr| {
             !attr.path().is_ident("static_call")
                 && !attr.path().is_ident("service")
+                && !attr.path().is_ident("game_method")
                 && !attr.path().is_ident("raw_text")
+                && !attr.path().is_ident("default_on_unavailable")
         });
         let operation = method.sig.ident.to_string();
         let label = format!("{union}::{operation}");
-        method.default = Some(syn::parse_quote!({
-            crate::world::phase::unprovided(#label, #operation, crate::world::phase::LoadAccess::#level)
-        }));
+        method.default = Some(if default_on_unavailable {
+            syn::parse_quote!({ Default::default() })
+        } else {
+            syn::parse_quote!({
+                crate::world::phase::unprovided(#label, #operation, crate::world::phase::LoadAccess::#level)
+            })
+        });
         method.semi_token = None;
     }
     quote!(#area).into()
@@ -362,23 +356,6 @@ pub fn horizon_mod(_attribute: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn horizon_part(_attribute: TokenStream, input: TokenStream) -> TokenStream {
     expand(parse_macro_input!(input as ItemImpl), false)
-}
-
-/// `#[point(side = "server" | "client" | "both", name = "…", slot = N, free, api(…), mirror(…))]`
-/// on a function: an injection point (arismoko/horizon#589), where mods listen through the API. The staging pass
-/// that builds the prebuilt game puts it on each replaceable function with an API record, with
-/// the function's replacement cell (`slot`); a function without a record is refused by this
-/// attribute, naming it. The source tree carries none. The function's head is its cell's one load
-/// and a branch, the same check a mixin build's copy is installed through: while a mod listens
-/// at the head or the return, the cell holds the point's dispatcher, which runs the head
-/// listeners, the body (or the installed copy) and the return listeners. An API listener, native
-/// or wasm, gets the side's host (on a `Game` method) and a record holding a copy of every
-/// parameter as an API value (an engine type `mirror(…)` names as its `mod_api` mirror): the
-/// function runs with the record's by-value and `&T` values, and a `&mut T` parameter's place
-/// gets the record's value back.
-#[proc_macro_attribute]
-pub fn point(attribute: TokenStream, input: TokenStream) -> TokenStream {
-    point::expand(attribute.into(), parse_macro_input!(input as ImplItemFn)).into()
 }
 
 /// `#[horizon_loop(name = "…", side = "server" | "client")]` on a published loop's entry function

@@ -104,7 +104,7 @@ an explicit NBT compound follows the load route without finalization.
 
 `event.mob` is the mob itself, an `UnspawnedMobRef`: it is not in a level, so it is not an `EntityRef`, and only this
 hook call can use it. Read it through the host (`kind`, `position`, `equipment`, `attribute_base`, `attribute_value`,
-`tags`, `custom_name`) and change it through `event.edits`, which reaches only this mob: equipment (an API-owned `ItemStack`), an attribute's base or a permanent modifier, tags and the custom name. An edit applies at once, so the
+`tags`, `custom_name`, `baby`) and change it through `event.edits`, which reaches only this mob: equipment (an API-owned `ItemStack`), an attribute's base or a permanent modifier, tags and the custom name. An edit applies at once, so the
 reads and the next listener see it. Once the hook returns, the handle answers `UnspawnedMobError::Expired`, as does a
 handle from another call passed to this call's editor.
 
@@ -202,7 +202,7 @@ Every mod is asked about every key, so a mod ignores keys it does not own. See [
 ## Spawning from a level
 
 `LevelRef::spawn_mob(host, kind, pos, reason)` is `EntityType.spawn`: the mob is made as any of its type is, Parts, attachments and `entity_constructing` included, then `finalize_spawn` and `finalizeSpawn` run with `reason`, and it joins the level (`entity_join_level`; inside a transaction, at its root commit), not persistent. It returns the mob's handle, or `None` with nothing spawned: a kind that isn't a mob, a position that isn't finite, outside `Level.isInSpawnableBounds` or in an unloaded chunk, a level not in place, a client, or a mod that cancelled the spawn or kept the mob out.
-Inside a transaction the join waits for the root commit, so a spawn a mod then keeps out still returns a handle, which reads stale from the commit on. The level's spawn limits, flags and spawn rules don't apply, as they don't to `/summon`. Items, experience and block drops have their own calls (`spawn_item`, `award_experience`, `pop_resource`), and any other entity `summon`.
+Inside a transaction the join waits for the root commit, so a spawn a mod then keeps out still returns a handle, which reads stale from the commit on. The level's spawn limits, flags and spawn rules don't apply, as they don't to `/summon`. Items, experience and block drops have their own calls (`spawn_item`, `award_experience`, `pop_resource`), and any other entity `summon`. One `award_experience` call awards at most 1,000,000 points (about 400 orbs); a larger amount is cut to that, so give more in several calls.
 
 A level's natural spawning (`NaturalSpawner.spawnForChunk`) also has a policy a mod can change:
 

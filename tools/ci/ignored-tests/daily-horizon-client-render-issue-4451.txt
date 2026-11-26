@@ -10,6 +10,7 @@ horizon-client-render block_states::tests::a_slabs_outline_is_its_half lib daily
 horizon-client-render block_states::tests::air_and_light_are_not_drawn lib daily resources
 horizon-client-render gfx::arena::source_tests::terrain_source_arena_gpu_grow_move_recycle_and_refusal lib daily resources
 horizon-client-render gfx::core_text::tests::vanillas_text_shader_makes_both_world_text_pipelines lib daily resources
+horizon-client-render gfx::entity_pixel_test::core_entity_uses_live_material_color_and_preserves_frame_encoding lib daily resources # Software Vulkan required.
 horizon-client-render gfx::entity_pixel_test::instance_run::an_instanced_run_matches_per_copy_pixels_with_hdr lib daily resources
 horizon-client-render gfx::lightning::tests::bolt_through_the_atlas_white_sprite_is_fully_drawn lib daily resources
 horizon-client-render gfx::lightning::tests::retained_gpu_draw_matches_transient_additive_draw lib daily resources
@@ -27,7 +28,6 @@ horizon-client-render gfx::prepared_model::tests::oversized_prepared_upload_retu
 horizon-client-render gfx::world_text::tests::world_text_blends_culls_and_obeys_world_depth lib daily resources
 horizon-client-render hud_kit::fit::tests::ellipsize_cuts_every_string_as_the_old_fit_did lib daily resources
 horizon-client-render lod::tests::chunks_a_server_dropped_stay_drawn_as_far_terrain lib daily resources
-horizon-client-render lod::tests::coarser_stand_ins_keep_the_ring_past_the_near_chunks_drawn lib daily resources
 horizon-client-render lod::tests::far_cells_sampled_before_their_chunks_were_kept_fill_in lib daily resources
 horizon-client-render lod::tests::real_mesh_clips_near_chunks_and_preserves_water_and_edited_surfaces lib daily resources
 horizon-client-render lod::tests::slab_materials_survive_chunk_summaries_and_draw_far_faces lib daily resources

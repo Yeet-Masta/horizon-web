@@ -24,7 +24,8 @@ Vanilla oracles are reused too: tools/parity_shim.py stands in for java and
 javac and replays an oracle run whose inputs are unchanged, so a Rust-only
 change costs only the Rust side. A harness that fails while reusing oracle
 results is rerun fresh, and stops reusing them if it then passes. --all and
---fresh never reuse them.
+--fresh never reuse them. The summary says what the shim did with each Java
+call: replayed, or run and why.
 
 A harness listed in parity_hosts.json's "known_flaky" (each with its reason)
 that fails runs once more from scratch instead, and a pass then counts. Every
@@ -49,24 +50,34 @@ the second build would replace the program the first is running.
 """
 
 import argparse
+from collections import Counter
 import hashlib
 import json
+import locale
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import signal
 import socket
+import sqlite3
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 
 try:
     from . import parity_reach
+    from . import compile_lock
+    from . import fast_bins
     from . import file_lock
     from . import process_tree
 except ImportError:
     import parity_reach
+    import compile_lock
+    import fast_bins
     import file_lock
     import process_tree
 
@@ -84,6 +95,8 @@ PROFILE = {
     "CARGO_PROFILE_DEV_OPT_LEVEL": "3",
 }
 SHIM = STATE_DIR / "shim"
+# One line per Java call the shim handled in this run (tools/parity_shim.py's decide), summed up at its end.
+DECISIONS = STATE_DIR / "shim-decisions.jsonl"
 # Results shared by every worktree using the same vanilla data (.local/minecraft
 # links to a shared directory in parallel worktrees): passes keyed by content,
 # so a harness whose inputs match one that passed elsewhere doesn't run again.
@@ -295,6 +308,74 @@ def artifacts_of(arguments):
         index += 1
     examples = any(kind in ("example", "examples") for kind, _ in found)
     return [[kind, name, profile, selection, examples] for kind, name in found]
+
+
+TEST_TARGETS = {"--lib", "--bins", "--tests", "--examples", "--benches", "--all-targets"}
+TEST_TARGET_FLAGS = {"--bin", "--test", "--example", "--bench"}  # followed by a value
+TEST_UNKEYED = {"--locked", "--no-run", "--no-fail-fast", "-q", "--quiet", "-v", "--verbose"}
+TEST_UNKEYED_FLAGS = {"-j", "--jobs", "--message-format", "--color"}  # followed by a value
+
+
+def test_selection(arguments):
+    """The arguments a `cargo test` command line compiles with: its profile flag as written, its package and feature
+    selection and its target filters, in that order. `cargo test --no-run` with them builds the very units that
+    command builds (--no-run only skips running them), so the harness then finds every one fresh: Cargo keys a unit on
+    its profile, features, target and mode, which these decide, and on the environment, which the prebuild shares with
+    the harnesses (run_environment). What it leaves out keys nothing: --locked, -j, --message-format, test name
+    filters and the test binary's own arguments after `--`. --offline (or --frozen) is kept as --offline: it keys no
+    unit, but a harness that forbids the network must not have its prebuild fetch.
+
+    None when the build can't be repeated exactly: an unknown flag, --doc (compiled when run), no -p or --workspace
+    (the selection would depend on the harness's working folder) or another workspace's --manifest-path."""
+    if len(arguments) < 2 or Path(arguments[0]).name.removesuffix(".exe") != "cargo" or arguments[1] != "test":
+        return None
+    arguments = arguments[2:arguments.index("--")] if "--" in arguments else arguments[2:]
+    profile, selection, targets, offline = [], [], [], []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        flag, sep, value = argument.partition("=") if argument.startswith("--") else (argument, "", "")
+        if not sep and flag[:2] in ("-p", "-F", "-j") and len(flag) > 2:
+            flag, value, sep = flag[:2], flag[2:], "="
+        if not sep and flag in {*SELECTION_FLAGS, *TEST_TARGET_FLAGS, *TEST_UNKEYED_FLAGS, "--profile", "--manifest-path",
+                                "--exclude"}:
+            if index + 1 >= len(arguments):
+                return None
+            value = arguments[index + 1]
+            index += 1
+        if flag in ("--offline", "--frozen"):
+            offline = ["--offline"]
+        elif flag in ("--release", "-r"):
+            profile = ["--release"]
+        elif flag == "--profile":
+            profile = ["--profile", value]
+        elif flag in SELECTION_FLAGS | {"--exclude"}:
+            selection += ["-p" if flag == "--package" else "--features" if flag == "-F" else flag, value]
+        elif flag in SELECTION_SWITCHES:
+            selection.append("--workspace" if flag == "--all" else flag)
+        elif flag in TEST_TARGETS:
+            targets.append(flag)
+        elif flag in TEST_TARGET_FLAGS:
+            targets += [flag, value]
+        elif flag == "--manifest-path":
+            if not Path(value).is_absolute() or Path(value).resolve() != (ROOT / "Cargo.toml").resolve():
+                return None
+        elif flag.startswith("-") and flag not in TEST_UNKEYED | TEST_UNKEYED_FLAGS:
+            return None
+        index += 1  # anything else is a test name filter
+    if "-p" not in selection and "--workspace" not in selection:
+        return None
+    return [*offline, *profile, *selection, *targets]
+
+
+def cargo_tests(commands):
+    """The distinct test_selection of each `cargo test` a traced harness ran, for the prebuild."""
+    found = []
+    for arguments in commands:
+        selection = test_selection(arguments)
+        if selection is not None and selection not in found:
+            found.append(selection)
+    return found
 
 
 RUST_PATH = re.compile(r"(?<![\w:])((?:crate|self|super)(?:::super)*|[a-z_][a-z0-9_]*)::((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)")
@@ -639,6 +720,43 @@ def run_environment(reuse_oracles=False):
     return environment
 
 
+def check_oracle_hashes(cache, repair=False, seconds=5):
+    """The oracle shims' hash database (tools/parity_shim.py), checked once before any shim of this run starts.
+    Shims never remove or make it again, since another may have it open; one that fails only hashes files itself. A
+    database SQLite's quick_check finds damaged, or that is no database at all (a cache entry cut short), is removed
+    with its -wal and -shm files only with `repair`, when this run owns the cache alone (PARITY_REPAIR_ORACLE_HASHES=1:
+    parity-hosted.yml, a fresh runner with one parity run); the first shim then makes it again. Otherwise another
+    parity run in this checkout may have it open (an idle connection doesn't stop quick_check), so it is only named,
+    and the shims hash files themselves. quick_check reads every page: about 30 ms for 60 MiB (2026-11-20). One that
+    runs past `seconds` or meets a lock leaves the database as it is."""
+    path = cache / "hashes.sqlite"
+    if not path.exists():
+        return
+    deadline = time.monotonic() + seconds
+    try:
+        db = sqlite3.connect(path, timeout=1)
+        try:
+            db.set_progress_handler(lambda: time.monotonic() > deadline, 10000)
+            damaged = db.execute("pragma quick_check").fetchone()[0] != "ok"
+        finally:
+            db.close()
+    except sqlite3.OperationalError as error:
+        if any(word in str(error) for word in ("interrupted", "locked", "busy")):
+            print("The oracle shims' hash database was not checked in time: left as it is.", flush=True)
+            return
+        damaged = True
+    except sqlite3.DatabaseError:
+        damaged = True
+    if damaged and repair:
+        for name in (path.name, f"{path.name}-wal", f"{path.name}-shm"):
+            path.with_name(name).unlink(missing_ok=True)
+        print("The oracle shims' hash database was damaged: removed, the first shim makes it again.", flush=True)
+    elif damaged:
+        print(f"The oracle shims' hash database {path} is damaged: left as it is (another parity run may have it "
+              "open), and the shims hash files themselves. Remove it with its -wal and -shm files while no parity run "
+              "is running.", flush=True)
+
+
 def default_build_jobs():
     """Cargo jobs for the probe build: PARITY_BUILD_JOBS, else every thread, within $FLEET_LOAD_JOBS when set."""
     if os.environ.get("PARITY_BUILD_JOBS"):
@@ -659,17 +777,24 @@ def target_packages():
             for target in package["targets"] for kind in target["kind"] if kind in ("example", "bin")}
 
 
-def prebuild_commands(artifacts, packages=None):
+def prebuild_commands(artifacts, packages=None, tests=()):
     """The Cargo runs that build the recorded probes exactly as their harnesses do: one per profile, package and
-    feature selection, and whether examples are among the command's targets (see artifacts_of)."""
+    feature selection, and whether examples are among the command's targets (see artifacts_of).
+
+    tests: recorded test_selection lists, each built by one `cargo test --no-run` of its own, before the builds. A test
+    selection of binaries builds them with its dev-dependencies' features and copies them to the profile folder,
+    where the builds after it put the harnesses' own back."""
+    builds = [["cargo", "test", "--locked", "--no-run", *selection]
+              for selection in sorted({tuple(fast_test_selection(selection)) for selection in tests})]
     groups = {}
     for kind, name, profile, selection, examples in selected_builds(artifacts, packages):
         targets = groups.setdefault((profile, tuple(selection), examples), [])
         target = [f"--{kind}", name] if name else [f"--{kind}"]
         if target not in targets:
             targets.append(target)
-    return [["cargo", "build", "--locked", "--profile", profile, *selection, *(part for target in targets for part in target)]
-            for (profile, selection, _), targets in sorted(groups.items())]
+    return builds + [["cargo", "build", "--locked", "--profile", profile, *selection,
+                      *(part for target in targets for part in target)]
+                     for (profile, selection, _), targets in sorted(groups.items())]
 
 
 def executables(artifacts, packages):
@@ -701,6 +826,12 @@ def selected_builds(artifacts, packages=None):
         if len(artifact) < 5:
             continue
         kind, name, profile, selection, examples = artifact
+        if profile == "release":
+            # Every harness builds in the fast profile now (tests/test_parity_harness_sources.py): a release record is
+            # from before, and is built as the harness builds it now, so the harness doesn't compile it in its own time.
+            # Removable once every runner's harnesses have run since the move to fast (one full parity-main per
+            # runner), and no open branch predates it.
+            profile = "fast"
         owner = (packages or {}).get((kind, name))
         selected = [value for flag, value in zip(selection, selection[1:]) if flag == "-p"]
         if not name and kind in ("bins", "examples") and "horizon-client" in selected \
@@ -710,20 +841,506 @@ def selected_builds(artifacts, packages=None):
         if owner and selected and owner not in selected:
             # A recorded target may have moved packages; retain its feature flags and old selections.
             selection = [*selection, "-p", owner]
+            selected.append(owner)
+        if profile == "fast" and not examples and kind in ("bin", "bins") and selected \
+                and selection == [part for package in selected for part in ("-p", package)] \
+                and set(selected) <= set(fast_bins.PACKAGES):
+            # Records from before tools/fast_bins.py (one selection for every fast program) are built as the harness
+            # builds them now, so their old selection isn't compiled as well. A --bins build is its packages'
+            # programs, named, since the shared selection's --bins would build every package's.
+            # Removable once every runner's harnesses have run since tools/fast_bins.py and recorded the shared
+            # selection (one full parity-main per runner), and no open branch predates it.
+            shared = [part for package in fast_bins.PACKAGES for part in ("-p", package)]
+            names = [name] if name else [target for (other, target), package in (packages or {}).items()
+                                         if other == "bin" and package in selected]
+            if names:
+                for target in names:
+                    yield "bin", target, profile, shared, False
+                continue
         yield kind, name, profile, selection, examples
 
 
-def prebuild(artifacts, jobs):
-    """Build the recorded probes before the harnesses start, so they don't serialise on Cargo's lock."""
+def fast_test_selection(selection):
+    """A recorded test_selection with the release profile (--release, -r) in the fast one, as selected_builds maps
+    release records. Removable with that mapping."""
+    result, index = [], 0
+    while index < len(selection):
+        if selection[index] in ("--release", "-r"):
+            result += ["--profile", "fast"]
+        elif selection[index] == "--profile" and selection[index + 1:index + 2] == ["release"]:
+            result += ["--profile", "fast"]
+            index += 1
+        else:
+            result.append(selection[index])
+        index += 1
+    return result
+
+
+# parity-main's probe prebuild ends the run past this, after its turn on the Mac (tools/compile_lock.py): a prebuild
+# that builds everything takes over 2 hours even alone, and this leaves 120 of the job's 360 min.
+PREBUILD_LIMIT = {"main": 240 * 60}
+
+
+def prebuild(artifacts, jobs, tests=()):
+    """Build the recorded probes and test selections (prebuild_commands) before the harnesses start, so they don't
+    serialise on Cargo's lock or compile within their own time limits.
+
+    On the self-hosted Mac the Cargo runs wait for a turn on the machine (tools/compile_lock.py), as the job's
+    HORIZON_COMPILE_LOCK_ROLE says: `main` for parity-main, else `pr`. A `pr` job gives the turn back between its runs
+    while a priority job waits."""
     environment = run_environment()
     environment["CARGO_BUILD_JOBS"] = str(jobs)
     errors = ""
     packages = target_packages()
-    for command in prebuild_commands(artifacts, packages):
-        result = subprocess.run(command, cwd=ROOT, env=environment, capture_output=True, text=True)
-        if result.returncode:
-            errors += result.stderr
-    return not errors, errors
+    commands = prebuild_commands(artifacts, packages, tests)
+    role = os.environ.get("HORIZON_COMPILE_LOCK_ROLE") or "pr"
+    timings = PrebuildTimings(environment) if os.environ.get(PREBUILD_TIMINGS) == "1" else None
+    try:
+        with compile_lock.Turn(role) as turn:
+            limit = PREBUILD_LIMIT.get(role)
+            deadline = time.monotonic() + limit if limit else None
+            expired = threading.Event()
+            load, stats = machine_load(), sccache_stats(environment)
+
+            def build(command):
+                """One Cargo run within the limit: its exit code and its timed stderr lines."""
+                # Stderr is read line by line, timed, so the summary can tell lock waits from compiling; stdout,
+                # which Cargo leaves empty here, was discarded before too. Undecodable bytes are replaced: decoding
+                # as the lines arrive must never interrupt the build. The encoding is text mode's default, named so
+                # tests can pin it.
+                # Cargo leads a process group of its own, so the limit or a cancelled job ends rustc and build
+                # scripts with it, and none of them keeps the stderr pipe (and this loop) open.
+                with subprocess.Popen(command, cwd=ROOT, env=environment, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.PIPE, text=True, encoding=locale.getpreferredencoding(False),
+                                      errors="replace", start_new_session=os.name != "nt") as process:
+                    # The line loop blocks while Cargo is quiet, so a timer ends a run past the limit.
+                    def stop(process=process):
+                        expired.set()
+                        compile_lock.stop_group(process)
+                    watchdog = threading.Timer(max(0, deadline - time.monotonic()), stop) if deadline else None
+                    if watchdog:
+                        watchdog.daemon = True
+                        watchdog.start()
+                    try:
+                        lines = [(time.monotonic(), line) for line in process.stderr]
+                        if watchdog:
+                            # Stderr can close before Cargo exits, so the deadline stays armed until Cargo has
+                            # exited (not reaped yet: its group's id stays its own). Then a watchdog already stopping
+                            # the group (a child that closed stderr outlives Cargo) finishes before Cargo is reaped
+                            # and the turn released.
+                            compile_lock.wait_exited(process)
+                            watchdog.cancel()
+                            watchdog.join()
+                        process.wait()
+                    except BaseException:
+                        # A cancelled job's next signal must not cut this short: it only shortens the grace.
+                        with compile_lock.Hurry():
+                            if watchdog:
+                                watchdog.cancel()
+                                watchdog.join()
+                            compile_lock.stop_group(process)  # its whole group, as subprocess.run kills the process
+                        raise
+                return process.returncode, lines
+
+            if timings:
+                timings.stats = stats
+            failed = False  # a call's last attempt exited nonzero, with or without output
+            for number, command in enumerate(commands, 1):
+                if number > 1:
+                    # A pull request's job lets a waiting parity-main or Mac build go first, outside the call's time.
+                    turn.yield_if_ahead()
+                if timings:
+                    timings.before_call()
+                started = time.monotonic()
+                # --timings is added here only: the run's line and the harnesses' records keep the command as
+                # selected.
+                returncode, lines = build(timings.command(command) if timings else command)
+                output, retried = lines, False
+                if returncode and timings and timings.on and not expired.is_set() \
+                        and not (deadline and time.monotonic() >= deadline):
+                    retried = True
+                    # Cargo fails a run whose timing report it could not write even when everything compiled: any
+                    # failure is run once more without the report, and that attempt is the call's result (a real
+                    # build error fails again, quickly).
+                    print(f"  cargo {number}/{len(commands)}: failed with --timings; run again without it, no "
+                          "timing report for it", flush=True)
+                    returncode, output = build(command)
+                    lines = lines + output
+                if returncode:
+                    failed = True
+                    errors += "".join(line for _, line in output)
+                summary = report(lambda: f"cargo {number}/{len(commands)}: "
+                                         f"{describe_cargo_build(command, lines, started, time.monotonic())}")
+                if expired.is_set():
+                    print(f"::error::The probe prebuild passed its {limit // 60:.0f} min limit at cargo {number}/"
+                          f"{len(commands)} and was stopped there.", flush=True)
+                    sys.exit(1)
+                if timings:
+                    # A rerun's call keeps no report: one the failed attempt wrote isn't the call's.
+                    timings.after_call(number, len(commands), summary, keep=not retried)
+            report(lambda: describe_machine(os.cpu_count(), load, machine_load()))
+            report(lambda: describe_sccache(stats, sccache_stats(environment)))
+        if timings:
+            # Here, not in finally: a cancelled, limit-stopped or raising prebuild doesn't wait on du, and a signal
+            # during du still reaches finish().
+            timings.measure_target()
+    finally:
+        # After the turn is released (and the limit's error line): only file work on the collection folder.
+        if timings:
+            timings.finish()
+    return not errors and not failed, errors
+
+
+def report(line):
+    """Print a prebuild measurement and return it; one that fails is left out (None) rather than failing the run."""
+    try:
+        text = line()
+        print(f"  {text}", flush=True)
+        return text
+    except Exception:
+        return None
+
+
+CARGO_LOCK_WAIT = re.compile(r"^\s*Blocking waiting for file lock on (.+?)\s*$")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def describe_cargo_build(command, lines, started, ended):
+    """One prebuild Cargo run as a log line: what it built, its wall time, how many crates Cargo compiled (it names
+    only those; fresh ones need -v), and about how long it sat behind another build's file lock.
+
+    lines: [(monotonic time, stderr line)], colours included when CARGO_TERM_COLOR=always. A wait runs from Cargo's
+    `Blocking waiting for file lock on <what>` to its next line, or to the end of the run, so it can include silent
+    work after the lock was taken."""
+    lines = [(at, ANSI_ESCAPE.sub("", line)) for at, line in lines]
+    test = command[1:2] == ["test"]  # Cargo's own profile (test) unless one is named
+    profile, selection, targets = None if test else "dev", [], 0
+    arguments = iter(command[2:])
+    for argument in arguments:
+        if argument == "--profile":
+            profile = next(arguments, profile)
+        elif argument in ("--example", "--bin"):
+            next(arguments, None)
+            targets += 1
+        elif argument not in ("--locked", "--no-run"):  # --bins and --examples stay as written: how many they build
+            selection.append(argument)  # isn't known here
+    compiled = sum(1 for _, line in lines if line.lstrip().startswith("Compiling "))
+    waits, waiting = {}, None
+    for at, line in lines:
+        if waiting:
+            waits[waiting[1]] = waits.get(waiting[1], 0) + at - waiting[0]
+            waiting = None
+        lock = CARGO_LOCK_WAIT.match(line)
+        if lock:
+            waiting = (at, lock.group(1))
+    if waiting:
+        waits[waiting[1]] = waits.get(waiting[1], 0) + ended - waiting[0]
+    built = " ".join([*(["test"] if test else []), *([profile] if profile else []), *selection,
+                      *([f"{targets} target{'s' * (targets != 1)}"] if targets else [])])
+    text = f"{built}: {ended - started:.0f}s, {compiled} crate{'s' * (compiled != 1)} compiled"
+    for lock, seconds in waits.items():
+        text += f", about {seconds:.0f}s waiting for the {lock} lock (to cargo's next line)"
+    return text
+
+
+def machine_load():
+    """The 1, 5 and 15 minute load averages, or None where the system has none (Windows)."""
+    try:
+        return os.getloadavg()
+    except (AttributeError, OSError):
+        return None
+
+
+def describe_machine(cpus, before, after):
+    loads = ", ".join(f"{when} {' '.join(f'{value:.1f}' for value in load)}"
+                      for when, load in (("start", before), ("end", after)) if load)
+    return f"machine: {cpus or '?'} CPUs" + (f", load (1/5/15 min) at {loads}" if loads else "")
+
+
+SCCACHE_COUNTS = re.compile(r"^Cache (hits|misses)\s+(\d+)\s*$", re.MULTILINE)
+
+
+def sccache_stats(environment):
+    """sccache's {"hits": n, "misses": n} when the build goes through it (RUSTC_WRAPPER names sccache or
+    tools/ci/compiler-cache.sh, which calls it), else None; None too when the counts can't be read in 10 s.
+
+    The output goes to a file, not a pipe: a server the command starts could inherit a pipe and hold it open."""
+    wrapper = os.path.basename(environment.get("RUSTC_WRAPPER", ""))
+    if os.path.splitext(wrapper)[0].lower() != "sccache" and wrapper != "compiler-cache.sh":
+        return None
+    try:
+        program = shutil.which("sccache", path=environment.get("PATH")) if wrapper == "compiler-cache.sh" \
+            else environment["RUSTC_WRAPPER"]
+        with tempfile.TemporaryFile() as output:
+            # run kills and reaps the probe on its timeout and on an interrupt, which still ends parity.py.
+            result = subprocess.run([program, "--show-stats"], stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.DEVNULL, timeout=10)
+            output.seek(0)
+            text = output.read().decode("utf-8", errors="replace")
+        counts = dict((name, int(value)) for name, value in SCCACHE_COUNTS.findall(text))
+        return counts if not result.returncode and len(counts) == 2 else None
+    except Exception:
+        return None
+
+
+def printable(text, stream=None):
+    """text with what the stream's encoding can't hold (a cp1252 console and cargo's replaced bytes) replaced."""
+    encoding = getattr(stream or sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return text.encode(encoding, errors="replace").decode(encoding)
+    except LookupError:
+        return text
+
+
+def describe_sccache(before, after):
+    if not before or not after or any(after[count] < before[count] for count in before):  # restarted server
+        return "compiler cache: not in use, or its counts could not be read"
+    # The server is the machine's, so other builds running meanwhile count too.
+    return (f"compiler cache (whole sccache server): {after['hits'] - before['hits']} hits, "
+            f"{after['misses'] - before['misses']} misses")
+
+
+# parity-main.yml sets this to 1, nothing else does: its prebuild then keeps Cargo's timing report of each run
+# (--timings) and the run's compiler-cache counts, which the job uploads, to tell which crates take its minutes.
+PREBUILD_TIMINGS = "HORIZON_PARITY_PREBUILD_TIMINGS"
+PREBUILD_TIMINGS_CAP = 20 << 20
+
+
+def remove_collection(path):
+    """Removes a collection folder holding only files (or a file or link in its place), never following a link."""
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        os.unlink(path)
+        return
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                raise ValueError(f"{entry.path} is a folder")
+            os.unlink(entry.path)
+    os.rmdir(path)
+
+
+PREBUILD_TIMINGS_NAMES = re.compile(r"cargo-\d{2,}\.html|prebuild-calls\.txt")
+
+
+TARGET_SIZES_TIMEOUT = 30
+PROFILE_FOLDERS = {"debug", "fast", "release"}
+
+
+def target_sizes(target, timeout=TARGET_SIZES_TIMEOUT):
+    """KiB per top-level folder of the build folder (debug, fast, release, ...), from one `du -sk`, which counts each
+    file once and follows no link. runner-gc.sh's MAX_TARGET_GB is set from these (#19465)."""
+    # cargo-timings holds only these reports (kB): left out, so a folder with no build yet reports nothing.
+    folders = sorted(entry.path for entry in os.scandir(target)
+                     if entry.is_dir(follow_symlinks=False) and entry.name != "cargo-timings")
+    if not folders:
+        return {}
+    done = subprocess.run(["du", "-sk", "--", *folders], capture_output=True, text=True, timeout=timeout, check=True,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    sizes = {}
+    for line in done.stdout.splitlines():
+        kib, _, path = line.partition("	")
+        # Only cargo's profile names go into the public report; any other folder counts as "other".
+        name = Path(path).name if Path(path).name in PROFILE_FOLDERS else "other"
+        sizes[name] = sizes.get(name, 0) + int(kib)
+    return sizes
+
+
+def describe_target_sizes(sizes):
+    if not sizes:
+        raise ValueError("no build folder yet")  # report() leaves the line out
+    gib = lambda kib: f"{kib / (1 << 20):.1f} GB"
+    parts = ", ".join(f"{name} {gib(kib)}" for name, kib in sorted(sizes.items(), key=lambda item: -item[1]))
+    return f"build folder after the prebuild: {gib(sum(sizes.values()))} ({parts})"
+
+
+class PrebuildTimings:
+    """The prebuild's timing reports: cargo-NN.html for run NN and prebuild-calls.txt, nothing else, at most
+    PREBUILD_TIMINGS_CAP in all. They are collected in a working folder and renamed to
+    STATE_DIR/prebuild-timings-<PARITY_RUN_ID>, the folder parity-main.yml uploads, only once finish() has checked
+    them. Cargo's report holds unit names, features, the profile, host, rustc version and timings, not the command
+    line, paths or environment (cargo 1.100).
+
+    Collecting never fails or stops the prebuild: what fails prints one line and is left out. During the compile turn
+    it only clears and copies bounded files and reads sccache (within its timeout); finish() does the rest after."""
+
+    def __init__(self, environment):
+        run = os.environ.get("PARITY_RUN_ID")
+        self.published = STATE_DIR / (f"prebuild-timings-{run}" if run else "prebuild-timings")
+        self.folder = self.published.with_name(f"{self.published.name}-working")
+        # Cargo writes them to <target>/cargo-timings, the probe profiles' shared target folder; it outlives runs.
+        self.reports = Path(environment["CARGO_TARGET_DIR"]) / "cargo-timings"
+        self.environment, self.stats, self.on, self.calls = environment, None, False, []
+        self.previous, self.started = None, 0
+        for folder in STATE_DIR.glob("prebuild-timings*"):
+            if folder not in (self.published, self.folder):
+                try:
+                    remove_collection(folder)  # an earlier run's: disk only, the upload names this run's
+                except Exception:
+                    pass
+        try:
+            if os.path.lexists(self.published):
+                remove_collection(self.published)  # an earlier try of this attempt: never uploaded as this one's
+        except Exception as error:
+            self.fail("an earlier collection could not be removed, no timings published", error)
+            return
+        try:
+            if os.path.lexists(self.folder):
+                remove_collection(self.folder)
+            self.folder.mkdir(parents=True)
+            self.on = True
+        except Exception as error:
+            self.fail("no working folder, no timings published", error)
+            self.discard()
+
+    def fail(self, what, error):
+        print(f"  prebuild timings: {what} ({type(error).__name__}: {error}); the prebuild goes on", flush=True)
+
+    def command(self, command):
+        return [*command, "--timings"] if self.on else command
+
+    @staticmethod
+    def identity(info):
+        return info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size
+
+    def report_identity(self):
+        try:
+            return self.identity(os.lstat(self.reports / "cargo-timing.html"))
+        except OSError:
+            return None
+
+    def before_call(self):
+        """Clears the reports Cargo left and notes the time, so only the next run's own report is taken."""
+        if not self.on:
+            return
+        try:
+            if stat.S_ISDIR(os.lstat(self.reports).st_mode):  # never into a link
+                with os.scandir(self.reports) as entries:
+                    for entry in entries:
+                        if entry.name.startswith("cargo-timing") and entry.name.endswith(".html") \
+                                and entry.is_file(follow_symlinks=False):
+                            os.unlink(entry.path)
+        except FileNotFoundError:
+            pass
+        except Exception as error:
+            self.fail("could not clear the old reports", error)
+        self.previous, self.started = self.report_identity(), time.time()
+
+    def keep_report(self, number):
+        """Copies the report this run wrote, a regular file of at most PREBUILD_TIMINGS_CAP, as cargo-NN.html."""
+        if not stat.S_ISDIR(os.lstat(self.reports).st_mode):
+            raise ValueError(f"{self.reports} is not a folder")
+        source = self.reports / "cargo-timing.html"
+        found = os.lstat(source)
+        if not stat.S_ISREG(found.st_mode):
+            raise ValueError("not a regular file")
+        # Nonblocking: a FIFO swapped in opens at once, and the regular-file check below refuses it.
+        descriptor = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                             | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as file:
+            # What is read is the file the checks are on: the open one.
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != (found.st_dev, found.st_ino):
+                raise ValueError("replaced while it was opened")
+            # Whole seconds: file systems with coarse times.
+            if self.identity(info) == self.previous or info.st_mtime < int(self.started):
+                raise ValueError("not written by this run")
+            if info.st_size > PREBUILD_TIMINGS_CAP:
+                raise ValueError(f"over {PREBUILD_TIMINGS_CAP >> 20} MB")
+            data = file.read(PREBUILD_TIMINGS_CAP + 1)
+        if len(data) > PREBUILD_TIMINGS_CAP:
+            raise ValueError(f"over {PREBUILD_TIMINGS_CAP >> 20} MB")
+        # Under a name finish() refuses until it is whole.
+        part = self.folder / f"cargo-{number:02d}.html.part"
+        try:
+            with open(part, "xb") as copy:
+                copy.write(data)
+            os.replace(part, self.folder / f"cargo-{number:02d}.html")
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+
+    def after_call(self, number, total, line, keep=True):
+        """Keeps run `number`'s report (with `keep`) and prints its compiler-cache line; both lines go to
+        prebuild-calls.txt."""
+        if not self.on:
+            return
+        if line:
+            self.calls.append(line)
+        try:
+            if keep:
+                self.keep_report(number)
+        except Exception as error:
+            self.fail(f"no report kept for cargo {number}/{total}", error)
+        # An unreadable server is not read again: each read can take its 10 s limit.
+        before, self.stats = self.stats, self.stats and sccache_stats(self.environment)
+        cache = report(lambda: f"cargo {number}/{total} compiler cache, change in the machine's whole sccache server "
+                               f"since the last reading: {describe_call_sccache(before, self.stats)}")
+        if cache:
+            self.calls.append(cache)
+
+    def size(self):
+        with os.scandir(self.folder) as entries:
+            return sum(os.lstat(entry.path).st_size for entry in entries)
+
+    def hold_to_cap(self):
+        """Writes prebuild-calls.txt and leaves out the largest reports until the folder holds at most the cap."""
+        reports = {path: os.lstat(path).st_size for path in self.folder.glob("cargo-*.html")}
+        dropped = []
+        while True:
+            note = [f"timing reports left out to stay under {PREBUILD_TIMINGS_CAP >> 20} MB: cargo "
+                    f"{', '.join(sorted(dropped))}"] if dropped else []
+            text = "".join(f"{line}\n" for line in self.calls + note).encode("utf-8")
+            if not reports or len(text) + sum(reports.values()) <= PREBUILD_TIMINGS_CAP:
+                break
+            largest = max(reports, key=reports.get)
+            largest.unlink()
+            del reports[largest]
+            dropped.append(largest.stem.removeprefix("cargo-"))
+        (self.folder / "prebuild-calls.txt").write_bytes(text)
+
+    def measure_target(self):
+        """The build folder's size line, after the turn and only when the prebuild ended normally: a cancelled job
+        does not wait on du. A slow or failed du leaves the line out (TARGET_SIZES_TIMEOUT)."""
+        if self.on:
+            sizes = report(lambda: describe_target_sizes(target_sizes(Path(self.environment["CARGO_TARGET_DIR"]))))
+            if sizes:
+                self.calls.append(sizes)
+
+    def finish(self):
+        """Holds the working folder to PREBUILD_TIMINGS_CAP, checks it holds only regular files of the two kinds,
+        then publishes it; anything failing publishes nothing."""
+        if not self.on:
+            return
+        try:
+            self.hold_to_cap()
+            with os.scandir(self.folder) as entries:
+                for entry in entries:
+                    if not entry.is_file(follow_symlinks=False) or not PREBUILD_TIMINGS_NAMES.fullmatch(entry.name):
+                        raise ValueError(f"{entry.name} does not belong in it")
+            if self.size() > PREBUILD_TIMINGS_CAP:
+                raise ValueError(f"over {PREBUILD_TIMINGS_CAP >> 20} MB")
+            os.rename(self.folder, self.published)
+            # The upload step's signal: it uploads its own fixed path only when this run published it. A fixed value:
+            # cargo and the harnesses inherit GITHUB_OUTPUT, so the step trusts nothing else in the output.
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                    output.write("prebuild_timings=ready\n")
+        except Exception as error:
+            self.fail("could not finish, no timings published", error)
+            self.discard()
+
+    def discard(self):
+        self.on = False
+        try:
+            remove_collection(self.folder)
+        except Exception:
+            pass
+
+
+def describe_call_sccache(before, after):
+    if not before or not after or any(after[count] < before[count] for count in before):  # restarted server
+        return "not in use"
+    return f"{after['hits'] - before['hits']} hits, {after['misses'] - before['misses']} misses"
 
 
 LARGE_OUTPUT = 64 << 20
@@ -779,7 +1396,8 @@ def publish(name, record):
     if record["status"] != "pass" or "key" not in record:
         return
     for path, data in ((SHARED / "passes" / name / f"{record['key']}.json", record),
-                       (SHARED / "dependencies" / f"{name}.json", {k: record[k] for k in ("dependencies", "artifacts")})):
+                       (SHARED / "dependencies" / f"{name}.json",
+                        {k: record[k] for k in ("dependencies", "artifacts", "tests") if k in record})):
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         temporary.write_text(json.dumps(data))
@@ -841,6 +1459,7 @@ def outcome(name, script, passed, elapsed, trace_path, hasher=None):
         trace = None  # killed before writing it, or the disk was full: the pass can't be keyed
     if trace:
         record["dependencies"], record["artifacts"] = dependencies(trace, harness_settings(script).get("PARITY_RUST_SCOPE"))
+        record["tests"] = cargo_tests(trace["commands"])
         if "peak_bytes" in trace:
             record["peak_bytes"] = trace["peak_bytes"]
         if passed:
@@ -849,7 +1468,7 @@ def outcome(name, script, passed, elapsed, trace_path, hasher=None):
             record["hashes"] = {path: hasher(ROOT / path)
                                 for path in {*record["dependencies"], *group_files(record["dependencies"])}}
     else:
-        record["dependencies"], record["artifacts"] = [], []
+        record["dependencies"], record["artifacts"], record["tests"] = [], [], []
     return record
 
 
@@ -864,6 +1483,9 @@ class LocalExecutor:
         self.builds = {}  # Windows: {harness: executables(...)}, see clashes
         self.dead = False  # this machine never drops out, unlike a remote host
         self.available, self.measured = 0, 0.0
+        self.decisions = None  # where the shim notes its decisions: the coordinating runner's, not a worker's
+        # Salts the call ids in those notes, so they say which calls are the same within a run and nothing else.
+        self.run_salt = os.urandom(16).hex()
         (STATE_DIR / "logs").mkdir(parents=True, exist_ok=True)
         (STATE_DIR / "traces").mkdir(parents=True, exist_ok=True)
 
@@ -914,6 +1536,9 @@ class LocalExecutor:
         game_home.mkdir(parents=True)
         environment.setdefault("HORIZON_HOME", str(game_home))
         environment["PARITY_SHIM_OUTPUTS"] = str(outputs_listing(name, fresh=True))
+        if self.decisions:
+            environment.update(PARITY_SHIM_DECISIONS=str(self.decisions), PARITY_SHIM_HARNESS=name,
+                               PARITY_SHIM_RUN=self.run_salt)
         environment.pop("PARITY_SHARD", None)
         if shard:
             environment["PARITY_SHARD"] = shard
@@ -965,7 +1590,7 @@ class RemoteExecutor:
     harness it is sent under the same tracer; results come back with the
     content hash of every dependency, so the pass is keyed on exactly what ran."""
 
-    def __init__(self, name, config, artifacts, local_only, timeout):
+    def __init__(self, name, config, artifacts, local_only, timeout, tests=()):
         import threading
         self.name, self.config, self.local_only, self.timeout = name, config, set(local_only), timeout
         self.jobs, self.memory_budget, self.ready, self.dead = 0, 0, False, False
@@ -973,12 +1598,12 @@ class RemoteExecutor:
         self.lock = threading.Lock()
         self.process = None
         self.mirror = f"{config['root']}/remote/{HOST}{str(ROOT).replace('/', '-')}"
-        threading.Thread(target=self._connect, args=(artifacts,), daemon=True).start()
+        threading.Thread(target=self._connect, args=(artifacts, tests), daemon=True).start()
 
     def _log(self, text):
         print(f"[{self.name}] {text}", flush=True)
 
-    def _connect(self, artifacts):
+    def _connect(self, artifacts, tests=()):
         import shlex
         ssh = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30", self.config["ssh"]]
         started = time.monotonic()
@@ -1017,7 +1642,7 @@ class RemoteExecutor:
             self._log(f"worker failed to start, running everything here: {error}")
             self.dead = True
             return
-        self._send({"prebuild": artifacts, "timeout": self.timeout})
+        self._send({"prebuild": artifacts, "tests": list(tests), "timeout": self.timeout})
         self._log(f"synced in {time.monotonic() - started:.0f}s, building probes...")
         for line in self.process.stdout:
             try:
@@ -1031,7 +1656,8 @@ class RemoteExecutor:
                     self.memory_budget = hello["memory"]
                     self.ready = True
                     if not hello["built"]:
-                        self._log("probe build failed; harnesses will report their own build errors:\n" + hello["errors"][-2000:])
+                        self._log("probe build failed; harnesses will report their own build errors:\n"
+                                  + printable(hello["errors"][-2000:]))
                     self._log(f"ready after {time.monotonic() - started:.0f}s: {self.jobs} harnesses at once, "
                               f"{self.memory_budget / (1 << 30):.0f} GB")
                 else:
@@ -1186,6 +1812,10 @@ def run(selected, state, hasher, environment_digest, executors, reuse_oracles, r
                 # gets its own retry below instead, which keeps reusing oracle results afterwards.
                 retried.add(label)
                 queue.insert(0, label)
+                if os.environ.get("PARITY_KEEP_FIRST_LOGS") == "1":
+                    # A hosted runner (parity-hosted.yml) keeps nothing else: the first run's log is the only
+                    # evidence of why it failed.
+                    keep_first_log(label)
                 print(f"retry {label} without reused oracle results", flush=True)
                 continue
             # A harness that only passes fresh no longer reuses oracle results.
@@ -1267,7 +1897,9 @@ def worker_main(shared_local):
     state = load_state()
     hasher = Hasher(state["hashes"])
     process_tree.start_build_server()  # before any build here: the probe build's would start it otherwise
-    built, errors = prebuild(first["prebuild"], default_build_jobs()) if first["prebuild"] else (True, "")
+    tests = first.get("tests", [])
+    built, errors = prebuild(first["prebuild"], default_build_jobs(), tests) if first["prebuild"] or tests \
+        else (True, "")
     executor = LocalExecutor(MACHINE_JOBS, int(memory_available() * 0.75), first["timeout"])
     send({"hello": {"jobs": MACHINE_JOBS, "memory": executor.memory_budget, "built": built, "errors": errors[-4000:]}})
     try:
@@ -1679,6 +2311,74 @@ def report_retries(results, flaky):
             summary.write("### Harnesses that failed once, then ran again\n" + "".join(f"- {line}\n" for line in lines))
 
 
+def fresh_decisions():
+    """An empty DECISIONS for this run's notes, or None (with a warning) if it can't be made: a summary is never worth
+    failing a run for, and a summary of an earlier run's notes would mislead."""
+    try:
+        DECISIONS.write_text("")
+        return DECISIONS
+    except OSError as error:
+        # The repository-relative name only: CI logs are public, and the checkout's path says nothing useful.
+        name = DECISIONS.relative_to(ROOT) if DECISIONS.is_relative_to(ROOT) else DECISIONS.name
+        print(f"warning: no oracle reuse summary this run ({name} can't be written: {type(error).__name__})",
+              flush=True)
+        return None
+
+
+def report_decisions(path):
+    """Sum up what tools/parity_shim.py did with this run's Java calls, here and in the CI job's summary: calls per
+    reason, Java seconds run and replayed, and the harnesses that ran the most Java seconds they might have replayed.
+    Only reasons, counts, seconds and harness names: nothing from the calls themselves. Harnesses run on other machines,
+    and fresh retries (no shim), are not counted. The notes are diagnostics: a line the shim could not write whole is
+    skipped and counted, and nothing here fails the run."""
+    if path is None:
+        return
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    decisions, unreadable = [], 0
+    for line in text.splitlines():
+        try:
+            decision = json.loads(line)
+            if not isinstance(decision, dict) or not isinstance(decision.get("reason"), str):
+                raise ValueError
+            seconds = decision.get("seconds")
+            decision["seconds"] = float(seconds) if isinstance(seconds, (int, float)) else None
+            decisions.append(decision)
+        except ValueError:
+            unreadable += line.strip() != ""
+    if not decisions and not unreadable:
+        return
+    reasons = Counter(decision["reason"] for decision in decisions)
+    replayed = sum(decision["seconds"] or 0 for decision in decisions if decision["reason"] == "hit")
+    ran = sum(decision["seconds"] or 0 for decision in decisions if decision["reason"] != "hit")
+    untimed = sum(decision["seconds"] is None for decision in decisions)
+    missed = Counter()
+    for decision in decisions:
+        if decision["reason"] != "hit" and decision["seconds"]:
+            missed[str(decision.get("harness"))] += decision["seconds"]
+    counts = ", ".join(f"{reason} {count}" for reason, count in reasons.most_common())
+    lines = [f"Java calls: {len(decisions)} ({counts})",
+             f"Java ran {ran:.0f} s, replayed {replayed:.0f} s; {untimed} calls untimed (passed straight to Java)"]
+    if missed:
+        lines.append("Most Java seconds not replayed: " +
+                     ", ".join(f"{harness} {seconds:.0f} s" for harness, seconds in missed.most_common(10)))
+    if unreadable:
+        lines.append(f"{unreadable} unreadable lines skipped")
+    print("\nOracle reuse (tools/parity_shim.py):")
+    for line in lines:
+        print(f"  {line}", flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        try:
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+                summary.write("### Oracle reuse (tools/parity_shim.py)\n\n| Reason | Calls |\n|---|---:|\n" +
+                              "".join(f"| {reason} | {count} |\n" for reason, count in reasons.most_common()) + "\n" +
+                              "".join(f"- {line}\n" for line in lines[1:]))
+        except OSError:
+            pass
+
+
 def finished_run(failed):
     """Record that this run completed, for tools/gate.py: a crashed runner never writes it."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1805,16 +2505,19 @@ def main():
 
     # The probes the selected harnesses built last time, here or (for those that never ran here) in another
     # worktree. A harness with no record builds its own: building every probe for it would be ~275 binaries.
-    artifacts, built_by = [], {}
+    artifacts, built_by, tests = [], {}, []
     for name in selected:
-        record = records.get(name)
-        if not record or "artifacts" not in record:
+        record = records.get(name) or {}
+        if "artifacts" not in record or "tests" not in record:
+            # A record from before `tests` was recorded takes another worktree's test selections meanwhile.
             template = SHARED / "dependencies" / f"{name}.json"
-            record = json.loads(template.read_text(encoding="utf-8")) if template.exists() else {}
+            shared = json.loads(template.read_text(encoding="utf-8")) if template.exists() else {}
+            record = {**shared, **record} if "artifacts" in record else shared
         built_by[name] = recorded_artifacts(record)
         for artifact in built_by[name]:
             if artifact not in artifacts:
                 artifacts.append(artifact)
+        tests += [selection for selection in record.get("tests", []) if selection not in tests]
     config = host_config()
     hosts = [host for host in (config.get("default", []) if args.hosts is None else args.hosts.split(","))
              if host and host != HOST]
@@ -1827,7 +2530,7 @@ def main():
             any(base_name(name) not in config["hosts"][host].get("exclude", {}) for host in hosts)
     if jobs == 0 and not all(elsewhere(name) for name in selected):
         jobs = 1  # harnesses that can only run here still need a slot
-    remotes = [RemoteExecutor(host, config["hosts"][host], artifacts, config.get("local_only", {}), args.timeout)
+    remotes = [RemoteExecutor(host, config["hosts"][host], artifacts, config.get("local_only", {}), args.timeout, tests)
                for host in hosts]
     local = None
     try:
@@ -1835,17 +2538,20 @@ def main():
             process_tree.start_build_server()  # before any build here: the probe build's would start it otherwise
             print("Building probes...", flush=True)
             started = time.monotonic()
-            built, errors = prebuild(artifacts, default_build_jobs())
+            built, errors = prebuild(artifacts, default_build_jobs(), tests)
             if not built:
-                print(errors[-4000:])
+                print(printable(errors[-4000:]))
                 print("Probe build failed; harnesses will report their own build errors.", flush=True)
             print(f"Probes built in {time.monotonic() - started:.0f}s.", flush=True)
         where = "".join(f", plus {host}" for host in hosts)
         print(f"Running {len(selected)} harnesses, {jobs} at a time here{where}...", flush=True)
         reuse_oracles = not (args.fresh or args.all)
+        if reuse_oracles and os.name != "nt":
+            check_oracle_hashes(STATE_DIR / "oracle-cache", os.environ.get("PARITY_REPAIR_ORACLE_HASHES") == "1")
         local = LocalExecutor(jobs, int(memory_available() * 0.75), args.timeout,
                               REMOTE_LOCAL_PEAK if remotes and args.jobs is None else None)
         local.solo = solo_harnesses(config)
+        local.decisions = fresh_decisions()
         if os.name == "nt":
             packages = target_packages()
             local.builds = {name: executables(built, packages) for name, built in built_by.items()}
@@ -1862,6 +2568,7 @@ def main():
     finished_run(failed)
     print(f"\n{len(results) - len(failed)} passed, {len(failed)} failed in {elapsed / 60:.1f} min.")
     report_retries(results, known_flaky(config))
+    report_decisions(local.decisions if local else None)
     known = known_failing(config)
     blocking, again, passed = split_known_failing(results, known)
     report_known_failing(again, passed, known)

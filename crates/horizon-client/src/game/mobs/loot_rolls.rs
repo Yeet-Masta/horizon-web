@@ -113,7 +113,7 @@ impl Game<'_> {
                 .mobs
                 .iter()
                 .find(|mob| mob.id == id)
-                .map(|mob| horizon_client::mobs::drops::loot_entity(mob, None)),
+                .map(|mob| self.mob_loot_entity(mob)),
             _ => None,
         };
         let loot = live_target.as_ref().and_then(|_| {

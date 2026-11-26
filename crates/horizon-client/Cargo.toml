@@ -40,7 +40,6 @@ horizon-optifine = { path = "../horizon-optifine" }
 # The server thread ahead of the workers (MinecraftServer.spin's Thread.setPriority).
 horizon-threads = { path = "../horizon-threads" }
 horizon-perf-format = { path = "../horizon-perf-format" }
-horizon-hdr = { path = "../horizon-hdr" }
 horizon-world = { path = "../horizon-world" }
 horizon-protocol = { path = "../horizon-protocol" }
 # server.properties, eula.txt and the user lists, shared with horizon-server.
@@ -62,7 +61,10 @@ horizon-friends = { path = "../horizon-friends", optional = true }
 horizon-narrator = { path = "../horizon-narrator" }
 # Horizon mods: sandboxed WebAssembly components, off unless installed and turned on (docs/modding/src/how-to/content-mods.md).
 # Their runtime is the `mods` feature.
-horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index"] }
+# Keep `horizon-mod-package` features aligned with `horizon-client-lib` so alternating client and
+# client-lib builds/tests unify the same dependency set and reuse compiled artifacts. Native mods'
+# holder processes (`runtime-process`) are native only, below.
+horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index", "junction"] }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "wgsl", "naga-ir"] }
 winit = "0.30.13"
 pollster = "0.4"
@@ -79,12 +81,10 @@ toml = "1.1"
 # hlsl-out: the gfx.rs tests translate every shader as wgpu's DirectX 12 backend does. A normal feature,
 # not a dev-dependency's, so builds, tests and examples share one build of naga, wgpu and this crate.
 naga = { version = "30.0.1", features = ["wgsl-in", "hlsl-out"] }
-miniz_oxide = "0.8"
 ab_glyph = "0.2.32"
 log = "0.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }
-horizon-theme = { path = "../horizon-theme" }
 # Machine and process probes for benchmark and dedicated-server performance reports.
 horizon-system = { path = "../horizon-system" }
 # Opt-in data collection: the game keeps, the launcher sends (docs/telemetry.md). The
@@ -134,7 +134,7 @@ glam = { version = "0.30", features = ["core-simd"] }
 
 [target.'cfg(unix)'.dependencies]
 # The server thread's CPU time per tick (`HORIZON_SPIKES`, spans.rs).
-rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "time", "process", "fs"] }
 
 [target.'cfg(windows)'.dependencies]
 # DirectX 12, where Vulkan has no adapter or device, or by choice (`graphicsApi`, graphics.rs).
@@ -184,6 +184,10 @@ horizon-extras = ["friends"]
 friends = ["dep:horizon-friends"]
 # Records the call sites of mob random draws (`mob_ai_probe` traces).
 rng-trace = ["horizon-core/rng-trace", "horizon-client-lib/rng-trace"]
+# horizon-client-lib's own `default` (only `audio` and `controllers`, which `audio` and `controllers` above turn on
+# anyway): what `-p horizon-client-lib` on the command line turns on. horizon-game's default asks for it, so the game
+# built with and without `-p horizon-client-lib` (parity's two selections) is one build, not two.
+client-lib-default = ["horizon-client-lib/default"]
 # Rust's allocations go to the system heap instead of mimalloc, where heap profilers that replace
 # malloc (heaptrack, valgrind's massif) see them. Also the Windows and macOS prebuilt archives' allocator
 # (tools/prebuilt_game.py, arismoko/horizon#2394, arismoko/horizon#3877): there std's shared library keeps its own allocator. Otherwise mimalloc is faster.
@@ -212,7 +216,7 @@ horizon-mod-wasm = { path = "../horizon-mod-wasm", features = ["runtime-fixture"
 wat = "1.261"
 tempfile = "3"
 horizon-mod-runtime = { path = "../horizon-mod-runtime", features = ["test-work-count"] }
-horizon-threads = { path = "../horizon-threads", features = ["test-allocation-count"] }
+horizon-threads = { path = "../horizon-threads", features = ["test-allocation-count", "test-game-dir"] }
 mod_platform = { package = "horizon-mod-api", path = "../horizon-mod-api", features = ["testing"] }
 mod_api = { package = "horizon-mod-vocab", path = "../horizon-mod-vocab", features = ["testing"] }
 horizon-client-render = { path = "../horizon-client-render", features = ["test-support"] }

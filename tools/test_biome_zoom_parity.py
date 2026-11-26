@@ -8,9 +8,10 @@ import platform
 import random
 import subprocess
 try:
-    from . import lab,test_rust_parity as base
+    from . import lab,oracle_folders,test_rust_parity as base
 except ImportError:
     import lab
+    import oracle_folders
     import test_rust_parity as base
 
 
@@ -50,9 +51,9 @@ def main():
         with (build/(name+".log")).open("w",encoding="utf-8") as log:base.run(list(map(str,command)),stdout=log,stderr=subprocess.STDOUT)
     dependency_path=os.pathsep.join(map(str,libraries))
     run(["javac","--release",lock["minecraft"]["java_major"],"-proc:none","-cp",str(jars["server"])+os.pathsep+dependency_path,"-d",classes,oracle],"compile-java")
-    run(["cargo","build","--release","-p","horizon-core","--example","biome_zoom_fixture"],"compile-rust")
+    run(["cargo","build","--profile","fast","-p","horizon-core","--example","biome_zoom_fixture"],"compile-rust")
     metadata=json.loads(subprocess.check_output(["cargo","metadata","--no-deps","--format-version","1"],cwd=lab.ROOT,text=True))
-    binary=Path(metadata["target_directory"])/"release/examples"/("biome_zoom_fixture.exe" if os.name=="nt" else "biome_zoom_fixture")
+    binary=Path(metadata["target_directory"])/"fast/examples"/("biome_zoom_fixture.exe" if os.name=="nt" else "biome_zoom_fixture")
     run([binary,build],"rust")
     import hashlib
     with (build/"rust.txt").open() as output:
@@ -63,8 +64,10 @@ def main():
                 if result!='s '+str(int.from_bytes(digest[:8],'little',signed=True)):raise AssertionError('seed SHA-256 disagrees with hashlib')
     references=[]
     for side,jar in jars.items():
-        reference=build/f"{side}.txt"
-        run(["java","-Xmx512M","-cp",os.pathsep.join([str(classes),str(jar),dependency_path]),"dev.horizonlab.parity.VanillaBiomeZoomOracle",side,build],side)
+        (build/f"{side}.txt").unlink(missing_ok=True)  # the layout before: the reference beside the work files
+        folder=oracle_folders.folder(build/f"oracle-{side}",*fixture_paths,call=(classes,jar,side))
+        reference=folder/f"{side}.txt"
+        run(["java","-Xmx512M","-cp",os.pathsep.join([str(classes),str(jar),dependency_path]),"dev.horizonlab.parity.VanillaBiomeZoomOracle",side,folder],side)
         matched=base.compare(reference,build/"rust.txt")
         references.append({"side":side,"jar_sha256":lab.digest(jar,"sha256"),"output_sha256":lab.digest(reference,"sha256"),"matched_output_lines":matched})
         print(f"{side}: {matched:,} biome-zoom output lines match Rust",flush=True)

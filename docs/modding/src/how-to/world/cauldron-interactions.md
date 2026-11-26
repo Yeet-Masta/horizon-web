@@ -114,6 +114,12 @@ a guest trap, stale preconditions or an enclosing abort discards the action.
 Sounds, statistics, events and overflow drops wait for root commit. The action uses the
 shared transaction and runtime limits, with no cauldron-specific budget.
 
+A mod that [owns a water-cauldron holder](../../concepts/parts/block-entity-types.md#state-on-a-vanilla-water-cauldron)
+can store its contents in `fire`, in the same transaction as the level and inventory exchange.
+For a plan going from `minecraft:cauldron` to `minecraft:water_cauldron`, the incoming holder is
+available during `fire` and `input.state` still describes the empty cauldron. A plan draining it
+can read the outgoing holder during `fire`; that holder is removed with the block on success.
+
 ## Client prediction
 
 Client prediction selects the same entry, but skips custom handlers entirely:

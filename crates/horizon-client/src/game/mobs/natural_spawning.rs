@@ -1,7 +1,11 @@
 //! The game's side of `NaturalSpawner` (`mobs::spawn_selection`): the level
 //! it reads, the spawning chunks and caps of `ServerChunkCache.tickChunks`,
 //! and the mobs it adds (finalized with the game's `finalizeSpawn`).
-use super::{Dim, Game, creatures::Finalized, structures::structures_reaching_in};
+use super::{
+    Dim, Game,
+    creatures::Finalized,
+    structures::reaches_in,
+};
 use horizon_client::vanillagen::VanillaTerrain;
 use horizon_client::{
     biome::{BiomeInfo, SpawnEntry},
@@ -40,11 +44,93 @@ use {
 mod parallel;
 
 /// A level's natural spawning policy, as mods set it through its `LevelRef`
-/// (`Game::spawn_policies`): the categories' caps and which may spawn.
+/// (`Game::spawn_policies`): the categories' caps, which may spawn, and how
+/// often each category spawns.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct SpawnPolicy {
     pub(super) limits: SpawnLimits,
     pub(super) flags: SpawnFlags,
+    pub(super) ticks: SpawnTicks,
+}
+
+/// Ticks between one category's natural spawn passes (Paper's `ticks-per-spawn`),
+/// set through `LevelRef::set_ticks_per_spawn`. Vanilla: monsters every tick, creatures
+/// every 400 ticks (`ServerChunkCache`'s persistent pass), the rest every tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SpawnTicks {
+    monster: u32,
+    creature: u32,
+    ambient: u32,
+    axolotls: u32,
+    underground_water_creature: u32,
+    water_creature: u32,
+    water_ambient: u32,
+}
+
+impl Default for SpawnTicks {
+    fn default() -> Self {
+        Self {
+            monster: 1,
+            creature: 400,
+            ambient: 1,
+            axolotls: 1,
+            underground_water_creature: 1,
+            water_creature: 1,
+            water_ambient: 1,
+        }
+    }
+}
+
+impl SpawnTicks {
+    /// The ticks between `category`'s passes. `Misc` never spawns naturally: 1.
+    pub(super) fn of(&self, category: Category) -> u32 {
+        match category {
+            Category::Monster => self.monster,
+            Category::Creature => self.creature,
+            Category::Ambient => self.ambient,
+            Category::Axolotls => self.axolotls,
+            Category::UndergroundWaterCreature => self.underground_water_creature,
+            Category::WaterCreature => self.water_creature,
+            Category::WaterAmbient => self.water_ambient,
+            Category::Misc => 1,
+        }
+    }
+    /// Sets one category's ticks and returns true. `Misc` is refused (false), as is 0.
+    pub(super) fn set(&mut self, category: mod_api::MobCategory, ticks: u32) -> bool {
+        if ticks == 0 {
+            return false;
+        }
+        let slot = match category {
+            mod_api::MobCategory::Monster => &mut self.monster,
+            mod_api::MobCategory::Creature => &mut self.creature,
+            mod_api::MobCategory::Ambient => &mut self.ambient,
+            mod_api::MobCategory::Axolotls => &mut self.axolotls,
+            mod_api::MobCategory::UndergroundWaterCreature => &mut self.underground_water_creature,
+            mod_api::MobCategory::WaterCreature => &mut self.water_creature,
+            mod_api::MobCategory::WaterAmbient => &mut self.water_ambient,
+            _ => return false,
+        };
+        *slot = ticks;
+        true
+    }
+}
+
+#[cfg(test)]
+mod spawn_ticks_tests {
+    use super::*;
+
+    #[test]
+    fn spawn_ticks_default_to_vanilla_and_set_one_category() {
+        let mut ticks = SpawnTicks::default();
+        assert_eq!(ticks.of(Category::Monster), 1);
+        assert_eq!(ticks.of(Category::Creature), 400);
+        assert!(ticks.set(mod_api::MobCategory::Ambient, 20));
+        assert_eq!(ticks.of(Category::Ambient), 20);
+        assert_eq!(ticks.of(Category::Creature), 400);
+        assert!(!ticks.set(mod_api::MobCategory::Misc, 5));
+        assert!(!ticks.set(mod_api::MobCategory::Monster, 0));
+        assert_eq!(ticks.of(Category::Monster), 1);
+    }
 }
 
 /// `ServerLevel.canSpawnEntitiesInChunk` of `world`: the chunk is loaded.
@@ -206,6 +292,14 @@ fn close_enough_for_spawning(p: &LevelPlayer, (cx, cz): (i32, i32)) -> bool {
         f64::from(cz * 16 + 8) - p.position.z,
     );
     !p.spectator && x * x + z * z < 16384.0
+}
+/// `ChunkMap.skipPlayer`: with `spectatorsGenerateChunks` false a spectator
+/// is not added to the distance manager, so its chunks never enlarge the
+/// natural-spawn chunk count the caps divide by.
+fn skip_spectators(players: &mut Vec<LevelPlayer>, spectators_generate_chunks: bool) {
+    if !spectators_generate_chunks {
+        players.retain(|p| !p.spectator);
+    }
 }
 /// The chunks within 8 of a player, in `scratch.candidates`, and for each in
 /// `scratch.close` whether a non-spectator is within 128 blocks or `forced`
@@ -940,17 +1034,17 @@ impl<H: LevelHost> NaturalLevel for Level<'_, H> {
         z: i32,
         wanted: &dyn Fn(&str) -> bool,
     ) -> Vec<StructureAt> {
-        structures_reaching_in(
+        reaches_in(
             self.w.world,
             &|| self.host.locator.clone(),
             [x, y, z],
             wanted,
         )
         .into_iter()
-        .map(|(id, in_piece)| StructureAt {
-            id,
-            in_piece,
-            in_bounds: true,
+        .map(|reach| StructureAt {
+            id: reach.name,
+            in_piece: reach.in_piece,
+            in_bounds: reach.in_box,
         })
         .collect()
     }
@@ -1329,18 +1423,22 @@ impl<'a> Game<'a> {
     }
     /// The categories a pass over the level in place tries: none with the
     /// `spawn_mobs` rule off, else `getFilteredSpawningCategories` with the
-    /// `spawn_monsters` rule, the persistent ones every 400 ticks, and the
+    /// `spawn_monsters` rule, each category only on the ticks its level's
+    /// `SpawnTicks` names (creatures every 400 ticks by default), and the
     /// level's spawn flags (`SpawnPolicy`) taking away.
     pub(super) fn natural_categories(&self, state: &SpawnState) -> Vec<Category> {
         let rules = &self.ui.rules;
         if !rules.bool_at(horizon_client::gamerules::vanilla::SPAWN_MOBS) {
             return Vec::new();
         }
-        state.policy_categories(
-            self.spawn_policy(self.dim.key()).flags,
+        let policy = self.spawn_policy(self.dim.key());
+        let mut categories = state.policy_categories(
+            policy.flags,
             rules.bool_at(horizon_client::gamerules::vanilla::SPAWN_MONSTERS),
-            self.world.game_time % 400 == 0,
-        )
+            true,
+        );
+        categories.retain(|&c| self.world.game_time % i64::from(policy.ticks.of(c)) == 0);
+        categories
     }
     /// The tick's spawning phases in `ServerLevel.tick`'s order: the raids
     /// tick first (`this.raids.tick`), then the chunk source's
@@ -1389,6 +1487,12 @@ impl<'a> Game<'a> {
                 players.retain(|p| !fake.contains(&p.uuid));
             }
         }
+        skip_spectators(
+            &mut players,
+            self.ui
+                .rules
+                .bool_at(horizon_client::gamerules::vanilla::SPECTATORS_GENERATE_CHUNKS),
+        );
         if players.is_empty() {
             return;
         }
@@ -1839,6 +1943,25 @@ mod tests {
             "only the held chunk"
         );
         assert!(!scratch.candidates.contains(&(30, 30)), "outside the area");
+    }
+
+    /// A far spectator's square counts toward the spawnable chunks only while
+    /// `spectatorsGenerateChunks` is on.
+    #[test]
+    fn spectators_count_toward_spawnable_chunks_only_when_they_generate_chunks() {
+        for (rule, count) in [(true, 2 * 289), (false, 289)] {
+            let mut players = vec![
+                player(8.0, 64.0, 8.0, false),
+                player(8000.0, 64.0, 8.0, true),
+            ];
+            skip_spectators(&mut players, rule);
+            let mut scratch = SpawnScratch::default();
+            assert_eq!(
+                scratch.collect(&players, |_| false, |_| true),
+                count,
+                "{rule}"
+            );
+        }
     }
 
     /// The candidates as the uncached port collected them every tick: each

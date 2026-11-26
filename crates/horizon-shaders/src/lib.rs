@@ -17,6 +17,7 @@
 
 mod biomes;
 mod block_ids;
+mod block_layers;
 mod condition;
 mod config;
 mod custom;
@@ -29,6 +30,7 @@ mod post;
 mod preprocess;
 mod properties;
 mod screens;
+mod sky_visibility;
 mod textures;
 mod translate;
 
@@ -36,6 +38,7 @@ pub use biomes::{
     category as biome_category, pack_id as biome_pack_id, precipitation as biome_precipitation,
 };
 pub use block_ids::BlockIds;
+pub use block_layers::{BlockLayers, RenderLayer};
 pub use condition::eval_condition;
 pub use config::{
     BUFFERS, Buffer, Config, Format, HALF_LIVES, Kind, SHADOW_COLORS, Shadow, buffer_index,
@@ -58,6 +61,7 @@ pub use post::{
 pub use preprocess::{Diagnostic, Origin, Preprocessed, preprocess};
 pub use properties::{Entry, Note, Properties};
 pub use screens::{Item as ScreenItem, Screens};
+pub use sky_visibility::SkyVisibility;
 pub use textures::{
     CustomTexture, Dim as TextureDim, EVERY_STAGE, Texels, Texture, TextureSource, decode_png,
     load_textures, resolve_resources,

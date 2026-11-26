@@ -9,7 +9,7 @@ craft in the 2x2 inventory grid or on a crafting table, and save and reload worl
 in vanilla's Anvil format.
 
 **Status:** playable; players get it through [the launcher](../launcher/README.md). The [harness table](status.md#what-the-harnesses-compare)
-in the README scores each subsystem against vanilla and lists what is still
+scores each subsystem against vanilla and lists what is still
 missing; [Rust rewrite status](rust-parity.md) has the details.
 
 On Windows, the launcher uses a stable executable path for each game home across
@@ -17,6 +17,26 @@ release and native-mod updates. Its private runtime copy lives under the launche
 data folder in `run/<home key>/game/`; installed versions remain intact. Opening a
 world to other machines can still require an initial Windows Firewall permission.
 The launcher does not create firewall rules or change network-profile settings.
+
+## Find your best graphics settings
+
+From the title screen, open **Options → Video Settings → Graphics Benchmark**.
+**Find my best settings** samples seven fixed workloads (dense and far terrain,
+entities, block entities, particles and weather, a resource pack, and inventory
+over a world). **Run thorough benchmark** samples each workload twice for longer.
+Both compare frame rate, 1% lows, and loading time. Leave Horizon at the title
+while it measures: another world or game can distort the comparison.
+
+The benchmark opens a separate worker window using a temporary world and its own
+settings. If a trial crashes or times out, Horizon skips that combination. If you
+close Horizon or it crashes, the next title screen resumes where it stopped.
+Saved results are local to the instance, GPU, driver and game build. After an
+update, run again to get a current recommendation.
+
+Review the results and changed settings, then choose **Apply recommended
+settings**. Nothing changes until you apply. A new graphics API or worker count
+takes effect the next time you start the game. **Undo benchmark settings** restores
+the previous settings if they have not been manually changed since applying.
 
 ## musl Linux: manual installation
 
@@ -65,7 +85,7 @@ Use current stable Rust (1.90+) and JDK 25 (Python 3.11+ only for the developmen
 harnesses). A checkout never
 downloads the game: resource preparation imports **your own copy** (the 26.3
 client from your official launcher install, and the 26.3 server jar you
-downloaded yourself; see [Build from source](#run-from-a-checkout)),
+downloaded yourself),
 verifies it against the pinned checksums, runs vanilla's data generator and small
 exporters against those jars, and extracts the jar's assets and data into ignored
 `.local/horizon-client/26.3/`. Sounds (about 380 MB) are copied from your
@@ -121,6 +141,12 @@ cargo run --release -p horizon-game -- --render-distance 12
 
 Development builds that link quickly: `cargo build --profile fast -p horizon-game`.
 
+On Windows, with the build prerequisites and prepared resources above and `python` on `PATH`, run
+`tools\build-and-run.bat --world "Dev World" --render-distance 8` from the checkout.
+It builds `target\fast\horizon-client.exe`, passes along game arguments, and prints the new
+temporary run directory. Saves, options and logs stay there by default, not in the checkout
+or in your regular Horizon profile. Each invocation starts with a fresh directory.
+
 `HORIZON_OCCLUSION_PROFILE=1` enables detailed entity-occlusion phase and bounds-scan timings
 in `horizon-ctl stats` and `bench`. The normal benchmark keeps these CPU-clock reads disabled;
 query, cache-hit and cull counters remain available without profiling.
@@ -153,6 +179,9 @@ Worlds autosave every 6000 ticks (5 minutes), when chunks unload and on quit.
 On headless Linux use `vscreen start ./target/release/horizon-client` and
 `vscreen shot`.
 
+Server dialogs replace the visible menu without closing it. Dismissing the
+dialog returns to the open inventory, container, or other screen.
+
 Sound: the game prints the output it opened (`Horizon: audio output ...`) or
 why it has none (`Horizon: no sound: ...`). It opens none with
 `HORIZON_NO_AUDIO` set, nor on a `vscreen`, where tests run beside someone
@@ -165,19 +194,20 @@ if your audio server underruns (e.g. PipeWire with `min-quantum` ≥ 1024), set
 `HORIZON_AUDIO_BUFFER=2048` or `HORIZON_AUDIO_BUFFER=default` to use the backend's
 default buffer size.
 
-### Experimental older servers
+### Older servers
 
 The native Rust adapter recognizes 26.2, 26.1.x, 1.21.11, 1.21.9/1.21.10,
 1.21.7/1.21.8, 1.21.6, 1.21.5, 1.21.4, 1.21.2/1.21.3, 1.21/1.21.1,
-1.20.5/1.20.6, 1.20.3/1.20.4 and 1.20.2. It is off by default while compatibility is incomplete. Set
-`HORIZON_OLDER_SERVERS=1` before starting the game; the server's status ping selects
-the adapter. The client still needs its prepared **26.3** resources.
+1.20.5/1.20.6, 1.20.3/1.20.4 and 1.20.2. It is on by default: the server's status ping selects the adapter. Set
+`HORIZON_OLDER_SERVERS=0` before starting the game to turn it off. The client still needs its prepared **26.3** resources.
+
+To turn it off for one run:
 
 ```sh
-HORIZON_OLDER_SERVERS=1 cargo run --profile fast -p horizon-game -- --server 127.0.0.1:25565
+HORIZON_OLDER_SERVERS=0 cargo run --profile fast -p horizon-game -- --server 127.0.0.1:25565
 ```
 
-In PowerShell, set `$env:HORIZON_OLDER_SERVERS = '1'`, then run the same Cargo
+In PowerShell, set `$env:HORIZON_OLDER_SERVERS = '0'`, then run the same Cargo
 command without the environment assignment at its start.
 
 This does not load Fabric JARs or emulate every older version's movement and
@@ -222,6 +252,8 @@ reconstruction. Modified entity/block-entity data has no general reverse datafix
 and newer components without an old field cannot be represented. Incoming block-entity
 updates and chunk entries use forward datafixes for banner patterns, skull profiles,
 text and nested inventory stacks, retaining opaque fields and the original tag identity.
+The legacy registry and item context is acquired only for translations that read it,
+not for movement, keepalives or other packets that do not use that data.
 Independent vanilla fixtures cover these conversions; they do not establish full rendered parity. Static banners,
 enchantments, paintings, instruments and the original wolf coat use vanilla names.
 Old recipes, trades, horse equipment, attribute/effect metadata and particles are
@@ -308,7 +340,9 @@ $C quit                                      # save and exit
 
 `horizon-ctl help` lists the commands by group and `horizon-ctl COMMAND --help`
 explains one with examples; `horizon-ctl help --game` lists what the running
-game accepts, test hooks included.
+game accepts, test hooks included. The widget IDs above are independent of the
+client language; use `ui` to discover IDs for other widgets
+([agent-control.md](agent-control.md#the-widget-tree)).
 
 - **Observe:** `state` (position, rotation, velocity, health, food, saturation,
   XP, effects, game mode, dimension, time, weather, the screen and what the

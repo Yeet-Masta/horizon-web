@@ -162,32 +162,40 @@ impl Game<'_> {
     /// without publishing. Saving, remeshing and resending wait for the outermost commit,
     /// once per column. Outside a transaction they run immediately.
     pub(in crate::game) fn set_biome_at(&mut self, pos: [i32; 3], biome: &str) -> bool {
-        let Some(target) = world_biomes!(self)
+        match self.write_biome_at(pos, biome) {
+            Some(key) => {
+                self.after_commit(super::super::transactions::After::Biome(key));
+                true
+            }
+            None => false,
+        }
+    }
+    /// `set_biome_at` without the column resend: the changed cell's column, None when nothing changed.
+    pub(in crate::game) fn write_biome_at(
+        &mut self,
+        pos: [i32; 3],
+        biome: &str,
+    ) -> Option<(i32, i32)> {
+        let target = world_biomes!(self)
             .list
             .iter()
-            .position(|b| b.name == biome)
-        else {
-            return false;
-        };
+            .position(|b| b.name == biome)?;
         let key = (pos[0] >> 4, pos[2] >> 4);
-        let Some(chunk) = self.world.chunks.get(&key) else {
-            return false;
-        };
+        let chunk = self.world.chunks.get(&key)?;
         if !self.world.shape.contains_y(pos[1])
             || usize::from(chunk.biome(pos[0], pos[1], pos[2])) == target
         {
-            return false;
+            return None;
         }
         let old = chunk.biome(pos[0], pos[1], pos[2]);
         self.journal_biome(pos, old);
         let qy =
             ((pos[1] - self.world.bottom_y()) >> 2).clamp(0, self.world.layout().height() / 4 - 1);
-        if let Some(chunk) = self.world.chunks.get_mut(&key) {
+        self.world.chunks.mutate_chunk(key, |chunk| {
             let chunk = std::sync::Arc::make_mut(chunk);
             chunk.set_biome_cell((pos[0] & 15) >> 2, qy, (pos[2] & 15) >> 2, target as u16);
-        }
-        self.after_commit(super::super::transactions::After::Biome(key));
-        true
+        });
+        Some(key)
     }
 
     // ---- /worldborder -----------------------------------------------------------------------
@@ -302,19 +310,19 @@ impl Game<'_> {
             .first()
             .and_then(|s| self.slot_get(s)))
     }
-    /// `LootCommand.dropBlockLoot`: copy the actual block entity's components
-    /// into the mine result without removing the source block or its contents.
+    /// `LootCommand.dropChestLoot`: resolve a named table from the world's
+    /// reloadable loot registry. `dropBlockLoot` keeps the mined block's components.
     pub(super) fn cmd_loot(&mut self, id: &str, ctx: &Context) -> R<i32> {
         let keep_empty = ctx.literals.iter().any(|literal| literal == "replace");
         // The drops.
         let (drops, table): (Vec<ItemStack>, Option<String>) = match id {
             "loot.loot" | "loot.fish" => {
-                let Some(Arg::Resource(table)) = ctx.get("loot_table").cloned() else {
+                let Some(Arg::Resource(table)) = ctx.get("loot_table") else {
                     return Ok(0);
                 };
                 // An inline table (ResourceOrIdArgument) keeps its random sequence.
                 if table.starts_with('{') {
-                    let (tag, _) = horizon_core::nbt::parse_snbt(&table)
+                    let (tag, _) = horizon_core::nbt::parse_snbt(table)
                         .map_err(|e| err("argument.nbt.invalid", &[&e]))?;
                     let json = horizon_client::scoreboard::tag_to_json(&tag);
                     // LootCommand's omitted fishing tool is EMPTY, not mainhand.
@@ -344,27 +352,28 @@ impl Game<'_> {
                     };
                     (drops, None)
                 } else {
-                    if !self.items().has_loot_table(&table) {
-                        return Err(err("argument.resource_or_id.failed_to_parse", &[&table]));
+                    if !world_items!(self).has_loot_table(table) {
+                        return Err(err("argument.resource_or_id.failed_to_parse", &[table]));
                     }
                     let held = if id == "loot.fish" {
                         self.tool_stack(ctx)?
                     } else {
                         None
                     };
-                    let drops = match world_items!(self).loot_sequence(&table) {
+                    let items = world_items!(self);
+                    let drops = match items.loot_sequence(table) {
                         Some(seq) => {
                             let random = self.rand_sequences.get(&seq, self.level.seed);
-                            world_items!(self).loot_table_for_command(
-                                &table,
+                            items.loot_table_for_command(
+                                table,
                                 false,
                                 held.as_ref(),
                                 random,
                                 keep_empty,
                             )
                         }
-                        None => world_items!(self).loot_table_for_command(
-                            &table,
+                        None => items.loot_table_for_command(
+                            table,
                             false,
                             held.as_ref(),
                             &mut self.world.random,
@@ -487,12 +496,12 @@ impl Game<'_> {
                         pending.attach(p, drop);
                     }
                 }
-                (drops, Some(table))
+                (items.split_stacks(drops), Some(table))
             }
         };
         let drops: Vec<ItemStack> = drops
             .into_iter()
-            .filter(|d| keep_empty || d.count > 0)
+            .filter(|d| keep_empty || (d.count > 0 && &*d.item != "minecraft:air"))
             .collect();
         // Where they go.
         let mut used: Vec<ItemStack> = Vec::new();
@@ -620,7 +629,7 @@ impl Game<'_> {
                         None => first.first().cloned().filter(|_| i == 0),
                     };
                     let Some(slot) = slot else { continue };
-                    let item = drops.get(i).filter(|drop| drop.count > 0).cloned();
+                    let item = loot_replace_slot_item(&drops, i);
                     if self.slot_accepts(&slot, item.as_ref())
                         && self.slot_set_by_command(&slot, item.clone())
                     {
@@ -671,8 +680,30 @@ impl Game<'_> {
     }
 }
 
+fn loot_replace_slot_item(drops: &[ItemStack], index: usize) -> Option<ItemStack> {
+    drops
+        .get(index)
+        .filter(|drop| drop.count > 0 && &*drop.item != "minecraft:air")
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loot_replace_normalises_air_and_zero_positions_while_preserving_later_items() {
+        let drops = [
+            super::ItemStack::new("minecraft:air", 1),
+            super::ItemStack::new("minecraft:iron_ingot", 0),
+            super::ItemStack::new("minecraft:diamond", 2),
+        ];
+        assert_eq!(super::loot_replace_slot_item(&drops, 0), None);
+        assert_eq!(super::loot_replace_slot_item(&drops, 1), None);
+        assert_eq!(
+            super::loot_replace_slot_item(&drops, 2),
+            Some(super::ItemStack::new("minecraft:diamond", 2))
+        );
+        assert_eq!(super::loot_replace_slot_item(&drops, 3), None);
+    }
     /// `LootCommand.getSourceHandItem`: a living source's hand; `permissions.requires.entity` for a source
     /// without an entity; `commands.drop.no_held_items` for any other entity. The player in place's own command
     /// (no source) reads its own hand.

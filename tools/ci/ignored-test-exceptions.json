@@ -362,6 +362,14 @@
   {
     "package": "horizon-client",
     "target": "lib",
+    "test": "game::nether_portal::persistence_tests::live_and_saved_portal_counters_follow_runtime_and_data_updates",
+    "path": "crates/horizon-client/src/game/blocks/tests/portal_persistence_tests.rs",
+    "reason": "needs explicit HORIZON_TEST_RESOURCES and HORIZON_PORTAL_REFERENCE",
+    "rationale": "Existing separately supplied input HORIZON_PORTAL_REFERENCE in tools/ci/ignored-tests/harness-inputs.txt; its dedicated workflow/harness must supply this input, which ordinary prepared resources do not contain. needs explicit HORIZON_TEST_RESOURCES and HORIZON_PORTAL_REFERENCE"
+  },
+  {
+    "package": "horizon-client",
+    "target": "lib",
     "test": "game::payload_transport::wasm_config_tests::compiled_guest_runs_on_configuration_connection_thread",
     "path": "crates/horizon-client/src/game/modding/payload_transport/wasm_config_tests.rs",
     "reason": "requires prepared resources and compiled HORIZON_WASM_FIXTURE/HORIZON_WASM_STD",
@@ -446,6 +454,22 @@
     "path": "crates/horizon-client/src/game/interface/tests/stat_award_tests.rs",
     "reason": "needs HORIZON_TEST_RESOURCES, HORIZON_WASM_FIXTURE and HORIZON_WASM_STD; build with horizon-mod-wasm/listener-fixture",
     "rationale": "Existing separately supplied input HORIZON_WASM_FIXTURE in tools/ci/ignored-tests/stat-award-wasm.txt; its dedicated workflow/harness must supply this input, which ordinary prepared resources do not contain. needs HORIZON_TEST_RESOURCES, HORIZON_WASM_FIXTURE and HORIZON_WASM_STD; build with horizon-mod-wasm/listener-fixture"
+  },
+  {
+    "package": "horizon-client",
+    "target": "lib",
+    "test": "game::remote::movement_input_tests::player_world_edge_parity_tests::a_tick_from_the_world_edge_lands_like_vanilla",
+    "path": "crates/horizon-client/src/game/network/remote/player_world_edge_parity_tests.rs",
+    "reason": "parity harness: tools/test_player_tick_world_edge_parity.py runs it",
+    "rationale": "The Rust side of the player-tick world-edge parity harness, run by its own driver: python tools/test_player_tick_world_edge_parity.py compiles the vanilla oracle, runs it, then exact-selects this test with --ignored --exact and HORIZON_PLAYER_TICK_TRACE pointing at its trace file, and compares the two JSON outputs case by case. The test writes no trace and asserts nothing without that variable, so daily shards have nothing to run here; the driver runs it wherever the harness runs (the parity job, which a maintainer starts on a fork's pull request, and main's own parity run)."
+  },
+  {
+    "package": "horizon-client",
+    "target": "lib",
+    "test": "game::interaction_click_parity_tests::a_click_on_a_server_interaction_consumes_like_vanilla",
+    "path": "crates/horizon-client/src/game/items/interaction_click_parity_tests.rs",
+    "reason": "parity harness: tools/test_interaction_click_parity.py runs it",
+    "rationale": "The Rust side of the interaction-click parity harness, run by its own driver: python tools/test_interaction_click_parity.py compiles the vanilla oracle, runs it, then exact-selects this test with --ignored --exact and HORIZON_INTERACTION_CLICK_TRACE pointing at its trace file, and compares the two JSON outputs case by case. The test writes no trace and asserts nothing without that variable, so daily shards have nothing to run here; the driver runs it wherever the harness runs (the parity job, which a maintainer starts on a fork's pull request, and main's own parity run)."
   },
   {
     "package": "horizon-client-core",
@@ -562,6 +586,14 @@
   {
     "package": "horizon-client-lib",
     "target": "lib",
+    "test": "save::block_entity_cache_tests::bench_repeated_block_entity_saves",
+    "path": "crates/horizon-client/src/save/block_entity_cache_tests.rs",
+    "reason": "a measurement, not a check",
+    "rationale": "Opt-in measurement, not an ordinary daily correctness check: a measurement, not a check. Run by hand on an idle machine with the optimized profile and its explicitly requested inputs; all assertions remain in the test."
+  },
+  {
+    "package": "horizon-client-lib",
+    "target": "lib",
     "test": "save::compression_bench::benches::bench_chunk_compression_speedup",
     "path": "crates/horizon-client/src/save/compression_bench.rs",
     "reason": "a measurement, not a check",
@@ -594,6 +626,14 @@
   {
     "package": "horizon-client-render",
     "target": "lib",
+    "test": "gfx::pack_post::material_demand_tests::material_demand_follows_usable_bindings_and_custom_overrides",
+    "path": "crates/horizon-client-render/src/gfx/pack_post/material_demand_tests.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
     "test": "gfx::entity_batch::tests::benchmark_entity_batch",
     "path": "crates/horizon-client-render/src/gfx/entity_batch.rs",
     "reason": "manual production-helper microbenchmark",
@@ -602,10 +642,42 @@
   {
     "package": "horizon-client-render",
     "target": "lib",
+    "test": "gfx::hdr::tests::a_frame_without_room_keeps_no_targets_and_the_next_makes_them",
+    "path": "crates/horizon-client-render/src/gfx/hdr.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Existing adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
     "test": "gfx::pack_post::indirect_tests::an_unsupported_indirect_device_keeps_the_direct_and_render_passes",
     "path": "crates/horizon-client-render/src/gfx/pack_post/indirect_tests.rs",
     "reason": "requires an explicit capability mask",
     "rationale": "Exact opt-in adapter capability control, not an ordinary daily selection: requires a real GPU and HORIZON_SHADER_PACK_WITHOUT=indirect. Its by-hand row in tools/ci/ignored-tests/manual-horizon-client-render.txt gives the exact cargo test command. Preserve the explicit environment assertion, unsupported-indirect diagnostic and direct/render pixel assertions."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
+    "test": "gfx::pack_post::sky_visibility_tests::pack_sun_and_moon_properties_control_independent_pixels",
+    "path": "crates/horizon-client-render/src/gfx/pack_sky_visibility_tests.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
+    "test": "gfx::pack_post::sky_visibility_tests::pack_sky_property_hides_disc_horizon_sunset_and_void_pixels",
+    "path": "crates/horizon-client-render/src/gfx/pack_sky_visibility_tests.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
+    "test": "gfx::pack_post::sky_visibility_tests::pack_sky_property_gates_native_fallback_submissions",
+    "path": "crates/horizon-client-render/src/gfx/pack_sky_visibility_tests.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
   },
   {
     "package": "horizon-client-render",
@@ -690,10 +762,26 @@
   {
     "package": "horizon-client-render",
     "target": "lib",
+    "test": "menu_blur::tests::without_room_the_menu_is_not_blurred_and_the_next_screen_blurs",
+    "path": "crates/horizon-client-render/src/menu_blur.rs",
+    "reason": "requires a Vulkan/Metal/DX12 adapter",
+    "rationale": "Existing adapter-gated GPU lane in tools/ci/ignored-tests/gpu.txt; a real available adapter is required and the runner handles adapter availability separately from prepared-resource daily selection."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
     "test": "packs::cache::tests::benchmark_real_resource_root",
     "path": "crates/horizon-client-render/src/packs/cache.rs",
     "reason": "requires prepared resources and real pack paths in environment",
     "rationale": "Existing parity-harness step in tools/ci/ignored-tests/parity-harness.txt; HORIZON_OVERLAY_BENCH_VANILLA supplies its independent oracle/private fixture and drives it separately, not as a prepared-resource daily test."
+  },
+  {
+    "package": "horizon-client-render",
+    "target": "lib",
+    "test": "level_loading::styled_loading_overlay_blends_both_logo_halves_on_gpu",
+    "path": "crates/horizon-client-render/src/level_loading.rs",
+    "reason": "requires a software Vulkan adapter",
+    "rationale": "Explicit software Vulkan test in tools/ci/ignored-tests/manual-horizon-client-render.txt; asserts both logo halves and the stock and styled progress bar on the real HUD pipeline."
   },
   {
     "package": "horizon-client-render",
@@ -768,12 +856,28 @@
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-client-render.txt: requires a Vulkan/Metal/DX12 adapter; cargo test -p horizon-client-render --test world_view_slots -- --ignored. Not selected by daily shards."
   },
   {
+    "package": "horizon-client-render",
+    "target": "lib",
+    "test": "gfx::ray_lights::tests::rebuild_timings",
+    "path": "crates/horizon-client-render/src/gfx/ray_lights.rs",
+    "reason": "timing",
+    "rationale": "Manual wall-clock measurement of the ray light sources' rebuild (render-thread cost and worker build), not a daily correctness check. Run by hand on an idle machine with --release, exact-selecting the full test path with --ignored --exact --nocapture; the grid's correctness is covered by the other gfx::ray_lights tests."
+  },
+  {
     "package": "horizon-core",
     "target": "lib",
     "test": "paletted::tests::benchmark_pack",
     "path": "crates/horizon-core/src/paletted.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: microbenchmark; run with --ignored --nocapture. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-core",
+    "target": "lib",
+    "test": "paletted::tests::benchmark_pack_and_unpack_widths",
+    "path": "crates/horizon-core/src/paletted/tests.rs",
+    "reason": "microbenchmark; run with --ignored --nocapture",
+    "rationale": "Explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: microbenchmark; run with --ignored --nocapture. Not selected by daily shards."
   },
   {
     "package": "horizon-core",
@@ -798,6 +902,14 @@
     "path": "crates/horizon-core/src/random/positional.rs",
     "reason": "benchmark",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: benchmark. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-core",
+    "target": "lib",
+    "test": "storage::tests::benchmark_unpack",
+    "path": "crates/horizon-core/src/storage.rs",
+    "reason": "microbenchmark; run with --ignored --nocapture",
+    "rationale": "Explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-core.txt: microbenchmark of PackedStorage::unpack_into; run with --release --ignored --nocapture. Not selected by daily shards; its correctness is covered by the other storage tests."
   },
   {
     "package": "horizon-items",
@@ -918,14 +1030,6 @@
     "path": "crates/horizon-mod-api/tests/dispatch_benchmark.rs",
     "reason": "optimized hot-hook microbenchmark",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-mod-api.txt: optimized hot-hook microbenchmark. Not selected by daily shards."
-  },
-  {
-    "package": "horizon-mod-api-gen",
-    "target": "lib",
-    "test": "interface_cache_tests::cached_points_match_full_generation_across_source_changes",
-    "path": "crates/horizon-mod-api-gen/src/interface_cache_tests.rs",
-    "reason": "full source-tree generation equivalence; run explicitly when changing the cache",
-    "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-mod-api-gen.txt: full source-tree generation equivalence; run explicitly when changing the cache. Not selected by daily shards."
   },
   {
     "package": "horizon-mod-api-gen",
@@ -1088,14 +1192,6 @@
     "rationale": "Explicit by-hand runner in tools/ci/ignored-tests/manual-horizon-mod-wasm.txt: requires HORIZON_WASM_FIXTURE and HORIZON_WASM_STD built locally from this tree. Not selected by daily shards."
   },
   {
-    "package": "horizon-mod-wasm",
-    "target": "test:unstaged",
-    "test": "real_guest_point_is_refused_without_staging",
-    "path": "crates/horizon-mod-wasm/tests/unstaged.rs",
-    "reason": "needs HORIZON_WASM_FIXTURE and HORIZON_WASM_STD, built by wasm-mods",
-    "rationale": "Explicit by-hand runner in tools/ci/ignored-tests/manual-horizon-mod-wasm.txt: supply locally built HORIZON_WASM_FIXTURE and HORIZON_WASM_STD. The fork's wasm-mods workflow is not adopted. Not selected by daily shards."
-  },
-  {
     "package": "horizon-perf",
     "target": "test:it",
     "test": "pacing_fixture::write_the_pacing_fixture",
@@ -1154,10 +1250,26 @@
   {
     "package": "horizon-world",
     "target": "lib",
+    "test": "chunk::tests::benchmark_paletted_container_baseline",
+    "path": "crates/horizon-world/src/chunk/tests.rs",
+    "reason": "headless palette baseline; run with --ignored --nocapture",
+    "rationale": "Manual optimized timing on an idle host. Correctness comparisons run inside the benchmark, but timing is not a daily gate."
+  },
+  {
+    "package": "horizon-world",
+    "target": "lib",
     "test": "chunk::tests::benchmark_section_get_set",
     "path": "crates/horizon-world/src/chunk.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
     "rationale": "Opt-in measurement, not an ordinary daily correctness check: microbenchmark; run with --ignored --nocapture. Run by hand on an idle machine with the optimized profile and its explicitly requested inputs; all assertions remain in the test."
+  },
+  {
+    "package": "horizon-world",
+    "target": "lib",
+    "test": "level::fluids::tests::benchmark_lava_flood",
+    "path": "crates/horizon-world/src/level/fluids.rs",
+    "reason": "headless lava scene; run with --ignored --nocapture",
+    "rationale": "Manual optimized timing on an idle host. The scene checks spread and dispatch counts; timing is not a daily gate."
   },
   {
     "package": "horizon-world",
@@ -1174,5 +1286,13 @@
     "path": "crates/horizon-world/tests/it/world_io.rs",
     "reason": "microbenchmark; run with --ignored --nocapture",
     "rationale": "Existing explicit manual runner by-hand in tools/ci/ignored-tests/manual-horizon-world.txt: microbenchmark; run with --ignored --nocapture. Not selected by daily shards."
+  },
+  {
+    "package": "horizon-client-lib",
+    "target": "lib",
+    "test": "lan::hub::tests::block_send_bench::block_fanout_benchmark",
+    "path": "crates/horizon-client/src/lan/hub/tests/block_send_bench.rs",
+    "reason": "timing",
+    "rationale": "Opt-in measurement, not an ordinary daily correctness check: timing. Run by hand on an idle machine with HORIZON_BLOCK_FANOUT_BENCH=1 and the optimized profile; all assertions remain in the test."
   }
 ]

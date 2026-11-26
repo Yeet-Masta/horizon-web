@@ -4,8 +4,8 @@
 //! (`Renderer::set_external_pipeline`), each point is one `Option` test.
 //!
 //! Workspace-internal: the trait names the engine's frame, its mesh format and its pass order,
-//! has one implementer in this workspace, carries no stability promise and is never exposed to
-//! mods. A mesher or pass change updates its implementer in the same PR. HDR output
+//! carries no stability promise and is never exposed to mods. A mesher or pass change
+//! updates its implementers in the same PR. HDR output
 //! (`output.rs`, `frame_policy`) is not an implementer: it stays the one output stage after the
 //! frame, and a pipeline draws into the frame it gives.
 //!
@@ -22,8 +22,7 @@ use super::pack_timing::PassTiming;
 pub use super::SectionLists;
 pub use super::rt::scene::{RayScene, Traced, TracedEntities};
 pub use super::weather::Weather;
-use super::{Cull, EffectiveOutput, Frame, Frustum, SectionKey, Sides, facing_runs, frustum};
-use crate::fast_hash::FxHashMap;
+use super::{Cull, EffectiveOutput, Frame, Frustum, Sides, facing_runs, frustum};
 
 /// What a world frame gives an external pipeline at its points: the frame's own values, and
 /// the display's from the renderer's one output snapshot (`EffectiveOutput`: whether HDR is on,
@@ -69,6 +68,11 @@ pub trait ExternalPipeline: PipelineSend + std::any::Any {
     }
     /// It stops with nothing in its place: what it kept from frame to frame goes now.
     fn retire(&mut self, _device: &wgpu::Device) {}
+    /// The tilt in degrees of the sun's and moon's path (`[sky] sun_path_rotation`), which turns
+    /// the sun, moon and stars the engine draws; none under the End sky.
+    fn sun_path_rotation(&self) -> f32 {
+        0.0
+    }
     /// Every section is gone (a new world, a new dimension).
     fn world_cleared(&mut self) {}
     /// Forget what was kept from earlier frames: the next is drawn as a fresh pipeline's first.
@@ -140,7 +144,11 @@ pub trait ExternalPipeline: PipelineSend + std::any::Any {
     /// Its grid of the solid terrain near the camera, drawn by `layers`' displaced layer, in a
     /// terrain pass with the engine's group 0 bound.
     fn draw_displaced(&self, _pass: &mut wgpu::RenderPass<'_>, _layers: TerrainLayers<'_>) {}
-    /// Where the world pass stops before translucent terrain, for layers that read it.
+    /// Whether the pipeline reads a copy of the world before translucent terrain.
+    fn reads_opaque(&self) -> bool {
+        false
+    }
+    /// Where the world pass stops before translucent terrain, for stages that read it.
     fn copy_opaque(&self, _copy: OpaqueCopy<'_>) {}
     /// Its rain and snow. False when it has none, for the engine's own.
     fn draw_weather(
@@ -184,6 +192,8 @@ pub struct Capabilities {
     pub displacement: bool,
     /// Its terrain draws with layers of its own.
     pub material: bool,
+    /// It draws its own sky in place of the engine's Overworld sky.
+    pub replaces_sky: bool,
     /// Its sky leaves out vanilla's clouds, sun, moon or stars.
     pub hides_clouds: bool,
     pub hides_sun: bool,
@@ -202,9 +212,17 @@ pub struct Capabilities {
     /// Its terrain pipelines bind the arenas' quad looks (`looks::wanted`): sections carry them.
     pub looks: bool,
     /// The renderer anti-aliases its world before the output reads it
-    /// (`WorldOutput::resolved`): it has no post passes (`[[post]]`) that draw the picture, and
-    /// its frame holds gamma light, which FXAA's blend is made for (not `blend = "linear"`).
-    pub engine_fxaa: bool,
+    /// (`WorldOutput::resolved`), with the player's TAA or FXAA: it has no post passes
+    /// (`[[post]]`) that draw the picture, and its frame holds gamma light, which their blends
+    /// are made for (not `blend = "linear"`).
+    pub engine_resolve: bool,
+    /// Besides `engine_resolve`, TAA upscales its world and sharpens it as without a pack: its
+    /// `[tonemap]`, if it has one, never reads `previous`, which is then larger than the world.
+    pub engine_upscale: bool,
+    /// Without `engine_resolve`, the renderer still moves the world's projection by TAA's
+    /// sub-pixel offset every frame and says it in `frame.jitter` (`[frame] jitter`), for the
+    /// pack's own temporal pass; it doesn't resolve, upscale or keep a history for it.
+    pub jitter: bool,
 }
 
 /// What the renderer hands the pack's post stage (`ExternalPipeline::run_post`).
@@ -214,6 +232,9 @@ pub struct WorldPost<'a> {
     /// The world's scaled target (colour, depth), of `size`.
     pub world: (&'a wgpu::TextureView, &'a wgpu::TextureView),
     pub size: [u32; 2],
+    /// The size of the world the renderer resolves (`WorldOutput::resolved`): larger than
+    /// `size` where TAA upscales it (`Capabilities::engine_upscale`).
+    pub display: [u32; 2],
     /// The window's size, the frame's.
     pub window: [u32; 2],
     /// The ray scene and the camera, when the game traces rays.
@@ -226,8 +247,10 @@ pub struct WorldOutput<'a> {
     pub encoder: &'a mut wgpu::CommandEncoder,
     /// The window's frame, which the output draws.
     pub screen: &'a wgpu::TextureView,
-    /// The world as the renderer resolved it (the player's FXAA), at the world's size and in
-    /// its format, for the output to read in its place; `None`: the world as drawn.
+    /// The world as the renderer resolved it (the player's TAA or FXAA), at
+    /// `WorldPost::display`, for the output to read in its place; `None`: the world as drawn.
+    /// TAA's is its `Rgba16Float` history, or that sharpened where TAA upscales; FXAA's and
+    /// the sharpened history are in the world's format.
     pub resolved: Option<&'a wgpu::TextureView>,
 }
 
@@ -248,17 +271,26 @@ pub struct FrameStart<'a> {
     pub frame: &'a Frame<'a>,
     /// The world's size this frame: the scaled target's, else the window's.
     pub size: [u32; 2],
+    /// The lens the world is drawn with this frame, unjittered and before the pose
+    /// (`View::projection`): its aspect is the window's, which the world's rounded `size`
+    /// can miss.
+    pub projection: glam::Mat4,
     /// This frame's output, whose display values a 0.2 pack reads.
     pub output: &'a EffectiveOutput,
     /// The light sources the section meshes list, and their revision (`BlockLight::update`).
-    pub lights: &'a FxHashMap<SectionKey, Vec<([i32; 3], u32)>>,
+    pub lights: &'a super::block_light::SectionLights,
     pub light_revision: u64,
+    /// The lowest block of the level's columns, which the sections' keys count from.
+    pub min_y: i32,
     /// The sky is open this frame.
     pub sky_visible: bool,
     /// The ray scene, when the game traces rays (`ExternalPipeline::start_frame`).
     pub scene: Option<&'a RayScene>,
     /// This frame's lightmap, RGBA rows of sky level by block level (`Renderer::lightmap_pixels`).
     pub lightmap: &'a [u8; 16 * 16 * 4],
+    /// The world's sub-pixel jitter this frame in clip space (`world_post::Post::jitter_clip`),
+    /// zero while TAA is off.
+    pub jitter: [f32; 2],
 }
 
 /// What the renderer hands the pack after the water mirror (`ExternalPipeline::prepare_world_targets`).
@@ -329,6 +361,10 @@ pub struct TerrainLayers<'a> {
     pub displaced: Option<&'a wgpu::RenderPipeline>,
     /// The solid layers for 4x MSAA (instanced, then flat draws), when the pack's material got them.
     pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
+    /// The solid layers' depth pre-pass (instanced, then flat draws), and 4x MSAA's, where they
+    /// have one: drawn over the same draws before each solid layer, which then tests depth
+    /// equal to it and doesn't write it.
+    pub depth: Option<SolidDepth<'a>>,
     /// The solid layers' second target, which they write beside the world's colour.
     pub surface: Option<&'a wgpu::TextureView>,
     /// The layers read the world before translucent terrain: the renderer stops there for
@@ -336,6 +372,14 @@ pub struct TerrainLayers<'a> {
     pub reads_opaque: bool,
     /// What the layers read beside the terrain's groups (`bind`).
     pub frame: &'a wgpu::BindGroup,
+}
+
+/// `TerrainLayers::depth`.
+#[derive(Clone, Copy)]
+pub struct SolidDepth<'a> {
+    pub solid: &'a wgpu::RenderPipeline,
+    pub flat: Option<&'a wgpu::RenderPipeline>,
+    pub msaa: Option<&'a (wgpu::RenderPipeline, Option<wgpu::RenderPipeline>)>,
 }
 
 impl TerrainLayers<'_> {
@@ -377,6 +421,9 @@ pub struct EntityLayers<'a> {
     /// Their group 3: the pack's frame, with this frame's version of the kept resources the
     /// stage reads where it reads any.
     pub frame: &'a wgpu::BindGroup,
+    /// `[entity] surface = true`: the surface target both pipelines write beside the colour,
+    /// the one the material stage's solid terrain writes.
+    pub surface: Option<&'a wgpu::TextureView>,
 }
 
 /// A section the grid may draw from this frame: its arena page, the base vertex of its solid
@@ -501,6 +548,33 @@ pub(super) fn shadow_box(view: &ShadowView) -> Frustum {
         planes[5] = Vec4::W;
     }
     Frustum { planes }
+}
+
+/// Where a section comes in the shadow pass's draw order, nearest the light first: a key that
+/// sorts as the height of its camera-relative `origin` along `light` (the direction toward the
+/// light) does with `f32::total_cmp`, highest first. Worked out once a section, where comparing
+/// heights worked them out again at every comparison.
+fn shadow_order(origin: [f32; 3], light: Vec3) -> u64 {
+    let bits = Vec3::from(origin).dot(light).to_bits();
+    // `total_cmp`'s order as unsigned integers (negatives below positives, each by magnitude),
+    // then turned around so that the highest comes first.
+    let ascending = if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    };
+    u64::from(!ascending)
+}
+
+/// Puts a shadow pass's `sections` in its draw order, nearest the light first, so that the
+/// depth test rejects what lies under them: highest along `light` first (`shadow_order`, worked
+/// out once a section into `distance`, which nothing reads of them after), those level with
+/// each other by key. They come in any order (`Resident::visible_unsorted`).
+pub(super) fn sort_shadow_sections(sections: &mut [super::resident::Visible], light: Vec3) {
+    for s in &mut *sections {
+        s.distance = shadow_order(s.origin, light);
+    }
+    sections.sort_unstable_by_key(|s| (s.distance, s.key));
 }
 
 /// The runs of a section's solid quads the shadow pass draws: every face within the unculled

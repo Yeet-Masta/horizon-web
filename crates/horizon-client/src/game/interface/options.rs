@@ -180,6 +180,11 @@ impl Game<'_> {
     }
     pub(super) fn draw_options(&mut self, batch: &mut HudBatch) {
         self.watch_pack_folder();
+        let tuning =
+            (self.title.is_some() && self.options.benchmark.is_none() && !self.options.offscreen)
+                .then(|| super::graphics_tuning::view(&self.settings))
+                .flatten();
+        self.ui.options.set_graphics_benchmark(tuning);
         let context = self.controller_settings_context();
         if self.ui.options.controller_open() {
             self.ui.options.set_controller_context(context);
@@ -188,6 +193,11 @@ impl Game<'_> {
         if self.settings.running_pack.as_deref() != pack {
             self.settings.running_pack = pack.map(str::to_owned);
         }
+        self.ui.options.set_shader_pack_loading(
+            self.renderer
+                .as_ref()
+                .is_some_and(|r| r.shader_pack_loading()),
+        );
         let output = self
             .renderer
             .as_ref()
@@ -372,6 +382,15 @@ impl Game<'_> {
         for e in events {
             match e {
                 Event::ButtonClick => self.audio.play_button_click(),
+                Event::GraphicsBenchmark(action) => {
+                    // The title remains interactive after resource loading hands it off to Game.
+                    if self.title.is_some()
+                        && super::graphics_tuning::action(action, &mut self.settings)
+                    {
+                        self.settings.save(&Self::options_path());
+                        self.apply_settings();
+                    }
+                }
                 Event::DebugEntriesChanged => self.debug_entries.invalidate(),
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
@@ -514,6 +533,7 @@ impl Game<'_> {
                 Event::NativePackOptions(i) => {
                     if let Some(pack) = self.settings.shader_packs.get(i) {
                         pack.save_values(&Self::shader_packs_dir());
+                        self.native_shaders.check_now();
                     }
                 }
                 Event::OpenShaderPackFolder => {
@@ -785,6 +805,11 @@ impl Game<'_> {
             .settings
             .horizon
             .battery_limit(limit, self.title.is_none(), self.focused);
+        let limit = if self.title.is_some() && super::graphics_tuning::running() {
+            limit.min(8)
+        } else {
+            limit
+        };
         // A native mod may only lower it (`native_framerate_limit`).
         let mut hooked = limit;
         self.native_framerate_limit(
@@ -832,6 +857,20 @@ impl Game<'_> {
         if let Some(r) = self.renderer.as_mut() {
             r.fullbright = self.settings.extras.fullbright && !held;
         }
+    }
+    /// The fullbright key (`key.fullbright`), from the game: it toggles the extra the Video
+    /// settings' switch does, and the next tick's `hold_fullbright` draws it. Reported handled
+    /// where the server holds fullbright off too, so the key does nothing else there (the
+    /// settings row is hidden in that state, and the key says nothing either).
+    pub(super) fn fullbright_key_press(&mut self, name: &str) -> bool {
+        if self.screen != Screen::Playing
+            || self.settings.keys.get("key.fullbright") != name
+            || name == "key.keyboard.unknown"
+        {
+            return false;
+        }
+        self.set_fullbright(!self.fullbright());
+        true
     }
 }
 
@@ -901,9 +940,10 @@ mod resize_state_tests {
         ) {
             return;
         }
+        use horizon_std::sync::Mutex;
         use mod_api::{ClientHost, Hooks, ModEntry, WindowResizeEvent};
         use mod_platform::testing::with_mods;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         struct Listener(Arc<Mutex<Vec<(u32, u32, u32, u32)>>>);
         #[mod_api::__subscriptions]
         impl Hooks for Listener {

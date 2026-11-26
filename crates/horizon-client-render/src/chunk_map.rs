@@ -40,10 +40,66 @@ pub enum ChunkMembershipDelta {
     Reset,
 }
 
+/// Direct-mapped toroidal lookup entry for resident chunk columns.
+#[derive(Clone)]
+struct CachedSlot {
+    key_packed: u64,
+    chunk: Option<Arc<Chunk>>,
+}
+impl CachedSlot {
+    const EMPTY: Self = Self {
+        key_packed: 0,
+        chunk: None,
+    };
+}
+
+#[inline(always)]
+fn pack_key(cx: i32, cz: i32) -> u64 {
+    u64::from(cx as u32) | (u64::from(cz as u32) << 32)
+}
+
+#[inline(always)]
+fn grid_index(cx: i32, cz: i32, mask: i32, shift: u8) -> usize {
+    (((cz & mask) as usize) << shift) | ((cx & mask) as usize)
+}
+
+#[inline]
+fn evict_grid_slot(grid: &mut [CachedSlot], mask: i32, shift: u8, missing: &mut usize, key: Key) {
+    if mask != 0 {
+        let idx = grid_index(key.0, key.1, mask, shift);
+        let slot = &mut grid[idx];
+        if slot.chunk.is_some() && slot.key_packed == pack_key(key.0, key.1) {
+            slot.chunk = None;
+            *missing += 1;
+        }
+    }
+}
+
+fn touch_fields(touched: &mut VecDeque<Key>, touched_base: &mut u64, key: Key) {
+    if touched.len() >= MAX_TOUCHED {
+        touched.pop_front();
+        *touched_base += 1;
+    }
+    touched.push_back(key);
+}
+
 /// Read access behaves like a map. Structural writes are explicit so edits to
 /// blocks or light don't invalidate consumers of the loaded chunk key set.
 /// Tokens are process-wide: replacing the entire map also invalidates caches.
 pub struct ChunkMap {
+    /// Toroidal power-of-two direct-mapped cache (`(cz & mask) << shift | (cx & mask)`)
+    /// for O(1) hash-free `get`, `get_chunk` and `contains_key` lookups.
+    /// Entries are cleared before mutable chunk access so `Arc::make_mut` sees
+    /// unique ownership and avoids copy-on-write cloning.
+    grid: Box<[CachedSlot]>,
+    grid_mask: i32,
+    grid_shift: u8,
+    /// Exact count of resident chunks in `columns` not currently stored in
+    /// `grid` (due to toroidal collisions or unrefreshed `get_mut`/`values_mut`/
+    /// `attachments_mut` evictions). When 0, every resident chunk sits in its
+    /// `grid` slot, letting unloaded-chunk queries return without hashing into
+    /// `columns`.
+    grid_missing: usize,
     columns: Columns,
     revision: u64,
     /// The oldest revision `recent_deltas` still answers for: the revision of
@@ -78,6 +134,10 @@ impl Default for ChunkMap {
     fn default() -> Self {
         let revision = next_revision();
         Self {
+            grid: Box::new([]),
+            grid_mask: 0,
+            grid_shift: 0,
+            grid_missing: 0,
             columns: Columns::default(),
             revision,
             min_valid_revision: revision,
@@ -92,6 +152,10 @@ impl Default for ChunkMap {
         }
     }
 }
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ChunkMap>();
+};
 // Only residency installation binds saved maps. Lighting COW leaves these shared
 // entries indexed; attachment access below rebinds an extras COW before its write.
 fn bind_saved_attachments(
@@ -122,8 +186,14 @@ impl ChunkMap {
     /// saved entries before their first read. Client/worker maps have no observer.
     pub fn observe_attachments(&mut self, observer: Arc<dyn AttachmentObserver>) {
         self.unload_attachments();
+        if self.grid_mask != 0 {
+            self.invalidate_grid();
+        }
         for (key, chunk) in &mut self.columns {
             bind_saved_attachments(&*observer, *key, chunk);
+        }
+        if self.grid_mask != 0 {
+            self.rebuild_grid(self.grid_shift);
         }
         self.attachment_observer = Some(observer);
     }
@@ -136,12 +206,142 @@ impl ChunkMap {
         }
     }
 
+    #[inline(always)]
+    fn grid_idx(&self, cx: i32, cz: i32) -> usize {
+        grid_index(cx, cz, self.grid_mask, self.grid_shift)
+    }
+
+    fn rebuild_grid(&mut self, shift: u8) {
+        let side = 1usize << shift;
+        let len = side * side;
+        if self.grid.len() != len {
+            self.grid = vec![CachedSlot::EMPTY; len].into_boxed_slice();
+        } else {
+            self.grid.fill(CachedSlot::EMPTY);
+        }
+        self.grid_shift = shift;
+        self.grid_mask = (side - 1) as i32;
+        let mut missing = 0usize;
+        for (&(cx, cz), chunk) in &self.columns {
+            let idx = grid_index(cx, cz, self.grid_mask, self.grid_shift);
+            if self.grid[idx].chunk.is_some() {
+                missing += 1;
+            }
+            self.grid[idx] = CachedSlot {
+                key_packed: pack_key(cx, cz),
+                chunk: Some(Arc::clone(chunk)),
+            };
+        }
+        self.grid_missing = missing;
+    }
+
+    fn invalidate_grid(&mut self) {
+        if self.grid_mask != 0 {
+            self.grid.fill(CachedSlot::EMPTY);
+            self.grid_missing = self.columns.len();
+        }
+    }
+
+    /// Whether every resident chunk in `columns` currently sits in its toroidal
+    /// `grid` slot, allowing unloaded-chunk lookups to return without hashing.
+    #[inline(always)]
+    pub fn grid_complete(&self) -> bool {
+        self.grid_missing == 0
+    }
+
+    /// Reference to the resident `Arc<Chunk>` at `key`, served from the O(1)
+    /// toroidal grid without hashing on the hot path.
+    #[inline(always)]
+    pub fn get(&self, key: &Key) -> Option<&Arc<Chunk>> {
+        let mask = self.grid_mask;
+        if mask == 0 {
+            debug_assert!(self.columns.is_empty());
+            return None;
+        }
+        let (cx, cz) = *key;
+        let idx = grid_index(cx, cz, mask, self.grid_shift);
+        if let Some(slot) = self.grid.get(idx) {
+            if let Some(chunk) = &slot.chunk
+                && slot.key_packed == pack_key(cx, cz)
+            {
+                return Some(chunk);
+            }
+            if self.grid_missing == 0 {
+                return None;
+            }
+        }
+        self.columns.get(key)
+    }
+
+    /// Direct reference to the resident `Chunk` at `(cx, cz)`, served from the
+    /// O(1) toroidal grid without hashing on the hot path.
+    #[inline(always)]
+    pub fn get_chunk(&self, cx: i32, cz: i32) -> Option<&Chunk> {
+        self.get(&(cx, cz)).map(|c| &**c)
+    }
+
+    /// Whether chunk `key` is resident, served from the O(1) toroidal grid on the
+    /// hot path before falling back to `columns`.
+    #[inline(always)]
+    pub fn contains_key(&self, key: &Key) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Mutates a resident chunk in place while keeping its toroidal grid slot
+    /// refreshed (drops the grid's `Arc` before `f` so `Arc::make_mut` avoids
+    /// copy-on-write cloning, then restores or opportunistically populates the
+    /// slot afterward without breaking `grid_complete()`).
+    #[inline]
+    pub fn mutate_chunk<R>(&mut self, key: Key, f: impl FnOnce(&mut Arc<Chunk>) -> R) -> Option<R> {
+        self.mutate_chunk_with(key, true, f)
+    }
+
+    #[inline]
+    fn mutate_chunk_with<R>(
+        &mut self,
+        key: Key,
+        touch: bool,
+        f: impl FnOnce(&mut Arc<Chunk>) -> R,
+    ) -> Option<R> {
+        let chunk = self.columns.get_mut(&key)?;
+        if touch {
+            touch_fields(&mut self.touched, &mut self.touched_base, key);
+        }
+        evict_grid_slot(
+            &mut self.grid,
+            self.grid_mask,
+            self.grid_shift,
+            &mut self.grid_missing,
+            key,
+        );
+        let out = f(chunk);
+        if self.grid_mask != 0 {
+            let idx = grid_index(key.0, key.1, self.grid_mask, self.grid_shift);
+            let slot = &mut self.grid[idx];
+            if slot.chunk.is_none() {
+                *slot = CachedSlot {
+                    key_packed: pack_key(key.0, key.1),
+                    chunk: Some(Arc::clone(chunk)),
+                };
+                self.grid_missing -= 1;
+            }
+        }
+        Some(out)
+    }
+
     /// The live map, rebound after extras COW but never merely for lighting COW.
     pub fn attachments_mut(&mut self, key: &Key) -> Result<&mut Attachments, AttachmentError> {
         let chunk = self
             .columns
             .get_mut(key)
             .ok_or(AttachmentError::MissingHolder)?;
+        evict_grid_slot(
+            &mut self.grid,
+            self.grid_mask,
+            self.grid_shift,
+            &mut self.grid_missing,
+            *key,
+        );
         let saved = Arc::make_mut(Arc::make_mut(chunk).saved.get_or_insert_default());
         attachment_compound(saved.root.get(&ATTACHMENTS_KEY.into()))?;
         if let Some(observer) = &self.attachment_observer
@@ -152,6 +352,7 @@ impl ChunkMap {
         Ok(&mut saved.attachments)
     }
 
+    #[inline]
     pub fn membership_revision(&self) -> u64 {
         self.revision
     }
@@ -172,11 +373,7 @@ impl ChunkMap {
         Some(self.touched.iter().skip((seq - self.touched_base) as usize))
     }
     fn touch(&mut self, key: Key) {
-        if self.touched.len() >= MAX_TOUCHED {
-            self.touched.pop_front();
-            self.touched_base += 1;
-        }
-        self.touched.push_back(key);
+        touch_fields(&mut self.touched, &mut self.touched_base, key);
     }
     fn touch_all(&mut self) {
         // One more than the entries dropped: the cursor moves even for a consumer that had
@@ -264,6 +461,7 @@ impl ChunkMap {
         } else {
             self.fresh.remove(&key);
         }
+        let cached = Arc::clone(&chunk);
         let previous = self.columns.insert(key, chunk);
         if previous.is_none() {
             for z in key.1 - 1..=key.1 + 1 {
@@ -274,13 +472,49 @@ impl ChunkMap {
             self.revision = next_revision();
             self.record_delta(ChunkMembershipDelta::Added(key));
         }
+        if self.grid_mask == 0 {
+            self.rebuild_grid(4);
+        } else if self.columns.len() > 2048 && self.grid_shift < 7 {
+            self.rebuild_grid(7);
+        } else if self.columns.len() > 128 && self.grid_shift < 6 {
+            self.rebuild_grid(6);
+        } else {
+            let idx = self.grid_idx(key.0, key.1);
+            let packed = pack_key(key.0, key.1);
+            let slot = &mut self.grid[idx];
+            match (previous.is_none(), slot.chunk.is_none()) {
+                (true, false) => self.grid_missing += 1,
+                (false, true) => self.grid_missing -= 1,
+                _ => {}
+            }
+            *slot = CachedSlot {
+                key_packed: packed,
+                chunk: Some(cached),
+            };
+        }
         previous
     }
     pub fn remove(&mut self, key: &Key) -> Option<Arc<Chunk>> {
-        self.touch(*key);
-        self.fresh.remove(key);
+        let removed_from_grid = if self.grid_mask != 0 {
+            let idx = self.grid_idx(key.0, key.1);
+            let slot = &mut self.grid[idx];
+            if slot.chunk.is_some() && slot.key_packed == pack_key(key.0, key.1) {
+                slot.chunk = None;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         let previous = self.columns.remove(key);
         if previous.is_some() {
+            self.touch(*key);
+            self.fresh.remove(key);
+            if !removed_from_grid {
+                self.grid_missing -= 1;
+            }
+            debug_assert!(!self.columns.is_empty() || self.grid_missing == 0);
             if let Some(observer) = &self.attachment_observer {
                 observer.unload(Holder::Chunk([key.0, key.1]));
             }
@@ -306,6 +540,14 @@ impl ChunkMap {
             self.columns.clear();
             self.fresh.clear();
             self.near.clear();
+            if self.grid.len() > 4096 {
+                self.grid = Box::new([]);
+                self.grid_mask = 0;
+                self.grid_shift = 0;
+            } else if self.grid_mask != 0 {
+                self.grid.fill(CachedSlot::EMPTY);
+            }
+            self.grid_missing = 0;
             self.revision = next_revision();
             self.recent_deltas.clear();
             self.recent_deltas
@@ -314,9 +556,11 @@ impl ChunkMap {
         }
     }
     /// Whether the column at `key` and its eight neighbours are all resident.
+    #[inline]
     pub fn surrounded(&self, key: Key) -> bool {
         self.near.get(&key) == Some(&9)
     }
+    #[inline]
     pub fn has_fresh(&self) -> bool {
         !self.fresh.is_empty()
     }
@@ -339,18 +583,35 @@ impl ChunkMap {
         self.fresh.remove(key);
     }
     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Arc<Chunk>> {
-        self.touch(*key);
-        self.columns.get_mut(key)
+        let chunk = self.columns.get_mut(key)?;
+        touch_fields(&mut self.touched, &mut self.touched_base, *key);
+        evict_grid_slot(
+            &mut self.grid,
+            self.grid_mask,
+            self.grid_shift,
+            &mut self.grid_missing,
+            *key,
+        );
+        Some(chunk)
     }
     pub fn values_mut(&mut self) -> ValuesMut<'_, Key, Arc<Chunk>> {
         self.touch_all();
+        self.invalidate_grid();
         self.columns.values_mut()
     }
 }
 impl Deref for ChunkMap {
     type Target = Columns;
+    #[inline]
     fn deref(&self) -> &Columns {
         &self.columns
+    }
+}
+impl std::ops::Index<&Key> for ChunkMap {
+    type Output = Arc<Chunk>;
+    #[inline(always)]
+    fn index(&self, key: &Key) -> &Arc<Chunk> {
+        self.get(key).expect("no entry found for key")
     }
 }
 impl<'a> IntoIterator for &'a ChunkMap {
@@ -362,16 +623,24 @@ impl<'a> IntoIterator for &'a ChunkMap {
 }
 impl crate::light::LightWorld for ChunkMap {
     fn section(&self, cx: i32, s: usize, cz: i32) -> Option<&Arc<crate::chunk::Section>> {
-        self.columns.section(cx, s, cz)
+        self.get_chunk(cx, cz)
+            .filter(|c| c.lit)
+            .map(|c| &c.sections[s])
     }
     fn set_section_light(&mut self, cx: i32, s: usize, cz: i32, light: crate::chunk::Light) {
-        self.columns.set_section_light(cx, s, cz, light);
+        self.mutate_chunk_with((cx, cz), false, |chunk| {
+            Arc::make_mut(&mut Arc::make_mut(chunk).sections[s]).light = light;
+        });
     }
     fn layout(&self) -> crate::chunk::ColumnLayout {
         self.columns.layout()
     }
     fn dynamic_emission(&self, x: i32, y: i32, z: i32) -> Option<u8> {
-        self.columns.dynamic_emission(x, y, z)
+        let chunk = self.get_chunk(x >> 4, z >> 4)?;
+        chunk
+            .dynamic_emission
+            .get(&chunk.dynamic_cell(x, y, z)?)
+            .copied()
     }
 }
 
@@ -825,5 +1094,397 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn toroidal_grid_handles_growth_collisions_cow_and_extreme_coords() {
+        let mut map = ChunkMap::default();
+        assert!(map.get_chunk(0, 0).is_none());
+        assert!(!map.contains_key(&(0, 0)));
+
+        // Grow through 16x16 -> 64x64 -> 128x128 with RD 32 footprint (-32..=32).
+        for cz in -32..=32 {
+            for cx in -32..=32 {
+                let mut c = Chunk::empty(cx, cz);
+                c.set(0, 64, 0, ((cx + 100) * 1000 + (cz + 100)) as u32);
+                map.insert((cx, cz), Arc::new(c));
+            }
+        }
+        assert!(
+            map.grid_complete(),
+            "RD 32 fits in 128x128 with no collisions"
+        );
+        assert_eq!(map.grid_shift, 7);
+        assert_grid_invariants(&map);
+        for cz in -33..=33 {
+            for cx in -33..=33 {
+                let expected = (-32..=32).contains(&cx) && (-32..=32).contains(&cz);
+                assert_eq!(map.contains_key(&(cx, cz)), expected);
+                let got = map.get_chunk(cx, cz);
+                assert_eq!(got.is_some(), expected);
+                if let Some(c) = got {
+                    assert_eq!(c.get(0, 64, 0), ((cx + 100) * 1000 + (cz + 100)) as u32);
+                }
+            }
+        }
+
+        // Unshared chunks mutate in place without COW cloning in both mutate_chunk and get_mut.
+        let before_ptr = Arc::as_ptr(map.get(&(0, 0)).unwrap());
+        map.mutate_chunk((0, 0), |c| {
+            Arc::make_mut(c).set(1, 64, 1, 66);
+        });
+        assert!(map.grid_complete());
+        assert_eq!(Arc::as_ptr(map.get(&(0, 0)).unwrap()), before_ptr);
+        assert_eq!(map.get_chunk(0, 0).unwrap().get(1, 64, 1), 66);
+
+        let before_ptr2 = Arc::as_ptr(map.get(&(2, 2)).unwrap());
+        Arc::make_mut(map.get_mut(&(2, 2)).unwrap()).set(1, 64, 1, 55);
+        assert_eq!(Arc::as_ptr(map.get(&(2, 2)).unwrap()), before_ptr2);
+        assert_eq!(map.get_chunk(2, 2).unwrap().get(1, 64, 1), 55);
+        assert_eq!(map.grid_missing, 1);
+
+        // Shared chunks COW cleanly via mutate_chunk and refresh the grid slot.
+        let shared = map.get(&(0, 0)).unwrap().clone();
+        map.mutate_chunk((0, 0), |c| {
+            Arc::make_mut(c).set(1, 64, 1, 77);
+        });
+        assert_eq!(map.get_chunk(0, 0).unwrap().get(1, 64, 1), 77);
+        assert_eq!(shared.get(1, 64, 1), 66);
+
+        // External get_mut + COW never returns stale data.
+        let shared2 = map.get(&(1, 1)).unwrap().clone();
+        Arc::make_mut(map.get_mut(&(1, 1)).unwrap()).set(2, 64, 2, 88);
+        assert_eq!(map.get_chunk(1, 1).unwrap().get(2, 64, 2), 88);
+        assert_eq!(shared2.get(2, 64, 2), 0);
+        assert_eq!(map.grid_missing, 2);
+
+        // Toroidal collision (128 chunks apart) and large negative coordinates.
+        let mut far = Chunk::empty(128, 0);
+        far.set(0, 64, 0, 999);
+        let far_arc = Arc::new(far);
+        let far_weak = Arc::downgrade(&far_arc);
+        map.insert((128, 0), far_arc);
+        let neg_key = (-100_000, -100_000);
+        let mut neg_chunk = Chunk::empty(neg_key.0, neg_key.1);
+        neg_chunk.set(0, 64, 0, 555);
+        map.insert(neg_key, Arc::new(neg_chunk));
+        assert!(!map.grid_complete());
+        assert_grid_invariants(&map);
+        assert_eq!(map.get_chunk(0, 0).unwrap().get(1, 64, 1), 77);
+        assert_eq!(map.get_chunk(128, 0).unwrap().get(0, 64, 0), 999);
+        assert_eq!(
+            map.get_chunk(neg_key.0, neg_key.1).unwrap().get(0, 64, 0),
+            555
+        );
+        assert!(map.contains_key(&(0, 0)));
+        assert!(map.contains_key(&(128, 0)));
+        assert!(map.contains_key(&neg_key));
+
+        // Remove & clear drop cached Arcs immediately and restore invariants.
+        drop(map.remove(&(128, 0)));
+        assert_eq!(far_weak.strong_count(), 0);
+        assert!(!map.contains_key(&(128, 0)));
+        assert!(map.get_chunk(0, 0).is_some());
+        assert_grid_invariants(&map);
+        map.clear();
+        assert!(map.grid_complete());
+        assert_grid_invariants(&map);
+        assert!(!map.contains_key(&(0, 0)));
+        assert!(map.get_chunk(0, 0).is_none());
+    }
+
+    fn assert_grid_invariants(map: &ChunkMap) {
+        if map.grid_mask == 0 {
+            assert!(map.grid.is_empty());
+            assert_eq!(map.grid_shift, 0);
+            assert!(map.columns.is_empty());
+            assert_eq!(map.grid_missing, 0);
+            assert!(map.grid_complete());
+            return;
+        }
+        let side = 1usize << map.grid_shift;
+        assert_eq!(map.grid_mask, (side - 1) as i32);
+        assert_eq!(map.grid.len(), side * side);
+        let mut occupied = 0usize;
+        for (idx, slot) in map.grid.iter().enumerate() {
+            if let Some(cached) = &slot.chunk {
+                occupied += 1;
+                let cx = slot.key_packed as u32 as i32;
+                let cz = (slot.key_packed >> 32) as u32 as i32;
+                assert_eq!(map.grid_idx(cx, cz), idx);
+                let resident = map
+                    .columns
+                    .get(&(cx, cz))
+                    .expect("cached grid slot must hold a resident chunk");
+                assert!(Arc::ptr_eq(cached, resident));
+            }
+        }
+        assert_eq!(map.grid_missing, map.columns.len() - occupied);
+        assert_eq!(map.grid_complete(), map.grid_missing == 0);
+        for (&key, resident) in &map.columns {
+            assert!(map.contains_key(&key));
+            assert!(Arc::ptr_eq(map.get(&key).unwrap(), resident));
+        }
+    }
+
+    #[test]
+    fn mutate_chunk_preserves_grid_complete_and_recovers_evicted_slots() {
+        let mut map = ChunkMap::default();
+        for cz in -8..=8 {
+            for cx in -8..=8 {
+                map.insert((cx, cz), Arc::new(Chunk::empty(cx, cz)));
+            }
+        }
+        assert!(map.grid_complete());
+        assert_eq!(map.grid_missing, 0);
+        assert_grid_invariants(&map);
+
+        // Live mutations via mutate_chunk keep grid_complete == true and mutate in place.
+        let cursor_before = map.touch_cursor();
+        let before_ptr = Arc::as_ptr(map.get(&(3, -4)).unwrap());
+        let out = map.mutate_chunk((3, -4), |c| {
+            let chunk = Arc::make_mut(c);
+            chunk.lit = true;
+            chunk.set(2, 64, 5, 42);
+            7u32
+        });
+        assert_eq!(out, Some(7));
+        assert!(map.grid_complete());
+        assert_eq!(map.grid_missing, 0);
+        assert_eq!(Arc::as_ptr(map.get(&(3, -4)).unwrap()), before_ptr);
+        assert_eq!(map.get_chunk(3, -4).unwrap().get(2, 64, 5), 42);
+        assert_eq!(
+            map.touched_since(cursor_before)
+                .unwrap()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![(3, -4)]
+        );
+
+        // Absent-key mutate_chunk and get_mut neither advance touch_cursor nor break grid_complete.
+        let cursor_idle = map.touch_cursor();
+        let missing_res: Option<()> = map.mutate_chunk((99, 99), |_| panic!("must not run"));
+        assert!(missing_res.is_none());
+        assert!(map.get_mut(&(99, 99)).is_none());
+        assert_eq!(map.touch_cursor(), cursor_idle);
+        assert!(map.grid_complete());
+        assert_grid_invariants(&map);
+
+        // Repeated get_mut on the same key increments grid_missing only once.
+        Arc::make_mut(map.get_mut(&(1, 1)).unwrap()).set(0, 64, 0, 11);
+        assert_eq!(map.grid_missing, 1);
+        assert!(!map.grid_complete());
+        Arc::make_mut(map.get_mut(&(1, 1)).unwrap()).set(0, 64, 0, 12);
+        assert_eq!(map.grid_missing, 1);
+        Arc::make_mut(map.get_mut(&(-2, 5)).unwrap()).set(0, 64, 0, 13);
+        assert_eq!(map.grid_missing, 2);
+        assert_grid_invariants(&map);
+
+        // mutate_chunk opportunistically refills empty slots and restores grid_complete().
+        map.mutate_chunk((1, 1), |c| {
+            Arc::make_mut(c).set(0, 64, 0, 14);
+        });
+        assert_eq!(map.grid_missing, 1);
+        assert!(!map.grid_complete());
+        map.mutate_chunk((-2, 5), |c| {
+            Arc::make_mut(c).set(0, 64, 0, 15);
+        });
+        assert_eq!(map.grid_missing, 0);
+        assert!(map.grid_complete());
+        assert_eq!(map.get_chunk(1, 1).unwrap().get(0, 64, 0), 14);
+        assert_eq!(map.get_chunk(-2, 5).unwrap().get(0, 64, 0), 15);
+        assert_grid_invariants(&map);
+
+        // A panic inside mutate_chunk leaves grid_missing exact; a later mutate_chunk restores it.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: Option<()> = map.mutate_chunk((0, 0), |_| panic!("intentional unwind"));
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(map.grid_missing, 1);
+        assert!(!map.grid_complete());
+        assert_grid_invariants(&map);
+        map.mutate_chunk((0, 0), |c| {
+            Arc::make_mut(c).lit = true;
+        });
+        assert_eq!(map.grid_missing, 0);
+        assert!(map.grid_complete());
+        assert_grid_invariants(&map);
+    }
+
+    #[test]
+    fn sliding_window_flight_and_collisions_keep_grid_missing_exact() {
+        // 64x4 active window fits in the 64x64 grid (shift = 6) with zero collisions.
+        let mut map = ChunkMap::default();
+        for x in 0..64 {
+            for z in -2..2 {
+                map.insert((x, z), Arc::new(Chunk::empty(x, z)));
+            }
+        }
+        assert_eq!(map.grid_shift, 6);
+        assert!(map.grid_complete());
+        assert_grid_invariants(&map);
+
+        // Straight-line flight across 192 chunks: leading column collides with trailing column
+        // before trailing unloads; unloading trailing must return grid_missing to 0 every step.
+        for step in 0..192 {
+            let lead_x = 64 + step;
+            let trail_x = step;
+            for z in -2..2 {
+                let mut c = Chunk::empty(lead_x, z);
+                c.set(0, 64, 0, (lead_x * 10 + z + 100) as u32);
+                map.insert((lead_x, z), Arc::new(c));
+                map.mutate_chunk((lead_x, z), |chunk| {
+                    Arc::make_mut(chunk).lit = true;
+                });
+            }
+            assert_eq!(
+                map.grid_missing, 4,
+                "step {step}: four trailing columns evicted"
+            );
+            assert!(!map.grid_complete());
+            // Mutating an evicted colliding column preserves exact grid_missing.
+            map.mutate_chunk((trail_x, 0), |chunk| {
+                Arc::make_mut(chunk).set(1, 64, 1, 9);
+            });
+            assert_eq!(map.grid_missing, 4);
+            // Replacing an already-resident colliding column swaps slots without double-counting.
+            map.insert((trail_x, 0), Arc::new(Chunk::empty(trail_x, 0)));
+            assert_eq!(map.grid_missing, 4);
+            // Put lead_x back into slot, then unload trailing column.
+            map.insert((lead_x, 0), Arc::new(Chunk::empty(lead_x, 0)));
+            assert_eq!(map.grid_missing, 4);
+            for z in -2..2 {
+                assert!(map.remove(&(trail_x, z)).is_some());
+            }
+            assert_eq!(
+                map.grid_missing, 0,
+                "step {step}: flight must recover grid_complete"
+            );
+            assert!(map.grid_complete());
+        }
+        assert_grid_invariants(&map);
+
+        // Negative-coordinate collisions and both removal orders (evicted-first vs cached-first).
+        let mut neg = ChunkMap::default();
+        neg.insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        neg.insert((-16, 0), Arc::new(Chunk::empty(-16, 0))); // collides in 16x16 grid
+        assert_eq!(neg.grid_shift, 4);
+        assert_eq!(neg.grid_missing, 1);
+        assert_grid_invariants(&neg);
+        // Removing the evicted entry ((0, 0)) immediately restores grid_complete().
+        neg.remove(&(0, 0));
+        assert_eq!(neg.grid_missing, 0);
+        assert!(neg.grid_complete());
+        assert_grid_invariants(&neg);
+
+        // Removing the cached colliding entry ((32, 0)) keeps grid_missing exact until restored.
+        neg.insert((32, 0), Arc::new(Chunk::empty(32, 0)));
+        assert_eq!(neg.grid_missing, 1);
+        neg.remove(&(32, 0));
+        assert_eq!(neg.grid_missing, 1);
+        assert_grid_invariants(&neg);
+        neg.mutate_chunk((-16, 0), |c| {
+            Arc::make_mut(c).lit = true;
+        });
+        assert_eq!(neg.grid_missing, 0);
+        assert!(neg.grid_complete());
+        assert_grid_invariants(&neg);
+    }
+
+    #[test]
+    fn randomized_grid_missing_invariant_across_all_operations() {
+        let mut map = ChunkMap::default();
+        let mut truth: FxHashMap<Key, u32> = FxHashMap::default();
+        let coords = [
+            0, 1, 15, 16, 17, 63, 64, 65, 127, 128, -1, -16, -64, -128, -100_000, 100_000,
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            seed >> 17
+        };
+
+        for step in 0..4000u32 {
+            let key = (
+                coords[(next() as usize) % coords.len()],
+                coords[(next() as usize) % coords.len()],
+            );
+            let tag = step + 1;
+            match next() % 100 {
+                0..=34 => {
+                    let mut c = Chunk::empty(key.0, key.1);
+                    c.set(0, 64, 0, tag);
+                    map.insert(key, Arc::new(c));
+                    truth.insert(key, tag);
+                }
+                35..=54 => {
+                    let removed = map.remove(&key);
+                    let expected = truth.remove(&key);
+                    assert_eq!(removed.is_some(), expected.is_some());
+                    if let (Some(c), Some(v)) = (removed, expected) {
+                        assert_eq!(c.get(0, 64, 0), v);
+                    }
+                }
+                55..=74 => {
+                    // Mix unshared in-place mutations and shared COW mutations.
+                    let shared = if next().is_multiple_of(3) {
+                        map.get(&key).cloned()
+                    } else {
+                        None
+                    };
+                    let got = map.mutate_chunk(key, |c| {
+                        let prev = c.get(0, 64, 0);
+                        Arc::make_mut(c).set(0, 64, 0, tag);
+                        prev
+                    });
+                    drop(shared);
+                    if let Some(entry) = truth.get_mut(&key) {
+                        assert_eq!(got, Some(*entry));
+                        *entry = tag;
+                    } else {
+                        assert_eq!(got, None);
+                    }
+                }
+                75..=84 => {
+                    if let Some(c) = map.get_mut(&key) {
+                        Arc::make_mut(c).set(0, 64, 0, tag);
+                        *truth.get_mut(&key).unwrap() = tag;
+                    } else {
+                        assert!(!truth.contains_key(&key));
+                    }
+                }
+                85..=89 => {
+                    let res = map.attachments_mut(&key);
+                    assert_eq!(res.is_ok(), truth.contains_key(&key));
+                }
+                90..=94 => {
+                    for c in map.values_mut() {
+                        Arc::make_mut(c).set(1, 64, 1, tag);
+                    }
+                }
+                95..=97 => {
+                    map.clear();
+                    truth.clear();
+                }
+                _ => {
+                    let probe = (key.0.wrapping_add(3), key.1.wrapping_sub(5));
+                    assert_eq!(map.contains_key(&probe), truth.contains_key(&probe));
+                    assert_eq!(
+                        map.get_chunk(probe.0, probe.1).map(|c| c.get(0, 64, 0)),
+                        truth.get(&probe).copied()
+                    );
+                }
+            }
+            if step < 500 || step.is_multiple_of(10) {
+                assert_grid_invariants(&map);
+                assert_eq!(map.len(), truth.len());
+                for (&k, &v) in &truth {
+                    assert_eq!(map.get_chunk(k.0, k.1).unwrap().get(0, 64, 0), v);
+                }
+            }
+        }
+        assert_grid_invariants(&map);
     }
 }

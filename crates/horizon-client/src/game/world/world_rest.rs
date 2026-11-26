@@ -1,5 +1,18 @@
 use super::*;
 
+/// The content mods' data files over the prepared root (`ResourceRoot::data_changes`), as the
+/// window's own tables read them.
+pub(super) fn content_files(
+    changes: &horizon_assets::resource_source::ResourceSource,
+) -> Vec<(String, Vec<Vec<u8>>)> {
+    let content =
+        horizon_client::datapack::DataPack::from_source("horizon-content".into(), changes.clone());
+    horizon_client::datapack::DataStore::load(&[&content])
+        .files
+        .into_iter()
+        .collect()
+}
+
 pub(super) fn load_world_rest(
     resource_root: &horizon_assets::resource_source::ResourceRoot,
     resources: &Resources,
@@ -20,14 +33,9 @@ pub(super) fn load_world_rest(
     let biomes = resources.biomes();
     let threads = resources.threads();
     let registry = assets.registry;
-    let content = horizon_client::datapack::DataPack::from_source(
-        "horizon-content".into(),
-        resource_root.data_changes().clone(),
-    );
-    let files = horizon_client::datapack::DataStore::load(&[&content])
-        .files
-        .into_iter()
-        .collect::<Vec<_>>();
+    // The world tables of this root tick this registry: it takes the root's own mod owners.
+    crate::game::code_block_owners::bind(registry, root);
+    let files = content_files(resource_root.data_changes());
     let inventory = horizon_mod_package::enabled::EnabledMods::read(root)?;
     let conditions = horizon_world::conditions::LoadConditions::new(inventory.server_ids());
     let overlay = &horizon_world::loot::PackOverlay {
@@ -294,9 +302,9 @@ pub(super) fn load_world_rest(
     );
     progress.set(8);
     Ok(WorldRest {
-        stations,
-        items,
-        recipes,
+        stations: Arc::new(stations),
+        items: Arc::new(items),
+        recipes: Arc::new(recipes),
         transformers,
         providers,
         block_entity_render: block_entity_render?,

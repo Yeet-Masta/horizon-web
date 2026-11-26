@@ -8,6 +8,7 @@ use crate::{
     advancements::{Progress, Tree},
     recipe_book::{Category, RecipeIndex, Settings, crafting_category, crafting_station},
 };
+use horizon_core::identifier::parse_or_keep;
 use horizon_protocol::buf::{Codec, Writer};
 use serde_json::Value;
 use std::{
@@ -36,7 +37,7 @@ pub struct ServerAdvancements {
 pub struct FirstTick {
     pub recipe_book_add: Option<Vec<u8>>,
     pub update_advancements: Vec<u8>,
-    pub granted: Vec<CriterionGrant>,
+    pub visible: Vec<bool>,
 }
 
 /// A criterion `CriteriaTriggers.TICK` newly granted, for the game to tell the mods.
@@ -131,14 +132,8 @@ impl ServerAdvancements {
         if was_done || !progress.done(advancement) {
             return None;
         }
-        book.add_recipes(&self.displays, &advancement.rewards.recipes);
-        let entries = advancement
-            .rewards
-            .recipes
-            .iter()
-            .flat_map(|id| self.book_entries(id, sync, NOTIFY_AND_HIGHLIGHT))
-            .collect::<Vec<_>>();
-        (!entries.is_empty()).then(|| book_add(entries, false))
+        let (_, unlocked) = book.add_recipes(&self.displays, &advancement.rewards.recipes);
+        self.recipes_added(&unlocked, sync)
     }
 
     /// Drop progress for advancements or criteria absent from the reloaded tree.
@@ -156,82 +151,50 @@ impl ServerAdvancements {
             });
     }
 
-    /// The first tick of a player without advancements: the criteria
-    /// `minecraft:tick` meets go into `progress` and the recipes their
-    /// advancements reward into `book`.
+    /// `ServerPlayer.tick`: finish any remaining unconditional tick grants, then send
+    /// the unlocked recipes before `PlayerAdvancements.flushDirty`'s first snapshot.
+    /// If the guest already ran its gameplay tick, it left its rewards in `unlocked`.
     pub fn first_tick(
         &self,
         sync: &SyncData,
         now_millis: i64,
         progress: &mut Progress,
         book: &mut Settings,
+        unlocked: &mut Vec<String>,
     ) -> FirstTick {
-        // CriteriaTriggers.TICK: the criteria it meets, and what they complete.
-        let mut obtained: Vec<Vec<&str>> = vec![Vec::new(); self.tree.list.len()];
-        for (i, a) in self.tree.list.iter().enumerate() {
-            for c in &a.criteria {
-                if c.trigger == "minecraft:tick" && c.conditions.is_null() {
-                    obtained[i].push(&c.name);
-                }
-            }
-        }
-        let done: Vec<bool> = self
-            .tree
-            .list
-            .iter()
-            .zip(&obtained)
-            .map(|(a, got)| {
-                !a.requirements.is_empty()
-                    && a.requirements
-                        .iter()
-                        .all(|group| group.iter().any(|c| got.contains(&c.as_str())))
-            })
-            .collect();
-        let date = crate::advancements::date_text(now_millis.div_euclid(1000));
+        // A recipe awarded and taken back before the first flush must not reappear.
+        unlocked.retain(|id| book.knows(id));
         let mut granted = Vec::new();
-        for (a, got) in self.tree.list.iter().zip(&obtained) {
-            for c in got {
-                if progress.grant(&a.id, c, &date) {
-                    granted.push(CriterionGrant {
-                        advancement: a.id.clone(),
-                        criterion: (*c).to_owned(),
-                    });
-                }
-            }
-        }
-        // AdvancementRewards.grant: the recipes, in the advancements' order.
-        let mut entries = Vec::new();
-        for (i, a) in self.tree.list.iter().enumerate() {
-            if !done[i] {
+        let date = crate::advancements::date_text(now_millis.div_euclid(1000));
+        for a in &self.tree.list {
+            if progress.done(a) {
                 continue;
             }
-            book.add_recipes(&self.displays, &a.rewards.recipes);
-            for id in &a.rewards.recipes {
-                entries.extend(self.book_entries(id, sync, NOTIFY_AND_HIGHLIGHT));
+            for c in &a.criteria {
+                if c.trigger == "minecraft:tick"
+                    && c.conditions.is_null()
+                    && progress.grant(&a.id, &c.name, &date)
+                {
+                    granted.push(CriterionGrant {
+                        advancement: a.id.clone(),
+                        criterion: c.name.clone(),
+                    });
+                    if progress.done(a) {
+                        let (_, added) = book.add_recipes(&self.displays, &a.rewards.recipes);
+                        unlocked.extend(added);
+                        break;
+                    }
+                }
             }
         }
-        let recipe_book_add = (!entries.is_empty()).then(|| book_add(entries, false));
-        // flushDirty: every advancement the player may see, and its progress.
-        let visible = self.tree.visible(&self.kids, |i| done[i]);
-        let shown: Vec<usize> = (0..self.tree.list.len()).filter(|i| visible[*i]).collect();
-        let mut w = Writer::new();
-        w.bool(true); // the first packet resets the client's advancements
-        w.varint(shown.len() as i32);
-        for &i in &shown {
-            self.write_advancement(&mut w, i, sync);
-        }
-        w.varint(0); // nothing removed
-        w.varint(shown.len() as i32);
-        for &i in &shown {
-            self.write_progress(&mut w, i, |c| {
-                obtained[i].contains(&c).then_some(now_millis)
-            });
-        }
-        w.bool(true); // show the advancements
+        let recipe_book_add = self.recipes_added(unlocked, sync);
+        unlocked.clear();
+        let (update_advancements, visible) =
+            self.first_snapshot(sync, progress, &granted, now_millis);
         FirstTick {
             recipe_book_add,
-            update_advancements: w.data,
-            granted,
+            update_advancements,
+            visible,
         }
     }
 
@@ -553,13 +516,9 @@ impl ServerAdvancements {
         };
         // The result as its ItemStackSlotDisplay, the station as its item.
         let result = |w: &mut Writer| {
+            let id = horizon_world::loot::recipe_result_id(&r["result"]);
             w.varint(slot("minecraft:item_stack"));
-            w.varint(
-                item(
-                    horizon_world::loot::recipe_result_id(&r["result"]).unwrap_or("minecraft:air"),
-                )
-                .unwrap_or(0),
-            );
+            w.varint(item(id.as_deref().unwrap_or("minecraft:air")).unwrap_or(0));
             w.varint(r["result"]["count"].as_i64().unwrap_or(1) as i32);
             w.varint(0);
             w.varint(0);
@@ -760,8 +719,8 @@ impl ServerAdvancements {
         }
         let base = result["count"].as_i64().unwrap_or(1) as i32;
         let add = r["add_material_count_to_result"].as_bool().unwrap_or(false);
-        let result_items: Vec<i32> = match result["id"].as_str() {
-            Some(id) => vec![item(id)?],
+        let result_items: Vec<i32> = match horizon_world::loot::recipe_result_id(result) {
+            Some(id) => vec![item(&id)?],
             // Composite over the input's items, in the order clients get the tag.
             None => match input.as_str()? {
                 tag if tag.starts_with('#') => {
@@ -776,7 +735,7 @@ impl ServerAdvancements {
                         .ids
                         .clone()
                 }
-                one => vec![item(one)?],
+                one => vec![item(&parse_or_keep(one))?],
             },
         };
         let (shapeless, tag, empty_stack) = (
@@ -897,13 +856,14 @@ fn shrink(rows: &[Value]) -> Vec<Vec<char>> {
 
 /// ByteBufCodecs.holderSet for an ingredient: a tag by name, or the items.
 /// An item the registries do not know is left out, not sent as id 0.
+/// `Item.CODEC` reads an id before that lookup; a tag's name stays as written.
 fn holder_set(w: &mut Writer, v: &Value, item: &dyn Fn(&str) -> Option<i32>) {
     match v {
         Value::String(s) if s.starts_with('#') => {
             w.varint(0);
             w.string(&s[1..]);
         }
-        Value::String(s) => match item(s) {
+        Value::String(s) => match item(&parse_or_keep(s)) {
             Some(id) => {
                 w.varint(2);
                 w.varint(id);
@@ -911,7 +871,10 @@ fn holder_set(w: &mut Writer, v: &Value, item: &dyn Fn(&str) -> Option<i32>) {
             None => w.varint(1),
         },
         Value::Array(a) => {
-            let ids: Vec<i32> = a.iter().filter_map(|s| item(s.as_str()?)).collect();
+            let ids: Vec<i32> = a
+                .iter()
+                .filter_map(|s| item(&parse_or_keep(s.as_str()?)))
+                .collect();
             w.varint(ids.len() as i32 + 1);
             for id in ids {
                 w.varint(id);
@@ -927,7 +890,7 @@ mod tests {
     use horizon_protocol::{
         buf::Reader,
         item::Stack,
-        packets::recipes::{HolderSet, RecipeBookEntry, RecipeDisplay, SlotDisplay},
+        packets::recipes::{HolderSet, RecipeBookAdd, RecipeBookEntry, RecipeDisplay, SlotDisplay},
     };
     use std::path::PathBuf;
 
@@ -1123,6 +1086,7 @@ mod tests {
     #[test]
     fn tick_grants_wait_for_listener_before_reward_and_recheck_progress() {
         use crate::advancements::{Advancement, Criterion, Display, Frame, Rewards};
+        const REWARD: &str = "minecraft:tick_reward";
         let mut tree = Tree::default();
         tree.list.push(Advancement {
             id: "test:tick".into(),
@@ -1147,20 +1111,22 @@ mod tests {
                 .collect(),
             requirements: vec![vec!["first".into()], vec!["second".into()]],
             rewards: Rewards {
-                recipes: vec!["test:reward".into()],
+                recipes: vec![REWARD.into()],
                 ..Default::default()
             },
         });
-        let mut sync = SyncData::empty();
+        let root = resources(
+            "tick_reward",
+            &[(
+                "tick_reward",
+                r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:raw_copper"],"result":{"id":"minecraft:copper_ingot"}}"#,
+            )],
+        );
+        let (mut sync, display) = entry(&root, REWARD);
         sync.advancements.kids = tree.children();
         sync.advancements.layout = tree.layout();
         sync.advancements.tree = std::sync::Arc::new(tree);
-        // A reward names a recipe the server knows: an unknown id is never added to the book.
-        sync.advancements.displays =
-            crate::recipe_book::RecipeIndex::from_serialized(&BTreeMap::from([(
-                "test:reward".to_owned(),
-                r#"{"type":"minecraft:crafting_shapeless"}"#.into(),
-            )]));
+        let _ = horizon_std::fs::remove_dir_all(&root);
         let advancement = &sync.advancements;
         let mut progress = Progress::default();
         let mut book = Settings::default();
@@ -1170,18 +1136,28 @@ mod tests {
             .grant_tick(&mut progress, &candidates[0], 12_345)
             .unwrap();
         assert!(progress.has("test:tick", "first"));
-        assert!(!book.knows("test:reward"));
-        advancement.reward_tick(&sync, &progress, &mut book, &candidates[0], was_done);
-        assert!(!book.knows("test:reward"));
+        assert!(!book.knows(REWARD));
+        assert!(
+            advancement
+                .reward_tick(&sync, &progress, &mut book, &candidates[0], was_done)
+                .is_none()
+        );
+        assert!(!book.knows(REWARD));
         let was_done = advancement
             .grant_tick(&mut progress, &candidates[1], 12_345)
             .unwrap();
         assert!(progress.has("test:tick", "second"));
         // This is where the Game invokes the mod listener: the criterion is
         // visible, and the completion reward is still absent.
-        assert!(!book.knows("test:reward"));
-        advancement.reward_tick(&sync, &progress, &mut book, &candidates[1], was_done);
-        assert!(book.knows("test:reward"));
+        assert!(!book.knows(REWARD));
+        let reward = advancement
+            .reward_tick(&sync, &progress, &mut book, &candidates[1], was_done)
+            .unwrap();
+        assert!(book.knows(REWARD));
+        let packet = RecipeBookAdd::read(&mut Reader::new(&reward)).unwrap();
+        assert!(!packet.replace);
+        assert_eq!(packet.entries.len(), 1);
+        assert_eq!(packet.entries[0].id, display.id);
         assert!(
             advancement
                 .grant_tick(&mut progress, &candidates[1], 12_345)
@@ -1194,11 +1170,33 @@ mod tests {
             12_345,
             &mut Progress::default(),
             &mut Settings::default(),
+            &mut Vec::new(),
         );
         assert_eq!(
             staged, original.update_advancements,
             "the staged first packet keeps the vanilla timestamp"
         );
+        assert_eq!(original.recipe_book_add.as_ref(), Some(&reward));
+
+        // The gameplay tick already granted the recipe and queued its delta. Its first
+        // flush sends exactly that delta, not another reward now or on the next flush.
+        let mut unlocked = vec![REWARD.to_owned()];
+        let already_ticked =
+            advancement.first_tick(&sync, 12_345, &mut progress, &mut book, &mut unlocked);
+        assert_eq!(already_ticked.recipe_book_add.as_ref(), Some(&reward));
+        assert!(unlocked.is_empty());
+
+        // If the recipe was taken before the queued delta went out, the advancement
+        // stays complete and the first flush neither sends nor awards it again.
+        assert_eq!(
+            book.remove_recipes(&advancement.displays, &[REWARD.to_owned()]),
+            [display.id]
+        );
+        unlocked.push(REWARD.to_owned());
+        let taken = advancement.first_tick(&sync, 12_345, &mut progress, &mut book, &mut unlocked);
+        assert!(taken.recipe_book_add.is_none());
+        assert!(!book.knows(REWARD));
+        assert!(unlocked.is_empty());
     }
 
     #[test]
@@ -1252,6 +1250,30 @@ mod tests {
             }
             other => panic!("not an item list: {other:?}"),
         }
+        let _ = horizon_std::fs::remove_dir_all(&root);
+    }
+
+    /// An ingredient's id is read as `Item.CODEC` reads one, before the registry lookup.
+    #[test]
+    fn an_ingredient_id_is_read_before_the_item_lookup() {
+        let bare = r#"{"type":"minecraft:crafting_shapeless","ingredients":["raw_copper"],"result":{"id":"minecraft:copper_ingot"}}"#;
+        let tag = r##"{"type":"minecraft:crafting_shapeless","ingredients":["#minecraft:dyes"],"result":{"id":"minecraft:copper_ingot"}}"##;
+        let unknown = r#"{"type":"minecraft:crafting_shapeless","ingredients":["Stick"],"result":{"id":"minecraft:copper_ingot"}}"#;
+        let root = resources(
+            "ingredient_id",
+            &[("bare", bare), ("tag", tag), ("unknown", unknown)],
+        );
+        let (sync, e) = entry(&root, "minecraft:bare");
+        let copper = sync.id("minecraft:item", "minecraft:raw_copper").unwrap();
+        assert_eq!(e.requirements, Some(vec![HolderSet::Items(vec![copper])]));
+        // A `#`-tag keeps its name; an id no registry entry has still names no item.
+        let (_, e) = entry(&root, "minecraft:tag");
+        assert_eq!(
+            e.requirements,
+            Some(vec![HolderSet::Tag("minecraft:dyes".into())])
+        );
+        let (_, e) = entry(&root, "minecraft:unknown");
+        assert_eq!(e.requirements, Some(vec![HolderSet::Items(Vec::new())]));
         let _ = horizon_std::fs::remove_dir_all(&root);
     }
 

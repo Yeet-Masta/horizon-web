@@ -62,3 +62,33 @@ button events. `ClientHost::mapping(name)` reads a held mapping as down, whoever
 
 The game has no bare swing to add: in 26.3 a swing sends nothing of its own, and the attack mapping
 produces the swing and its packet.
+
+## Shaping gameplay controller sticks (native)
+
+Use `Hooks::controller_move` and `Hooks::controller_look` to replace a native mod's raw stick
+response without replacing engine functions. Returning `None` keeps Horizon's stock calculation;
+the first mod returning `Some` supplies the answer. Both hooks run after the existing controller,
+screen, focus and radial-menu guards. They see non-centered `[right, up]` axes in `[-1, 1]` before
+the gameplay dead zones, not keyboard or mouse input. Neither changes menu navigation or bindings.
+
+- `controller_move` runs when the on-foot client samples movement for a player tick. It receives the
+  configured dead zone and the most recent advancing frame's elapsed seconds; several ticks can
+  sample the same frame. Return `ControllerMoveOverride::new([left, forward], bypass_square_movement)`.
+  The game bounds the vector to unit length; `[0.0, 0.0]` suppresses the stick, but not held keys.
+  The optional bypass affects only the selected analog direction for this tick. The game still
+  applies 0.98, item-use and crouch multipliers. If a later `movement_input` hook replaces the
+  direction, the square-movement opt-out is discarded. Mounted movement uses the stock path.
+- `controller_look` runs in the frame after mouse look. `event.input` contains the raw axes, applied
+  looking sensitivity and inversion, the configured dead zone, elapsed seconds (capped at 0.1 as in
+  stock look), and whether a spyglass is in use in first person. Return `[yaw, pitch]` in degrees,
+  positive right and down, for that frame. The mod applies whichever sensitivity, inversion and scope
+  slowdown it wants. The game clamps the result to ±180 degrees per axis, then applies cinematic
+  smoothing and turns the view through its ordinary camera path. Centering the stick still lets
+  cinematic turns ease out without calling the hook.
+
+Both hooks discard a non-finite answer and use stock shaping. Their `external_server` flag refers to
+the current multiplayer connection, not the integrated world's in-memory protocol session. A native
+mod can return `None` on external servers to keep stock movement, or remap which digital direction
+flags the stick selects there. External movement still uses full-speed digital directions and the
+ordinary input packets; a stick override cannot enable analog movement or skip square shaping on
+an external server.

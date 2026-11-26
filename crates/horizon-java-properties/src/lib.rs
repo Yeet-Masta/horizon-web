@@ -34,6 +34,16 @@ impl Properties {
 
     /// Java's properties loader over already decoded characters.
     pub fn load(text: &[char]) -> Result<Self, Malformed> {
+        Self::load_locating(text).map_err(|(e, _)| e)
+    }
+
+    /// [`Properties::load_file`], naming on failure the line (from 1) of the entry that broke it: its last
+    /// line when it is continued, lines ending at `\n`, `\r` or `\r\n` as the loader ends them.
+    pub fn load_file_locating(bytes: &[u8]) -> Result<Self, (Malformed, usize)> {
+        Self::load_locating(&decode_file(bytes))
+    }
+
+    fn load_locating(text: &[char]) -> Result<Self, (Malformed, usize)> {
         let mut out = Self::default();
         let mut reader = LineReader {
             chars: text,
@@ -72,8 +82,9 @@ impl Properties {
                 }
                 value_start += 1;
             }
-            let key = load_convert(&line[..key_len])?;
-            let value = load_convert(&line[value_start..])?;
+            let at = |e| (e, line_at(&text[..reader.pos]));
+            let key = load_convert(&line[..key_len]).map_err(at)?;
+            let value = load_convert(&line[value_start..]).map_err(at)?;
             out.map.insert(key, value);
         }
         Ok(out)
@@ -82,10 +93,7 @@ impl Properties {
     /// Settings.loadFromFile: UTF-8 with errors reported, falling back to
     /// ISO-8859-1 for the whole file. A missing file is an empty set.
     pub fn load_file(bytes: &[u8]) -> Result<Self, Malformed> {
-        match std::str::from_utf8(bytes) {
-            Ok(s) => Self::load(&s.chars().collect::<Vec<_>>()),
-            Err(_) => Self::load(&bytes.iter().map(|&b| char::from(b)).collect::<Vec<_>>()),
-        }
+        Self::load(&decode_file(bytes))
     }
 
     /// Java's properties loader for an input stream: ISO-8859-1.
@@ -114,6 +122,28 @@ impl Properties {
             out.push_str(nl);
         }
         out
+    }
+}
+
+/// Settings.loadFromFile's decoding: UTF-8, or ISO-8859-1 for the whole file when it isn't UTF-8.
+fn decode_file(bytes: &[u8]) -> Vec<char> {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.chars().collect(),
+        Err(_) => bytes.iter().map(|&b| char::from(b)).collect(),
+    }
+}
+
+/// The line `read` ends on: the line reader stops just past a line's last character, or on its `\r` of a
+/// `\r\n`.
+fn line_at(read: &[char]) -> usize {
+    let ends = read
+        .iter()
+        .enumerate()
+        .filter(|&(i, &c)| c == '\n' || (c == '\r' && read.get(i + 1) != Some(&'\n')))
+        .count();
+    match read.last() {
+        Some('\n' | '\r') => ends,
+        _ => ends + 1,
     }
 }
 
@@ -405,6 +435,24 @@ mod tests {
         assert_eq!(p.get("cr"), Some("1"));
         assert_eq!(p.get("next"), Some("2"));
     }
+    /// `LineReader.readLine` (run on JDK 25.0.3) treats `#` and `!` as a comment when the logical line
+    /// is still empty, so after a continuation that left it empty the line is a comment, while on a
+    /// line that has content the `#` is a value character.
+    #[test]
+    fn a_hash_on_an_empty_continued_line_is_a_comment() {
+        let p = load("\\\n#x=1\n");
+        assert_eq!(p.get("#x"), None);
+        let p = load("  \\\r\n  !y=2\nz=3\n");
+        assert_eq!((p.get("!y"), p.get("z")), (None, Some("3")));
+        let p = load("\\\n\n#c=1\nk=v\n");
+        assert_eq!((p.get("#c"), p.get("k")), (None, Some("v")));
+        let p = load("k=\\\n#v\n");
+        assert_eq!(p.get("k"), Some("#v"));
+        // The comment is skipped whole: its bad escape is never read.
+        let p = load("\\\n#note=\\uZZZZ\nk=v\n");
+        assert_eq!(p.get("k"), Some("v"));
+    }
+
     #[test]
     fn stores_sorted_and_escaped() {
         let mut p = Properties::default();

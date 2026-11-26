@@ -55,7 +55,7 @@ impl Title {
         hide_splash: bool,
         phases: &mut dyn FnMut(crate::screen_draw::RenderPhase, &mut HudBatch),
     ) {
-        self.draw_with_items(atlas, None, batch, cursor, hide_splash, false, phases);
+        self.draw_with_items(atlas, None, batch, cursor, hide_splash, false, phases, None);
     }
     /// [`Title::draw`] with the item models, which draw the item icons of the
     /// Superflat screens the way `GuiGraphicsExtractor.item` does.
@@ -69,6 +69,7 @@ impl Title {
         hide_splash: bool,
         hide_server_address: bool,
         phases: &mut dyn FnMut(crate::screen_draw::RenderPhase, &mut HudBatch),
+        decorate_server_row: Option<&mut crate::multiplayer::DecorateServerRow<'_>>,
     ) {
         let (w, h) = (batch.width.ceil(), batch.height.ceil());
         if self.rules.borrow().is_some() {
@@ -117,6 +118,7 @@ impl Title {
             return screen.draw(batch, atlas, cursor, phases);
         }
         let mut fade_from = None;
+        let mut row_tooltip = Vec::new();
         if crate::widgets::narrating()
             && let Some(info) = self.narration()
         {
@@ -126,7 +128,7 @@ impl Title {
             Mode::Main => {
                 phases(crate::screen_draw::RenderPhase::Background, batch);
                 draw_logo(atlas, batch, w);
-                if !hide_splash && let Some(splash) = self.splash.as_deref() {
+                if let Some(splash) = self.splash_text(hide_splash) {
                     let tw = HudBatch::text_width(atlas, splash);
                     let start = batch.vertices.len();
                     batch.text(
@@ -170,7 +172,13 @@ impl Title {
                 let tw = HudBatch::text_width(atlas, notice).ceil();
                 let rect = [w - tw - 2.0, h - 10.0, tw, 10.0];
                 self.credits_button.set(rect);
-                crate::widgets::record(notice, rect, true);
+                crate::widgets::record_with_id(
+                    Some("not-affiliated-with-mojang-or-microsoft"),
+                    notice,
+                    rect,
+                    true,
+                    crate::widgets::Kind::Button,
+                );
                 let inside = cursor.0 >= rect[0]
                     && cursor.0 < rect[0] + rect[2]
                     && cursor.1 >= rect[1]
@@ -795,15 +803,18 @@ impl Title {
                 self.ban_buttons
                     .set([layout.buttons[0], layout.buttons[1], layout.buttons[2]]);
             }
-            Mode::Multiplayer(screen) => screen.draw(
-                atlas,
-                batch,
-                &mut self.caret.borrow_mut(),
-                self.started,
-                cursor,
-                hide_server_address,
-                phases,
-            ),
+            Mode::Multiplayer(screen) => {
+                row_tooltip = screen.draw(
+                    atlas,
+                    batch,
+                    &mut self.caret.borrow_mut(),
+                    self.started,
+                    cursor,
+                    hide_server_address,
+                    phases,
+                    decorate_server_row,
+                );
+            }
             Mode::Realms(screen) => screen.draw(
                 batch,
                 atlas,
@@ -819,7 +830,13 @@ impl Title {
         // The hovered button's `Tooltip`, drawn once the widgets are.
         let mut button_tooltip = None;
         for b in self.buttons(w, h) {
-            crate::widgets::record(&b.label, [b.x, b.y, b.w, 20.0], b.enabled);
+            crate::widgets::record_with_id(
+                b.agent_id,
+                &b.label,
+                [b.x, b.y, b.w, 20.0],
+                b.enabled,
+                crate::widgets::Kind::Button,
+            );
             // Realms' icon buttons have no label to record.
             if b.enabled && b.label.trim().is_empty() {
                 crate::widgets::target([b.x, b.y, b.w, 20.0]);
@@ -843,16 +860,10 @@ impl Title {
             } else {
                 "gui/sprites/widget/button"
             };
-            // Nine-slice approximation: left and right halves of the 200-wide sprite.
-            if let Some(r) = atlas.sprites.get(sprite).copied() {
-                let half = b.w / 2.0;
-                let mut left = r;
-                left.u1 = r.u0 + (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x, b.y, half, 20.0, left, u32::MAX);
-                let mut right = r;
-                right.u0 = r.u1 - (r.u1 - r.u0) * (half / r.w as f32);
-                batch.rect_uv(b.x + half, b.y, half, 20.0, right, u32::MAX);
-            }
+            // `Button.extractContents`: `blitSprite` with the sprite's own `gui.scaling`, so
+            // a pack's button of another size (a 20x20 nine-slice) draws as it does on the
+            // other screens.
+            crate::ui::nine_slice(batch, atlas, sprite, b.x, b.y, b.w, 20.0, u32::MAX);
             let color = if b.enabled {
                 u32::MAX
             } else {
@@ -907,7 +918,7 @@ impl Title {
             self.select_tooltip(atlas, batch, cursor, (w, h), worlds, *selected);
         }
         if let Mode::Multiplayer(screen) = &self.mode {
-            screen.draw_tooltip(atlas, batch, cursor);
+            screen.draw_tooltip(atlas, batch, cursor, row_tooltip);
         }
         if let Mode::Realms(screen) = &self.mode {
             screen.draw_tooltip(atlas, batch, cursor, (w, h));

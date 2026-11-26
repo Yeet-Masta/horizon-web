@@ -35,8 +35,9 @@ pub(super) fn folder_busy(
     }
 }
 
-/// The imported packs' read on a thread (#18074): only the window's latest read applies, and
-/// only when the window changed no pack since asking for it.
+/// A list read on a thread: the imported packs (#18074), an instance's game packs, its server
+/// list. Only the window's latest read applies, and only when the window changed nothing since
+/// asking for it.
 #[derive(Default)]
 pub(super) struct PackReads {
     asked: u64,
@@ -45,24 +46,24 @@ pub(super) struct PackReads {
 
 impl PackReads {
     /// A new read: its number, which its packs come back with.
-    fn ask(&mut self) -> u64 {
+    pub(super) fn ask(&mut self) -> u64 {
         self.asked += 1;
         self.running = Some(self.asked);
         self.asked
     }
 
-    fn running(&self) -> bool {
+    pub(super) fn running(&self) -> bool {
         self.running.is_some()
     }
 
     /// The window changed its packs (a step ended, a pack was removed): a read running began
     /// before and is out of date. True when one was, so a fresh one is to be asked for.
-    fn changed(&mut self) -> bool {
+    pub(super) fn changed(&mut self) -> bool {
         self.running.take().is_some()
     }
 
     /// Whether the packs of read `read` apply: the latest, with no change since.
-    fn arrived(&mut self, read: u64) -> bool {
+    pub(super) fn arrived(&mut self, read: u64) -> bool {
         let applies = self.running == Some(read);
         if applies {
             self.running = None;
@@ -205,20 +206,20 @@ impl Launcher {
 
     fn play_pack(&mut self, work: PathBuf) {
         // The pack's instance plays its own version, if it has one.
-        let pack = self.instances.list.iter().find(|i| i.work == work);
-        let pack_id = pack.map(|i| i.id.clone());
-        let Some(tag) = pack
-            .and_then(|i| self.version_of(i))
-            .or_else(|| self.launcher_version())
-            .cloned()
-        else {
-            return;
+        let pack = instances::pack_for_launch(&work)
+            .and_then(|instance| Ok((instance.resolve_version(None)?, instance.id)));
+        let (tag, pack_id) = match pack {
+            Ok(launch) => launch,
+            Err(e) => {
+                self.pack_error = Some(e);
+                return;
+            }
         };
         if !self.can_start(&tag) {
             return;
         }
         self.starting_pack = Some(work);
-        self.start_client(tag, pack_id);
+        self.start_client(tag, Some(pack_id));
     }
 
     /// Looks for other launchers' modpacks on a thread: their folders can be slow to read.

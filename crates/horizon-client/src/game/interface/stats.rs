@@ -6,7 +6,9 @@ use super::native_hooks::PhantomSpawnResult;
 use super::{Dim, Game};
 use horizon_core::geometry::Vec3;
 use horizon_core::random::RandomSource;
-pub(super) use horizon_gameplay::stats::{Stats, locate_player_json, player_json};
+pub(super) use horizon_gameplay::stats::{
+    Stats, locate_player_json, player_json, write_player_json,
+};
 use horizon_gameplay::stats::{namespaced, phantom_group_size};
 use std::path::PathBuf;
 
@@ -120,7 +122,7 @@ impl Game<'_> {
         }
         self.stats.loaded = true;
         if let Some(path) = self.stats_path() {
-            self.stats.values = Stats::read(&path).values;
+            self.stats.load_from(Stats::read(&path));
         }
     }
     /// `ServerStatsCounter.save`.
@@ -173,6 +175,22 @@ impl Game<'_> {
         };
         let alive = !p.health.dead_or_dying();
         let crouching = p.pose == horizon_client::pose::Pose::Crouching;
+        if !self.lan_acting_fake && !mod_api::__private::listened(mod_api::HookId::PlayerStatAward)
+        {
+            let mut mask = (1 << 0) | (1 << 1);
+            if alive {
+                mask |= 1 << 2;
+            }
+            if crouching {
+                mask |= 1 << 3;
+            }
+            if !sleeping {
+                mask |= 1 << 4;
+            }
+            let record_events = !self.score.board.objectives.is_empty();
+            self.stats.add_tick_mask(mask, record_events);
+            return;
+        }
         self.award_custom_stat("play_time", 1);
         self.award_custom_stat("total_world_time", 1);
         if alive {
@@ -227,7 +245,7 @@ impl Game<'_> {
             p.fall_flying,
             p.pose == horizon_client::pose::Pose::Swimming,
         );
-        let climbing = p.last_climbable.is_some() && d.y > 0.0;
+        let on_climbable = self.player_on_climbable();
         let riding = self.riding.map(|id| {
             self.mobs
                 .iter()
@@ -269,8 +287,10 @@ impl Game<'_> {
                     self.award_custom_stat("walk_on_water_one_cm", horizontal)
                 }
             }
-            None if climbing => {
-                self.award_custom_stat("climb_one_cm", (d.y * 100.0).round() as i32)
+            None if on_climbable => {
+                if d.y > 0.0 {
+                    self.award_custom_stat("climb_one_cm", (d.y * 100.0).round() as i32);
+                }
             }
             None if on_ground => {
                 if horizontal > 0 {
@@ -461,6 +481,185 @@ mod tests {
                 .retain(|g| g.uuid != 2);
             game.spawn_phantoms();
             assert_eq!(with_fake, game.world.random.next_int());
+        });
+    }
+
+    #[test]
+    fn tick_mask_stats_roundtrip_snapshots_and_player_predicate() {
+        use super::Stats;
+        use horizon_client::advancements::{self as adv, EntityView, PlayerFacts, World};
+        use std::collections::BTreeMap;
+
+        struct TestWorld;
+        impl World for TestWorld {
+            fn dimension(&self) -> &str {
+                "minecraft:overworld"
+            }
+            fn weather(&self) -> (bool, bool) {
+                (false, false)
+            }
+            fn biome(&self, _: [i32; 3]) -> String {
+                "minecraft:plains".into()
+            }
+            fn structures(&self, _: [i32; 3]) -> Vec<String> {
+                Vec::new()
+            }
+            fn block(&self, _: [i32; 3]) -> (String, BTreeMap<String, String>) {
+                ("minecraft:air".into(), BTreeMap::new())
+            }
+            fn fluid(&self, _: [i32; 3]) -> Option<String> {
+                None
+            }
+            fn can_see_sky(&self, _: [i32; 3]) -> bool {
+                true
+            }
+            fn light(&self, _: [i32; 3]) -> i32 {
+                15
+            }
+            fn smokey(&self, _: [i32; 3]) -> bool {
+                false
+            }
+            fn in_tag(&self, _: &str, _: &str, _: &str) -> bool {
+                false
+            }
+        }
+
+        let predicate = serde_json::json!({
+            "type_specific/player": {
+                "stats": [{
+                    "type": "minecraft:custom",
+                    "stat": "minecraft:play_time",
+                    "value": { "min": 2 }
+                }]
+            }
+        });
+        let matches = |stats: &Stats| {
+            let view = EntityView {
+                kind: "minecraft:player".into(),
+                player_facts: PlayerFacts {
+                    stats: Some(stats.merged_values()),
+                    ..PlayerFacts::default()
+                },
+                ..EntityView::default()
+            };
+            adv::entity(&predicate, &view, &TestWorld, [0.0; 3])
+        };
+
+        let mut stats = Stats::default();
+        // Bits: play_time (0), sneak_time (3), time_since_rest (4).
+        let mask = (1 << 0) | (1 << 3) | (1 << 4);
+        stats.add_tick_mask(mask, false);
+        stats.add_tick_mask(mask, false);
+
+        assert_eq!(stats.get("custom", "minecraft:play_time"), 2);
+        assert_eq!(stats.get("custom", "minecraft:sneak_time"), 2);
+        assert_eq!(stats.get("custom", "minecraft:time_since_rest"), 2);
+        assert_eq!(stats.get("custom", "minecraft:total_world_time"), 0);
+
+        let json = stats.to_json();
+        assert_eq!(json["stats"]["minecraft:custom"]["minecraft:play_time"], 2);
+        assert_eq!(json["stats"]["minecraft:custom"]["minecraft:sneak_time"], 2);
+        assert_eq!(
+            json["stats"]["minecraft:custom"]["minecraft:time_since_rest"],
+            2
+        );
+
+        let dirty = stats.take_dirty();
+        assert_eq!(
+            dirty,
+            vec![
+                ("minecraft:custom".into(), "minecraft:play_time".into(), 2),
+                ("minecraft:custom".into(), "minecraft:sneak_time".into(), 2),
+                (
+                    "minecraft:custom".into(),
+                    "minecraft:time_since_rest".into(),
+                    2
+                ),
+            ]
+        );
+        assert!(matches(&stats));
+
+        let next = Stats::from_snapshot(&serde_json::json!({
+            "stats": {
+                "minecraft:custom": {
+                    "minecraft:play_time": 42
+                }
+            }
+        }))
+        .unwrap();
+        stats.replace(next);
+        assert_eq!(stats.get("custom", "minecraft:play_time"), 42);
+        assert_eq!(stats.get("custom", "minecraft:sneak_time"), 0);
+        assert!(matches(&stats));
+        let replace_dirty = stats.take_dirty();
+        assert_eq!(
+            replace_dirty,
+            vec![
+                ("minecraft:custom".into(), "minecraft:play_time".into(), 42),
+                ("minecraft:custom".into(), "minecraft:sneak_time".into(), 0),
+                (
+                    "minecraft:custom".into(),
+                    "minecraft:time_since_rest".into(),
+                    0
+                ),
+            ]
+        );
+
+        let cleared = Stats::from_snapshot(&serde_json::json!({ "stats": {} })).unwrap();
+        stats.replace(cleared);
+        assert!(stats.is_empty());
+        assert_eq!(stats.get("custom", "minecraft:play_time"), 0);
+        assert!(!matches(&stats));
+        assert_eq!(
+            stats.take_dirty(),
+            vec![("minecraft:custom".into(), "minecraft:play_time".into(), 0)]
+        );
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn movement_stats_uses_current_on_climbable_branch() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.world.chunks.insert(
+                (0, 0),
+                std::sync::Arc::new(horizon_client::chunk::Chunk::empty(0, 0)),
+            );
+            let scaffolding = game
+                .pack
+                .assets
+                .registry
+                .resolve(&horizon_world::chunk::BlockState {
+                    name: "minecraft:scaffolding".into(),
+                    properties: Default::default(),
+                })
+                .unwrap();
+            let air = game.res.facts().air;
+            game.world.set(0, 65, 0, scaffolding).unwrap();
+            {
+                let p = game.player.as_mut().unwrap();
+                p.position = horizon_core::geometry::Vec3::new(0.5, 65.0, 0.5);
+                p.ground.on_ground = true;
+                p.flying = false;
+                p.last_climbable = None;
+            }
+            // Walking horizontally inside scaffolding awards neither walk nor climb.
+            game.movement_stats(horizon_core::geometry::Vec3::new(1.0, 0.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:walk_one_cm"), 0);
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 0);
+
+            // Moving upward inside scaffolding awards climb_one_cm.
+            game.movement_stats(horizon_core::geometry::Vec3::new(0.0, 1.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 100);
+
+            // Leaving the climbable block while last_climbable is still set does not award climb.
+            game.world.set(0, 65, 0, air).unwrap();
+            {
+                let p = game.player.as_mut().unwrap();
+                p.ground.on_ground = false;
+                p.last_climbable = Some(horizon_core::position::BlockPos::new(0, 65, 0));
+            }
+            game.movement_stats(horizon_core::geometry::Vec3::new(0.0, 1.0, 0.0));
+            assert_eq!(game.stats.get("custom", "minecraft:climb_one_cm"), 100);
         });
     }
 }

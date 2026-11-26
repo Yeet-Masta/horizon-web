@@ -21,6 +21,7 @@
 .DS_Store
 # What the client writes to its working directory when run from the repo root.
 /options.txt
+/command_history.txt
 /debug-profile.json
 /horizon.txt
 /horizon-graphics.txt
@@ -45,3 +46,6 @@
 # Visual Studio editor state.
 .vs/
 /web/jspi/target/
+
+# Crowdin's export, read by tools/crowdin_import.py: the lang files are the copy that ships.
+/l10n/

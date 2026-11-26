@@ -310,6 +310,11 @@ impl RsaPublicKey {
         if key.modulus.len() < 64
             || n_bits > MAX_MODULUS_BITS
             || n_bits > RESTRICT_EXPONENT_ABOVE && e_bits > MAX_RESTRICTED_EXPONENT_BITS
+            // RSAPublicKeyImpl.checkExponentRange: an exponent of at least 3 (1 would "encrypt"
+            // the shared secret to itself) and below the modulus. Up to 3072 bits nothing else
+            // limits it, and a Hello carried megabytes of exponent.
+            || (key.exponent.len(), key.exponent.first()) < (1, Some(&3))
+            || (key.exponent.len(), &key.exponent) >= (key.modulus.len(), &key.modulus)
             || key.modulus.last().is_none_or(|b| b & 1 == 0)
         {
             return Err(bad());
@@ -824,7 +829,12 @@ pub(crate) mod tests {
             n[0] = 0xff >> ((8 - bits % 8) % 8);
             n
         };
-        let exponent = |bits: usize| modulus(bits);
+        // The same with the lowest bit cleared: just below the modulus of that length.
+        let exponent = |bits: usize| {
+            let mut e = modulus(bits);
+            *e.last_mut().unwrap() &= 0xfe;
+            e
+        };
         let parses = |n: &[u8], e: &[u8]| RsaPublicKey::from_der(&spki(n, e)).is_ok();
         // The builder makes keys from_der reads: the usual 65537, and the test key's modulus.
         assert!(parses(&hex(TEST_N), &[1, 0, 1]));
@@ -836,6 +846,13 @@ pub(crate) mod tests {
         assert!(!parses(&modulus(2049 * 8), &[3]));
         // Up to 3072 bits, the exponent may be as long as the modulus.
         assert!(parses(&modulus(3072), &exponent(3072)));
+        // Below 3 the JDK throws "exponent is smaller than 3": 1 would leave the secret as it is.
+        assert!(!parses(&hex(TEST_N), &[1]));
+        assert!(!parses(&hex(TEST_N), &[2]));
+        assert!(parses(&hex(TEST_N), &[3]));
+        // Never the modulus itself or more: megabytes of exponent held a login for minutes.
+        assert!(!parses(&modulus(3072), &modulus(3072)));
+        assert!(!parses(&modulus(1024), &exponent(3072)));
         // Past 3072 bits it may have 64 bits at most: 2048-byte modulus, 9-byte exponent refused.
         assert!(parses(&modulus(3073), &exponent(64)));
         assert!(!parses(&modulus(3073), &exponent(65)));

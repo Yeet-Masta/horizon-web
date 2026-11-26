@@ -12,6 +12,7 @@ use super::{
     path::PathType,
 };
 use crate::containers::BlockEntity;
+use crate::health::Attack;
 use horizon_core::{geometry::Vec3, random::RandomSource};
 use std::collections::HashMap;
 
@@ -105,7 +106,7 @@ pub fn tear_down(m: &mut Mob, events: &mut Vec<MobEvent>) {
 /// `Creaking.hurtServer` for a heart-bound creaking: no damage, only the
 /// invulnerability animation and the heart's reaction. Returns whether the
 /// normal damage path should run.
-pub fn accepts_damage(m: &mut Mob, source: &Damage) -> bool {
+pub fn accepts_damage(m: &mut Mob, source: &Damage, attack: &Attack) -> bool {
     if !heart_bound(m) || source.kind.bypasses_invulnerability() {
         return true;
     }
@@ -114,20 +115,23 @@ pub fn accepts_damage(m: &mut Mob, source: &Damage) -> bool {
     }
     let by_player = source.attacker == Some(Who::Player);
     // The direct entity must be living or a projectile (or a player must be to blame).
-    let direct = matches!(
-        source.kind,
-        DamageKind::PlayerAttack
-            | DamageKind::MaceSmash
-            | DamageKind::Spear
-            | DamageKind::MobAttack
-            | DamageKind::MobAttackNoAggro
-            | DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Fireball
-            | DamageKind::WitherSkull
-            | DamageKind::WindCharge
-            | DamageKind::Thorns
-    );
+    let direct = attack.projectile.is_some()
+        // A command's explicit `by` entity, which the damage type cannot name.
+        || attack.direct.is_some_and(|id| id != 0)
+        || matches!(
+            source.kind,
+            DamageKind::PlayerAttack
+                | DamageKind::MaceSmash
+                | DamageKind::Spear
+                | DamageKind::MobAttack
+                | DamageKind::MobAttackNoAggro
+                | DamageKind::Arrow
+                | DamageKind::Thrown
+                | DamageKind::Fireball
+                | DamageKind::WitherSkull
+                | DamageKind::WindCharge
+                | DamageKind::Thorns
+        );
     if !direct && !by_player {
         return false;
     }
@@ -651,6 +655,28 @@ mod tests {
             hurt_sounds(&m),
             ["entity.hostile.hurt"],
             "an unbound creaking is hurt like a monster"
+        );
+    }
+
+    /// `Creaking.hurtServer`: a `Projectile`'s direct entity gets through the
+    /// heart's guard, and a thrown trident is one.
+    #[test]
+    fn a_trident_starts_a_heart_bound_creaking_invulnerability_animation() {
+        let mut m = creaking();
+        m.extra.home = Some([0, 64, 0]);
+        let attack = Attack {
+            projectile: Some(2),
+            projectile_is_arrow: true,
+            ..Default::default()
+        };
+        assert!(!accepts_damage(
+            &mut m,
+            &Damage::of(DamageKind::Trident),
+            &attack
+        ));
+        assert!(
+            m.extra.ints[INVULNERABLE] > 0,
+            "the hit starts the invulnerability animation"
         );
     }
 

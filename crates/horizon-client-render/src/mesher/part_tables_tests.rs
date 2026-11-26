@@ -56,6 +56,7 @@ pub(super) fn tables(overlay: bool) -> MeshTables {
         info: vec![air(), water, Info { overlay, ..air() }],
         solid: vec![],
         full_faces: vec![],
+        ao_info: vec![],
         visibility: horizon_world::block_render::FaceVisibility::empty(),
         water_still: 11,
         water_flow: WATER_FLOW,
@@ -86,7 +87,7 @@ fn faces(tables: &MeshTables, parts: &PartTables) -> [Vec<u16>; 6] {
         parts,
         (false, false, true, false, false),
         &pad,
-        0x3F76E4,
+        || 0x3F76E4,
         &mut mesh,
         [0, 0, 0],
     );

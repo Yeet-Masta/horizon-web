@@ -189,6 +189,93 @@ pub fn use_default_folder() -> Result<()> {
     use_default_at(&bootstrap_path()?)
 }
 
+/// If the selected launcher data root is a link, return the existing folder it points to.
+/// Environment overrides are intentionally excluded: their owners selected those roots directly.
+pub fn linked_data_folder_target() -> Option<PathBuf> {
+    if has_override() {
+        return None;
+    }
+    let bootstrap = bootstrap_path().ok()?;
+    let launcher = stored_roots_at(&bootstrap)
+        .ok()?
+        .map(|roots| roots.launcher)
+        .unwrap_or_else(crate::backend::data_dir);
+    let metadata = fs::symlink_metadata(&launcher).ok()?;
+    if !is_link(&metadata) {
+        return None;
+    }
+    fs::canonicalize(&launcher).ok().map(plain_drive)
+}
+
+/// Record a linked launcher data folder's existing target as the configured root. No files are
+/// copied or removed; the next process opens the same data through its real path.
+pub fn use_real_data_folder() -> Result<()> {
+    if has_override() {
+        return Err("Data folders are set by HORIZON_LAUNCHER_HOME or HORIZON_HOME".into());
+    }
+    use_real_at(&bootstrap_path()?)
+}
+
+fn use_real_at(bootstrap: &Path) -> Result<()> {
+    let _lease = MigrationLease::take(bootstrap)?;
+    let mut roots = roots_for_real_folder(bootstrap)?;
+    let metadata =
+        fs::symlink_metadata(&roots.launcher).map_err(|e| problem(&roots.launcher, e))?;
+    if !is_link(&metadata) {
+        return Err(format!(
+            "The launcher data folder is not a link: {}",
+            roots.launcher.display()
+        ));
+    }
+    let linked_launcher = roots.launcher.clone();
+    roots.launcher = fs::canonicalize(&linked_launcher)
+        .map(plain_drive)
+        .map_err(|e| problem(&linked_launcher, e))?;
+    if roots.build == linked_launcher {
+        roots.build = roots.launcher.clone();
+    }
+    roots = validate_roots(&roots)?;
+    tool_safe(&roots.build)?;
+    for root in [&roots.launcher, &roots.game, &roots.build] {
+        if !root.is_dir() {
+            fs::create_dir_all(root).map_err(|e| problem(root, e))?;
+        }
+    }
+    roots = validate_roots(&roots)?;
+    commit(bootstrap, &roots)
+}
+
+fn roots_for_real_folder(bootstrap: &Path) -> Result<Roots> {
+    Ok(stored_roots_at(bootstrap)?.unwrap_or_else(|| Roots {
+        launcher: crate::backend::data_dir(),
+        game: crate::backend::game_home(),
+        build: crate::backend::build_dir(),
+    }))
+}
+
+fn stored_roots_at(bootstrap: &Path) -> Result<Option<Roots>> {
+    let bootstrap = pointer_path(bootstrap)?;
+    let bytes = match fs::read(&bootstrap) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(problem(&bootstrap, error)),
+    };
+    let location: Location = serde_json::from_slice(&bytes).map_err(|e| {
+        format!(
+            "Invalid {}: {e}; restore this file or the previous data folder",
+            bootstrap.display()
+        )
+    })?;
+    if location.version != 1 {
+        return Err(format!(
+            "Unsupported data location version {} in {}",
+            location.version,
+            bootstrap.display()
+        ));
+    }
+    Ok(Some(location.roots))
+}
+
 fn use_default_at(bootstrap: &Path) -> Result<()> {
     if bootstrap.exists() {
         let backup = bootstrap.with_file_name("location.json.old");
@@ -283,15 +370,28 @@ fn lock_at(bootstrap: &Path, exclusive: bool) -> Result<File> {
     Ok(file)
 }
 
-pub fn migrate_current(source: &Roots, target: &Path, progress: impl FnMut(&str)) -> Result<Roots> {
-    migrate_current_with_prepare(source, target, progress, |_, _| Ok(()))
+pub fn migrate_current(
+    source: &Roots,
+    target: &Path,
+    mut progress: impl FnMut(&str),
+) -> Result<Roots> {
+    migrate_current_with_prepare(
+        source,
+        target,
+        |message| {
+            progress(message);
+            Ok(())
+        },
+        |_, _| Ok(()),
+    )
 }
 
 /// Called only by the offline helper, after the GUI requests exit. Wait briefly for its lease.
+/// An error from progress stops the move there, between files, like any other failure.
 pub fn migrate_current_with_prepare(
     source: &Roots,
     target: &Path,
-    progress: impl FnMut(&str),
+    progress: impl FnMut(&str) -> Result<()>,
     prepare: impl FnOnce(&Roots, &Roots) -> Result<()>,
 ) -> Result<Roots> {
     if has_override() {
@@ -325,10 +425,14 @@ pub fn migrate_with_prepare(
     source: &Roots,
     target: &Path,
     bootstrap: &Path,
-    progress: impl FnMut(&str),
+    mut progress: impl FnMut(&str),
     prepare: impl FnOnce(&Roots, &Roots) -> Result<()>,
 ) -> Result<Roots> {
     let lease = MigrationLease::take(bootstrap)?;
+    let progress = |message: &str| {
+        progress(message);
+        Ok(())
+    };
     migrate_locked(source, target, bootstrap, progress, prepare, &lease)
 }
 
@@ -354,10 +458,12 @@ fn migrate_locked(
     source: &Roots,
     target: &Path,
     bootstrap: &Path,
-    mut progress: impl FnMut(&str),
+    mut progress: impl FnMut(&str) -> Result<()>,
     prepare: impl FnOnce(&Roots, &Roots) -> Result<()>,
     _lease: &MigrationLease,
 ) -> Result<Roots> {
+    // How the launcher spelled its folder, which the links it made may name.
+    let written = source.launcher.clone();
     let source = validate_roots(source)?;
     if let Some(current) = resolve_at(bootstrap)? {
         if current != source {
@@ -368,6 +474,16 @@ fn migrate_locked(
         }
     }
     let target = checked_path(target)?;
+    // Live data in a folder of such a name would look like a stopped move's to a retry.
+    if target
+        .components()
+        .any(|part| part.as_os_str().to_string_lossy().starts_with(STAGING))
+    {
+        return Err(format!(
+            "Destination {} has a {STAGING} folder in its path; choose another folder",
+            target.display()
+        ));
+    }
     for root in [
         &source.launcher,
         &source.game,
@@ -383,17 +499,16 @@ fn migrate_locked(
         }
     }
     if target.exists()
-        && (!target.is_dir()
-            || fs::read_dir(&target)
-                .map_err(|e| problem(&target, e))?
-                .next()
-                .is_some())
+        && (!target.is_dir() || !staging_only(&target).map_err(|e| problem(&target, e))?)
     {
         return Err(format!(
             "Destination {} must be an empty folder",
             target.display()
         ));
     }
+    // Held through the commit: two moves into one destination, from different bootstraps, would
+    // otherwise mix their folders at the final renames.
+    let _destination_lease = lock_destination(&target)?;
     let mut destination = layout(&source, &target);
     // MinGW needs the *physical* path to be ASCII: aliases are canonicalized by rustc.
     // Reserve a fresh sibling, never reuse or modify another location's build data.
@@ -401,45 +516,221 @@ fn migrate_locked(
     if separate_build {
         destination.build = reserve_build_folder(&source, &target, bootstrap)?;
     }
-    let stage = target.join(".relocation-staging");
-    let mut staged = layout(&source, &stage);
-    if separate_build {
-        // This unique folder is not published until the location pointer commits. It need
-        // not be renamed across volumes, and preparation sees its final, tool-safe path.
-        staged.build = destination.build.clone();
-    }
+    let mut ours = None;
     let result = (|| {
         fs::create_dir_all(&target).map_err(|e| problem(&target, e))?;
-        private_dir(&stage)?;
-        progress("Copying and verifying launcher data");
-        copy_tree(&source.launcher, &staged.launcher, bootstrap, &mut progress)?;
-        progress("Copying and verifying game data");
-        copy_tree(&source.game, &staged.game, bootstrap, &mut progress)?;
+        let stage = claim_stage(&target)?;
+        ours = Some(stage.clone());
+        let mut staged = layout(&source, &stage);
+        if separate_build {
+            // This unique folder is not published until the location pointer commits. It need
+            // not be renamed across volumes, and preparation sees its final, tool-safe path.
+            staged.build = destination.build.clone();
+        }
+        progress(progress::LAUNCHER)?;
+        // Preparing links other launchers' files into the launcher's data and links them again
+        // each time; they are never followed or copied. The server runtime's links are made
+        // again below, to the same release.
+        let runtime = crate::servers::RuntimeLinks::find(&source.launcher, &written)?;
+        let mut skip = runtime.paths(&source.launcher);
+        skip.extend(crate::sources::linked_layout_links(&source.launcher));
+        copy_tree(
+            &source.launcher,
+            &source.launcher,
+            &staged.launcher,
+            bootstrap,
+            &skip,
+            &mut progress,
+        )?;
+        progress(progress::GAME)?;
+        // Every instance's cache holds links the game made, which copy_tree refuses; the
+        // game rebuilds the cache on its next start.
+        copy_tree(
+            &source.game,
+            &source.game,
+            &staged.game,
+            bootstrap,
+            &crate::instances::game_caches(&source.game),
+            &mut progress,
+        )?;
         if separate_build || !within(&source.build, &source.launcher) {
-            progress("Copying and verifying build data");
-            copy_tree(&source.build, &staged.build, bootstrap, &mut progress)?;
+            progress(progress::BUILD)?;
+            copy_tree(
+                &source.build,
+                &source.build,
+                &staged.build,
+                bootstrap,
+                &[],
+                &mut progress,
+            )?;
         } else if !staged.build.exists() {
             fs::create_dir_all(&staged.build).map_err(|e| problem(&staged.build, e))?;
         }
         prepare(&staged, &destination)?;
-        for name in ["launcher", "game", "build"] {
-            let from = stage.join(name);
-            if from.exists() {
-                fs::rename(&from, target.join(name)).map_err(|e| problem(&from, e))?;
+        // The last point at which progress may stop the move. From the first rename on it runs
+        // to its commit or fails on its own: a stop between the renames would leave the
+        // destination neither moved nor open to a retry.
+        progress(progress::COMMIT)?;
+        // The stage always holds launcher and game; build only when it is neither inside
+        // launcher nor in a separate folder. A missing one, or one already at the destination,
+        // fails the move before the commit.
+        let own_build = !separate_build && !within(&source.build, &source.launcher);
+        for (name, required) in [("launcher", true), ("game", true), ("build", own_build)] {
+            let (from, to) = (stage.join(name), target.join(name));
+            if required || from.exists() {
+                if fs::symlink_metadata(&to).is_ok() {
+                    return Err(format!("{} already exists", to.display()));
+                }
+                fs::rename(&from, &to).map_err(|e| problem(&from, e))?;
             }
         }
+        // Before the commit, so a stage that is left never holds data a location names.
         fs::remove_dir(&stage).map_err(|e| problem(&stage, e))?;
+        runtime.make(&destination.launcher)?;
         sync_dir(&target)?;
-        progress("Committing data location");
         commit(bootstrap, &destination)?;
         Ok(destination.clone())
     })();
     result.map_err(|e: String| {
+        let args = [
+            ("error", e.as_str()),
+            ("target", &target.display().to_string()),
+            ("build", &destination.build.display().to_string()),
+        ];
+        // A failure after the renames leaves data beside the stage, which a retry refuses.
+        let error = if staging_only(&target).unwrap_or(false) {
+            crate::i18n::trf(
+                "{error}. Original data was kept. Partial copies may remain in {target} and {build}. Retry with the same folder or another empty one",
+                &args,
+            )
+        } else {
+            crate::i18n::trf(
+                "{error}. Original data was kept. Partial copies may remain in {target} and {build}; choose an empty folder to retry",
+                &args,
+            )
+        };
+        match kept_note(&target, ours.as_deref()) {
+            Some(note) => format!("{error}. {note}"),
+            None => error,
+        }
+    })
+}
+
+/// What a move passes to its `progress` callback: each part as it starts, then each file.
+pub mod progress {
+    pub const LAUNCHER: &str = "Copying and verifying launcher data";
+    pub const GAME: &str = "Copying and verifying game data";
+    pub const BUILD: &str = "Copying and verifying build data";
+    pub const FILE: &str = "Verified file";
+    pub const COMMIT: &str = "Committing data location";
+}
+
+/// What the stage a move copies into inside its destination starts with: a unique name per run.
+/// A move that failed or was stopped leaves it behind.
+///
+/// A move never touches a staging folder it didn't create in this run: an earlier one may be the
+/// only copy, or another profile's live data (#19607 review).
+const STAGING: &str = ".relocation-staging";
+/// The destination's lock, which a move holds through its commit. It stays once released.
+const LOCK: &str = ".relocation.lock";
+
+/// Creates `target` and takes its lock, refused while another move holds it.
+fn lock_destination(target: &Path) -> Result<MigrationLease> {
+    fs::create_dir_all(target).map_err(|e| problem(target, e))?;
+    let path = target.join(LOCK);
+    // `staging_only` refused a link or folder of that name; this sees one made since.
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        reject_link(&path, &meta)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| problem(&path, e))?;
+    file.try_lock()
+        .map_err(|_| format!("Another move is using {}", target.display()))?;
+    // Released before it closes, as the migration lease is.
+    Ok(MigrationLease(file))
+}
+
+/// Whether `dir` holds nothing but plain folders whose names start with `STAGING`, which are
+/// never read, and the plain file `LOCK`: a link or any other entry is false.
+fn staging_only(dir: &Path) -> std::io::Result<bool> {
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        let meta = fs::symlink_metadata(&path)?;
+        let name = path.file_name().unwrap_or_default();
+        let fits = if name == LOCK {
+            meta.is_file()
+        } else {
+            name.to_string_lossy().starts_with(STAGING) && meta.is_dir()
+        };
+        if !fits || reject_link(&path, &meta).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The staging folders in `dir` other than `ours`, by name.
+pub fn kept_copies(dir: &Path, ours: Option<&Path>) -> Vec<PathBuf> {
+    let mut kept: Vec<_> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            Some(path.as_path()) != ours
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(STAGING))
+        })
+        .collect();
+    kept.sort();
+    kept
+}
+
+/// What a player is told about the staging folders in `dir` other than `ours`, if any.
+pub fn kept_note(dir: &Path, ours: Option<&Path>) -> Option<String> {
+    let kept = kept_copies(dir, ours);
+    (!kept.is_empty()).then(|| {
+        let folders = kept
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         crate::i18n::trf(
-            "{error}. Original data was kept. Partial copies may remain in {target} and {build}; choose an empty folder to retry",
-            &[("error", &e), ("target", &target.display().to_string()), ("build", &destination.build.display().to_string())],
+            "Horizon left these folders in {target} as they were: {folders}",
+            &[
+                ("target", &dir.display().to_string()),
+                ("folders", &folders),
+            ],
         )
     })
+}
+
+/// Makes this run's stage under a fresh name, then makes sure no other move came in between.
+fn claim_stage(target: &Path) -> Result<PathBuf> {
+    let stage = tempfile::Builder::new()
+        .prefix(&format!("{STAGING}-"))
+        .tempdir_in(target)
+        .map_err(|e| problem(target, e))?
+        .keep();
+    // A move from another bootstrap may have put its own data beside the stage since the check.
+    if !staging_only(target).map_err(|e| problem(target, e))? {
+        // Ours and still empty: remove_dir removes nothing else.
+        fs::remove_dir(&stage).map_err(|e| problem(&stage, e))?;
+        return Err(format!("Another move is using {}", target.display()));
+    }
+    Ok(stage)
+}
+
+/// Whether a move may use the folder `dir`: it holds nothing, or only staging folders of earlier
+/// moves, which a move leaves alone. The picker asks; the move checks again under its lease.
+pub fn reusable_destination(dir: &Path) -> Result<bool> {
+    staging_only(dir).map_err(|e| problem(dir, e))
 }
 
 /// Prefer the chosen drive's nearest existing ASCII ancestor. If it is not writable
@@ -620,7 +911,47 @@ fn pointer_path(path: &Path) -> Result<PathBuf> {
     }
 }
 
-fn reject_link(path: &Path, meta: &fs::Metadata) -> Result<()> {
+/// The target of the symlink at `path` when the same link at the destination points into the
+/// copy: relative, only `..` then plain names, and lexically inside `root` from the link's folder.
+/// The link is read, never followed.
+#[cfg(unix)]
+fn contained_link(
+    root: &Path,
+    path: &Path,
+    meta: &fs::Metadata,
+) -> std::io::Result<Option<PathBuf>> {
+    if !meta.file_type().is_symlink() {
+        return Ok(None);
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let target = fs::read_link(path)?;
+    let (mut up, mut down) = (0, 0);
+    // Split by hand: `Path::components` would drop an interior `.` and repeated slashes.
+    for part in target.as_os_str().as_bytes().split(|&byte| byte == b'/') {
+        match part {
+            b".." if down == 0 => up += 1,
+            b"" | b"." | b".." => return Ok(None),
+            _ => down += 1,
+        }
+    }
+    let depth = path
+        .parent()
+        .and_then(|folder| folder.strip_prefix(root).ok())
+        .map(|folder| folder.components().count());
+    Ok((down > 0 && depth.is_some_and(|depth| up <= depth)).then_some(target))
+}
+
+pub(crate) fn reject_link(path: &Path, meta: &fs::Metadata) -> Result<()> {
+    if is_link(meta) {
+        return Err(format!(
+            "Symbolic links and reparse points cannot be relocated: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_link(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     let reparse = {
         use std::os::windows::fs::MetadataExt;
@@ -628,13 +959,7 @@ fn reject_link(path: &Path, meta: &fs::Metadata) -> Result<()> {
     };
     #[cfg(not(windows))]
     let reparse = false;
-    if meta.file_type().is_symlink() || reparse {
-        return Err(format!(
-            "Symbolic links and reparse points cannot be relocated: {}",
-            path.display()
-        ));
-    }
-    Ok(())
+    meta.file_type().is_symlink() || reparse
 }
 
 fn tool_safe(path: &Path) -> Result<()> {
@@ -674,17 +999,25 @@ fn new_file(path: &Path) -> Result<File> {
     options.open(path).map_err(|e| problem(path, e))
 }
 
+/// Copies `source`, inside `root`, to `dest`, leaving out the paths in `skip`.
+#[cfg_attr(not(unix), allow(clippy::only_used_in_recursion))]
 fn copy_tree(
+    root: &Path,
     source: &Path,
     dest: &Path,
     bootstrap: &Path,
-    progress: &mut impl FnMut(&str),
+    skip: &[PathBuf],
+    progress: &mut impl FnMut(&str) -> Result<()>,
 ) -> Result<()> {
     let meta = match fs::symlink_metadata(source) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return private_dir(dest),
         Err(e) => return Err(problem(source, e)),
     };
+    #[cfg(unix)]
+    if let Some(target) = contained_link(root, source, &meta).map_err(|e| problem(source, e))? {
+        return std::os::unix::fs::symlink(&target, dest).map_err(|e| problem(dest, e));
+    }
     reject_link(source, &meta)?;
     if meta.is_dir() {
         private_dir(dest)?;
@@ -692,6 +1025,9 @@ fn copy_tree(
         for entry in fs::read_dir(source).map_err(|e| problem(source, e))? {
             let entry = entry.map_err(|e| problem(source, e))?;
             let path = entry.path();
+            if skip.contains(&path) {
+                continue;
+            }
             let controls = [
                 bootstrap.to_path_buf(),
                 bootstrap.with_file_name("migration.lock"),
@@ -703,7 +1039,14 @@ fn copy_tree(
             {
                 continue;
             }
-            copy_tree(&path, &dest.join(entry.file_name()), bootstrap, progress)?;
+            copy_tree(
+                root,
+                &path,
+                &dest.join(entry.file_name()),
+                bootstrap,
+                skip,
+                progress,
+            )?;
         }
         fs::set_permissions(dest, meta.permissions()).map_err(|e| problem(dest, e))?;
         sync_dir(dest)?;
@@ -725,7 +1068,7 @@ fn copy_tree(
             ));
         }
         fs::set_permissions(dest, meta.permissions()).map_err(|e| problem(dest, e))?;
-        progress("Verified file");
+        progress(progress::FILE)?;
     } else {
         return Err(format!("Unsupported special file: {}", source.display()));
     }
@@ -777,7 +1120,7 @@ fn commit(bootstrap: &Path, roots: &Roots) -> Result<()> {
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         File::open(path)

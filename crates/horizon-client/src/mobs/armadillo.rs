@@ -8,7 +8,7 @@
 use super::{
     Damage, DamageKind, Mob, MobEvent, MobWorld, Species, Who,
     goals::{
-        AnimalPanic, Breed, Cx, Float, Goal, LOOK, LookAtPlayer, MOVE, RandomLookAround, Stroll,
+        AnimalPanic, BrainLookAround, Breed, Cx, Float, Goal, LOOK, LookAtPlayer, MOVE, Stroll,
         Tempt, goal_clone,
     },
 };
@@ -69,7 +69,8 @@ pub fn register(m: &mut Mob) {
     g.add(4, Idle(BabyFollowAdult::default()));
     g.add(5, Stroll::avoiding_water(1.0));
     g.add(6, LookAtPlayer::new(6.0));
-    g.add(7, RandomLookAround::default());
+    // ArmadilloAi: the brain's `RandomLookAround`, not the goal of that name.
+    g.add(7, BrainLookAround::new((150, 250), 30.0, 0.0, 0.0));
     // LivingEntity(): `makeBrain` after the yaw; then Armadillo(), after
     // `setCanFloat`, `scuteTime = pickNextScuteDropTime()`. All from the
     // armadillo's own random.

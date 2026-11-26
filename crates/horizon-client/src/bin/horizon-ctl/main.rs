@@ -148,6 +148,7 @@ pub struct Session {
     pub paced: bool,
     /// The pause menu `--paced` opened, which the next action closes.
     pub(crate) held: bool,
+    exporting: bool,
 }
 
 impl Session {
@@ -160,6 +161,7 @@ impl Session {
             client: None,
             paced: false,
             held: false,
+            exporting: false,
         }
     }
     /// A failure while No AI is on: every command refuses (help aside).
@@ -184,6 +186,11 @@ impl Session {
             self.client = None;
         }
         let reply = result?;
+        if line.starts_with("export ")
+            && let Some(active) = reply["active"].as_bool()
+        {
+            self.exporting = active;
+        }
         if reply.get("error").is_some() {
             return Err(Failure {
                 reply,
@@ -194,8 +201,8 @@ impl Session {
     }
 
     /// `hunt ID`: walk up to a mob and hit it until it is gone, at most `timeout` seconds.
-    fn hunt(&mut self, id: i64, timeout: f64) -> Result<Value, Failure> {
-        let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
+    fn hunt(&mut self, id: i64, timeout: Duration) -> Result<Value, Failure> {
+        let deadline = Instant::now() + timeout;
         let before = self.game("inventory")?;
         let (mut hits, mut seen) = (0, Value::Null);
         loop {
@@ -211,7 +218,7 @@ impl Session {
             if Instant::now() > deadline {
                 return Err(Failure {
                     reply: json!({
-                        "error": format!("entity {id} still alive after {timeout} s"),
+                        "error": format!("entity {id} still alive after {} s", timeout.as_secs_f64()),
                         "kind": "timeout",
                         "hits": hits,
                         "entity": mob,
@@ -322,18 +329,20 @@ impl Session {
                 "use horizon-ctl COMMAND --help outside scripts",
             ));
         }
-        let number = |i: usize, what: &str| -> Result<f64, Failure> {
-            words
+        let number = |i: usize, what: &str| -> Result<Duration, Failure> {
+            let text = words
                 .get(i)
-                .ok_or_else(|| Failure::usage(format!("missing {what}; usage: {}", usage(name))))?
-                .parse::<f64>()
-                .map_err(|_| {
-                    Failure::usage(format!("{what} must be a number; usage: {}", usage(name)))
-                })
+                .ok_or_else(|| Failure::usage(format!("missing {what}; usage: {}", usage(name))))?;
+            parse_seconds(text).ok_or_else(|| {
+                Failure::usage(format!(
+                    "{what} must be a number of seconds, at most {MAX_SECONDS}; usage: {}",
+                    usage(name)
+                ))
+            })
         };
         match name {
             "sleep" => {
-                thread::sleep(Duration::from_secs_f64(number(1, "SECONDS")?.max(0.0)));
+                thread::sleep(number(1, "SECONDS")?);
                 Ok(json!({ "ok": true }))
             }
             "launch" => {
@@ -350,7 +359,7 @@ impl Session {
                 if !wait {
                     return Ok(reply);
                 }
-                let mut ready = self.wait_ready(300.0)?;
+                let mut ready = self.wait_ready(Duration::from_secs(300))?;
                 ready["launch"] = reply;
                 Ok(ready)
             }
@@ -378,9 +387,9 @@ impl Session {
             }
             "hunt" => {
                 let (id, timeout) = match words {
-                    [_, id] => (id.parse::<i64>().ok(), Some(30.0)),
+                    [_, id] => (id.parse::<i64>().ok(), Some(Duration::from_secs(30))),
                     [_, id, flag, s] if flag == "--timeout" => {
-                        (id.parse::<i64>().ok(), s.parse::<f64>().ok())
+                        (id.parse::<i64>().ok(), parse_seconds(s))
                     }
                     _ => (None, None),
                 };
@@ -401,8 +410,10 @@ impl Session {
                     [_, key, _] => (key.clone(), number(2, "SECONDS")?),
                     _ => return Err(Failure::usage(format!("usage: {}", usage(name)))),
                 };
+                // The duration is checked before the key goes down: a refusal
+                // later would leave it pressed.
                 self.game(&format!("key {key} down"))?;
-                thread::sleep(Duration::from_secs_f64(seconds.max(0.0)));
+                thread::sleep(seconds);
                 self.game(&format!("key {key} up"))
             }
             "logs" => logs(&self.home, &words[1..]),
@@ -410,7 +421,7 @@ impl Session {
                 let limit = if words.len() > 1 {
                     number(1, "SECONDS")?
                 } else {
-                    120.0
+                    Duration::from_secs(120)
                 };
                 self.wait_ready(limit)
             }
@@ -433,27 +444,53 @@ impl Session {
         }
     }
 
-    fn wait_ready(&mut self, limit: f64) -> Result<Value, Failure> {
-        let deadline = Instant::now() + Duration::from_secs_f64(limit.max(0.0));
+    fn wait_ready(&mut self, limit: Duration) -> Result<Value, Failure> {
+        let deadline = Instant::now() + limit;
         loop {
             let status = self.game("status")?;
-            // On a server (single player's server thread too), also the
-            // level around the player.
-            if !status["player"].is_null()
-                && status["pending_chunks"] == 0
-                && status["server"]["loaded"] != false
-            {
+            if world_ready(&status) {
                 return Ok(status);
             }
             if Instant::now() > deadline {
                 return Err(Failure {
-                    reply: json!({ "error": format!("not ready after {limit} seconds"), "status": status }),
+                    reply: json!({ "error": format!("not ready after {} seconds", limit.as_secs_f64()), "status": status }),
                     status: GAME_ERROR,
                 });
             }
             thread::sleep(Duration::from_millis(250));
         }
     }
+}
+
+/// The longest wait a command takes, in seconds (a year): `Duration` can't hold
+/// every `f64` a number parses to (`inf`, `1e30`), and a longer wait is a typo.
+const MAX_SECONDS: u64 = 365 * 24 * 3600;
+
+/// `text` as a wait: a number of seconds (below 0 counts as 0), or None when it
+/// isn't a finite number of at most `MAX_SECONDS`.
+fn parse_seconds(text: &str) -> Option<Duration> {
+    // NaN and -inf would pass `max(0.0)` as 0, so they are refused first.
+    let seconds = text.parse::<f64>().ok().filter(|s| s.is_finite())?;
+    Duration::try_from_secs_f64(seconds.max(0.0))
+        .ok()
+        .filter(|d| d.as_secs() <= MAX_SECONDS)
+}
+
+/// Whether `status` says a world has arrived: the player is in it, no chunk
+/// work waits here (`pending_chunks`), it holds the columns its render
+/// distance's view has (`view_chunks`), and the terrain has settled
+/// (`terrain_loading`: the view's outermost columns, generation, meshes,
+/// uploads or the server's backlog). A server sends a view's columns nearest
+/// first, so `pending_chunks` alone reads 0 while most of them are unsent.
+fn world_ready(status: &Value) -> bool {
+    !status["player"].is_null()
+        && status["pending_chunks"] == 0
+        && status["server"]["loaded"] != false
+        && !status["terrain_loading"].as_bool().unwrap_or(false)
+        && status["chunks"].as_u64().unwrap_or(0)
+            >= horizon_client::benchmark::view_chunks(
+                status["render_distance"].as_u64().unwrap_or(0),
+            )
 }
 
 /// Whether `look` (a `look-at entity` reply) put entity `id` under the crosshair; if not,
@@ -707,14 +744,14 @@ fn main() -> ExitCode {
                 args.remove(0);
             }
             Some("--timeout") if args.len() >= 2 => {
-                let Ok(s) = args[1].parse::<f64>() else {
+                let Some(s) = parse_seconds(&args[1]) else {
                     print(
-                        &json!({ "error": "--timeout takes seconds", "kind": "usage" }),
+                        &json!({ "error": format!("--timeout takes seconds, at most {MAX_SECONDS}"), "kind": "usage" }),
                         false,
                     );
                     return ExitCode::from(USAGE);
                 };
-                timeout = Some(Duration::from_secs_f64(s.max(0.001)));
+                timeout = Some(s.max(Duration::from_millis(1)));
                 args.drain(0..2);
             }
             Some("--api") if args.len() >= 2 => {
@@ -850,6 +887,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wait_ready_waits_for_the_view_s_chunks_and_terrain_to_settle() {
+        let status = |chunks: u64, pending: u64, loading: bool| {
+            json!({
+                "player": {"position": [0.0, 64.0, 0.0]},
+                "pending_chunks": pending,
+                "server": {"loaded": true},
+                "render_distance": 12,
+                "chunks": chunks,
+                "terrain_loading": loading,
+            })
+        };
+        // A brand-new world: nothing is queued here yet, the server is still
+        // sending the view (76 of 3725 columns in the issue's runs).
+        assert!(!world_ready(&status(0, 0, false)));
+        assert!(
+            !world_ready(&status(360, 0, false)),
+            "below view_chunks(12)"
+        );
+        // The view's columns are in, but their meshes and uploads are not.
+        assert!(!world_ready(&status(400, 0, true)));
+        assert!(!world_ready(&status(400, 1, false)));
+        // Nothing is left: the world is ready.
+        assert!(world_ready(&status(400, 0, false)));
+        // A game before `terrain_loading` existed is judged by its columns and queue.
+        let mut old = status(400, 0, false);
+        old.as_object_mut().unwrap().remove("terrain_loading");
+        assert!(world_ready(&old));
+        // No player, or a player the server has not loaded, is not ready.
+        assert!(!world_ready(&json!({
+            "pending_chunks": 0, "chunks": 400, "render_distance": 12, "server": {"loaded": true},
+        })));
+        let mut unloaded = status(400, 0, false);
+        unloaded["server"]["loaded"] = json!(false);
+        assert!(!world_ready(&unloaded));
+    }
+
+    #[test]
     fn aimed_at_names_what_is_under_the_crosshair_instead() {
         let on = json!({ "target": { "entity": { "id": 91, "type": "minecraft:sheep" } } });
         assert_eq!(aimed_at(&on, 91), Ok(()));
@@ -965,6 +1039,37 @@ mod tests {
     }
 
     #[test]
+    fn seconds_are_finite_and_bounded() {
+        assert_eq!(parse_seconds("1.5"), Some(Duration::from_millis(1500)));
+        assert_eq!(parse_seconds("-3"), Some(Duration::ZERO));
+        for bad in ["inf", "-inf", "NaN", "1e30", "31536001", "x", ""] {
+            assert_eq!(parse_seconds(bad), None, "{bad}");
+        }
+    }
+
+    /// A bad duration is a usage error before any key goes down: the key would stay pressed.
+    #[cfg(unix)]
+    #[test]
+    fn hold_with_a_bad_duration_presses_no_key() {
+        let (path, game) = fake_game("hold-bad", r#"{"ok":true}"#);
+        let home =
+            horizon_std::env::temp_dir().join(format!("horizon-ctl-hold-{}", std::process::id()));
+        let mut s = Session::new(path.clone(), Some(Duration::from_secs(5)));
+        s.home = home;
+        for bad in ["inf", "1e30"] {
+            let f = s
+                .run(&["hold".to_owned(), "w".to_owned(), bad.to_owned()])
+                .unwrap_err();
+            assert_eq!(f.status, USAGE, "{bad}");
+        }
+        drop(s);
+        // The fake game waits for a connection; give it one so it can report what it got.
+        drop(std::os::unix::net::UnixStream::connect(&path).unwrap());
+        assert!(game.join().unwrap().is_empty());
+        let _ = horizon_std::fs::remove_file(path);
+    }
+
+    #[test]
     fn script_lines_split_like_a_shell() {
         assert_eq!(
             split_line("goto 1 2 3 --near 2").unwrap(),
@@ -990,6 +1095,14 @@ mod tests {
         name: &str,
         reply: &'static str,
     ) -> (PathBuf, horizon_std::thread::JoinHandle<Vec<String>>) {
+        fake_game_with(name, move |_| reply)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn fake_game_with(
+        name: &str,
+        reply: impl Fn(&str) -> &'static str + Send + 'static,
+    ) -> (PathBuf, horizon_std::thread::JoinHandle<Vec<String>>) {
         let path =
             horizon_std::env::temp_dir().join(format!("hctl-{name}-{}.sock", std::process::id()));
         let _ = horizon_std::fs::remove_file(&path);
@@ -1001,9 +1114,10 @@ mod tests {
             let mut out = stream;
             let mut line = String::new();
             while reader.read_line(&mut line).unwrap_or(0) > 0 {
-                lines.push(line.trim_end().to_owned());
+                let command = line.trim_end();
+                writeln!(out, "{}", reply(command)).unwrap();
+                lines.push(command.to_owned());
                 line.clear();
-                writeln!(out, "{reply}").unwrap();
             }
             lines
         });

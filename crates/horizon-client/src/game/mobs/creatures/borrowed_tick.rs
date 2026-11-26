@@ -22,9 +22,15 @@ fn route_player_events(
             };
             events.insert(k, *event);
         }
-        // A hoglin broadcast carries the source's player, not the receiving
-        // hoglin's independently selected player.
+        // A hoglin broadcast or an alert carries the source's player as it is now,
+        // not the receiver's independently selected player, nor the source's
+        // binding when the batch is delivered (an earlier alert may rebind it).
         if let MobEvent::HoglinAttackTarget {
+            target: Who::Player,
+            player,
+            ..
+        }
+        | MobEvent::SetTarget {
             target: Who::Player,
             player,
             ..
@@ -78,7 +84,7 @@ pub(super) struct BorrowedMobTick<'a> {
     pub(super) laps: &'a mut horizon_client::spans::Laps,
     pub(super) uuid: Option<[i32; 4]>,
     pub(super) level_id: &'static str,
-    pub(super) round: &'a super::super::native_ticks::TickRound,
+    pub(super) round: &'a mut super::super::native_ticks::TickRound,
 }
 impl Game<'_> {
     pub(super) fn tick_borrowed_creatures(
@@ -141,6 +147,7 @@ impl Game<'_> {
         let mut positions: Option<horizon_client::fast_hash::FxHashMap<u32, usize>> = None;
         let mut index = horizon_client::fast_hash::FxHashMap::<u32, u32>::default();
         let mut villager_slots = Vec::new();
+        let mut village = horizon_client::mobs::village_index::VillageIndex::default();
         let mut solid_slots = Vec::new();
         let mut species_slots = horizon_client::mobs::species_slots::SpeciesSlots::new(&snapshot);
         for (i, s) in snapshot.iter().enumerate() {
@@ -162,9 +169,12 @@ impl Game<'_> {
         let mut resume_was_on_fire = false;
         let mut resume_sampled = None;
         let mut resume_guest = None;
+        let mut pre_done_for: Option<u32> = None;
         loop {
             let mut pause = None;
             let mut retry_rider = None;
+            let mut tick_pre_each: Option<(u32, Arc<horizon_client::mobs::MobType>)> = None;
+            let mut tick_post_each: Option<(u32, Arc<horizon_client::mobs::MobType>)> = None;
             // A mob's list is lifted while its world view is borrowed.  Once a
             // position write was captured, stop after this mob, restore the
             // list, and tell its writes while the live row is readable.
@@ -203,6 +213,7 @@ impl Game<'_> {
                         Some(positions) => {
                             let Some(&i) = positions.get(&snapshot[slot].id) else {
                                 keep[slot] = false;
+                                village.mark(slot, &snapshot[slot], &snapshot[slot]);
                                 snapshot[slot].alive = false;
                                 // The row's mob left the list at a boundary: the
                                 // tick view must answer a removed handle with nothing.
@@ -224,6 +235,7 @@ impl Game<'_> {
                     }
                     if m.removed && !resuming {
                         keep[slot] = false;
+                        village.mark(slot, &snapshot[slot], &snapshot[slot]);
                         snapshot[slot].alive = false;
                         // `removed` is the view's authoritative gone: a dead body
                         // that is still in the level keeps resolving (arismoko/horizon#795).
@@ -232,6 +244,86 @@ impl Game<'_> {
                         continue;
                     }
                     let (bx, bz) = (m.position.x.floor() as i32, m.position.z.floor() as i32);
+                    let each_mob = round.each(&m.kind.id);
+                    if each_mob
+                        && !resuming
+                        && !retried
+                        && pre_done_for != Some(m.id)
+                        && !round.canceled(m.id)
+                        && base.world.loaded(bx, bz)
+                        && ticking(bx, bz)
+                    {
+                        tick_pre_each = Some((m.id, m.kind.clone()));
+                        break;
+                    }
+                    let post_each = each_mob.then(|| (m.id, m.kind.clone()));
+                    if !resuming
+                        && !retried
+                        && m.species() == horizon_client::mobs::Species::Mannequin
+                        && m.extra.static_env_stamp
+                            == Some((
+                                base.world.revision,
+                                [
+                                    m.position.x.to_bits(),
+                                    m.position.y.to_bits(),
+                                    m.position.z.to_bits(),
+                                ],
+                                [m.width().to_bits(), m.height().to_bits()],
+                            ))
+                        && !mod_api::__private::listened(mod_api::HookId::LivingChangeTarget)
+                    {
+                        if !base.world.loaded(bx, bz) || !ticking(bx, bz) {
+                            keep[slot] = true;
+                            cursor += 1;
+                            continue;
+                        }
+                        if round.canceled(m.id) {
+                            m.despawn = mod_api::Despawn::default();
+                            cursor += 1;
+                            continue;
+                        }
+                        let bounds = m.bounds();
+                        let reach = (16.0 * f64::from(m.model_scale().max(1.0))).powi(2);
+                        let near_player = |pos: Vec3| {
+                            let dx = pos.x - m.position.x;
+                            let dy = pos.y - m.position.y;
+                            let dz = pos.z - m.position.z;
+                            dx * dx + dy * dy + dz * dz < reach
+                        };
+                        let player_near = nearest
+                            .nearest(m.position.x, m.position.y, m.position.z)
+                            .is_some_and(|p| near_player(p.position))
+                            || base.player.as_ref().is_some_and(|p| {
+                                p.alive && !p.spectator && near_player(p.position)
+                            });
+                        let clear_of_mobs = !pushes.has_for(m.id)
+                            && !grid.any_in(bounds, snapshot.len(), |idx| {
+                                let o = &snapshot[idx as usize];
+                                o.id != m.id && o.alive && o.pushable && o.bounds.intersects(bounds)
+                            });
+                        if !player_near
+                            && clear_of_mobs
+                            && m.is_static_mannequin()
+                            && m.position.y >= f64::from(base.world.bottom_y() - 64)
+                        {
+                            m.despawn = mod_api::Despawn::default();
+                            super::super::inventory_tick::equipment_inventory_tick(
+                                &self.world,
+                                self.res.facts(),
+                                level_id,
+                                &mut m.extra.equipment,
+                            );
+                            if horizon_client::mobs::ai::tick_static_mannequin(
+                                m,
+                                base.world.revision,
+                                base.world.bottom_y(),
+                            ) {
+                                ticked.insert(m.id);
+                                cursor += 1;
+                                continue;
+                            }
+                        }
+                    }
                     let seen_guest = if resuming {
                         resume_guest
                     } else if guests.is_empty() {
@@ -300,6 +392,7 @@ impl Game<'_> {
                                     others_grid: Some(&grid),
                                     others_index: Some(&index),
                                     others_villagers: Some(&villager_slots),
+                                    village: Some(&village),
                                     species_slots: Some(&species_slots),
                                     others_solid: Some(&solid_slots),
                                     live_mobs: None,
@@ -443,6 +536,7 @@ impl Game<'_> {
                         others_grid: Some(&grid),
                         others_index: Some(&index),
                         others_villagers: Some(&villager_slots),
+                        village: Some(&village),
                         species_slots: Some(&species_slots),
                         others_solid: Some(&solid_slots),
                         difficulty,
@@ -640,6 +734,7 @@ impl Game<'_> {
                     // ServerLevel ticks entities one after another: the ones
                     // after this mob see it as it is now.
                     let fresh = seen(m, uuid, world_items!(self));
+                    village.mark(slot, &snapshot[slot], &fresh);
                     let reclassified = snapshot[slot].species != fresh.species;
                     snapshot[slot] = fresh;
                     if reclassified {
@@ -656,12 +751,21 @@ impl Game<'_> {
                         from,
                     );
                     cursor += 1;
+                    if let Some(post) = post_each {
+                        tick_post_each = Some(post);
+                        break;
+                    }
                     if section_yield {
                         break;
                     }
                 }
             }
-            if pause.is_none() && retry_rider.is_none() && !section_yield {
+            if pause.is_none()
+                && retry_rider.is_none()
+                && !section_yield
+                && tick_pre_each.is_none()
+                && tick_post_each.is_none()
+            {
                 break;
             }
             // No MobWorld, DamageLevel or navigation loan crosses this boundary.
@@ -702,6 +806,21 @@ impl Game<'_> {
                     self.dismount_mob(id);
                 } else if let Some(decision) = pause.as_ref() {
                     self.apply_fox_consumption(decision);
+                } else if let Some((id, kind)) = tick_pre_each.take() {
+                    let mut canceled = false;
+                    self.native_entity_tick_pre(self.dim.id(), id, &kind.id, &mut canceled);
+                    if canceled {
+                        round.cancel(id);
+                    } else {
+                        pre_done_for = Some(id);
+                        if mod_api::__private::listened(mod_api::HookId::CanContinueSleeping)
+                            && let Some(idx) = self.mobs.iter().position(|m| m.id == id)
+                        {
+                            self.sync_sleeping_mob(idx);
+                        }
+                    }
+                } else if let Some((id, kind)) = tick_post_each.take() {
+                    self.native_entity_tick_post(self.dim.id(), id, &kind.id);
                 }
             }))
             .err();
@@ -753,6 +872,7 @@ impl Game<'_> {
                 }
             }
             villager_slots.clear();
+            village = horizon_client::mobs::village_index::VillageIndex::default();
             species_slots = horizon_client::mobs::species_slots::SpeciesSlots::new(&snapshot);
             solid_slots.clear();
             for (slot, s) in snapshot.iter().enumerate() {
@@ -770,7 +890,9 @@ impl Game<'_> {
                 path_writes.append(writes);
             }
             lent = horizon_client::health::LentLevel::take(&mut self.world);
-            resuming = retry_rider.is_none() && !section_yield;
+            // Only a consumption pause stopped a mob mid-tick: a per-entity Pre yields
+            // before the mob's tick starts and a Post after it ends, so neither resumes.
+            resuming = pause.is_some() && retry_rider.is_none() && !section_yield;
             retried_rider = retry_rider;
         }
         laps.lap("creature_loop");
@@ -988,6 +1110,37 @@ mod hoglin_routing_tests {
                 player, ..
             } if player == expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod alert_routing_tests {
+    use super::*;
+
+    /// Player 12 hit zombified piglin 9001 and player 13 hit 9002 before one tick. 9001's
+    /// tick alerts 9002, and 9002's alerts 9003. The batch is delivered after the tick, so
+    /// 9001's alert has rebound 9002 to player 12 by the time 9002's alert is applied; vanilla
+    /// hands each alerted mob `getLastHurtByMob()` as it alerts, so 9003 still goes for 13.
+    #[test]
+    fn two_attackers_in_one_tick_each_alert_carries_its_own() {
+        let mut events = Vec::new();
+        for (source, seen, alerted) in [(9001, Some(12), 9002), (9002, Some(13), 9003)] {
+            let from = events.len();
+            events.push(MobEvent::SetTarget {
+                mob: alerted,
+                target: Who::Player,
+                player: None,
+            });
+            route_player_events(&mut events, from, seen, &[], &mut Vec::new(), source);
+        }
+        let carried: Vec<(u32, Option<u32>)> = events
+            .iter()
+            .map(|e| match e {
+                MobEvent::SetTarget { mob, player, .. } => (*mob, *player),
+                other => panic!("an alert stays an alert: {other:?}"),
+            })
+            .collect();
+        assert_eq!(carried, [(9002, Some(12)), (9003, Some(13))]);
     }
 }
 

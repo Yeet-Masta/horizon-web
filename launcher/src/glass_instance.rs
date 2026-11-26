@@ -7,7 +7,7 @@ use super::*;
 use crate::glass_ui::{self as ui, white};
 use horizon_launcher::instances::{self, Channel, Icon, Instance};
 use horizon_launcher::loaders::Kind as Loader;
-use horizon_launcher::nightly::{stable_builds, StableBuild};
+use horizon_launcher::nightly::{latest_for, stable_builds, StableBuild};
 use horizon_theme::glass::{fill, ink, radius};
 use new_instance::{NewKind, VersionList};
 use servers_page::Field;
@@ -272,23 +272,27 @@ impl Launcher {
         d.pin.clone().or_else(|| self.followed_version(d.channel))
     }
 
-    /// The version an instance that keeps none plays: on Stable the newest stable build (Create
-    /// installs it), on Nightly the launcher's, or with none installed yet, the newest Nightly.
+    /// The installed version an unpinned draft plays today.
     fn followed_version(&self, channel: Channel) -> Option<String> {
-        let nightly = || {
-            self.launcher_version()
-                .cloned()
-                .or_else(|| self.horizon_choices().into_iter().next())
-        };
-        match channel {
-            Channel::Stable => self
-                .stable_builds()
-                .into_iter()
-                .next()
-                .map(|b| b.tag)
-                .or_else(nightly),
-            Channel::Nightly => nightly(),
+        latest_for(channel, &self.installed, self.settings.selected.as_deref())
+    }
+
+    /// A saved pin may need a download. Saving on Stable can also fetch the offered build,
+    /// or when nothing is installed, saving on either channel can fetch its first build.
+    pub(super) fn draft_download(&self) -> Option<Release> {
+        let draft = self.instances.dialog.as_ref()?;
+        let tag = match (&draft.pin, draft.channel) {
+            (Some(tag), _) => Some(tag.clone()),
+            (None, Channel::Stable) => self.stable_builds().into_iter().next().map(|b| b.tag),
+            (None, Channel::Nightly) => None,
         }
+        .or_else(|| {
+            self.installed
+                .is_empty()
+                .then(|| self.horizon_choices().into_iter().next())
+                .flatten()
+        })?;
+        self.release_to_install(&tag)
     }
 
     /// The Stable channel's builds, newest first (none until the release list is here).
@@ -302,11 +306,10 @@ impl Launcher {
     /// Whether Home's Stable update has to wait: another download runs or is queued, and the
     /// update never replaces it.
     pub(super) fn stable_update_waits(&self) -> bool {
-        self.installing.is_some() || self.install_next.is_some()
+        self.installing.is_some() || !self.install_queue.is_empty()
     }
 
-    /// Home's Stable update: installed for the instance, so the version picked on Versions, which
-    /// Nightly instances follow, stays; never while another download runs or is queued.
+    /// Home's Stable update is installed for the instance when no other download is pending.
     pub(super) fn install_stable_update(&mut self, release: Release) {
         if !self.stable_update_waits() {
             self.stable_install = Some(release.clone());
@@ -790,12 +793,6 @@ fn native_base(tag: &str) -> Option<String> {
     })
 }
 
-/// A build's commit, for the details under its name: `4baa571` of `nightly-2026-10-29-4baa571`.
-fn version_commit(tag: &str) -> Option<&str> {
-    horizon_launcher::nightly::date_of(tag)?;
-    tag.get(17..).filter(|c| !c.is_empty())
-}
-
 impl Launcher {
     /// The right column: the title, what the instance plays, its name and group, its icon, and
     /// the foot.
@@ -1091,30 +1088,13 @@ impl Launcher {
                 });
             },
         );
-        // Latest on Nightly plays the version picked on Versions: an older one Use picked is
-        // named, never called the latest.
-        let held = self
-            .held_version()
-            .filter(|_| channel == Channel::Nightly)
-            .map(|tag| self.version_name(tag));
-        // The way back through Versions is only for an instance following Latest, not one that
-        // keeps its own build.
-        let note =
-            ui::text(13., FontWeight::NORMAL, ink::QUIET)
-                .child(match (channel, held.as_ref().filter(|_| pin.is_none())) {
-                (Channel::Stable, _) => tr("One build a week, fewer surprises").to_string(),
-                (Channel::Nightly, None) => tr("Every day's build: newest, may break").to_string(),
-                (Channel::Nightly, Some(_)) => tr(
-                    "Every day's build. Another version was picked on Versions: press Use on the \
-                     newest there to follow new ones again.",
-                )
-                .to_string(),
-            });
-        let current = match (&pin, &held) {
-            (None, Some(held)) => trf("{version} (picked on Versions)", &[("version", held)]),
-            (None, None) => tr("Latest").to_string(),
-            (Some(p), _) => name(p),
-        };
+        let note = ui::text(13., FontWeight::NORMAL, ink::QUIET).child(match channel {
+            Channel::Stable => tr("One build a week, fewer surprises"),
+            Channel::Nightly => tr("Every day's build: newest, may break"),
+        });
+        let current = pin
+            .as_deref()
+            .map_or_else(|| tr("Latest").to_string(), name);
         let button = keyboard(
             div()
                 .id("horizon-version-menu")
@@ -1159,17 +1139,20 @@ impl Launcher {
                     cx.notify();
                 }))
         };
+        let details = self.followed_version(channel).map_or_else(
+            || tr("No version installed").to_string(),
+            |tag| {
+                trf(
+                    "Now {version}. Moves to each new one.",
+                    &[("version", &name(&tag))],
+                )
+            },
+        );
         let mut rows = vec![row(
             "horizon-version-latest".into(),
             pin.is_none(),
-            tr("Latest").into(),
-            match &held {
-                Some(held) => trf(
-                    "Playing {version}, picked on Versions",
-                    &[("version", held)],
-                ),
-                None => tr("Moves to each new one").into(),
-            },
+            tr("Latest").to_string(),
+            details,
             None,
         )];
         for tag in &builds {
@@ -1177,7 +1160,9 @@ impl Launcher {
                 format!("horizon-version-{tag}"),
                 pin.as_ref() == Some(tag),
                 name(tag),
-                version_commit(tag).unwrap_or_default().to_string(),
+                horizon_launcher::nightly::commit_of(tag)
+                    .unwrap_or_default()
+                    .to_string(),
                 Some(tag.clone()),
             ));
         }

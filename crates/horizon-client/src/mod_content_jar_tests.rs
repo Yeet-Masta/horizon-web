@@ -1,6 +1,6 @@
 use super::*;
 use crate::datapack::{self, DataPack, DataStore};
-use horizon_mod_package::manifest::MissingJar;
+use horizon_mod_package::manifest::{MissingJar, Side};
 use std::io::Write as _;
 
 struct Fixture(PathBuf);
@@ -265,7 +265,7 @@ fn changing_jar_list_or_order_rebuilds_and_missing_after_compose_keeps_the_old_r
             .clone();
     assert_ne!(shortened, reversed);
     assert_eq!(shortened_source.read(path).unwrap(), b"b");
-    check_jars(&shortened, &store).unwrap();
+    check_jars(&shortened, &store, Side::Client).unwrap();
     let relabeled = JarRef::new(b.id().into(), "2".into(), b.sha512().into()).unwrap();
     mods[0].jars[0] = relabeled.clone();
     let versioned = resource_root_fixture(&base, &store, &mods, &cache).unwrap();
@@ -287,7 +287,7 @@ fn changing_jar_list_or_order_rebuilds_and_missing_after_compose_keeps_the_old_r
     assert_eq!(missing.path, b.cache_path(&store));
     assert_eq!(fs::read_dir(&cache).unwrap().count(), before);
     assert_eq!(shortened_source.read(path).unwrap(), b"b");
-    let error = check_jars(&shortened, &store).unwrap_err();
+    let error = check_jars(&shortened, &store, Side::Client).unwrap_err();
     let JarInputsError::Missing(accepted_missing) = error else {
         panic!("expected typed missing accepted input, got {error:?}");
     };
@@ -298,13 +298,93 @@ fn changing_jar_list_or_order_rebuilds_and_missing_after_compose_keeps_the_old_r
 }
 
 #[test]
+fn a_jar_take_list_keeps_only_its_prefixes_from_both_packs_and_a_server_skips_a_client_only_jar() {
+    let f = Fixture::new("take");
+    let recipe = r#"{"type":"minecraft:crafting_shapeless","ingredients":["minecraft:stone"],"result":{"id":"minecraft:dirt","count":1}}"#;
+    let whole = f.jar(
+        "original",
+        'a',
+        &[
+            ("assets/original/lang/en_us.json", r#"{"a":"b"}"#),
+            ("assets/original_extra/lang/en_us.json", r#"{"c":"d"}"#),
+            ("assets/minecraft/atlases/blocks.json", r#"{"sources":[]}"#),
+            ("assets/minecraft/models/block/stone.json", "{}"),
+            ("data/original/recipe/probe.json", recipe),
+            ("data/foreign/recipe/probe.json", recipe),
+            ("data/c/tags/item/ingots.json", r#"{"values":[]}"#),
+        ],
+    );
+    let assets_only = whole
+        .clone()
+        .with_take(vec![
+            "assets/original".into(),
+            "assets/minecraft/atlases".into(),
+        ])
+        .unwrap();
+    let base = f.0.join("base");
+    let store = f.0.join("jars");
+    let cache = f.0.join("cache");
+    let mut mods = vec![f.content("alpha", &[], vec![assets_only.clone()])];
+    let root = resource_root_fixture(&base, &store, &mods, &cache).unwrap();
+    let resources = resolved_resources(&base, root.clone(), &store, &mods, cache.clone()).unwrap();
+    let assets = resources.source();
+    assert!(assets.contains("assets/original/lang/en_us.json"));
+    assert!(assets.contains("assets/minecraft/atlases/blocks.json"));
+    assert!(!assets.contains("assets/original_extra/lang/en_us.json"));
+    assert!(!assets.contains("assets/minecraft/models/block/stone.json"));
+    for path in [
+        "data/original/recipe/probe.json",
+        "data/foreign/recipe/probe.json",
+        "data/c/tags/item/ingots.json",
+    ] {
+        assert!(!resources.data().contains(path), "{path}");
+        assert!(!assets.contains(path), "{path}");
+    }
+
+    // Taking one data namespace layers it in the data pack, and nothing else of `data/`;
+    // the changed list builds a new root.
+    mods[0].jars[0] = whole
+        .clone()
+        .with_take(vec!["assets/original".into(), "data/original".into()])
+        .unwrap();
+    let with_data = resource_root_fixture(&base, &store, &mods, &cache).unwrap();
+    assert_ne!(with_data, root);
+    let resources =
+        resolved_resources(&base, with_data.clone(), &store, &mods, cache.clone()).unwrap();
+    assert!(resources.data().contains("data/original/recipe/probe.json"));
+    assert!(!resources.data().contains("data/foreign/recipe/probe.json"));
+    assert!(
+        !resources
+            .source()
+            .contains("assets/minecraft/atlases/blocks.json")
+    );
+
+    // The accepted inputs record the client-only side; a server's reload check, which never
+    // needed the file, ignores it gone, while a client's still refuses.
+    let accepted: Vec<horizon_mod_package::manifest::JarRequirement> =
+        serde_json::from_slice(&fs::read(root.join(JAR_INPUTS)).unwrap()).unwrap();
+    assert_eq!(accepted[0].side, Side::Client);
+    assert_eq!(accepted[0].jar, whole);
+    fs::remove_file(whole.cache_path(&store)).unwrap();
+    check_jars(&root, &store, Side::Server).unwrap();
+    assert!(matches!(
+        check_jars(&root, &store, Side::Client),
+        Err(JarInputsError::Missing(_))
+    ));
+    assert!(matches!(
+        check_jars(&with_data, &store, Side::Server),
+        Err(JarInputsError::Missing(_))
+    ));
+}
+
+#[test]
 fn accepted_jar_inputs_distinguish_unreadable_invalid_and_non_file_cache_entries() {
     let fixture = Fixture::new("accepted-input-errors");
     let root = fixture.0.join("accepted");
     let store = fixture.0.join("jars");
     fixture.write(&format!("accepted/{MARKER}"), "{}");
     let path = root.join(JAR_INPUTS);
-    let error = check_jars(&root, &store).unwrap_err();
+    let error = check_jars(&root, &store, Side::Client).unwrap_err();
     assert!(matches!(
         error,
         JarInputsError::Io { path: failed, source }
@@ -313,7 +393,7 @@ fn accepted_jar_inputs_distinguish_unreadable_invalid_and_non_file_cache_entries
 
     fixture.write(&format!("accepted/{JAR_INPUTS}"), "[");
     assert!(matches!(
-        check_jars(&root, &store).unwrap_err(),
+        check_jars(&root, &store, Side::Client).unwrap_err(),
         JarInputsError::Invalid { path: failed, .. } if failed == path
     ));
 
@@ -321,6 +401,7 @@ fn accepted_jar_inputs_distinguish_unreadable_invalid_and_non_file_cache_entries
     let requirements = [horizon_mod_package::manifest::JarRequirement {
         owners: vec!["alpha".into(), "beta".into()],
         jar: jar.clone(),
+        side: Side::Both,
     }];
     fixture.write(
         &format!("accepted/{JAR_INPUTS}"),
@@ -328,7 +409,7 @@ fn accepted_jar_inputs_distinguish_unreadable_invalid_and_non_file_cache_entries
     );
     fs::create_dir_all(jar.cache_path(&store)).unwrap();
     assert!(matches!(
-        check_jars(&root, &store).unwrap_err(),
+        check_jars(&root, &store, Side::Client).unwrap_err(),
         JarInputsError::Io { path: failed, source }
             if failed == store && source.kind() == std::io::ErrorKind::InvalidInput
     ));
@@ -474,8 +555,8 @@ fn a_biome_modifier_declared_in_code_applies_to_the_root_biomes() {
     fs::remove_dir_all(scratch).unwrap();
 }
 
-/// `add_carvers` and `remove_carvers` edit a biome's `carvers`; a carver the root lacks is
-/// skipped with a warning.
+/// `add_carvers` and `remove_carvers` edit a biome's `carvers`, a mod's own carvers included;
+/// a carver the root lacks is skipped with a warning.
 #[test]
 fn carver_modifiers_edit_the_biomes_carvers() {
     let base = biome_base("biome-modifiers-carvers");
@@ -501,7 +582,7 @@ fn carver_modifiers_edit_the_biomes_carvers() {
         r##"{"temperature":0.8,"carvers":"#zinc:caves"}"##.into(),
     );
     fs::write(&path, serde_json::to_string(&bundle).unwrap()).unwrap();
-    let m = zinc_mod(
+    zinc_mod(
         &scratch.join("zinc"),
         &[
             (
@@ -516,7 +597,28 @@ fn carver_modifiers_edit_the_biomes_carvers() {
                 "missing",
                 r#"{"type":"neoforge:add_carvers","biomes":"minecraft:desert","carvers":"zinc:none"}"#,
             ),
+            (
+                "vent",
+                r#"{"type":"neoforge:add_carvers","biomes":"minecraft:desert","carvers":"zinc:vent"}"#,
+            ),
         ],
+    );
+    // The mod's own carver, which only the merged bundle has: shaped as 26.3's
+    // cave, since one the world can't decode is left out.
+    let m = folder_mod(
+        &scratch.join("zinc"),
+        &[(
+            "data/zinc/worldgen/carver/vent.json",
+            r#"{"type":"minecraft:cave","probability":0.15,"weird_thickness_bias":true,
+                "y":{"type":"minecraft:uniform","min_inclusive":{"above_bottom":8},
+                    "max_inclusive":{"absolute":180}},
+                "count":{"type":"minecraft:very_biased_to_bottom","min_inclusive":0,"max_inclusive":14},
+                "floor_level":{"type":"minecraft:uniform","min_inclusive":-1.0,"max_exclusive":-0.4},
+                "horizontal_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.7,"max_exclusive":1.4},
+                "vertical_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.8,"max_exclusive":1.3},
+                "room_vertical_radius_multiplier":{"type":"minecraft:uniform","min_inclusive":0.1,"max_exclusive":0.9},
+                "thickness":{"type":"minecraft:trapezoid","min":0.0,"max":3.0,"plateau":1.0}}"#,
+        )],
     );
     let out = scratch.join("out");
     let warnings = build_fixture(&base, &base.join("jars"), &[m], &out).unwrap();
@@ -525,7 +627,10 @@ fn carver_modifiers_edit_the_biomes_carvers() {
     let carvers = |id: &str| {
         serde_json::from_str::<serde_json::Value>(&after[id]).unwrap()["carvers"].clone()
     };
-    assert_eq!(carvers("minecraft:desert"), serde_json::json!(["zinc:pit"]));
+    assert_eq!(
+        carvers("minecraft:desert"),
+        serde_json::json!(["zinc:pit", "zinc:vent"])
+    );
     assert_eq!(carvers("minecraft:plains"), serde_json::json!([]));
     assert!(
         warnings

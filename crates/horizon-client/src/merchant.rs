@@ -191,6 +191,9 @@ pub struct Session {
     pub level: i32,
     /// A villager (progress bar, restocks, level-ups), not a wandering trader.
     pub villager: bool,
+    /// `Merchant.isClientSide`: a server's merchant on its client
+    /// (`ClientSideMerchant`), which only predicts a trade's use and xp.
+    pub client_side: bool,
     /// `minecraft:` ids of the profession and villager type.
     pub profession: String,
     pub variant: String,
@@ -219,6 +222,7 @@ impl Session {
             xp: 0,
             level: 1,
             villager,
+            client_side: false,
             profession: String::new(),
             variant: "minecraft:plains".into(),
             random: horizon_core::random::LegacyRandom::new(0),
@@ -264,6 +268,12 @@ impl Session {
             return false;
         };
         offer.uses += 1;
+        if self.client_side {
+            // `ClientSideMerchant.notifyTrade`, then `MerchantResultSlot.onTake`'s
+            // `overrideXp`: the server rewards the trade and says so.
+            self.xp += offer.xp;
+            return false;
+        }
         let offer = offer.clone();
         self.ambient_sound_time = -80;
         self.events
@@ -320,9 +330,9 @@ impl Session {
         self.sequences.insert(sequence, random);
         out
     }
-    /// `AbstractVillager.notifyTradeUpdated`.
+    /// `AbstractVillager.notifyTradeUpdated` (`ClientSideMerchant`'s says nothing).
     pub fn notify_trade_updated(&mut self, has_result: bool) {
-        if self.ambient_sound_time > -80 + 20 {
+        if !self.client_side && self.ambient_sound_time > -80 + 20 {
             self.ambient_sound_time = -80;
             let pitch = self.voice_pitch();
             self.events.push(Event::TradeUpdated(has_result, pitch));

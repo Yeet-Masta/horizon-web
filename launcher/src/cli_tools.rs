@@ -44,6 +44,10 @@ pub const DESTRUCTIVE: &[&str] = &[
     "unshare-log",
     // It sets shell commands the next Play runs: the player says yes first.
     "instance launch",
+    // They decide what the next Play runs or joins: --server HOST, --control, --smoke-report PATH
+    // as game arguments, and a Java home or JVM arguments (-javaagent) that run code.
+    "game-args",
+    "instance java",
 ];
 
 /// Commands that send something or reach other people: only when the player asks.
@@ -256,7 +260,7 @@ impl Tool {
 #[cfg(test)]
 fn session_tool(words: &str) -> &'static str {
     match words {
-        "play" => "`play`, then the `game_*` tools",
+        "play" => "`play` (its `arg` needs `confirm: true`), then the `game_*` tools",
         "server" => "`server`, `server_command`, `server_log`, `server_stop`",
         "account sign-in" => "`account_sign_in`",
         "account list" => "`account_list`",
@@ -278,7 +282,7 @@ arguments are the command's, in snake_case. A tool runs the command with `--json
 The tools that change the player's things for good need `confirm: true`. \
 The tools that send something or reach other people say \"only when the player asks\". \
 The game's own tools, `game_*`, are in [horizon-ctl-commands.md](horizon-ctl-commands.md). \
-For unsigned developer installations only, `HORIZON_LAUNCHER_DEVELOPER_OFFLINE=1` enables account-free Play. Only the exact value `1` enables it. The installed base must have persisted developer provenance, and the selected game must advertise `--developer-single-player` through `--launch-api`; older games must be rebuilt and reinstalled. Signed releases, Nightlies and their native descendants keep the account check. This mode supplies no session, blocks normal external connections and LAN hosting, and preserves managed launch leases, instance settings and unsigned labels. It is not a sandbox for native mods. If direct execution reports unregistered cache directories, use Horizon Launcher Play from the same launcher data directory with the intended instance and installed version (`horizon-launcher play --instance <instance> --version <tag>`).\n\n\
+For unsigned developer installations only, `HORIZON_LAUNCHER_DEVELOPER_OFFLINE=1` enables account-free Play. Only the exact value `1` enables it. The installed base must have persisted developer provenance, and the selected game must advertise `--developer-single-player` through `--launch-api`; older games must be rebuilt and reinstalled. Signed releases, Nightlies and their native descendants keep the account check. This mode supplies no session, blocks normal external connections and LAN hosting, and preserves managed launch leases, instance settings and unsigned labels. It is not a sandbox for native mods. If the game says a folder isn't registered by the launcher, start it with Play from the same launcher data directory, with the intended instance and installed version (`horizon-launcher play --instance <instance> --version <tag>`).\n\n\
 With No AI on, `mcp` and `agent-config` are hidden and refuse; every other command stays. See [agent-control.md](agent-control.md#no-ai).\n\n",
     );
     let mut rows = Vec::new();
@@ -503,6 +507,26 @@ mod tests {
                 .argv(&json!({ "tag": "v1", "confirm": true }))
                 .unwrap(),
             ["remove", "v1"]
+        );
+        // What the next Play runs or joins is the player's to agree to, as `instance launch` is.
+        for name in ["game_args", "instance_java"] {
+            let t = tool(name);
+            assert_eq!(t.describe()["annotations"]["destructiveHint"], true);
+            assert!(
+                t.argv(&json!({ "instance": "x" }))
+                    .unwrap_err()
+                    .contains("confirm"),
+                "{name}"
+            );
+        }
+        assert!(tool("game_args")
+            .argv(&json!({ "args": "--server evil.example:25565" }))
+            .is_err());
+        assert_eq!(
+            tool("game_args")
+                .argv(&json!({ "args": "--server-thread", "confirm": true }))
+                .unwrap(),
+            ["game-args", "--server-thread"]
         );
         for words in DESTRUCTIVE.iter().chain(OPEN_WORLD) {
             assert!(

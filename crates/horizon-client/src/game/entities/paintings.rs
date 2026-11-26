@@ -300,6 +300,8 @@ impl Game<'_> {
         if self.hanging_place_cancelled("minecraft:painting", pos) {
             return true;
         }
+        // The item's `entity_data` is a compound `Entity.load` reads, `Tags` included.
+        Self::normalize_loaded_tags(&mut raw);
         self.persist.raw.insert(candidate.id, raw);
         let (lo, hi) = candidate.bounds();
         let at = [
@@ -456,10 +458,14 @@ impl Game<'_> {
     /// PaintingRenderer: the variant on the front, the back texture behind and
     /// on the edges.
     pub(super) fn painting_geometry(&self, camera: glam::DVec3, out: &mut Vec<Vertex>) {
+        if self.paintings.is_empty() {
+            return;
+        }
         let sprites = &self.gui.atlas.sprites;
         let Some(back) = sprites.get("painting/back").copied() else {
             return;
         };
+        let mut key = String::with_capacity(32);
         for p in &self.paintings {
             // EntityRenderer.shouldRender: the default range and its box,
             // measured from the box's centre (HangingEntity's position).
@@ -476,7 +482,10 @@ impl Game<'_> {
             let Some(v) = self.painting_variants.get(&p.variant) else {
                 continue;
             };
-            let Some(front) = sprites.get(&format!("painting/{}", v.asset)).copied() else {
+            key.clear();
+            key.push_str("painting/");
+            key.push_str(&v.asset);
+            let Some(front) = sprites.get(key.as_str()).copied() else {
                 continue;
             };
             let (lo, hi) = p.bounds();

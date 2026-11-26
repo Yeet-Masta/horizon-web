@@ -25,7 +25,6 @@
 - [Registry keys](concepts/registry-keys.md)
 - [Wire types](concepts/wire-types.md)
 - [Dependencies between mods](concepts/dependencies.md)
-- [Injections](concepts/injections.md)
 - [The native route](concepts/native-route.md)
 - [Testing a mod](concepts/testing.md)
 
@@ -40,6 +39,7 @@
 - [Items, recipes and loot](how-to/items.md)
 - [Entities, players and commands](how-to/entities.md)
 - [Client, rendering and sound](how-to/client.md)
+  - [Export a video](how-to/client/video-export.md)
 
 # Reference
 

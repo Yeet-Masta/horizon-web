@@ -37,6 +37,38 @@ pub trait EntitiesHost {
     /// dimension the server hasn't loaded. API 373.
     #[access(WorldOnly)]
     fn level(&self, dimension: &str) -> Option<LevelRef>;
+    /// Side: server.
+    /// Whether the entity is still in the world and not removed (`Entity.isValid`): a mob queued for
+    /// removal, a frame or painting broken, and a stale handle are not valid. Only the handle's
+    /// entity is asked about; the answer changes nothing.
+    #[access(WorldOnly)]
+    fn entity_is_valid(&self, entity: EntityRef) -> bool;
+    /// Side: both.
+    /// Whether `id` names an entity type in the game's registry (`EntityType.byString` finds it),
+    /// such as `minecraft:zombie` or a mod's type. The check is literal: `id` is compared as
+    /// written, with its namespace (a bare `zombie` is not in the registry). The answer comes
+    /// from the loaded entity-type registry, which loads with the first world, so it is false
+    /// while no world has loaded it. Use it to validate a configured id before a mod acts on it,
+    /// for example whitelist or blacklist entries, which the game drops when unknown.
+    #[access(Metadata)]
+    fn entity_type_exists(&self, id: &str) -> bool;
+    /// Side: both.
+    /// Whether the entities of type `id` are `Enemy`s (`instanceof Enemy`), which a type's
+    /// class decides, not its category: the monsters, the slimes and magma cubes, the ghast,
+    /// phantom, shulker, hoglin and the ender dragon; not the zombie horse, camel husk or zombie
+    /// nautilus, though they are in the monster category. Golems and conduits pick their targets
+    /// by it, and spawn-control mods their hostile mobs. `id` is compared as written, as
+    /// `entity_type_exists` does; false for every other type and an unknown id.
+    #[access(WorldOnly)]
+    fn entity_type_is_enemy(&self, id: &str) -> bool;
+    /// Side: both.
+    /// Whether the entities of type `id` are `Animal`s (`instanceof Animal`): the mobs whose
+    /// class extends vanilla's `Animal`, the hoglin and the zombie horse included, the fish,
+    /// squids, dolphins, villagers and golems not. Spawn-control mods count passive mobs by it
+    /// (an `Animal` that is no `Enemy`). `id` is compared as written; false for every other type
+    /// and an unknown id.
+    #[access(WorldOnly)]
+    fn entity_type_is_animal(&self, id: &str) -> bool;
 }
 /// The server host's methods of the `entities` area, implemented by the game and reached through [`ServerHost`].
 #[horizon_mod_api_macros::host_area]
@@ -146,9 +178,16 @@ pub trait EntitiesBackend {
     /// False for a stale handle or on a client.
     #[access(WorldOnly)]
     fn entity_added_to_level(&self, entity: EntityRef) -> bool;
+    /// Side: server.
+    /// The online players currently tracking this entity (in its level or via a viewed level),
+    /// in the order the server keeps its players. Does not include the entity itself when it is
+    /// a player. None on a client, for a stale handle, or for an invalid/removed entity.
+    #[access(WorldOnly)]
+    fn entity_trackers(&self, entity: EntityRef) -> Option<Vec<PlayerRef>>;
     /// Side: both.
     /// The entity's position (`Entity.position`): its feet, the middle of
-    /// its box for a painting or an item frame.
+    /// its box for a painting or an item frame. A client display reports the
+    /// current interpolation tick's position.
     #[access(WorldOnly)]
     fn entity_position(&self, entity: EntityRef) -> Option<[f64; 3]>;
     /// Side: server.
@@ -161,9 +200,10 @@ pub trait EntitiesBackend {
     /// for the kinds that don't turn. API 373.
     #[access(WorldOnly)]
     fn entity_rotation(&self, entity: EntityRef) -> Option<[f32; 2]>;
-    /// Side: server.
+    /// Side: both.
     /// The entity's resolved type key (`Entity.getType`). Compare keys directly;
-    /// request `key.id(host)` explicitly when its canonical name is needed. API 373.
+    /// request `key.id(host)` explicitly when its canonical name is needed.
+    /// On the client, reads the local player or a tracked entity's type. API 373.
     #[access(WorldOnly)]
     fn entity_kind(&self, entity: EntityRef) -> Option<EntityTypeKey>;
     /// Side: server.
@@ -240,9 +280,11 @@ pub trait EntitiesBackend {
     fn entity_on_ground(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
     /// The entity's box (`Entity.getBoundingBox`): its lowest and highest
-    /// corner. None for the kinds whose box Horizon doesn't keep (displays,
-    /// markers, End crystals, the dragon); a dragon part's is its own. On a client, reads
-    /// its own copy of a tracked entity, or the local player's predicted box.
+    /// corner. A display has coincident corners at its position; its width and
+    /// height are used for render culling. None for the kinds whose box Horizon
+    /// doesn't keep (markers, End crystals, the dragon); a dragon part's is its
+    /// own. On a client, reads its own copy of a tracked entity, or the local
+    /// player's predicted box.
     #[access(WorldOnly)]
     fn entity_bounding_box(&self, entity: EntityRef) -> Option<[[f64; 3]; 2]>;
     /// Side: both.
@@ -339,10 +381,13 @@ pub trait EntitiesBackend {
     /// shulker bullet set it in their constructors and never clear it.
     #[access(WorldOnly)]
     fn entity_no_physics(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// What the entity rides (`Entity.getVehicle`): `None` when it rides
     /// nothing, its actual vehicle is retained off-level and has no resident handle,
-    /// or the supplied handle is stale. `is_passenger` still reports the relationship.
+    /// or the supplied handle is stale. On a client, reads the server's latest
+    /// passenger relationships (or the local player's ride), and returns `None`
+    /// when the vehicle is not tracked in the current client level.
+    /// `is_passenger` remains server-only.
     #[access(WorldOnly)]
     fn entity_vehicle(&self, entity: EntityRef) -> Option<EntityRef>;
     /// Side: server.
@@ -437,15 +482,17 @@ pub trait EntitiesBackend {
     /// False for non-player entities, None for a stale or unreachable handle.
     #[access(WorldOnly)]
     fn entity_is_shift_key_down(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity crouches (`Entity.isCrouching`: the crouching
     /// pose).
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_crouching(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity sprints (`Entity.isSprinting`): a player, or a
     /// cat or ocelot dashing after its target (their shared sprinting flag);
     /// false for the other kinds.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_sprinting(&self, entity: EntityRef) -> Option<bool>;
     /// Side: both.
@@ -465,13 +512,28 @@ pub trait EntitiesBackend {
     /// client, reads its own copy as `entity_fluid_heights` does.
     #[access(WorldOnly)]
     fn entity_eye_fluid(&self, entity: EntityRef) -> Option<Option<String>>;
-    /// Side: server.
+    /// Side: both.
     /// Whether the entity touched water at its last fluid update
     /// (`Entity.isInWater`): players and mobs.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_in_water(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
+    /// Whether the entity's eyes are submerged in water (`Entity.isUnderWater`:
+    /// `isEyeInFluid(WATER) && isInWater()`): players and mobs. On a client, reads its own
+    /// cached fluid update as `entity_eye_fluid` does. None for other kinds and stale handles.
+    #[access(WorldOnly)]
+    fn entity_is_under_water(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
+    /// Whether the entity is on fire (`Entity.isOnFire`): not fire-immune and either
+    /// burning (`fire_ticks > 0`) or carrying the client shared on-fire flag. Players, mobs,
+    /// armor stands and dropped items on a server; on a client, the local player's own fire
+    /// state, and None for any other entity there. None for other kinds and stale handles.
+    #[access(WorldOnly)]
+    fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool>;
+    /// Side: both.
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_is_in_lava(&self, entity: EntityRef) -> Option<bool>;
     /// Side: server.
@@ -527,12 +589,19 @@ pub trait EntitiesBackend {
     /// flag.
     #[access(WorldOnly)]
     fn entity_is_invisible(&self, entity: EntityRef) -> Option<bool>;
-    /// Side: server.
+    /// Side: both.
     /// The entity's pose (`Entity.getPose`) as `Pose` names it: `standing`,
     /// `crouching`, `swimming`, `sleeping`, a warden's `roaring`... Kinds
     /// with no pose stand.
+    /// On a client, the local player's own (`LocalPlayer`'s); None for any other entity there.
     #[access(WorldOnly)]
     fn entity_pose(&self, entity: EntityRef) -> Option<&'static str>;
+    /// Side: server.
+    /// The way a painting, item frame or glow item frame faces (`HangingEntity.getDirection`),
+    /// the value `entity_set_hanging_direction` sets. A painting answers only a horizontal
+    /// direction, as it keeps one. None for another kind or a stale handle.
+    #[access(WorldOnly)]
+    fn entity_hanging_direction(&self, entity: EntityRef) -> Option<Direction>;
 }
 /// The handles' writes of the `entities` area, implemented by the game and reached through [`BackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -554,6 +623,20 @@ pub trait EntitiesBackendMut {
     /// 386.
     #[access(WorldOnly)]
     fn entity_merge_nbt(&mut self, entity: EntityRef, nbt: Compound) -> bool;
+    /// Side: server.
+    /// Keeps the entity out of the level's saves (`saved` false) or puts it
+    /// back in (true, what every entity starts as): the autosave and the save
+    /// of its chunk's unload write the level without it, so it is gone at the
+    /// next start, and a chunk that unloads takes it away unwritten. For an
+    /// entity a mod owns and removes itself (a display that follows another
+    /// entity, a floating number): call it right after `summon`, so a crash
+    /// or an unload before the mod's own cleanup leaves nothing behind.
+    /// Whatever rides it is saved under it, so goes unsaved with it; an
+    /// entity that rides another is saved with its vehicle, so keep the
+    /// vehicle out. The entity gets the UUID the save will find it by. False
+    /// for a player and a stale handle.
+    #[access(WorldOnly)]
+    fn entity_set_saved(&mut self, entity: EntityRef, saved: bool) -> bool;
     /// Side: server.
     /// Adds tag `tag` (`Entity.addTag`): false when it has it already, holds
     /// 1024, its kind cannot store tags, or the handle is stale. API 386.
@@ -585,12 +668,55 @@ pub trait EntitiesBackendMut {
     #[access(WorldOnly)]
     fn entity_set_custom_name_visible(&mut self, entity: EntityRef, visible: bool) -> bool;
     /// Side: server.
+    /// Hides the entity from one viewer's client, or shows it again (Paper's `Player.hideEntity`
+    /// and `showEntity`): the entity tracker never pairs a hidden entity with that client, so it
+    /// is not sent, and a hidden one it already tracks is removed from that client on the next
+    /// tracker pass. Everyone else, and the entity itself, are untouched. A hidden player stays
+    /// in the viewer's Tab list (`player_hide` also lists them out); chat and commands are not
+    /// filtered. Kept per viewer, by the entity's UUID, until shown again or the viewer leaves
+    /// (a rejoin starts with nothing hidden). Returns whether it changed (`false`: it was
+    /// already so). This API refuses with `EntityVisibilityRefusal`: `Client` on a client, `Stale`
+    /// for a viewer handle that no longer identifies a player in the server's list,
+    /// `NoConnection` for a fake viewer, and `StaleEntity` for an entity handle that names
+    /// nothing or the viewer's own player.
+    #[access(WorldOnly)]
+    fn entity_set_visible_to(
+        &mut self,
+        entity: EntityRef,
+        viewer: PlayerRef,
+        visible: bool,
+    ) -> Result<bool, EntityVisibilityRefusal>;
+    /// Side: server.
+    /// Whether `entity_set_visible_to` left the entity visible to that viewer (Paper's
+    /// `Player.canSee(Entity)`): `false` only while a mod has it hidden from that viewer. Not
+    /// the tracker's other rules (range, spectators, `player_hide`); `player_sees` answers those
+    /// for players. Refuses like `entity_set_visible_to`.
+    #[access(WorldOnly)]
+    fn entity_visible_to(
+        &mut self,
+        entity: EntityRef,
+        viewer: PlayerRef,
+    ) -> Result<bool, EntityVisibilityRefusal>;
+    /// Side: server.
     /// `Entity.resetFallDistance`: how far the entity has fallen is forgotten, so its next
     /// landing hurts it as a step does (a fan's or a launcher's push, a mod's soft block).
     /// Players too, the acting one and guests. False for a stale handle or an entity not in
     /// the level in place; true for a kind that keeps no fall distance, which has none to forget.
     #[access(WorldOnly)]
     fn entity_reset_fall_distance(&mut self, entity: EntityRef) -> bool;
+    /// Side: server.
+    /// Sets whether a player is swimming (`Entity.setSwimming`), the flag the next water
+    /// update reads: a swimming player keeps the swimming pose and its swim speed until the
+    /// water says otherwise. Server players and guests; a mob's swim is its own AI's and
+    /// refuses here. False for a mob, another kind or a stale handle.
+    #[access(WorldOnly)]
+    fn entity_set_swimming(&mut self, entity: EntityRef, swimming: bool) -> bool;
+    /// Sets the blocks the entity has fallen (`Entity.fallDistance`), as Paper's
+    /// `Entity#setFallDistance` does: the next landing hurts by what it reads. Server players,
+    /// guests and mobs. False for another kind, a client, a stale handle or a value that is
+    /// not finite. `entity_reset_fall_distance` sets it to zero.
+    #[access(WorldOnly)]
+    fn entity_set_fall_distance(&mut self, entity: EntityRef, distance: f64) -> bool;
     /// Side: server.
     /// The entity's UUID (`Entity.getUUID`), the one it is saved with; an
     /// entity that has none yet gets it now, as a new vanilla entity does.
@@ -919,6 +1045,20 @@ pub trait EntitiesBackendMut {
     /// Sets the mob's persistent glowing tag (`Entity.setGlowingTag`). Returns false for players and guests.
     #[access(WorldOnly)]
     fn entity_set_glowing(&mut self, entity: EntityRef, glowing: bool) -> bool;
+    /// Side: server.
+    /// Explodes an entity now, as its own explosion would: a primed TNT explodes where it
+    /// stands, with its power (`PrimedTnt.explode`), and a creeper is lit and explodes at once
+    /// (`Creeper.explodeCreeper`; Paper's `Creeper#explode`). The entity is gone after its
+    /// explosion. False for a stale handle, a kind that does not explode, or when the explosion
+    /// itself fails.
+    #[access(WorldOnly)]
+    fn entity_detonate(&mut self, entity: EntityRef) -> bool;
+    /// Sets the fuse of a primed TNT: the ticks left before it explodes (`PrimedTnt.setFuse`;
+    /// Paper's `TNTPrimed#setFuseTicks`). A fuse at 0 or below explodes it on its next tick,
+    /// as vanilla's does. False for a stale handle, an entity that is not primed TNT, or a
+    /// negative count (this API refuses it and changes nothing).
+    #[access(WorldOnly)]
+    fn entity_set_fuse(&mut self, entity: EntityRef, ticks: i32) -> bool;
     /// Side: server.
     /// Turns a painting, item frame or glow item frame in place to face `direction`
     /// (`HangingEntity.setDirection`, `ItemFrame.setDirection`): its facing, the yaw and pitch

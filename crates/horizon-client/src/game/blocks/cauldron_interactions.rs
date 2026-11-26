@@ -286,7 +286,7 @@ impl Game<'_> {
                     // `Pass`, and any decision this build doesn't know: no action.
                     _ => return Ok(false),
                 };
-                let unchanged = |game: &mut Game<'_>| {
+                let unchanged = |game: &mut Game<'_>, state| {
                     Arc::ptr_eq(table, &snapshot())
                         && game.dim == dimension
                         && game.native_lifecycle.epoch() == Some(epoch)
@@ -296,12 +296,12 @@ impl Game<'_> {
                                 mod_api::Hand::Main => Hand::Main,
                                 mod_api::Hand::Off => Hand::Off,
                             }
-                        && game.world.block(pos[0], pos[1], pos[2]) == before
+                        && game.world.block(pos[0], pos[1], pos[2]) == state
                         && game.held() == Some(&held)
                         && api_values::block_state::current()
                             .is_ok_and(|now| Arc::ptr_eq(&index, &now))
                 };
-                if !unchanged(self) {
+                if !unchanged(self, before) {
                     return Err(());
                 }
                 // Validate the complete untrusted proposal before entering the write phase.
@@ -362,14 +362,28 @@ impl Game<'_> {
                     statistics: plan.statistics.iter().map(ToString::to_string).collect(),
                     item: held.item.to_string(),
                 };
+                use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+                // Supplying the first bottle needs the incoming owned holder during
+                // `fire`. A drain still lets the callback read the old holder first.
+                let incoming = block.filter(|&state| {
+                    type_for(WATER_CAULDRON).is_some()
+                        && self.res.facts().get(before).name.as_ref() == "minecraft:cauldron"
+                        && self.res.facts().get(state).name.as_ref() == WATER_CAULDRON
+                });
                 mod_api::run_transaction(self, |game, _| {
                     game.journal_player(player);
+                    if let Some(state) = incoming
+                        && !game.journal_set_block(pos, state)
+                    {
+                        return Err(());
+                    }
                     if callback.handler.fire(game, &input, &plan) != CauldronFire::Applied
-                        || !unchanged(game)
+                        || !unchanged(game, incoming.unwrap_or(before))
                     {
                         return Err(());
                     }
                     if let Some(block) = block
+                        && incoming.is_none()
                         && !game.journal_set_block(pos, block)
                     {
                         return Err(());

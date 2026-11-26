@@ -160,8 +160,12 @@ pub fn rear_offset(m: &Mob) -> [f64; 3] {
     [0.0, 0.15 * stand * scale, -0.7 * stand * scale]
 }
 /// `AbstractHorse.isImmobile`: no goals while it eats or rears. A mount its
-/// rider steers still takes their input (`travelRidden`).
+/// rider steers still takes their input (`travelRidden`). `Llama.isImmobile`:
+/// only while it eats (a loaded `EatingHaystack`; it never grazes).
 pub fn immobile(m: &Mob) -> bool {
+    if super::llama::is_llama(m.species()) {
+        return m.extra.flag;
+    }
     can_rear(m.species()) && (m.extra.flag || m.extra.counter > 0) && !controlled(m)
 }
 /// `AbstractHorse.onElasticLeashPull`: a lead pulled taut ends the horse's
@@ -853,9 +857,16 @@ pub fn ridden_step(m: &mut Mob, context: &LoopContext) {
     if super::camel::is_camel(m.species()) {
         // Camel.tickRidden / getRiddenInput: forward stands it up once a pose
         // transition is over; no input while sitting; the jump is a dash.
+        // `standUp`: its sound and its game event reach the server's level;
+        // the rider's client copy stands up too, but a client level's
+        // `playSound(null, ...)` and `gameEvent` do nothing (the rider hears
+        // the server's sound once).
         if r.forward > 0.0 && super::camel::sitting(m) && !super::camel::in_transition(m) {
             let mut ev = Vec::new();
             super::camel::stand_up(m, &mut ev);
+            if !m.extra.client_side {
+                m.outbox.append(&mut ev);
+            }
         }
         if super::camel::refuse_to_move(m) {
             m.ai.xxa = 0.0;
@@ -1068,31 +1079,89 @@ pub fn grazes(s: Species) -> bool {
     is_equine(s) && !super::camel::is_camel(s) && !super::llama::is_llama(s)
 }
 /// Body texture and the markings overlay.
-pub fn texture(m: &Mob) -> String {
-    let baby = if m.is_baby() { "_baby" } else { "" };
+pub fn texture(m: &Mob) -> &'static str {
+    let baby = m.is_baby();
     match m.species() {
         Species::Horse => {
-            let c = COLORS[(m.extra.variant as usize).min(6)];
-            format!("entity/horse/horse_{c}{baby}")
+            const ADULT: [&str; 7] = [
+                "entity/horse/horse_white",
+                "entity/horse/horse_creamy",
+                "entity/horse/horse_chestnut",
+                "entity/horse/horse_brown",
+                "entity/horse/horse_black",
+                "entity/horse/horse_gray",
+                "entity/horse/horse_darkbrown",
+            ];
+            const BABY: [&str; 7] = [
+                "entity/horse/horse_white_baby",
+                "entity/horse/horse_creamy_baby",
+                "entity/horse/horse_chestnut_baby",
+                "entity/horse/horse_brown_baby",
+                "entity/horse/horse_black_baby",
+                "entity/horse/horse_gray_baby",
+                "entity/horse/horse_darkbrown_baby",
+            ];
+            let i = (m.extra.variant as usize).min(6);
+            if baby { BABY[i] } else { ADULT[i] }
         }
-        Species::Donkey => format!("entity/horse/donkey{baby}"),
-        Species::Mule => format!("entity/horse/mule{baby}"),
-        Species::SkeletonHorse => format!("entity/horse/horse_skeleton{baby}"),
-        Species::Camel => format!("entity/camel/camel{baby}"),
-        Species::CamelHusk => "entity/camel/camel_husk".into(),
-        _ => format!("entity/horse/horse_zombie{baby}"),
+        Species::Donkey => {
+            if baby {
+                "entity/horse/donkey_baby"
+            } else {
+                "entity/horse/donkey"
+            }
+        }
+        Species::Mule => {
+            if baby {
+                "entity/horse/mule_baby"
+            } else {
+                "entity/horse/mule"
+            }
+        }
+        Species::SkeletonHorse => {
+            if baby {
+                "entity/horse/horse_skeleton_baby"
+            } else {
+                "entity/horse/horse_skeleton"
+            }
+        }
+        Species::Camel => {
+            if baby {
+                "entity/camel/camel_baby"
+            } else {
+                "entity/camel/camel"
+            }
+        }
+        Species::CamelHusk => "entity/camel/camel_husk",
+        _ => {
+            if baby {
+                "entity/horse/horse_zombie_baby"
+            } else {
+                "entity/horse/horse_zombie"
+            }
+        }
     }
 }
-pub fn markings(m: &Mob) -> Option<String> {
+pub fn markings(m: &Mob) -> Option<&'static str> {
     if m.species() != Species::Horse {
         return None;
     }
-    let mk = MARKINGS[(m.extra.variant2 as usize).min(4)];
-    if mk.is_empty() {
-        return None;
-    }
-    let baby = if m.is_baby() { "_baby" } else { "" };
-    Some(format!("entity/horse/horse_markings_{mk}{baby}"))
+    const ADULT: [Option<&str>; 5] = [
+        None,
+        Some("entity/horse/horse_markings_white"),
+        Some("entity/horse/horse_markings_whitefield"),
+        Some("entity/horse/horse_markings_whitedots"),
+        Some("entity/horse/horse_markings_blackdots"),
+    ];
+    const BABY: [Option<&str>; 5] = [
+        None,
+        Some("entity/horse/horse_markings_white_baby"),
+        Some("entity/horse/horse_markings_whitefield_baby"),
+        Some("entity/horse/horse_markings_whitedots_baby"),
+        Some("entity/horse/horse_markings_blackdots_baby"),
+    ];
+    let i = (m.extra.variant2 as usize).min(4);
+    if m.is_baby() { BABY[i] } else { ADULT[i] }
 }
 /// The model key prefix for the species.
 pub fn model_name(s: Species) -> &'static str {
@@ -1573,6 +1642,24 @@ mod tests {
         assert_eq!(m.extra.counter, 0);
     }
 
+    /// `Llama.isImmobile` is `isDeadOrDying() || isEating()`: an eating llama
+    /// runs no goals, and a llama does not stand (#18677).
+    #[test]
+    fn an_eating_llama_is_immobile() {
+        for (species, id) in [
+            (Species::Llama, "minecraft:llama"),
+            (Species::TraderLlama, "minecraft:trader_llama"),
+        ] {
+            let mut m = equine(1, species, id);
+            assert!(!immobile(&m), "{id}");
+            m.extra.flag = true;
+            assert!(immobile(&m), "{id} eating");
+            m.extra.flag = false;
+            m.extra.counter = 5;
+            assert!(!immobile(&m), "{id} has no standing");
+        }
+    }
+
     #[test]
     fn llamas_and_camels_never_rear_when_hurt() {
         let mut test_level = crate::health::TestLevel::new(0);
@@ -1698,6 +1785,50 @@ mod tests {
             outcomes,
             vec![true, false],
             "a mob-ridden horse bolts; a mob-ridden zombie horse is controlled"
+        );
+    }
+
+    /// `ZombieHorse.addBehaviourGoals` tempts with `#minecraft:zombie_horse_food`,
+    /// which `VanillaItemTagsProvider` fills with the red mushroom alone
+    /// (`ZombieHorse.isFood` reads the same tag): a player holding one tempts a
+    /// zombie horse, one holding its family's wheat does not.
+    #[test]
+    fn a_red_mushroom_tempts_a_zombie_horse() {
+        use crate::mobs::world::{test_player, with_test_world};
+        let tempted = |hand: &str| -> Option<bool> {
+            let mut out = None;
+            let ran = with_test_world(&[], |w, types| {
+                let mut world = w.clone();
+                let mut p = test_player(Vec3::new(5.5, 64.0, 0.5));
+                p.main_hand = Some(hand.into());
+                world.player = Some(p);
+                let kind = Arc::new(types.types["minecraft:zombie_horse"].clone());
+                let mut m = Mob::new(1, kind, Vec3::new(0.5, 64.0, 0.5), 0.0);
+                register(&mut m);
+                m.on_ground = true;
+                let mut lr = crate::health::TestLevel::new(0);
+                let mut events = Vec::new();
+                let mut cx = Cx {
+                    w: &world,
+                    level: &mut lr.level(),
+                    events: &mut events,
+                };
+                let mut goals = std::mem::take(&mut m.ai.goals);
+                goals.tick(&mut m, &mut cx);
+                out = Some(goals.is_running("Tempt"));
+                m.ai.goals = goals;
+            });
+            let _ = ran;
+            out
+        };
+        let Some(mushroom) = tempted("minecraft:red_mushroom") else {
+            return;
+        };
+        assert!(mushroom, "a red mushroom tempts a zombie horse");
+        assert_eq!(
+            tempted("minecraft:wheat"),
+            Some(false),
+            "wheat is horse food, not zombie horse food"
         );
     }
 

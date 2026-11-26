@@ -4,7 +4,7 @@ use super::{
     Mob, MobEvent, MobWorld,
     anim::{Poses, State},
     goals::{
-        AnimalPanic, Breed, Cx, Float, FollowParent, Goal, LookAtPlayer, MOVE, RandomLookAround,
+        AnimalPanic, BrainLookAround, Breed, Cx, Float, FollowParent, Goal, LookAtPlayer, MOVE,
         Stroll, Tempt, goal_clone,
     },
 };
@@ -31,7 +31,7 @@ pub fn register(m: &mut Mob) {
     g.add(0, Float);
     g.add(1, CamelPanic(AnimalPanic::new(4.0)));
     g.add(2, Breed::new(1.0));
-    g.add(3, Tempt::new(2.5, tempt, false));
+    g.add(3, CamelTempt(Tempt::new(2.5, tempt, false)));
     // CamelAi's `triggerIf(Predicate.not(Camel::refuseToMove), ...)` around
     // BabyFollowAdult and RandomStroll: neither gives a sitting camel a walk
     // target (the move control would stand it up for one).
@@ -39,9 +39,40 @@ pub fn register(m: &mut Mob) {
     g.add(5, Stroll::new(2.0).gate(|m, _| !refuse_to_move(m)));
     g.add(5, RandomSitting);
     g.add(6, LookAtPlayer::new(6.0));
-    g.add(7, RandomLookAround::default());
+    // CamelAi: the brain's `RandomLookAround`, not the goal of that name.
+    g.add(7, BrainLookAround::new((150, 250), 30.0, 0.0, 0.0));
     // finalizeSpawn: fully standing.
-    stand_up_instantly(m);
+    reset_pose_to_full_stand(m);
+}
+/// `CamelAi.initIdleActivity`'s `FollowTemptation(camel -> 2.5F, camel ->
+/// camel.isBaby() ? 2.5 : 3.5)`: an adult camel stops 3.5 blocks from the
+/// player holding its food, a baby 2.5 (a camel husk is never a baby).
+#[derive(Clone, Debug)]
+struct CamelTempt(Tempt);
+impl Goal for CamelTempt {
+    goal_clone!();
+    fn flags(&self) -> u8 {
+        self.0.flags()
+    }
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+    fn can_use(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        self.0.can_use(m, cx)
+    }
+    fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
+        self.0.can_continue(m, cx)
+    }
+    fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.0.start(m, cx);
+    }
+    fn stop(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.0.stop(m, cx);
+    }
+    fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
+        self.0.stop_distance = if m.is_baby() { 2.5 } else { 3.5 };
+        self.0.tick(m, cx);
+    }
 }
 /// `CamelAi`'s `triggerIf(Predicate.not(Camel::refuseToMove),
 /// BabyFollowAdult.create(...))`: a sitting camel does not start following an
@@ -302,6 +333,7 @@ fn sit_down(m: &mut Mob, events: &mut Vec<MobEvent>) {
         sound(m, voice(m, 0), events);
         m.extra.camel_sitting = true;
         m.extra.egg_time = m.age as i32;
+        entity_action(m, events);
     }
 }
 pub fn stand_up(m: &mut Mob, events: &mut Vec<MobEvent>) {
@@ -309,12 +341,36 @@ pub fn stand_up(m: &mut Mob, events: &mut Vec<MobEvent>) {
         sound(m, voice(m, 1), events);
         m.extra.camel_sitting = false;
         m.extra.egg_time = m.age as i32;
+        entity_action(m, events);
     }
 }
 /// `standUpInstantly`.
-pub fn stand_up_instantly(m: &mut Mob) {
+pub fn stand_up_instantly(m: &mut Mob, events: &mut Vec<MobEvent>) {
+    reset_pose_to_full_stand(m);
+    entity_action(m, events);
+}
+/// `Camel.actuallyHurt`: a hurt camel is on its feet before the damage.
+pub fn actually_hurt(m: &mut Mob) {
+    if is_camel(m.species()) {
+        let mut events = Vec::new();
+        stand_up_instantly(m, &mut events);
+        m.outbox.append(&mut events);
+    }
+}
+/// `resetLastPoseChangeTickToFullStand`: standing at once, with no sound and
+/// no game event (a spawn or a loaded pose tick, not `standUpInstantly`).
+pub fn reset_pose_to_full_stand(m: &mut Mob) {
     m.extra.camel_sitting = false;
     m.extra.egg_time = (i64::from(m.age) - STAND_UP - 1) as i32;
+}
+/// `Entity.gameEvent(GameEvent.ENTITY_ACTION)` at the camel, silent or not.
+fn entity_action(m: &Mob, events: &mut Vec<MobEvent>) {
+    events.push(MobEvent::GameEvent {
+        event: "minecraft:entity_action",
+        at: [m.position.x, m.position.y, m.position.z],
+        source: m.id,
+        state: horizon_world::registry::BlockStateId(0),
+    });
 }
 /// `is_camel`: camels and camel husks (`CamelHusk extends Camel`).
 pub fn is_camel(s: super::Species) -> bool {
@@ -344,7 +400,11 @@ pub fn voice(m: &Mob, which: usize) -> &'static str {
         (_, true) => "entity.camel_husk.eat",
     }
 }
+/// `Entity.playSound`: a silent camel makes none (its game events still post).
 fn sound(m: &Mob, name: &'static str, events: &mut Vec<MobEvent>) {
+    if m.silent {
+        return;
+    }
     events.push(MobEvent::Sound(
         name,
         [m.position.x, m.position.y, m.position.z],
@@ -370,7 +430,7 @@ impl Goal for CamelPanic {
         self.0.can_continue(m, cx)
     }
     fn start(&mut self, m: &mut Mob, cx: &mut Cx) {
-        stand_up_instantly(m);
+        stand_up_instantly(m, cx.events);
         self.0.start(m, cx);
     }
     fn tick(&mut self, m: &mut Mob, cx: &mut Cx) {
@@ -431,7 +491,7 @@ pub fn ai_step(m: &mut Mob, events: &mut Vec<MobEvent>) {
         }
     }
     if sitting(m) && m.fluids.in_water {
-        stand_up_instantly(m);
+        stand_up_instantly(m, events);
     }
     animation_states(m, pose_time(m), sitting(m));
 }
@@ -557,9 +617,13 @@ mod camel_husk_tests;
 mod camel_pose_tests;
 
 #[cfg(test)]
+#[path = "camel_tempt_tests.rs"]
+mod camel_tempt_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mobs::{Anim, Brain, Flags, MobType, Part, Species};
+    use crate::mobs::{Anim, Brain, Damage, DamageKind, Flags, MobType, Part, Species};
     use crate::mobs::{leash::Holder, world::with_test_world};
     use horizon_core::geometry::Vec3;
     use serde_json::json;
@@ -704,13 +768,15 @@ mod tests {
 
     #[test]
     fn a_fresh_camel_can_move_at_once() {
-        // Camel.finalizeSpawn: standUpInstantly, also at age 0.
+        // Camel.finalizeSpawn: resetLastPoseChangeTickToFullStand, also at
+        // age 0, and with no game event of its own.
         let mut m = camel();
         register(&mut m);
         assert_eq!(m.age, 0);
         assert!(!sitting(&m));
         assert!(!refuse_to_move(&m));
-        stand_up_instantly(&mut m);
+        assert!(m.outbox.is_empty(), "a spawn is not an entity action");
+        stand_up_instantly(&mut m, &mut Vec::new());
         assert!(!refuse_to_move(&m));
     }
 
@@ -729,6 +795,271 @@ mod tests {
         assert!(!sitting(&m) && refuse_to_move(&m));
         m.age += 52;
         assert!(!refuse_to_move(&m));
+    }
+
+    /// `Camel.sitDown`, `standUp` and `standUpInstantly` each post
+    /// `GameEvent.ENTITY_ACTION` at the camel — for sculk sensors and wardens,
+    /// silent or not — and none of them posts one when the pose stays put.
+    #[test]
+    fn sitting_and_standing_post_entity_action() {
+        let actions = |events: &[MobEvent]| -> Vec<[f64; 3]> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    MobEvent::GameEvent {
+                        event, at, source, ..
+                    } if *event == "minecraft:entity_action" && *source == 1 => Some(*at),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut m = camel();
+        register(&mut m);
+        m.position = Vec3::new(1.5, 64.0, 2.5);
+        m.age = 100;
+        m.silent = true;
+        let at = [1.5, 64.0, 2.5];
+        let mut events = Vec::new();
+        sit_down(&mut m, &mut events);
+        assert_eq!(actions(&events), vec![at], "sitting down");
+        events.clear();
+        sit_down(&mut m, &mut events);
+        assert!(actions(&events).is_empty(), "already sitting down");
+        m.age += SIT_DOWN as u32;
+        events.clear();
+        stand_up(&mut m, &mut events);
+        assert_eq!(actions(&events), vec![at], "standing up");
+        events.clear();
+        stand_up(&mut m, &mut events);
+        assert!(actions(&events).is_empty(), "already standing");
+        stand_up_instantly(&mut m, &mut events);
+        assert_eq!(actions(&events), vec![at], "up at once");
+    }
+
+    /// `Entity.playSound` skips a silent entity: a `Silent` camel sits and
+    /// stands without `entity.camel.sit` or `entity.camel.stand`.
+    #[test]
+    fn a_silent_camel_sits_and_stands_without_a_sound() {
+        let sounds = |events: &[MobEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, MobEvent::Sound(..)))
+                .count()
+        };
+        let mut m = camel();
+        m.age = 100;
+        let mut events = Vec::new();
+        sit_down(&mut m, &mut events);
+        assert_eq!(sounds(&events), 1, "a camel that is not silent sits aloud");
+        m.age += SIT_DOWN as u32;
+        stand_up(&mut m, &mut events);
+        m.silent = true;
+        m.age += 100;
+        events.clear();
+        sit_down(&mut m, &mut events);
+        m.age += SIT_DOWN as u32;
+        stand_up(&mut m, &mut events);
+        assert_eq!(sounds(&events), 0, "{events:?}");
+    }
+
+    /// `Camel.actuallyHurt` stands the camel up before the damage, so no hit
+    /// leaves it kneeling and getting up for the next 52 ticks.
+    #[test]
+    fn a_hurt_camel_stands_up_at_once() {
+        let mut m = camel();
+        m.age = 600;
+        let mut events = Vec::new();
+        sit_down(&mut m, &mut events);
+        m.age += SIT_DOWN as u32;
+        assert!(sitting(&m), "sitting still");
+        m.outbox.clear();
+        assert!(m.damage(
+            &mut crate::health::TestLevel::new(0).level(),
+            1.0,
+            Damage::of(DamageKind::Generic)
+        ));
+        assert!(!sitting(&m), "the hit stands it up");
+        assert!(!refuse_to_move(&m), "at once, not over 52 ticks");
+        assert!(
+            m.outbox.iter().any(|e| matches!(e,
+                MobEvent::GameEvent { event, source: 1, .. }
+                    if *event == "minecraft:entity_action")),
+            "the stand posts entity_action: {:?}",
+            m.outbox
+        );
+    }
+
+    /// `Camel.tickRidden`: forward input stands a sitting camel up only when
+    /// it is not in a pose transition (`isInPoseTransition`).
+    #[test]
+    fn forward_input_waits_out_the_sit_down_animation() {
+        let mut m = camel();
+        m.age = 100;
+        m.rider = Some(crate::mobs::equine::Rider {
+            forward: 1.0,
+            ..Default::default()
+        });
+        let mut events = Vec::new();
+        sit_down(&mut m, &mut events);
+        assert!(sitting(&m) && in_transition(&m));
+        m.outbox.clear();
+        crate::mobs::equine::ridden_step(&mut m, crate::test_resources::server_loop_context());
+        assert!(sitting(&m), "the input does not stand it up mid-animation");
+        assert!(m.outbox.is_empty(), "and plays no stand sound");
+        // On its belly: the same input stands it up.
+        m.age += SIT_DOWN as u32;
+        assert!(!in_transition(&m));
+        crate::mobs::equine::ridden_step(&mut m, crate::test_resources::server_loop_context());
+        assert!(!sitting(&m), "forward stands it up");
+        assert!(in_transition(&m), "over the 52 ticks it takes to get up");
+        assert!(!m.outbox.is_empty(), "the server plays the sound");
+        // The rider's client copy stands up as well, and leaves the sound to the server.
+        m.extra.camel_sitting = true;
+        m.age += SIT_DOWN as u32;
+        m.extra.egg_time = 0;
+        m.extra.client_side = true;
+        m.outbox.clear();
+        crate::mobs::equine::ridden_step(&mut m, crate::test_resources::server_loop_context());
+        assert!(!sitting(&m), "the client copy stands up too");
+        assert!(m.outbox.is_empty(), "no sound: {:?}", m.outbox);
+    }
+
+    /// `CamelAi`'s brain `RandomLookAround(UniformInt.of(150, 250), 30.0F,
+    /// 0.0F, 0.0F)`: a new look every 150 to 250 ticks, at most 30 degrees
+    /// off the body's yaw, held by `LookAtTargetSink` for 45 to 90 ticks.
+    #[test]
+    fn the_look_around_waits_150_to_250_ticks_and_stays_near_the_body() {
+        let mut m = camel();
+        m.yaw = 40.0;
+        m.body_yaw = 40.0;
+        m.head_yaw = 40.0;
+        let mut looks: Vec<(i64, f32)> = Vec::new();
+        let mut wanted = m.ai.look.wanted;
+        let ran = with_test_world(&[], |w, _| {
+            let mut test_level = crate::health::TestLevel::new(7);
+            let mut level = test_level.level();
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w,
+                level: &mut level,
+                events: &mut events,
+            };
+            let mut goals = std::mem::take(&mut m.ai.goals);
+            for tick in 0..1000 {
+                m.age += 1;
+                // Mob.serverAiStep's cadence: the selector runs every other
+                // tick, the goals that want every tick run on both.
+                let id_based = i64::from(m.age) + i64::from(m.id);
+                if id_based % 2 != 0 && m.age > 1 {
+                    goals.tick_running(&mut m, &mut cx, false);
+                } else {
+                    goals.tick(&mut m, &mut cx);
+                }
+                if m.ai.look.wanted != wanted {
+                    wanted = m.ai.look.wanted;
+                    let (dx, dz) = (wanted[0] - m.position.x, wanted[2] - m.position.z);
+                    let yaw = horizon_core::geometry::trig::atan2_degrees(dz, dx) - 90.0;
+                    looks.push((tick, crate::mobs::living::wrap(yaw - m.body_yaw)));
+                }
+            }
+            m.ai.goals = goals;
+        });
+        if !ran {
+            return;
+        }
+        assert!(looks.len() >= 4, "a look every 150 to 250 ticks: {looks:?}");
+        for pair in looks.windows(2) {
+            let gap = pair[1].0 - pair[0].0;
+            assert!(
+                (150..=252).contains(&gap),
+                "looks {gap} ticks apart: {looks:?}"
+            );
+        }
+        for (tick, off) in &looks {
+            assert!(
+                off.abs() <= 30.0,
+                "the look at tick {tick} is {off} degrees off the body"
+            );
+        }
+    }
+
+    /// `RandomLookAround` starts only while `LOOK_TARGET` is absent: a
+    /// tempting player (`Tempt`, `LookAtPlayer`: a higher `LOOK` goal) keeps
+    /// the head on them, held look or not, while `GAZE_COOLDOWN_TICKS` still
+    /// runs out, so the next look comes as soon as they are gone.
+    #[test]
+    fn the_look_around_gives_way_to_a_higher_look() {
+        use crate::mobs::goals::{BrainLookAround, GoalSelector, LOOK};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const PLAYER: [f64; 3] = [9.0, 66.0, 9.0];
+        /// A tempting player: `LOOK` at priority 3, while `on`.
+        #[derive(Clone, Debug)]
+        struct Tempting(Arc<AtomicBool>);
+        impl Goal for Tempting {
+            goal_clone!();
+            fn flags(&self) -> u8 {
+                LOOK
+            }
+            fn can_use(&mut self, _: &mut Mob, _: &mut Cx) -> bool {
+                self.0.load(Ordering::Relaxed)
+            }
+            fn every_tick(&self) -> bool {
+                true
+            }
+            fn tick(&mut self, m: &mut Mob, _: &mut Cx) {
+                m.look_at(PLAYER);
+            }
+        }
+        let on = Arc::new(AtomicBool::new(false));
+        let mut goals = GoalSelector::default();
+        goals.add(3, Tempting(on.clone()));
+        goals.add(7, BrainLookAround::new((150, 250), 30.0, 0.0, 0.0));
+        let mut m = camel();
+        let start = m.ai.look.wanted;
+        // (tick, wanted) after each tick.
+        let mut seen: Vec<(u32, [f64; 3])> = Vec::new();
+        let ran = with_test_world(&[], |w, _| {
+            let mut test_level = crate::health::TestLevel::new(7);
+            let mut level = test_level.level();
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w,
+                level: &mut level,
+                events: &mut events,
+            };
+            for tick in 1..=400u32 {
+                // The player turns up after the first look, and leaves once
+                // its cooldown (at most 251 ticks) is long over.
+                on.store((20..300).contains(&tick), Ordering::Relaxed);
+                m.age = tick;
+                if (i64::from(m.age) + i64::from(m.id)) % 2 != 0 && m.age > 1 {
+                    goals.tick_running(&mut m, &mut cx, false);
+                } else {
+                    goals.tick(&mut m, &mut cx);
+                }
+                seen.push((tick, m.ai.look.wanted));
+            }
+        });
+        if !ran {
+            return;
+        }
+        let first = seen
+            .iter()
+            .find(|(_, w)| *w != start)
+            .expect("a first look");
+        assert!(first.0 < 20, "the first look comes at once: {first:?}");
+        for (tick, wanted) in &seen[21..299] {
+            assert_eq!(*wanted, PLAYER, "tick {tick}: the head stays on the player");
+        }
+        let next = seen[299..]
+            .iter()
+            .find(|(_, w)| *w != PLAYER)
+            .expect("a look after the player leaves");
+        assert!(
+            next.0 <= 301,
+            "the cooldown ran out meanwhile: the next look at once, not at {}",
+            next.0
+        );
     }
 
     #[test]

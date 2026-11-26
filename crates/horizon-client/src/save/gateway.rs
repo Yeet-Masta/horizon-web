@@ -26,6 +26,10 @@ impl SaveDir {
     /// Chunk NBT is authoritative; preserve its exit and all unrelated tags.
     /// Retire the JSON only after the region writer confirms every update.
     pub fn migrate_end_gateway_exits(&self) -> Result<usize> {
+        // This migration edits section NBT. Backend chunks are migrated by the converter.
+        if self.backend.is_some() {
+            return Ok(0);
+        }
         let path = self.root.join(LEGACY_FILE);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -45,8 +49,14 @@ impl SaveDir {
                 std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::btree_map::Entry::Vacant(e) => {
                     // Propagate damaged/unreadable regions; never discard their legacy exits.
-                    let Some(mut root) =
-                        read_region_record(&self.root, &self.regions, "region", key.0, key.1)?
+                    let Some(mut root) = read_region_record(
+                        &self.root,
+                        &self.regions,
+                        None,
+                        "region",
+                        key.0,
+                        key.1,
+                    )?
                     else {
                         continue;
                     };

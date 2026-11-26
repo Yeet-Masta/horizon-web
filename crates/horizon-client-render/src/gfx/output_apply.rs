@@ -7,8 +7,10 @@
 //! moment's loss of the display's report ([`auto_grace`]).
 use super::{DisplayReading, DisplayWatch, Renderer, hdr, output};
 use crate::graphics::HdrMode;
+use horizon_std::sync::Mutex;
 use horizon_std::time::{Duration, Instant};
 use output::{EffectiveOutput, FrameRequest, OutputCapabilities};
+use std::sync::{Arc, PoisonError, mpsc};
 
 /// What an output's resources are made for: the encoding presented and the frame.
 type Key = (Option<hdr::Output>, output::FrameConfiguration);
@@ -106,6 +108,19 @@ pub(super) fn surface_config(
     config
 }
 
+/// Frames the swapchain may hold ahead of the display (its images, less one). Fifo shows
+/// every frame in order, so each extra image is a frame of input lag: it keeps 2. Mailbox
+/// and Immediate always show the newest frame, so extra images cost only memory. They are
+/// needed where the compositor scans the game's frames out directly (fullscreen on GNOME
+/// Wayland): it hands images back only at the display's refresh, so with 2 frames ahead the
+/// game drew one frame per refresh even with VSync off, with 3 two, with 6 up to five.
+pub(super) fn frame_latency(mode: wgpu::PresentMode) -> u32 {
+    match mode {
+        wgpu::PresentMode::Mailbox | wgpu::PresentMode::Immediate => 6,
+        _ => 2,
+    }
+}
+
 /// How long Auto keeps HDR on once the display stops reporting it. A fixed window that
 /// coalesces the report's churn as a display wakes or the window moves to another one; not a
 /// measured sleep/wake time.
@@ -169,7 +184,9 @@ fn graced(
 /// Whether the output resolves again at `now`: a due poll (`read`, with the surface's
 /// `offer`; on Wayland, an event) changed `reading` or `caps`, or Auto's grace `since` is
 /// over. Its end reads the display once more first, however long until the next poll, unless
-/// a read since the deadline did (the last read is a `DISPLAY_POLL` before the next).
+/// a read since the deadline did (the last read is a `DISPLAY_POLL` before the next). With a
+/// reader thread, a poll takes what it handed over instead and reads nothing; only the end of
+/// the grace reads here.
 fn poll_display(
     watch: Option<&mut DisplayWatch>,
     reading: &mut DisplayReading,
@@ -183,15 +200,130 @@ fn poll_display(
     let Some(watch) = watch else {
         return over;
     };
+    let mut at_once = false;
     if let (Some(since), Some(next)) = (since.filter(|_| over), &mut watch.polled)
         && *next < since + AUTO_OFF_DELAY + super::DISPLAY_POLL
     {
         *next = now;
+        at_once = true;
+    }
+    if !at_once && let Some(reader) = &watch.reader {
+        let Some((read, offered, _)) = reader.latest() else {
+            return over;
+        };
+        watch.polled = Some(now + super::DISPLAY_POLL);
+        if read != *reading {
+            super::log_os_reported(read.luminance);
+        }
+        return observe(reading, caps, read, offered) || over;
     }
     let Some(read) = watch.poll(*reading, now, read) else {
         return over;
     };
-    observe(reading, caps, read, offer()) || over
+    let offered = offer_fresh(Some(watch), offer);
+    observe(reading, caps, read, offered) || over
+}
+
+/// What the surface offers now (`offer`), read on the render thread after any display read
+/// there. A reading the reader thread started before this returns may hold the old offer, and
+/// is dropped (`DisplayReader::read_fresh`).
+fn offer_fresh(
+    watch: Option<&mut DisplayWatch>,
+    offer: impl FnOnce() -> Option<Option<hdr::Output>>,
+) -> Option<Option<hdr::Output>> {
+    let offered = offer();
+    if let Some(reader) = watch.and_then(|watch| watch.reader.as_mut()) {
+        reader.read_fresh(Instant::now());
+    }
+    offered
+}
+
+/// What a [`DisplayReader`] hands over at each read: the display's report, the surface's
+/// offer and when the read started.
+type Handed = (DisplayReading, Option<Option<hdr::Output>>, Instant);
+
+/// Vulkan wants a surface's host access externally synchronized while a swapchain is made
+/// for it: the reader's capability query and a configure (`Renderer::configure`) never overlap.
+pub(super) static SURFACE_QUERY: Mutex<()> = Mutex::new(());
+
+/// Reads a polled display every `DISPLAY_POLL` on a thread of its own and hands the reading
+/// over: DXGI's walk and the surface's capabilities stalled the render thread 3-7 ms at each
+/// poll (#18535). It holds the surface, so it ends (dropped) before the renderer lets that go.
+pub(super) struct DisplayReader {
+    handed: mpsc::Receiver<Handed>,
+    /// Dropped to end the thread at once.
+    stop: Option<mpsc::Sender<()>>,
+    thread: Option<horizon_std::thread::JoinHandle<()>>,
+    /// When the last read the render thread made itself finished (`read_fresh`).
+    fresh: Option<Instant>,
+}
+
+impl DisplayReader {
+    /// `None` on macOS, where AppKit answers on the main thread only.
+    /// None on the web build too: the browser's surface and adapter stay on the page's thread,
+    /// and it reports no display to watch.
+    #[cfg(target_family = "wasm")]
+    fn start(_: &Arc<wgpu::Surface<'static>>, _: &wgpu::Adapter) -> Option<Self> {
+        None
+    }
+    #[cfg(not(target_family = "wasm"))]
+    fn start(surface: &Arc<wgpu::Surface<'static>>, adapter: &wgpu::Adapter) -> Option<Self> {
+        if cfg!(target_os = "macos") {
+            return None;
+        }
+        let (send, handed) = mpsc::channel();
+        let (stop, stopped) = mpsc::channel::<()>();
+        let (surface, adapter) = (Arc::clone(surface), adapter.clone());
+        let thread = horizon_std::thread::Builder::new()
+            .name("Display watch".into())
+            .spawn(move || {
+                while stopped.recv_timeout(super::DISPLAY_POLL)
+                    == Err(mpsc::RecvTimeoutError::Timeout)
+                {
+                    let started = Instant::now();
+                    let reading = DisplayReading::read(Some(&*surface), &adapter);
+                    let offered = {
+                        let _configure =
+                            SURFACE_QUERY.lock().unwrap_or_else(PoisonError::into_inner);
+                        offer(Some(&*surface), &adapter)
+                    };
+                    if send.send((reading, offered, started)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self {
+            handed,
+            stop: Some(stop),
+            thread: Some(thread),
+            fresh: None,
+        })
+    }
+
+    /// The newest reading handed over since the last call, of those that started after the
+    /// last fresh read: one already running then may be handed over after it, but is older.
+    fn latest(&self) -> Option<Handed> {
+        let fresh = self.fresh;
+        self.handed
+            .try_iter()
+            .filter(|(.., started)| fresh.is_none_or(|fresh| *started >= fresh))
+            .last()
+    }
+
+    /// The render thread read the display itself, finishing at `finished`.
+    fn read_fresh(&mut self, finished: Instant) {
+        self.fresh = Some(finished);
+    }
+}
+
+impl Drop for DisplayReader {
+    fn drop(&mut self) {
+        self.stop = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// What `surface` offers now (`None` offscreen): Vulkan's offered formats can change with
@@ -263,19 +395,73 @@ impl Present for Applying<'_> {
     }
 
     fn present_sdr(&mut self) {
-        let r = &mut *self.renderer;
-        r.hdr = None;
-        r.mark_hdr_start(false, self.marker);
-        if let Some(surface) = &r.surface {
-            r.frame_gen.stop_to_configure();
-            r.queue.wait();
-            r.surface_unconfigured =
-                Renderer::configure(&r.device, surface, &r.config, None, &r.device_lost).is_err();
-        }
+        self.renderer.present_sdr();
+    }
+}
+
+/// Whether a swapchain that did not configure for HDR output's `presented` encoding goes SDR in
+/// the same frame: the surface, read again, offers no HDR (the window is now on a display
+/// without it). Offered the other encoding, the next frame's output moves to that one and
+/// keeps HDR output's tuning (`Hdr::retargeted`). An SDR swapchain that fails tries nothing more.
+fn sdr_at_once(presented: Option<hdr::Output>, offered: Option<Option<hdr::Output>>) -> bool {
+    presented.is_some() && offered == Some(None)
+}
+
+/// The output published once HDR output's swapchain did not configure for `applied` and the
+/// surface, read again, `offered` this. SDR at once (`sdr_at_once`): `present_sdr`, and the
+/// snapshot says SDR on the same frame, so HDR output, the snapshot and the swapchain agree
+/// before the next frame (which configures nothing more). Else `applied` as it was.
+fn refused(
+    applied: EffectiveOutput,
+    offered: Option<Option<hdr::Output>>,
+    present_sdr: impl FnOnce(),
+) -> EffectiveOutput {
+    if !sdr_at_once(applied.encoding, offered) {
+        return applied;
+    }
+    present_sdr();
+    EffectiveOutput {
+        encoding: None,
+        ..applied
     }
 }
 
 impl Renderer {
+    fn present_sdr(&mut self) {
+        self.hdr = None;
+        self.drop_hdr_marker();
+        if let Some(surface) = &self.surface {
+            self.frame_gen.stop_to_configure();
+            self.queue.wait();
+            self.surface_unconfigured =
+                Self::configure(&self.device, surface, &self.config, None, &self.device_lost)
+                    .is_err();
+        }
+    }
+
+    /// After the window surface did not configure: what it offers now, where HDR output
+    /// presents an encoding the surface may no longer offer. The output resolves again at the
+    /// next frame rather than at the next display poll, up to `DISPLAY_POLL` of skipped frames
+    /// later (#18536); with no HDR offered, SDR is configured already.
+    pub(super) fn surface_refused(&mut self) {
+        let presented = self.hdr.as_ref().map(|hdr| hdr.output);
+        if presented.is_none() {
+            return;
+        }
+        let (surface, adapter) = (self.surface.as_deref(), &self.adapter);
+        let offered = offer_fresh(self.display.as_mut(), || offer(surface, adapter));
+        if offered.is_none_or(|offered| offered == presented) {
+            return;
+        }
+        self.output_caps.hdr = offered.flatten();
+        self.display_fresh = true;
+        let applied = self.output;
+        self.output = refused(applied, offered, || {
+            log::info!("Horizon renderer: the window surface offers no HDR now; SDR");
+            self.present_sdr();
+        });
+    }
+
     /// HDR output presenting `encoding` for `output`, made apart from the one presented: from
     /// it where there is one, keeping the player's tuning (`Hdr::retargeted`). An error is
     /// the device's, caught here rather than left for the next frame.
@@ -322,6 +508,7 @@ impl Renderer {
         settings: &crate::graphics::Graphics,
         marker: &std::path::Path,
     ) {
+        self.set_ray_tracing(settings.ray_tracing);
         let now = Instant::now();
         self.watch_hdr(settings.hdr);
         // Auto's grace ends on a fresh read, also where a settings change comes before the
@@ -388,6 +575,7 @@ impl Renderer {
             let (watch, now) =
                 DisplayWatch::new(&self.window, self.surface.as_deref(), &self.adapter);
             self.display = Some(watch);
+            self.start_display_reader();
             let offer = offer(self.surface.as_deref(), &self.adapter);
             self.output_caps.hdr = offer.unwrap_or(self.output_caps.hdr);
             self.reading = now;
@@ -457,6 +645,29 @@ impl Renderer {
         self.output_caps.hdr = offer.unwrap_or(self.output_caps.hdr);
         self.display_fresh = true;
         self.output_rejected = None;
+        self.start_display_reader();
+    }
+
+    /// A polled display's reads move to a thread for the window surface there is now
+    /// (`DisplayReader`), replacing the one there was.
+    fn start_display_reader(&mut self) {
+        if let Some(watch) = &mut self.display
+            && watch.polled.is_some()
+        {
+            watch.reader = None;
+            watch.reader = self
+                .surface
+                .as_ref()
+                .and_then(|s| DisplayReader::start(s, &self.adapter));
+        }
+    }
+
+    /// Ends the display reader's thread, which holds the surface: before the surface is
+    /// handed over or made again.
+    pub(super) fn stop_display_reader(&mut self) {
+        if let Some(watch) = &mut self.display {
+            watch.reader = None;
+        }
     }
 
     /// Whether what the system reports for the display, or what the surface offers, changed
@@ -494,6 +705,13 @@ mod tests {
     use crate::graphics::{Graphics, HdrMode, Reported};
     use hdr::Output::{Pq, ScRgb};
     use output::tests::{snapshot, window};
+
+    #[test]
+    fn newest_frame_modes_keep_more_images() {
+        assert_eq!(frame_latency(wgpu::PresentMode::Fifo), 2);
+        assert_eq!(frame_latency(wgpu::PresentMode::Mailbox), 6);
+        assert_eq!(frame_latency(wgpu::PresentMode::Immediate), 6);
+    }
 
     /// A swapchain that records what it was asked to present, and fails `fails`.
     #[derive(Default)]
@@ -580,6 +798,7 @@ mod tests {
             #[cfg(target_os = "linux")]
             wayland: None,
             polled: Some(start + super::super::DISPLAY_POLL),
+            reader: None,
         };
         let same = reading;
         assert_eq!(watch.poll(reading, start, || unreachable!()), None);
@@ -597,6 +816,132 @@ mod tests {
             (published.nits, published.reported, published.system_hdr),
             (applied.nits, applied.reported, applied.system_hdr)
         );
+    }
+
+    /// With a reader thread the render thread reads nothing at a due poll: it takes the newest
+    /// reading handed over, the surface's offer with it, or nothing. Only the end of Auto's
+    /// grace reads at once, and a reading handed over before it doesn't override that read.
+    #[test]
+    fn the_render_thread_only_takes_what_the_reader_hands_over() {
+        /// A poll outside Auto's grace, which must not read.
+        fn poll(
+            watch: &mut DisplayWatch,
+            reading: &mut DisplayReading,
+            caps: &mut OutputCapabilities,
+            now: Instant,
+        ) -> bool {
+            poll_display(
+                Some(watch),
+                reading,
+                caps,
+                None,
+                now,
+                || unreachable!(),
+                || unreachable!(),
+            )
+        }
+        let (mut caps, mut reading) = window(Some(Pq), Some(true));
+        // Frames on a clock that ends before now: a fresh read finishes at the real time.
+        let start = Instant::now() - Duration::from_secs(10);
+        let at = |ms| start + Duration::from_millis(ms);
+        let (hand, handed) = mpsc::channel();
+        let mut watch = DisplayWatch {
+            #[cfg(target_os = "linux")]
+            wayland: None,
+            polled: Some(start),
+            reader: Some(DisplayReader {
+                handed,
+                stop: None,
+                thread: None,
+                fresh: None,
+            }),
+        };
+        // Long past due, nothing handed over.
+        assert!(!poll(&mut watch, &mut reading, &mut caps, at(5000)));
+        // The thread's read: the offer alone changed.
+        let same = reading;
+        hand.send((same, Some(Some(ScRgb)), at(5005))).unwrap();
+        assert!(poll(&mut watch, &mut reading, &mut caps, at(5010)));
+        assert_eq!((reading, caps.hdr), (same, Some(ScRgb)));
+        assert!(!poll(&mut watch, &mut reading, &mut caps, at(5020)));
+        // Auto's grace from 5100 ends at 5600, the last read before it: read at once, and an
+        // older reading the thread handed over meanwhile is dropped. So is one the thread
+        // started while that read asked for the offer.
+        let lost = DisplayReading {
+            hdr: Some(false),
+            ..same
+        };
+        hand.send((lost, Some(None), at(5590))).unwrap();
+        let mut reads = 0;
+        let read = || {
+            reads += 1;
+            same
+        };
+        let since = Some(at(5100));
+        let (during, offered_after) = (hand.clone(), Some(Some(ScRgb)));
+        let offered = move || {
+            // Strictly before the cutoff taken after this returns: two `Instant::now()` can be equal.
+            let started = Instant::now() - Duration::from_nanos(1);
+            during.send((lost, Some(None), started)).unwrap();
+            offered_after
+        };
+        let ended = poll_display(
+            Some(&mut watch),
+            &mut reading,
+            &mut caps,
+            since,
+            at(5600),
+            read,
+            offered,
+        );
+        assert!(ended);
+        assert_eq!((reads, reading, caps.hdr), (1, same, Some(ScRgb)));
+        assert!(!poll(&mut watch, &mut reading, &mut caps, at(5610)));
+        // A read the thread started before that read finished, handed over after it: dropped.
+        hand.send((lost, Some(None), at(5599))).unwrap();
+        assert!(!poll(&mut watch, &mut reading, &mut caps, at(5620)));
+        assert_eq!((reading, caps.hdr), (same, Some(ScRgb)));
+        // One it started after: taken.
+        hand.send((lost, Some(None), Instant::now())).unwrap();
+        assert!(poll(&mut watch, &mut reading, &mut caps, at(5640)));
+        assert_eq!((reading, caps.hdr), (lost, None));
+    }
+
+    /// A configure refused after a display move reads the offer at once (`surface_refused`):
+    /// a reading the thread started before that, handed over after it, would put the old
+    /// offer back, so it is dropped.
+    #[test]
+    fn a_reading_from_before_a_refused_configure_is_dropped() {
+        let (mut caps, mut reading) = window(Some(Pq), Some(true));
+        let (hand, handed) = mpsc::channel();
+        let mut watch = DisplayWatch {
+            #[cfg(target_os = "linux")]
+            wayland: None,
+            polled: Some(Instant::now()),
+            reader: Some(DisplayReader {
+                handed,
+                stop: None,
+                thread: None,
+                fresh: None,
+            }),
+        };
+        // Strictly before the cutoff: two `Instant::now()` in a row can be equal.
+        let before = Instant::now() - horizon_std::time::Duration::from_secs(1);
+        let offered = offer_fresh(Some(&mut watch), || Some(None));
+        caps.hdr = offered.flatten();
+        hand.send((reading, Some(Some(Pq)), before)).unwrap();
+        let now = Instant::now();
+        let polled = poll_display(
+            Some(&mut watch),
+            &mut reading,
+            &mut caps,
+            None,
+            now,
+            || unreachable!(),
+            || unreachable!(),
+        );
+        assert!(!polled);
+        assert_eq!(caps.hdr, None);
     }
 
     /// The display's luminance, the UI brightness or Color Boost change on the same output: the values
@@ -737,6 +1082,44 @@ mod tests {
         assert_eq!(swapchain.asked.len(), 4);
     }
 
+    /// The window on a display without HDR: HDR10 no longer configures and the surface, read
+    /// again, offers no HDR, so SDR is configured in the same frame. Offered scRGB instead, the
+    /// next frame moves to it; an SDR swapchain that fails, an encoding still offered or no
+    /// surface change nothing.
+    #[test]
+    fn hdr_that_no_longer_configures_goes_sdr_in_the_same_frame() {
+        assert!(sdr_at_once(Some(Pq), Some(None)));
+        for (presented, offered) in [
+            (Some(Pq), Some(Some(ScRgb))),
+            (Some(ScRgb), Some(Some(ScRgb))),
+            (None, Some(None)),
+            (Some(Pq), None),
+        ] {
+            assert!(
+                !sdr_at_once(presented, offered),
+                "{presented:?} {offered:?}"
+            );
+        }
+        // SDR is presented and published on the same frame, and the next frame, resolving on
+        // the offer read, configures nothing more.
+        let settings = on();
+        let (mut caps, reading) = window(Some(Pq), Some(true));
+        let pq = snapshot(&settings, NO_PACK, caps, reading);
+        let mut swapchain = Swapchain::default();
+        let sdr = refused(pq, Some(None), || swapchain.present_sdr());
+        assert_eq!(
+            (sdr.encoding, sdr.frame, swapchain.sdr),
+            (None, pq.frame, 1)
+        );
+        caps.hdr = None;
+        let next = candidate(&settings, caps, reading, &sdr);
+        let published = commit(&mut swapchain, &sdr, next, caps, &mut None);
+        assert_eq!((published.encoding, swapchain.sdr), (None, 1));
+        assert!(swapchain.asked.is_empty());
+        // Offered scRGB, nothing changes at once.
+        assert_eq!(refused(pq, Some(Some(ScRgb)), || unreachable!()), pq);
+    }
+
     /// A window in Auto presenting HDR10 at 400/1000 nits on the layered frame, followed on
     /// fake time as the game follows a renderer each frame: `display_changed`, then
     /// `update_output` where it says so.
@@ -775,6 +1158,7 @@ mod tests {
                     #[cfg(target_os = "linux")]
                     wayland: None,
                     polled: polled.then_some(start),
+                    reader: None,
                 },
                 reading,
                 caps,

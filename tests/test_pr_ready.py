@@ -14,7 +14,7 @@ import time
 import unittest
 from unittest import mock
 
-from tools import pr_ready
+from tools import lab, pr_ready
 
 PACKAGES = {"horizon-core": "crates/horizon-core", "horizon-client": "crates/horizon-client",
             "horizon-theme": "crates/horizon-theme", "xtask": "xtask"}
@@ -170,6 +170,17 @@ class PrReadyTests(unittest.TestCase):
             pr_ready.run_script([step], "local", verbose=False)
         self.assertNotIn(pr_ready.CLIPPY_CACHE_HINT, log.getvalue())
 
+    @unittest.skipUnless(POSIX_BASH and os.name != "nt" and hasattr(os, "waitid"), "POSIX with os.waitid")
+    def test_a_check_that_leaves_a_child_holding_its_output_does_not_block(self):
+        """#17707: a background child keeps the shell's stdout open after the shell exits; its group ends instead."""
+        step = pr_ready.Step("tests", "sleep 60 & printf 'ran\\n'")
+        runner = threading.Thread(target=pr_ready.run_script, args=([step], "local", False), daemon=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            runner.start()
+            runner.join(30)
+        self.assertFalse(runner.is_alive(), "run_script waited for the check's leftover child")
+        self.assertEqual((step.status, step.output.strip()), ("pass", "ran"))
+
     def test_data_backed_summary_with_and_without_prepared_data(self):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(pr_ready, "ROOT", Path(directory) / "checkout/repo"), \
@@ -184,7 +195,7 @@ class PrReadyTests(unittest.TestCase):
                 return pr_ready.block(args(), "origin/main", "abcdef123", [], {}, [step], "skip-release", 0,
                                       ("a" * 40, "", ""))
             self.assertIn("data-backed tests not run: no prepared data here", render())
-            prepared = pr_ready.ROOT / ".local/horizon-client/26.3"
+            prepared = pr_ready.ROOT / lab.RESOURCES.relative_to(lab.ROOT)
             prepared.mkdir(parents=True)
             self.assertIn("data-backed tests not run: no prepared data here", render())
             (prepared / "gameplay-facts.json").write_text("{}")
@@ -204,12 +215,14 @@ class PrReadyTests(unittest.TestCase):
             "dispatch tests tests",
             "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4} cargo test --manifest-path a/Cargo.toml --locked",
         )
-        with mock.patch.object(pr_ready.subprocess, "Popen") as popen, \
+        with mock.patch.object(pr_ready.process_tree, "popen") as popen, \
                 mock.patch.object(pr_ready, "finish"), mock.patch.dict(os.environ):
             os.environ.pop("CARGO_BUILD_JOBS", None)
-            popen.return_value.__enter__.return_value.stdout = []
-            popen.return_value.__enter__.return_value.wait.return_value = 0
-            popen.return_value.__enter__.return_value.returncode = 0
+            process = popen.return_value.__enter__.return_value
+            process.stdout = []
+            process.wait.return_value = 0
+            process.returncode = 0
+            process.job = None
             pr_ready.run_windows([step], False)
         self.assertEqual(popen.call_args.args[0],
                          ["cargo", "test", "--manifest-path", "a/Cargo.toml", "--locked"])
@@ -335,7 +348,7 @@ class PrReadyTests(unittest.TestCase):
                 self.assertLess(steps.index(actor), next(i for i, step in enumerate(steps)
                                 if step.name.startswith("tests")))
                 self.assertLess(steps.index(actor), steps.index(by_name["launcher tests"]))
-        for path in ("README.md", "crates/horizon-core/src/lib.rs"):
+        for path in ("README.md", "crates/horizon-client/src/lib.rs"):
             with self.subTest(path=path), mock.patch.object(pr_ready, "affected_here", return_value=[]):
                 steps = pr_ready.plan(args(quick=True), "origin/main", {path}, packages,
                                       LIBRARIES, DEPENDENCIES)
@@ -744,7 +757,8 @@ class PrReadyTests(unittest.TestCase):
         self.assertIn("2 affected, to run in CI (--quick): food, light", harness.detail)
         by_name = {step.name: step for step in steps}
         self.assertIn("tests: horizon-world", by_name)
-        self.assertEqual(by_name["launcher clippy"].status, "skip")
+        # horizon-world is built into the launcher (horizon-platform's world feature), so its checks run too.
+        self.assertIsNone(by_name["launcher clippy"].status)
         self.assertIsNone(by_name["clippy"].status)
         with mock.patch.object(pr_ready, "affected_here", return_value=["food"]):
             steps = pr_ready.plan(args(host="macmini", harnesses=True), "origin/main", changed, {"horizon-world": "crates/horizon-world"}, {"horizon-world"}, {})

@@ -4,56 +4,81 @@ use horizon_client_core::nbt_value::{number, string, text};
 use horizon_core::nbt::Tag;
 use std::sync::Arc;
 
-/// The two measured saved forms of `BlockPredicate.CODEC`, and the `Identifier`s
-/// of `attribute_modifiers` written whole. Operate only on
-/// the fresh ItemStack save, never its model or the shared live component view.
-fn canonical_saved_adventure_predicates(components: &mut Tag) {
-    fn predicate(value: &mut Tag) {
-        let named = match value.get("blocks") {
-            Some(Tag::List(names)) => match names.as_slice() {
-                [Tag::String(name)]
-                    if horizon_core::identifier::Identifier::parse(&name.to_string_lossy())
-                        .is_ok_and(|id| !id.path().is_empty()) =>
-                {
-                    Some(name.clone())
+/// Canonicalize the saved forms of `BlockPredicate.CODEC` and the identifiers
+/// in `attribute_modifiers` on the fresh ItemStack save.
+fn canonical_saved_components(components: &mut Tag) {
+    for key in [
+        "minecraft:can_break",
+        "minecraft:can_place_on",
+        "minecraft:attribute_modifiers",
+    ] {
+        if let Some(value) = components.get_mut(key) {
+            canonicalize_component(key, value, |custom| {
+                if matches!(custom, Tag::Compound(_)) {
+                    *custom =
+                        Tag::String(horizon_world::snbt_text::to_snbt(custom).as_str().into());
                 }
-                _ => None,
-            },
-            _ => None,
-        };
-        if let Some(name) = named {
-            *value.get_mut("blocks").unwrap() = Tag::String(name);
+            });
         }
-        // CustomDataPredicate -> NbtPredicate -> TagParser.LENIENT_CODEC.
-        // Exact `components` and the item's own custom_data are distinct.
-        if let Some(custom) = value
-            .get_mut("predicates")
-            .and_then(|p| p.get_mut("minecraft:custom_data"))
-            && matches!(custom, Tag::Compound(_))
+    }
+}
+
+/// Compare the parsed predicate with the original compound. Rendering the
+/// original to SNBT could hide a change, such as replacing an unpaired surrogate.
+pub(crate) fn canonicalize_component_for_comparison(key: &str, value: &mut Tag) {
+    canonicalize_component(key, value, |custom| {
+        if let Tag::String(snbt) = custom
+            && let Ok((compound @ Tag::Compound(_), used)) =
+                horizon_core::nbt::parse_snbt_utf16(&snbt.0)
+            && used == snbt.0.len()
         {
-            *custom = Tag::String(horizon_world::snbt_text::to_snbt(custom).as_str().into());
+            *custom = compound;
         }
-    }
-    for key in ["minecraft:can_break", "minecraft:can_place_on"] {
-        match components.get_mut(key) {
-            Some(Tag::List(predicates)) => predicates.iter_mut().for_each(predicate),
-            Some(value) => predicate(value),
-            None => {}
-        }
-    }
-    // `Attribute.CODEC` and `Identifier.CODEC` read a bare name as `minecraft:`'s
-    // and write it back whole, so a stack given `attack_damage` saves as
-    // `minecraft:attack_damage` (#14641).
-    if let Some(Tag::List(entries)) = components.get_mut("minecraft:attribute_modifiers") {
-        for entry in entries.iter_mut() {
-            for key in ["type", "id"] {
-                if let Some(Tag::String(name)) = entry.get_mut(key) {
-                    let named =
-                        horizon_world::datafix::dynamic::namespaced(&name.to_string_lossy());
-                    *name = named.as_str().into();
+    });
+}
+
+fn canonicalize_component(key: &str, value: &mut Tag, custom_data: fn(&mut Tag)) {
+    match key {
+        "minecraft:can_break" | "minecraft:can_place_on" => {
+            let predicates = match value {
+                Tag::List(predicates) => predicates.as_mut_slice(),
+                one => std::slice::from_mut(one),
+            };
+            for predicate in predicates {
+                if let Some(blocks) = predicate.get_mut("blocks")
+                    && let Tag::List(names) = blocks
+                    && let [Tag::String(name)] = names.as_slice()
+                    && horizon_core::identifier::Identifier::parse(&name.to_string_lossy())
+                        .is_ok_and(|id| !id.path().is_empty())
+                {
+                    *blocks = Tag::String(name.clone());
+                }
+                // CustomDataPredicate -> NbtPredicate -> TagParser.LENIENT_CODEC.
+                // Exact `components` and the item's own custom_data are distinct.
+                if let Some(custom) = predicate
+                    .get_mut("predicates")
+                    .and_then(|p| p.get_mut("minecraft:custom_data"))
+                {
+                    custom_data(custom);
                 }
             }
         }
+        "minecraft:attribute_modifiers" => {
+            // Attribute.CODEC and Identifier.CODEC use the default namespace (#14641).
+            if let Tag::List(entries) = value {
+                for entry in entries {
+                    for key in ["type", "id"] {
+                        if let Some(Tag::String(name)) = entry.get_mut(key)
+                            && let Ok(text) = name.to_string()
+                        {
+                            let named = horizon_world::datafix::dynamic::namespaced(&text);
+                            *name = named.as_str().into();
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -63,7 +88,7 @@ pub fn encode_item(stack: &crate::items::ItemStack) -> Vec<(&'static str, Tag)> 
         ("count", Tag::Int(stack.count as i32)),
     ];
     if let Some(mut components) = crate::item_data::encode_components(stack) {
-        canonical_saved_adventure_predicates(&mut components);
+        canonical_saved_components(&mut components);
         entries.push(("components", components));
     }
     entries
@@ -79,7 +104,7 @@ pub fn item_to_nbt_with_items(stack: &crate::items::ItemStack, items: &crate::it
         ("count", Tag::Int(stack.count as i32)),
     ];
     if let Some(mut components) = crate::item_data::encode_components_with_items(stack, items) {
-        canonical_saved_adventure_predicates(&mut components);
+        canonical_saved_components(&mut components);
         entries.push(("components", components));
     }
     Tag::compound(entries)
@@ -90,6 +115,24 @@ pub fn item_to_nbt_with_items(stack: &crate::items::ItemStack, items: &crate::it
 /// command's NBT often leaves the namespace out), and an id that is no valid
 /// identifier makes no stack.
 pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
+    decode_item(tag, |_| None)
+}
+/// `item_from_nbt` as `new ItemStack(item, count, patch)` builds it
+/// (`PatchedDataComponentMap.applyPatch`) against the item prototypes of the
+/// game that owns the save (`Items::component_defaults`): a saved value equal
+/// to the prototype's, or a removal of a component it lacks, is left out.
+/// Only a caller holding that game's own table passes it; every other read
+/// keeps the patch as saved.
+pub fn item_from_nbt_in(
+    tag: &Tag,
+    prototypes: &std::collections::HashMap<String, horizon_core::nbt::Compound>,
+) -> Option<crate::items::ItemStack> {
+    decode_item(tag, |id| prototypes.get(id))
+}
+fn decode_item<'a>(
+    tag: &Tag,
+    prototype: impl Fn(&str) -> Option<&'a horizon_core::nbt::Compound>,
+) -> Option<crate::items::ItemStack> {
     let (namespace, path) = horizon_world::datafix::identifier(&text(tag.get("id"))?)?;
     let id = format!("{namespace}:{path}");
     if id == "minecraft:air" {
@@ -99,7 +142,16 @@ pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
         .or_else(|| number(tag.get("Count")))
         .filter(|count| (1..=99).contains(count))
         .unwrap_or(1) as u32;
-    let (damage, extra) = crate::item_data::decode_components_for_item(&id, tag.get("components"));
+    let saved = tag.get("components");
+    let canonical = match (saved, prototype(&id)) {
+        (Some(Tag::Compound(patch)), Some(prototype)) => {
+            let mut patch = patch.clone();
+            crate::item_data::prototype_patch(&mut patch, prototype).then_some(Tag::Compound(patch))
+        }
+        _ => None,
+    };
+    let (damage, extra) =
+        crate::item_data::decode_components_for_item(&id, canonical.as_ref().or(saved));
     Some(crate::items::ItemStack {
         item: Arc::from(id.as_str()),
         count,
@@ -171,6 +223,149 @@ impl TryFrom<Tag> for crate::item_data::StackData {
 mod tests {
     use super::*;
 
+    /// `ItemStack.CODEC` decodes through `applyPatch`: against the prototype a saved
+    /// stack equals (and hashes like) the stack built with the same patch, and its
+    /// re-saved patch differs from the verbatim one only by the dropped keys.
+    #[test]
+    fn saved_stacks_decode_against_the_prototype() {
+        let prototype = horizon_core::json_nbt::json_to_compound(
+            serde_json::json!({
+                "minecraft:damage": 0, "minecraft:max_damage": 250,
+                "minecraft:max_stack_size": 1, "minecraft:repair_cost": 0,
+                "minecraft:enchantments": {}, "minecraft:rarity": "common"
+            })
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+        let hash = |stack: &crate::items::ItemStack| {
+            use std::hash::{Hash, Hasher};
+            let mut state = std::collections::hash_map::DefaultHasher::new();
+            stack.hash(&mut state);
+            state.finish()
+        };
+        let tag = |components: &str| {
+            Tag::compound([
+                ("id", string("minecraft:iron_pickaxe")),
+                ("count", Tag::Int(1)),
+                (
+                    "components",
+                    horizon_core::nbt::parse_snbt(components).unwrap().0,
+                ),
+            ])
+        };
+        for (saved, kept) in [
+            (
+                r#"{"minecraft:damage":0,"minecraft:max_damage":250.5f,"minecraft:repair_cost":0}"#,
+                None,
+            ),
+            (
+                r#"{"minecraft:damage":3,"minecraft:max_damage":100,"minecraft:enchantments":{}}"#,
+                Some(r#"{"minecraft:damage":3,"minecraft:max_damage":100}"#),
+            ),
+            (
+                r#"{"!minecraft:damage":{},"!minecraft:custom_name":{},"test:unknown":1b}"#,
+                Some(r#"{"!minecraft:damage":{},"test:unknown":1b}"#),
+            ),
+            (
+                r#"{"minecraft:custom_data":{k:1b},"minecraft:rarity":"rare"}"#,
+                Some(r#"{"minecraft:custom_data":{k:1b},"minecraft:rarity":"rare"}"#),
+            ),
+        ] {
+            let decoded = decode_item(&tag(saved), |_| Some(&prototype)).unwrap();
+            let verbatim = decode_item(&tag(saved), |_| None).unwrap();
+            let mut built = verbatim.clone();
+            crate::item_data::drop_prototype_values(&mut built, &prototype);
+            assert_eq!(decoded, built, "{saved}");
+            assert_eq!(hash(&decoded), hash(&built), "{saved}");
+            let resaved = item_to_nbt(&decoded);
+            let expected = kept.map(|k| horizon_core::nbt::parse_snbt(k).unwrap().0);
+            assert_eq!(
+                resaved.get("components").map(crate::item_data::canon_tag),
+                expected.as_ref().map(crate::item_data::canon_tag),
+                "{saved}"
+            );
+            // Only the dropped keys differ from the verbatim decode's patch.
+            let Some(Tag::Compound(all)) = item_to_nbt(&verbatim).get("components").cloned() else {
+                panic!("{saved}: verbatim patch")
+            };
+            let mut filtered = all.clone();
+            crate::item_data::prototype_patch(&mut filtered, &prototype);
+            assert_eq!(
+                resaved.get("components").cloned(),
+                (!filtered.is_empty()).then_some(Tag::Compound(filtered)),
+                "{saved}"
+            );
+        }
+        // A nested template (`ChargedProjectiles`) keeps its patch as saved.
+        let crossbow = decode_item(
+            &tag(r#"{"minecraft:charged_projectiles":[{id:"minecraft:arrow",count:1,components:{"minecraft:max_stack_size":64,"minecraft:repair_cost":0}}],"minecraft:max_stack_size":1}"#),
+            |id| (id == "minecraft:iron_pickaxe").then_some(&prototype),
+        )
+        .unwrap();
+        let data = crossbow.data().unwrap();
+        assert_eq!(data.other("minecraft:max_stack_size"), None);
+        assert_eq!(
+            crate::item_data::encode_components(&data.charged[0]),
+            Some(
+                horizon_core::nbt::parse_snbt(
+                    r#"{"minecraft:max_stack_size":64,"minecraft:repair_cost":0}"#
+                )
+                .unwrap()
+                .0
+            )
+        );
+    }
+
+    /// A value is left out only against the prototypes of the game that owns the
+    /// save: an explicit `damage:75` is a real override where the default is 0
+    /// and survives a load and save there, and the plain decode keeps every value.
+    #[test]
+    fn only_the_owning_prototypes_leave_a_value_out() {
+        let table = |damage: i32| {
+            let prototype = horizon_core::json_nbt::json_to_compound(
+                serde_json::json!({"minecraft:damage": damage, "minecraft:max_damage": 250})
+                    .as_object()
+                    .unwrap(),
+            )
+            .unwrap();
+            std::collections::HashMap::from([("minecraft:iron_sword".to_owned(), prototype)])
+        };
+        let (vanilla, altered) = (table(0), table(75));
+        let saved = Tag::compound([
+            ("id", string("minecraft:iron_sword")),
+            ("count", Tag::Int(1)),
+            (
+                "components",
+                horizon_core::nbt::parse_snbt(r#"{"minecraft:damage":75}"#)
+                    .unwrap()
+                    .0,
+            ),
+        ]);
+        let damage = |stack: &crate::items::ItemStack| {
+            number(
+                item_to_nbt(stack)
+                    .get("components")
+                    .and_then(|c| c.get("minecraft:damage")),
+            )
+        };
+        for kept in [
+            item_from_nbt(&saved).unwrap(),
+            item_from_nbt_in(&saved, &vanilla).unwrap(),
+        ] {
+            assert_eq!(kept.damage, 75);
+            let resaved = item_to_nbt(&kept);
+            assert_eq!(damage(&kept), Some(75));
+            // A second load and save under the same table keeps it as well.
+            assert_eq!(
+                damage(&item_from_nbt_in(&resaved, &vanilla).unwrap()),
+                Some(75)
+            );
+        }
+        let elided = item_from_nbt_in(&saved, &altered).unwrap();
+        assert_eq!(item_to_nbt(&elided).get("components"), None);
+    }
+
     #[test]
     fn nbt_count_defaults_to_one_outside_codec_range() {
         for item in ["minecraft:stone", "minecraft:diamond_sword"] {
@@ -220,6 +415,41 @@ mod tests {
         assert_eq!(read("nexo:ruby").map(|s| s.item), Some("nexo:ruby".into()));
         assert!(read("air").is_none());
         assert!(read("Stone").is_none(), "not a valid identifier");
+    }
+
+    #[test]
+    fn empty_writable_book_content_is_only_elided_for_its_own_prototype() {
+        let key = "minecraft:writable_book_content";
+        let removed = "!minecraft:writable_book_content";
+        let writable_book = "minecraft:writable_book";
+        let stack = |item, patch| {
+            item_from_nbt(&Tag::compound([
+                ("id", string(item)),
+                ("components", patch),
+            ]))
+            .unwrap()
+        };
+        let empty = Tag::compound([("pages", Tag::List(vec![]))]);
+        for value in [Tag::Compound(Default::default()), empty] {
+            let book = stack(writable_book, Tag::compound([(key, value)]));
+            assert_eq!(item_to_nbt(&book).get("components"), None);
+        }
+
+        let page = Tag::compound([(
+            "pages",
+            Tag::List(vec![Tag::compound([("raw", string("draft"))])]),
+        )]);
+        for (item, patch_key, value) in [
+            ("minecraft:paper", key, Tag::Compound(Default::default())),
+            (writable_book, key, page),
+            (writable_book, removed, Tag::Compound(Default::default())),
+        ] {
+            let patch = Tag::compound([(patch_key, value)]);
+            assert_eq!(
+                item_to_nbt(&stack(item, patch.clone())).get("components"),
+                Some(&patch)
+            );
+        }
     }
 
     #[test]
@@ -317,6 +547,7 @@ mod h285_saved_adventure_tests {
                 Some(&canonical),
                 "actual saved codec must canonicalize the two admitted forms"
             );
+            assert!(stack.matches_saved(&item_from_nbt(&saved).unwrap()));
         }
     }
     #[test]
@@ -551,6 +782,7 @@ mod h285_saved_adventure_tests {
                 entry("minecraft:armor", "mod:x"),
             ]))
         );
+        assert!(stack.matches_saved(&item_from_nbt(&saved).unwrap()));
         // The live stack keeps what it was given: only the save is canonical.
         assert_eq!(
             stack.data().unwrap().other("minecraft:attribute_modifiers"),

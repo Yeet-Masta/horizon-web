@@ -469,6 +469,7 @@ impl Game<'_> {
     pub(super) fn apply_staged_pack(&mut self, staged: StagedPack) -> horizon_client::Result<()> {
         let StagedPack {
             root,
+            root_feature_flags,
             client_applies,
             gui,
             pack,
@@ -503,7 +504,7 @@ impl Game<'_> {
                     &gui,
                     self.renderer.as_ref(),
                     Some(textures),
-                    self.settings.horizon.api,
+                    self.settings.horizon.effective_api(),
                     self.settings.horizon.translucent_batching,
                     self.settings.vsync,
                     &self.settings.horizon,
@@ -543,11 +544,13 @@ impl Game<'_> {
         self.armor_stand_assets.apply_resources(armor_stand_assets);
         self.random_tick_sections.clear();
         self.portals.sections.clear();
+        self.forget_stand_rests();
         // Each level keeps its own portal answers: the parked ones are stale too.
         for level in self.levels.parked.values_mut() {
             level.portal_sections.clear();
         }
         self.options.resources = root.clone();
+        self.mods.root_feature_flags = root_feature_flags;
         self.falling_vertices.get_mut().clear();
         self.pack = pack;
         let skip = self
@@ -555,6 +558,9 @@ impl Game<'_> {
             .extras
             .skip_modded_splashes_if_vanilla_modified;
         self.gui = gui.with_splashes(&self.pack.source, &self.vanilla_root(), skip);
+        // Client mods' dynamic textures keep their names and places in the new atlas's page,
+        // and their kept pixels upload with the next frame: no mod uploads them again.
+        self.dynamic_textures.rebind(&mut self.gui.atlas);
         self.standalone_geometry = standalone_geometry;
         self.instance_groups.borrow_mut().clear();
         // The new atlas's skin and map slots are blank: players and maps
@@ -766,6 +772,7 @@ pub(super) fn stage_pack(
     progress.set(3);
     Ok(StagedPack {
         root,
+        root_feature_flags: mod_sources.candidate_feature_flags(),
         client_applies,
         gui,
         pack,
@@ -785,6 +792,7 @@ pub(super) fn stage_pack(
 /// it on the render thread).
 pub(super) struct StagedPack {
     pub root: PathBuf,
+    root_feature_flags: Option<Arc<[String]>>,
     pub waypoint_styles: horizon_client::locator_bar::WaypointStyles,
     pub armor_stand_assets: super::armor_stands::ArmorStandAssets,
     pub frame_models: [super::frames::FrameModel; 4],

@@ -1,0 +1,2 @@
+# A wind burst plays its sound on the blocks source; the test boots a game with prepared vanilla resources.
+horizon-client game::wind::tests::wind_burst_plays_on_blocks_sound_source lib daily resources

@@ -9,7 +9,7 @@
 The game ships only the Nightly since 2026-10-28 (Ludovic): when `decide --kind game` says so, release.yml starts
 `nightly build` on the commit it decided (tools/ci/nightly.py), and "the last release" is the published Nightly.
 A kind releases when a pull request merged into main since its last published release changed one of its
-player-facing paths (GAME_PATHS, LAUNCHER_PATHS), once BATCH of them are waiting and the newest merged at least
+player-facing paths (GAME_PATHS, LAUNCHER_RELEASE_PATHS), once BATCH of them are waiting and the newest merged at least
 DEBOUNCE ago (a burst of merges becomes one release), or once the oldest has waited MAX_WAIT (LAUNCHER_MAX_WAIT for the launcher: a lone fix still ships),
 or at once when one of those pull requests is labelled release-now. Pull requests labelled skip-release (work players don't see) don't count
 towards a release and aren't listed in the notes. RELEASES_PAUSED=1 (a repository variable) stops automatic releases,
@@ -68,8 +68,58 @@ OLD_LAUNCHER_PREFIX = "launcher-v"
 
 # What players run. Documentation (*.md), tests, benchmarks and harness probes (examples/) never count.
 GAME_PATHS = ["crates/", "xtask/", "packaging/", "Cargo.toml", "Cargo.lock", "research-lock.json"]
-# Every crate the launcher builds in (cargo metadata --manifest-path launcher/Cargo.toml: the path packages).
+# Every crate the launcher builds in: the path packages its manifest reaches, through dependencies of any kind of the
+# launcher and normal and build dependencies of each crate after it (tests/test_release_train.py fails when they differ).
+# It decides only whether the launcher's checks and build run (tools/ci/rust_changes.py, tools/pr_ready.py, launcher.yml);
+# LAUNCHER_RELEASE_PATHS below decides releases.
 LAUNCHER_PATHS = [
+    "launcher/",
+    "crates/horizon-addresses/",
+    "crates/horizon-anticheat/",
+    "crates/horizon-assets/",
+    "crates/horizon-bench/",
+    "crates/horizon-chat-filter/",
+    "crates/horizon-core/",
+    "crates/horizon-cosmetics/",
+    "crates/horizon-friends/",
+    "crates/horizon-game-discovery/",
+    "crates/horizon-guest-stack/",
+    "crates/horizon-hooks/",
+    "crates/horizon-java-properties/",
+    "crates/horizon-mcp/",
+    "crates/horizon-mod-api-gen/",
+    "crates/horizon-mod-api-macros/",
+    "crates/horizon-mod-package/",
+    "crates/horizon-mod-runtime/",
+    "crates/horizon-mod-source/",
+    "crates/horizon-mod-surface/",
+    "crates/horizon-mod-vocab/",
+    "crates/horizon-perf-format/",
+    "crates/horizon-platform/",
+    "crates/horizon-port-pack/",
+    "crates/horizon-prepare/",
+    "crates/horizon-protocol/",
+    "crates/horizon-release-sign/",
+    "crates/horizon-server-files/",
+    "crates/horizon-server-launch/",
+    "crates/horizon-shader-api/",
+    "crates/horizon-system/",
+    "crates/horizon-telemetry/",
+    "crates/horizon-theme/",
+    "crates/horizon-threads/",
+    "crates/horizon-world/",
+    # Its icon, its menu entries and its AppImage are compiled or packaged into a release
+    # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
+    "packaging/icons/",
+    "packaging/linux/",
+    # launcher.yml's macOS build packages Horizon.app and the .dmg with packaging/macos/package.sh.
+    "packaging/macos/",
+]
+# What counts toward a launcher release (player_facing). Deliberately narrower than LAUNCHER_PATHS: the checks must see
+# every crate the launcher compiles, but a release for each change to the other 26 (horizon-world, horizon-core...)
+# would mean about 60% more launcher releases, more auto-updates for players and more release jobs on the Mac that
+# parity and Nightlies need; at about 47 releases a week such changes ship within hours anyway. Don't widen it to match.
+LAUNCHER_RELEASE_PATHS = [
     "launcher/",
     "crates/horizon-bench/",
     "crates/horizon-friends/",
@@ -85,6 +135,8 @@ LAUNCHER_PATHS = [
     # (launcher/build.rs, src/desktop.rs, packaging/linux/appimage.sh).
     "packaging/icons/",
     "packaging/linux/",
+    # launcher.yml's macOS build packages Horizon.app and the .dmg with packaging/macos/package.sh.
+    "packaging/macos/",
 ]
 LAUNCHER_IGNORED = ["launcher/links.json", "launcher/docs/", "launcher/tests/"]
 
@@ -131,10 +183,10 @@ def exporters():
 
 def player_facing(path, kind, exporter_paths=frozenset()):
     """Whether a change to path ships to players in a release of this kind."""
-    if path.endswith(".md") or re.match(r"(crates|launcher)/([\w-]+/)?(examples|tests|benches)/", path):
+    if path.endswith(".md") or re.match(r"(crates|launcher)/([\w-]+/)?(examples|tests|[\w-]+-tests|benches)/", path):
         return False
     if kind == "launcher":
-        return any(path.startswith(p) for p in LAUNCHER_PATHS) and not any(path.startswith(p) for p in LAUNCHER_IGNORED)
+        return any(path.startswith(p) for p in LAUNCHER_RELEASE_PATHS) and not any(path.startswith(p) for p in LAUNCHER_IGNORED)
     return any(path == p or path.startswith(p) for p in GAME_PATHS) or path in exporter_paths
 
 
@@ -486,12 +538,31 @@ def published_nightly():
     return json.loads(out) if out.strip() else None
 
 
-def nightly_building():
-    """The run of `nightly build` under way or waiting, if any: the train starts no second one."""
-    runs = gh_json("run", "list", "--repo", REPO, "--workflow", NIGHTLY_WORKFLOW, "--limit", "10",
-                   "--json", "databaseId,status")
-    return next((entry["databaseId"] for entry in runs if entry["status"] in ("queued", "in_progress", "waiting",
-                                                                              "pending", "requested")), None)
+# How far back `nightly_building` looks, and the most runs it lists. GitHub allows a run to be rerun for 30 days and
+# the rerun keeps the run's creation date (a real cut's `sdk-publish` rerun after parity-main passes), so any run
+# created in the last 35 days may be active again. GitHub returns at most 1000 runs for a filtered listing; a full
+# one counts as building.
+NIGHTLY_ACTIVE = ("queued", "in_progress", "waiting", "pending", "requested")
+NIGHTLY_LOOKBACK_DAYS = 35
+NIGHTLY_LISTING = 1000
+
+
+def nightly_building(now):
+    """The run of `nightly build` under way or waiting, if any: the train starts no second one. One listing of every
+    run created in the lookback, so a run moving between states is seen in exactly one of them, and newer finished
+    runs (dry runs no longer wait in line) can't hide an active one. A full listing may be cut off: it counts as
+    building. A dry run counts too: its own concurrency group, but its macOS jobs share the Mac's one nightly
+    runner."""
+    since = (now - dt.timedelta(days=NIGHTLY_LOOKBACK_DAYS)).date().isoformat()
+    runs = gh_json("run", "list", "--repo", REPO, "--workflow", NIGHTLY_WORKFLOW, "--created", f">={since}",
+                   "--limit", str(NIGHTLY_LISTING), "--json", "databaseId,status")
+    if not isinstance(runs, list):
+        # gh prints `[]` for no runs; blank or anything else is a listing that failed, never "nothing is building".
+        raise SystemExit(f"gh run list {NIGHTLY_WORKFLOW}: no run listing ({runs!r})")
+    active = next((entry["databaseId"] for entry in runs if entry["status"] in NIGHTLY_ACTIVE), None)
+    if active is None and len(runs) >= NIGHTLY_LISTING:
+        return f"unknown: {len(runs)} runs since {since} fill the listing, so one may be hidden"
+    return active
 
 
 def nightly_builds_today(today):
@@ -643,7 +714,7 @@ def main():
         release, reason = False, f"waiting for checks and parity-main to pass on {head[:9]}"
     urgent = False
     if args.kind == "game":
-        release, reason, urgent = nightly_decision(release, reason, prs, nightly_building(),
+        release, reason, urgent = nightly_decision(release, reason, prs, nightly_building(now),
                                                    len(nightly_builds_today(now.date().isoformat())), args.force)
     minor = any("feature" in pr["labels"] for pr in prs if pr["paths"])
     tag = "nightly" if args.kind == "game" else next_launcher_tag(tags, minor, line)

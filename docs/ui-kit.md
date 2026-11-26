@@ -21,7 +21,7 @@ The kit grows a piece at a time, each with something on screen that needs it:
 | `hud_kit::icon` | `Icon`: a sprite, an item, a glyph or the player's face, through an `IconPainter` |
 | `hud_kit::tabs` | `collapsed`: a page list in one row, `‹ Name ›` with a pip per page; `tab_strip`: a row of tabs that falls back to it |
 | `pad_glyph`, with `GlyphOf` and `MenuJob` in `gamepad.rs` | `Glyph`: a controller button, asked for by what it does, in the player's `Glyphs` |
-| `hud_kit::fit` | `ellipsize`, `wrap`, `chord` and `fit_in_circle`: text cut or wrapped to the room it has |
+| `hud_kit::fit` | `ellipsize`, `clip_text` (vanilla's `clipText`), `wrap`, `chord` and `fit_in_circle`: text cut or wrapped to the room it has |
 | `hud_kit::hint` | `HintRow`: glyphs and what they do, "(A) Jump", measured, fitted and drawn one way |
 | `settings_shell` | `Shell`: a searchable settings screen (Extras, Graphics, Controller Settings, Shaders) a `Screen` describes; it draws and drives it, binding rows included |
 
@@ -251,7 +251,7 @@ closes anyway). Before, the menu took that B.
 
 ## Glyphs
 
-Code asks for a glyph by what the button does, never by a button. The chain runs from the job to the art:
+Gameplay and menu prompts ask for a glyph by what the button does. The chain runs from the job to the art:
 
 1. **What it does** (`gamepad::GlyphOf`): a gameplay action, `GlyphOf::Bound("key.jump")`, or a menu's fixed
    job, `GlyphOf::Menu(MenuJob::Back)`. Menus aren't rebindable, so `MenuJob::button` is the one map from a
@@ -272,10 +272,10 @@ confirms and jumps. Inside `pad_glyph`, a `Glyph` turns its part back into the b
 art and the label, so South shows that A. `GlyphStyle` is only the setting: the Glyphs choice and
 `horizon-controller.txt` keep `nintendo` and `nintendoLetters` as before.
 
-What the types guarantee: no code outside `pad_glyph` can turn a bare `Button` into art or a label, and none
-can make `Glyphs` without the `PadSettings` its letters come from. What they don't: a caller holding the
-settings could still pass another pad's family, so gameplay reads the player's through `Game::glyph` and
-`Game::menu_glyph`.
+`Glyph::physical` is for prompts that explicitly document a controller's physical button. It takes
+the selected artwork family and skips the letter remap, including when drawing a button that was
+already resolved from a gameplay role. The mod SDK uses this path without exposing the atlas.
+Gameplay still reads the player's bindings and art through `Game::glyph` and `Game::menu_glyph`.
 
 A new screen asks for a glyph like this:
 
@@ -399,7 +399,7 @@ The shell paints through `graphics_style`, which follows the menu style the laye
 (`menu_style::install`). Its `surfaces` picks one of two looks, with the same layout:
 
 - `Surfaces::Flat`: see-through glass panels and flat controls in the style's colours. The official game
-  gives this with Horizon's Blocks palette (`horizon_look.rs`).
+  gives this with Horizon's Blocks palette (`horizon-game/src/look.rs`).
 - `Surfaces::Vanilla`: what vanilla's Options screens draw, from the player's resource packs. Panels are
   the list background between its header and footer separators, and the open page is a selection
   list's entry (a grey edge round black, white with the focus). Controls are the `widget/*` sprites: a
@@ -410,6 +410,13 @@ The shell paints through `graphics_style`, which follows the menu style the laye
 Two of vanilla's pieces draw in any look, for overlays that use them: `graphics_style::vanilla_tab`
 (a Create World tab, `MenuTabBar.MenuTabButton`) and `ui::tooltip_panel` (a tooltip's background and
 frame round any content).
+
+The radial menu follows the same switch (`graphics_style::vanilla_surfaces()`). On vanilla's surfaces
+every slot is an advancement task frame with its item: the picked one in the obtained (gold) frame under
+a container's hover glow, one that can't run dimmed, an empty one faded. The hub is a tooltip with one
+short line (the item's name), the pages are Create World's tabs, and there are no
+state chips. A view too tight for the frames takes vanilla's 18 px inventory slots before the HUD's rows
+are covered (`radial_overlay/vanilla.rs`).
 
 `HORIZON_MENU_STYLE=vanilla` starts the official game with no style given, so it draws in `NEUTRAL`.
 Use it to see and test the vanilla look; `pad_menu_e2e.py` passes the variable on to the game.

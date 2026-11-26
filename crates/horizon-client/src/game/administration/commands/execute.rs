@@ -66,6 +66,11 @@ pub(in crate::game) struct ExecState {
     /// Function IDs in execution order, with the active frame last.
     pub functions: Vec<String>,
     pub prepared_function: Option<super::super::functions::PreparedFunctionCall>,
+    /// Original input for the active parsed mod command, including any execute prefix.
+    pub native_command_input: Option<String>,
+    /// The leaf text of the mod command whose `run_mod_command` listeners run
+    /// (`ServerHost::mod_command_raw`).
+    pub native_command_raw: Option<String>,
 }
 
 /// A modifier that brings the sources to `max_command_forks` ends the chain
@@ -135,7 +140,7 @@ impl Game<'_> {
                 .armor_stands
                 .iter()
                 .find(|a| a.id == id)
-                .map_or([0.0; 2], |a| [a.yaw, 0.0]),
+                .map_or([0.0; 2], |a| [a.yaw, a.pitch]),
             Target::Boat(id) => self
                 .boats
                 .iter()
@@ -230,13 +235,17 @@ impl Game<'_> {
         f: impl FnOnce(&mut Self) -> T,
     ) -> T {
         let previous = self.command_source.replace(source);
-        let back = self.enter_command_level(source.dimension);
-        let out = f(self);
+        // Opening a level can call mods after the swap, before it returns.
+        let mut back = Some(self.dim);
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            back = self.enter_command_level(source.dimension);
+            f(self)
+        }));
         if let Some(back) = back {
             self.enter_command_level(back);
         }
         self.command_source = previous;
-        out
+        out.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
     /// `CommandSourceStack.getLevel`: the source's own level (`execute in`,
     /// which `with_source` puts in place), the console's Overworld, or the
@@ -251,6 +260,14 @@ impl Game<'_> {
 
     // ---- running commands -----------------------------------------------
 
+    /// Standalone commands can run synchronously from a mod hook in another command.
+    pub(in crate::game) fn with_command_frame<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::take(&mut self.exec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(self)));
+        self.exec = outer;
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
     /// Run one command line with `source` (no error reporting): the entry
     /// for functions and `execute run`.
     pub(in crate::game) fn execute_line(&mut self, line: &str, source: Source) -> R<i32> {
@@ -258,8 +275,13 @@ impl Game<'_> {
         let parse = d.parse(line, &self.ui.registries);
         let (ctx, _) = parse.executable()?;
         let ctx = ctx.clone();
-        let root = parse.context.clone();
-        self.with_source(source, |g| g.run_chain(&root, &ctx))
+        let input = (ctx.command == Some("native_mod_command")).then_some(parse.input);
+        let saved = std::mem::replace(&mut self.exec.native_command_input, input);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.with_source(source, |g| g.run_chain(&parse.context, &ctx))
+        }));
+        self.exec.native_command_input = saved;
+        result.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
     /// Run a parsed command (`root` is the first context; `ctx` the one with
     /// the executable node): `execute` and `return` walk their own chains.
@@ -1088,10 +1110,14 @@ impl Game<'_> {
         let Some(Arg::Resource(name)) = c.get("name").cloned() else {
             return Ok((false, 0));
         };
+        // The tag stops at its first `return`, the last result; the callback
+        // tests only that one (`check.test(result)`).
         let results = self.call_function_ref(&name, None)?;
-        let keep = results.iter().any(|r| r.is_some_and(|v| (v != 0) == want));
-        let fallthrough = !results.is_empty() && results.iter().all(Option::is_none);
-        Ok((keep || (!want && fallthrough), 0))
+        Ok(match results.last() {
+            None => (false, 0),
+            Some(Some(v)) => ((*v != 0) == want, 0),
+            Some(None) => (!want, 0),
+        })
     }
     /// `ExecuteCommand.isChunkLoaded`: an entity-ticking loading status and
     /// completed entity loading, rather than merely a retained lit column.
@@ -1291,18 +1317,23 @@ impl Game<'_> {
         }
         Ok((true, count))
     }
-    /// The biome name at a block position.
-    fn biome_name_at_block(&self, p: [i32; 3]) -> Option<String> {
-        let chunk = self.world.chunks.get(&(p[0] >> 4, p[2] >> 4))?;
+    /// The stored biome id `LevelReader.getBiome(BlockPos)` reads at `p`: the
+    /// quart cell `BiomeManager.getBiome`'s zoom picks among the eight around
+    /// the block, which near a border can be a neighbouring cell. The zoom is
+    /// seeded with `BiomeManager.obfuscateSeed(seed)`. None where the picked
+    /// cell's chunk isn't loaded.
+    pub(in crate::game) fn zoomed_biome_id(&self, p: [i32; 3]) -> Option<u16> {
+        let at = horizon_core::position::BlockPos::new(p[0], p[1], p[2]);
+        let [x, y, z] = self.streaming.biome_zoom.quart_at_block(at).map(|q| q << 2);
+        Some(self.world.chunks.get(&(x >> 4, z >> 4))?.biome(x, y, z))
+    }
+    /// The biome name at a block position, as `LevelReader.getBiome` zooms it.
+    pub(in crate::game) fn biome_name_at_block(&self, p: [i32; 3]) -> Option<String> {
+        let id = self.zoomed_biome_id(p)?;
         // The world's table (`world_biomes!`): a packed biome's id is past
         // the built-in list, and `Biomes::get` would clamp it to the last
         // vanilla one.
-        Some(
-            world_biomes!(self)
-                .get(chunk.biome(p[0], p[1], p[2]))
-                .name
-                .clone(),
-        )
+        Some(world_biomes!(self).get(id).name.clone())
     }
     /// A biome id or `#tag` matched against a biome name.
     pub(in crate::game) fn biome_matches(&self, wanted: &str, biome: &str) -> bool {

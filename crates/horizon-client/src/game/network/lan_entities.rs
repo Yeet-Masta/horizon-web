@@ -337,7 +337,22 @@ impl Game<'_> {
                 _ => {}
             }
         });
+        // A stand nobody has had a `&mut` to since its state was built has the state it had: the
+        // lists hand out no `&mut` without `Joined::touch`, which sets `sync_dirty`.
+        // A test sets `VERIFY_STAND_STATES` to rebuild each clean stand too and check it against
+        // the kept state.
+        let verify = VERIFY_STAND_STATES.load(std::sync::atomic::Ordering::Relaxed);
+        let mut rebuilt = false;
         for a in self.armor_stands.iter().filter(|a| a.id > after) {
+            if !a.sync_dirty
+                && !verify
+                && let Some(kept) = self.stand_states.get(&a.id)
+            {
+                let e = out.add(kept.id, kept.uuid, &kept.kind);
+                e.clone_from(kept);
+                continue;
+            }
+            rebuilt = true;
             let p = a.position;
             let attributes = self.stand_attributes(&a.live);
             let e = add_state(
@@ -411,6 +426,27 @@ impl Game<'_> {
                 }
             }
             e.attributes = attributes;
+            if verify
+                && !a.sync_dirty
+                && let Some(kept) = self.stand_states.get(&a.id)
+            {
+                assert_eq!(&*e, kept, "stand {} kept state", a.id);
+            }
+            self.stand_states.insert(a.id, e.clone());
+        }
+        if rebuilt {
+            // The states of stands that were built; the dirt they carried is told.
+            self.armor_stands.for_each_quiet(|a| {
+                if a.id > after {
+                    a.sync_dirty = false;
+                }
+            });
+        }
+        // Also when every stand was a clean hit: stands that were removed leave their states.
+        if self.stand_states.len() > self.armor_stands.len() + 64 {
+            let live: std::collections::HashSet<u32> =
+                self.armor_stands.iter().map(|a| a.id).collect();
+            self.stand_states.retain(|id, _| live.contains(id));
         }
         for f in self.item_frames.iter().filter(|f| f.id > after) {
             // ItemFrame.getAddEntityPacket: the block it hangs in and its direction.
@@ -545,6 +581,24 @@ impl Game<'_> {
                     .lan
                     .as_mut()
                     .and_then(|host| host.hub.stack(&Some(item)));
+            }
+            // Interaction.DATA_WIDTH (8), DATA_HEIGHT (9) and DATA_RESPONSE
+            // (10): sent only when they differ from the defaults a client
+            // starts with, which are the values it returns to.
+            if let Some(i) = o.interaction {
+                if i.width != 1.0 {
+                    e.meta.push((8, serializer::FLOAT, Value::Float(i.width)));
+                }
+                if i.height != 1.0 {
+                    e.meta.push((9, serializer::FLOAT, Value::Float(i.height)));
+                }
+                if i.response {
+                    e.meta.push((10, serializer::BOOLEAN, Value::Bool(true)));
+                }
+                e.defaults.push((8, serializer::FLOAT, Value::Float(1.0)));
+                e.defaults.push((9, serializer::FLOAT, Value::Float(1.0)));
+                e.defaults
+                    .push((10, serializer::BOOLEAN, Value::Bool(false)));
             }
         }
         // Only this level's displays: the others are kept for their own level's pass.
@@ -687,6 +741,10 @@ impl Game<'_> {
             _ => return None,
         };
         e.meta = display_data(tag, false);
+        // Entity.setGlowingTag: a nonliving display sends its NBT glow on shared flag 6.
+        if horizon_client::entity_nbt::flag(tag, "Glowing") {
+            e.meta.insert(0, (0, serializer::BYTE, Value::Byte(0x40)));
+        }
         e.meta.extend(meta);
         e.defaults = display_data(&empty, true);
         e.defaults.extend(defaults);
@@ -1319,6 +1377,162 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn glowing_display_metadata_reaches_the_model_silhouettes() {
+        use crate::game::native_entity_refs::tests::with_client_game;
+        use horizon_client::block_entity_render::{END_GATEWAY_LAYER, END_PORTAL_LAYER};
+        use horizon_protocol::{
+            item::Stack,
+            packets::play::{self, Clientbound as C},
+        };
+
+        with_client_game(|game| {
+            let (client, _server) = horizon_protocol::connection::Pipe::pair();
+            game.connect_local(client, "display-glow-test").unwrap();
+            let builtin = game.remote.as_ref().unwrap().builtin.clone();
+            let types = builtin.get("minecraft:entity_type").unwrap();
+            let planks = builtin
+                .get("minecraft:item")
+                .unwrap()
+                .id("minecraft:oak_planks")
+                .unwrap();
+            let uuid = 1;
+            let id = 42;
+            let member = "00000000-0000-0000-0000-000000000001";
+            let camera = glam::DVec3::new(0.0, 70.0, 0.0);
+            let team = "red_team";
+            let override_color = 0xff12_3456_u32 as i32;
+            game.score.board.add_team(team).color = Some("red".into());
+
+            for (kind, contents, end_cube) in [
+                (
+                    "minecraft:item_display",
+                    r#"item:{id:"minecraft:oak_planks",count:1}"#,
+                    None,
+                ),
+                (
+                    "minecraft:block_display",
+                    r#"block_state:{id:"minecraft:oak_planks"}"#,
+                    None,
+                ),
+                (
+                    "minecraft:block_display",
+                    r#"block_state:{id:"minecraft:end_portal"}"#,
+                    Some((END_PORTAL_LAYER, [0.4375, 0.625])),
+                ),
+                (
+                    "minecraft:block_display",
+                    r#"block_state:{id:"minecraft:end_gateway"}"#,
+                    Some((END_GATEWAY_LAYER, [0.25, 0.75])),
+                ),
+                ("minecraft:text_display", r#"text:{text:"Glow"}"#, None),
+            ] {
+                game.handle_packet(C::AddEntity(play::AddEntity {
+                    id,
+                    uuid,
+                    kind: types.id(kind).unwrap(),
+                    position: [0.0, 70.0, -4.0],
+                    velocity: [0.0; 3],
+                    pitch: 0,
+                    yaw: 0,
+                    head_yaw: 0,
+                    data: 0,
+                }))
+                .unwrap();
+                let mut tracked = EntityState {
+                    id,
+                    kind: kind.into(),
+                    ..Default::default()
+                };
+                let transform = if end_cube.is_some() {
+                    ",transformation:{translation:[0.5f,0.25f,0.5f],scale:[2f,0.5f,1f],left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f]}"
+                } else {
+                    ""
+                };
+                let tag = horizon_client::command::snbt::parse_fully(&format!(
+                    "{{Glowing:1b,glow_color_override:{override_color},{contents}{transform}}}"
+                ))
+                .unwrap();
+                let stack = game.lan_display_data_kept(id as u32, &tag, &mut tracked);
+                if let Some(stack) = stack {
+                    let (_, _, value) =
+                        tracked.meta.iter_mut().find(|entry| entry.0 == 23).unwrap();
+                    *value = Value::Item(Some(Stack::new(planks, stack.count as i32)));
+                }
+                let send = |game: &mut Game<'_>, values| {
+                    game.handle_packet(C::SetEntityData(play::SetEntityData { id, values }))
+                        .unwrap();
+                };
+                let draw = |game: &mut Game<'_>, visible: bool, color: Option<u32>| {
+                    game.glowing_vertices.borrow_mut().clear();
+                    let mut model = Vec::new();
+                    game.block_item_display_geometry(camera, 0.0, &mut model);
+                    game.text_display_geometry(camera, 0.0, &mut model, &mut Vec::new());
+                    assert_eq!(model.is_empty(), !visible, "{contents}");
+                    if let Some((layer, y)) = end_cube.filter(|_| visible) {
+                        assert_eq!(model.len(), 24, "{contents} should draw six faces");
+                        assert!(model.iter().all(|v| v.layer == layer));
+                        for (axis, planes) in [[0.5, 2.5], y, [-3.5, -2.5]].into_iter().enumerate()
+                        {
+                            for coordinate in planes {
+                                assert!(
+                                    model
+                                        .as_chunks::<4>()
+                                        .0
+                                        .iter()
+                                        .any(|face| face.iter().all(|v| v.pos[axis] == coordinate)),
+                                    "{contents} is missing its face at axis {axis}, {coordinate}"
+                                );
+                            }
+                        }
+                    }
+                    let outline = game.glowing_vertices.borrow();
+                    if let Some(color) = color.filter(|_| kind != "minecraft:text_display") {
+                        assert_eq!(outline.len(), model.len(), "{kind}");
+                        for (outline, model) in outline.iter().zip(&model) {
+                            assert_eq!(outline.color, color, "{kind}");
+                            assert_eq!(
+                                (outline.pos, outline.uv, outline.layer),
+                                (model.pos, model.uv, model.layer)
+                            );
+                        }
+                    } else {
+                        assert!(outline.is_empty(), "{kind} should draw no silhouette");
+                    }
+                };
+
+                game.score.board.add_to_team(member, team);
+                send(game, tracked.meta);
+                game.tick_text_displays();
+                assert!(game.tracked_entity_glowing(id as u32), "{kind}");
+                draw(game, true, Some(0xff56_3412));
+                // Resetting metadata takes effect before another display tick.
+                send(game, vec![(22, serializer::INT, Value::Int(-1))]);
+                draw(game, true, Some(0xff55_55ff));
+                game.score.board.remove_from_team(member);
+                draw(game, true, Some(0xffff_ffff));
+                send(game, vec![(22, serializer::INT, Value::Int(0))]);
+                draw(game, true, Some(0xff00_0000));
+                send(game, vec![(17, serializer::FLOAT, Value::Float(0.0))]);
+                draw(game, false, None);
+                send(game, vec![(17, serializer::FLOAT, Value::Float(1.0))]);
+                draw(game, true, Some(0xff00_0000));
+                send(
+                    game,
+                    vec![
+                        (22, serializer::INT, Value::Int(override_color)),
+                        (0, serializer::BYTE, Value::Byte(0)),
+                    ],
+                );
+                assert!(!game.tracked_entity_glowing(id as u32), "{kind}");
+                draw(game, true, None);
+                game.handle_packet(C::RemoveEntities(play::RemoveEntities { ids: vec![id] }))
+                    .unwrap();
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn kept_display_data_is_what_a_build_gives() {
         crate::game::native_entity_refs::tests::with_game(|game| {
             let snbt = |s: &str| horizon_client::command::snbt::parse_fully(s).unwrap();
@@ -1490,5 +1704,102 @@ mod vehicle_meta_tests {
         );
         vehicle_meta(&mut e, 4, -1, 3.0);
         assert_eq!(e.meta.len(), 3);
+    }
+}
+
+/// Set by a test: every clean stand is rebuilt too and compared with its kept state.
+pub(crate) static VERIFY_STAND_STATES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+mod interaction_meta_tests {
+    //! A server `minecraft:interaction`'s box and response reach a guest as
+    //! `Interaction`'s synched data, sent only when they differ from the
+    //! defaults a client starts with (`Interaction.defineSynchedData`).
+    use super::*;
+
+    /// The values a client starts with, which the tracker sends whenever a
+    /// value it saw is left out again.
+    fn defaults() -> Vec<(u8, i32, Value)> {
+        vec![
+            (8, serializer::FLOAT, Value::Float(1.0)),
+            (9, serializer::FLOAT, Value::Float(1.0)),
+            (10, serializer::BOOLEAN, Value::Bool(false)),
+        ]
+    }
+
+    fn interaction(
+        id: u32,
+        width: f32,
+        height: f32,
+        response: bool,
+    ) -> crate::game::commands::OtherEntity {
+        crate::game::commands::OtherEntity {
+            attachment_lifetime: Default::default(),
+            join: Default::default(),
+            id,
+            kind: "minecraft:interaction".into(),
+            position: horizon_core::geometry::Vec3::new(4.5, 70.0, 4.5),
+            yaw: 0.0,
+            pitch: 0.0,
+            item_transformation: None,
+            interaction: Some(crate::game::interactions::InteractionState {
+                width,
+                height,
+                response,
+                attack: None,
+                interaction: None,
+            }),
+            knot_check: None,
+            eye: None,
+        }
+    }
+
+    /// What the tracker holds for `id`: the synched values it sends and the
+    /// defaults it falls back to (`ServerEntity.getNonDefaultValues`).
+    fn tracked(game: &mut Game<'_>, id: u32) -> (Vec<(u8, i32, Value)>, Vec<(u8, i32, Value)>) {
+        fn data(list: &[(u8, i32, Value)]) -> Vec<(u8, i32, Value)> {
+            // `Interaction`'s DATA_WIDTH (8), DATA_HEIGHT (9), DATA_RESPONSE (10).
+            list.iter()
+                .filter(|(index, _, _)| (8..=10).contains(index))
+                .cloned()
+                .collect()
+        }
+        let mut states = States::default();
+        game.lan_object_states(&mut states, false, 0);
+        let e = states
+            .as_slice()
+            .iter()
+            .find(|e| e.id == id as i32)
+            .expect("the interaction is tracked");
+        (data(&e.meta), data(&e.defaults))
+    }
+
+    #[test]
+    fn an_interactions_box_and_response_reach_guests_with_their_defaults() {
+        if horizon_std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        // A LAN host: `lan_object_states` tracks nothing without one.
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            game.others.push(interaction(900, 2.5, 1.5, true));
+            game.others.push(interaction(901, 1.0, 1.0, false));
+            assert_eq!(
+                tracked(game, 900),
+                (
+                    vec![
+                        (8, serializer::FLOAT, Value::Float(2.5)),
+                        (9, serializer::FLOAT, Value::Float(1.5)),
+                        (10, serializer::BOOLEAN, Value::Bool(true)),
+                    ],
+                    defaults(),
+                ),
+                "a box and a response a client cannot guess, over the defaults they return to"
+            );
+            assert_eq!(
+                tracked(game, 901),
+                (Vec::new(), defaults()),
+                "an interaction at its defaults sends none of them"
+            );
+        });
     }
 }

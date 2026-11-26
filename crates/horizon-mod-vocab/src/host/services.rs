@@ -24,6 +24,11 @@ pub trait ServicesServerHost {
     #[access(WorldOnly)]
     #[service]
     fn players(&self) -> &dyn Players;
+    /// The profiles service.
+    /// Not on wasm: a frame resource; its methods are the imports.
+    #[access(WorldOnly)]
+    #[service]
+    fn profiles(&mut self) -> &mut dyn Profiles;
     /// The runtime_levels service.
     /// Not on wasm: a frame resource; its methods are the imports.
     #[access(WorldOnly)]
@@ -93,6 +98,40 @@ pub trait ClientSession {
         crate::world::phase::unprovided(
             "ClientSession::client_tab_list",
             "client_tab_list",
+            crate::world::phase::LoadAccess::ClientSetup,
+        )
+    }
+    /// Side: client.
+    /// The locator bar's tracked waypoints: each waypoint's identifier, target, icon style and
+    /// icon colour, in the order the server sent them. What this client has been sent; None
+    /// outside a logged-in client world. Sends nothing.
+    fn client_waypoints(&self) -> Option<ClientWaypoints> {
+        crate::world::phase::unprovided(
+            "ClientSession::client_waypoints",
+            "client_waypoints",
+            crate::world::phase::LoadAccess::ClientSetup,
+        )
+    }
+    /// Side: client.
+    /// Side: client.
+    /// The title, subtitle and action bar on screen now. Each is None once its timer has run
+    /// out; the subtitle shows only with a title. What this client has been sent; None outside
+    /// a logged-in client world. Sends nothing.
+    fn client_titles(&self) -> Option<ClientTitles> {
+        crate::world::phase::unprovided(
+            "ClientSession::client_titles",
+            "client_titles",
+            crate::world::phase::LoadAccess::ClientSetup,
+        )
+    }
+    /// Side: client.
+    /// The boss bars the window shows, in the order the server added them: each bar's name and
+    /// progress (0 to 1, as drawn). What this client has been sent; None outside a logged-in
+    /// client world. Sends nothing.
+    fn client_boss_bars(&self) -> Option<Vec<ClientBossBarEntry>> {
+        crate::world::phase::unprovided(
+            "ClientSession::client_boss_bars",
+            "client_boss_bars",
             crate::world::phase::LoadAccess::ClientSetup,
         )
     }
@@ -174,6 +213,30 @@ pub trait Commands {
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }
+    /// Side: server.
+    /// The command `label` names (Paper's `Server.getCommandMap().getCommand(label)`), a leading
+    /// slash dropped: a usage a native mod registered (`register_commands`), else vanilla's root
+    /// command, an alias resolved to its target (`tp` gives `teleport`, with `aliases` naming
+    /// `tp`). `level` is the lowest a mod's usages ask, or vanilla's permission for the root.
+    /// None when neither has the name. Reads only; it runs nothing. Horizon has no permission
+    /// nodes: the level is the answer.
+    fn command_info(&mut self, label: &str) -> Option<CommandInfo> {
+        crate::world::phase::unprovided(
+            "Commands::command_info",
+            "command_info",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+    /// Side: server.
+    /// The root names of every command the server answers, mods' and vanilla's (aliases
+    /// included), sorted, each once. Empty without a server world.
+    fn command_names(&mut self) -> Vec<String> {
+        crate::world::phase::unprovided(
+            "Commands::command_names",
+            "command_names",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
 }
 /// The levels service, reached through its host.
 pub trait Levels {
@@ -210,12 +273,35 @@ pub trait Messages {
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }
+    /// Side: server.
+    /// Writes `line` to the server console and its log at `level` (`Logger.info`, `warning`,
+    /// `severe`), prefixed with `[mod_id] ` so the line names the mod that wrote it; `mod_id` is
+    /// the id the mod gives, as the other calls taking a mod id. The line is cut to its first
+    /// 4096 bytes at a character boundary; control characters in it (line breaks included) are
+    /// replaced by spaces, so one call is always one log line. Refuses with
+    /// `ConsoleLogRefusal::EmptyModId`, `ModIdTooLong` (over 64 bytes) or `InvalidModId` (a
+    /// control character in the id) and then logs nothing.
+    /// It is also the reply a mod gives a console command after the command has returned: the
+    /// console sender of `run_command_with_output` is the console itself, so a delayed answer
+    /// goes here. Other console listeners (`console_line`) hear the line too.
+    fn console_log(
+        &self,
+        mod_id: &str,
+        level: ConsoleLevel,
+        line: &str,
+    ) -> Result<(), ConsoleLogRefusal> {
+        crate::world::phase::unprovided(
+            "Messages::console_log",
+            "console_log",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
 }
 /// The players service, reached through its host.
 pub trait Players {
     /// Side: server.
-    /// The players on this server, in the order they joined. Empty on a
-    /// client and in a world nobody else can join.
+    /// The players on this server, in the order they joined; in single player that
+    /// includes the world's owner, who joins its server like any player. Empty on a client.
     fn server_players(&self) -> Vec<PlayerRef> {
         crate::world::phase::unprovided(
             "Players::server_players",
@@ -245,6 +331,44 @@ pub trait Players {
         )
     }
 }
+/// The profiles service, reached through its host: the game's own Minecraft profile resolver,
+/// the one behind dynamic player heads and `/fetchprofile`. Unlike `host.profile_by_uuid` and
+/// `host.profile_by_name`, which answer from the server's online players and user cache without
+/// asking Mojang, these lookups ask the session server and can resolve an account the server has
+/// never seen, whatever its online mode.
+pub trait Profiles {
+    /// Side: server.
+    /// Resolve a Minecraft account name (`Notch`) through the game's profile resolver: the
+    /// session server's profile, with the signed `textures` property a skin mod replaces a
+    /// player's skin with. The resolver caches answers and paces a mod's new lookups at 60 a
+    /// minute, so it stays within Mojang's rate limit; the game's own lookups are not paced. It
+    /// reaches Mojang's services whatever the server's online mode, and a name that is not a
+    /// valid player name is [`ProfileResolution::Done`] with `None` without a lookup.
+    ///
+    /// The lookup runs in the background: the first call answers
+    /// [`ProfileResolution::Pending`], and a later call (poll it from `server_tick`) the answer,
+    /// which is also cached for the game's own uses. `Pending` can also mean the per-minute
+    /// budget is refilling; poll again later.
+    fn resolve_name(&mut self, name: &str) -> ProfileResolution {
+        crate::world::phase::unprovided(
+            "Profiles::resolve_name",
+            "resolve_name",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+    /// Side: server.
+    /// Resolve an account's UUID through the game's profile resolver, as `resolve_name` does
+    /// by name. The profile's name is the account's current one, and new lookups share the same
+    /// per-minute budget.
+    fn resolve_id(&mut self, id: u128) -> ProfileResolution {
+        crate::world::phase::unprovided(
+            "Profiles::resolve_id",
+            "resolve_id",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+}
+
 /// The runtime_levels service, reached through its host.
 /// Success from `open` or `unload` admits a queued request, not its completion.
 /// Apply failures are logged with the requesting mod and level id. A failed open
@@ -311,6 +435,15 @@ pub trait RuntimeLevels {
         crate::world::phase::unprovided(
             "RuntimeLevels::is_open",
             "is_open",
+            crate::world::phase::LoadAccess::WorldOnly,
+        )
+    }
+    /// Side: server.
+    /// Regenerate the Overworld, the Nether and the End with `seed`, once this server tick's levels have ticked: their chunk files, entities, structure references, raids, the dragon fight and the world spawn are replaced by a fresh world's; game rules, the clock, the weather, the scoreboard, the world border settings and the players' files are kept. The request is checked now and again when it is applied. Refused with [`LevelResetError::PlayersInside`] while a player or an arrival not yet landed is in one of the three levels (the mod moves its players out first, for example into a runtime level it opened: `entity_teleport_to_level`), with [`LevelResetError::NoHoldingLevel`] when the mod has no runtime level open, and with [`LevelResetError::NotPermitted`] unless the mod's manifest declares `[native] level_reset`. Maps are kept. `levels_reset` fires once the old terrain is gone and not when a removal failed; the levels open again from the new seed when somebody next enters them.
+    fn reset_vanilla(&mut self, seed: i64) -> Result<(), LevelResetError> {
+        crate::world::phase::unprovided(
+            "RuntimeLevels::reset_vanilla",
+            "reset_vanilla",
             crate::world::phase::LoadAccess::WorldOnly,
         )
     }

@@ -3,13 +3,13 @@
 //! tendril animations, the model and its emissive layers. Its brain
 //! (`WardenAi`) is in `warden_brain`.
 use super::{
-    Damage, DamageKind, Mob, MobEvent, MobWorld, Species, TargetChange, Who,
+    Damage, Mob, MobEvent, MobWorld, Species, TargetChange, Who,
     anim::{Poses, State},
     keyframes::Animation,
     path::PathType,
     warden_brain::{self, Brain},
 };
-use crate::health::DamageLevel;
+use crate::health::{Attack, DamageLevel, mob_source};
 use crate::sculk::{self, Context, Info};
 use horizon_core::{
     geometry::{Vec3, trig::Mth},
@@ -513,18 +513,13 @@ pub fn accepts_damage(m: &Mob, source: &Damage) -> bool {
     !(digging_or_emerging(m) && !source.kind.bypasses_invulnerability())
 }
 /// `Warden.hurtServer`'s reaction, handled at the warden's next tick.
-pub fn hurt(m: &mut Mob, source: &Damage) {
+pub fn hurt(m: &mut Mob, source: &Damage, attack: &Attack) {
     if m.no_ai || digging_or_emerging(m) {
         return;
     }
-    let direct = !matches!(
-        source.kind,
-        DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Fireball
-            | DamageKind::WitherSkull
-            | DamageKind::WindCharge
-    );
+    // `DamageSource.isDirect`: the direct entity is the causing one, whatever the type.
+    let hit = mob_source(source, attack);
+    let direct = hit.direct == hit.causing;
     if let Some(st) = m.extra.warden.as_mut() {
         st.hurt_by.push((source.attacker, direct));
     }
@@ -1152,6 +1147,7 @@ pub fn emissive_layers(m: &Mob, partial: f32) -> [(&'static str, &'static str, f
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mobs::DamageKind;
 
     /// `Entity.playSound` checks `isSilent`: a `Silent:1b` warden summoned
     /// out of the ground still growled (#8835).
@@ -1170,6 +1166,48 @@ mod tests {
         };
         assert_eq!(sounds(false), 1);
         assert_eq!(sounds(true), 0);
+    }
+
+    /// `Warden.hurtServer`'s `source.isDirect()`: a thrown trident's causing
+    /// entity (its owner) is not its direct one, so the hit is not direct.
+    #[test]
+    fn a_trident_projectile_hit_is_not_direct() {
+        let mut m = Mob::new(1, crate::mobs::sensor_scan_tests::kind(), Vec3::ZERO, 0.0);
+        register(&mut m);
+        let attack = Attack {
+            projectile: Some(2),
+            projectile_is_arrow: true,
+            ..Default::default()
+        };
+        let source = Damage {
+            kind: DamageKind::Trident,
+            attacker: Some(Who::Mob(1)),
+            ..Damage::of(DamageKind::Trident)
+        };
+        hurt(&mut m, &source, &attack);
+        let st = m.extra.warden.as_ref().expect("a warden's state");
+        assert_eq!(st.hurt_by, [(Some(Who::Mob(1)), false)]);
+    }
+
+    /// `/damage ... minecraft:trident by @s` makes the player both the direct
+    /// and the causing entity, so the far warden targets them at once.
+    #[test]
+    fn a_command_trident_hit_by_its_own_player_is_direct() {
+        let mut m = Mob::new(1, crate::mobs::sensor_scan_tests::kind(), Vec3::ZERO, 0.0);
+        register(&mut m);
+        let attack = Attack {
+            attacker: 1,
+            direct: Some(1),
+            ..Default::default()
+        };
+        let source = Damage {
+            kind: DamageKind::Trident,
+            attacker: Some(Who::Player),
+            ..Damage::of(DamageKind::Trident)
+        };
+        hurt(&mut m, &source, &attack);
+        let st = m.extra.warden.as_ref().expect("a warden's state");
+        assert_eq!(st.hurt_by, [(Some(Who::Player), true)]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use horizon_client::{
     mobs::{Damage, Mob, Species, Who, stuck::Stuck},
     motion::MotionEvent,
     particles::{ParticleOptions, ParticleType},
-    text::Text,
+    text::{ClickEvent, Style, Text},
 };
 use horizon_core::random::RandomSource;
 
@@ -113,6 +113,10 @@ pub(super) struct CombatTracker {
     /// The projectile hitting the player now is another player's that
     /// `ServerPlayer.canHarmPlayer` refuses (the `pvp` rule, an ally).
     pub(super) refuse_player_hit: bool,
+    /// An arrow just hurt the player (`AbstractArrow.onHitEntity`'s
+    /// `hurtOrSimulate` was true), so its shooter, when another player, is
+    /// sent the arrow-hit ding (`projectile_hits_player`).
+    pub(super) arrow_hurt_player: bool,
     /// The hit on the player now runs its post-attack effects (thorns) only
     /// if the player lives through it (`WitherSkull.onHitEntity`).
     pub(super) post_attack_if_alive: bool,
@@ -450,7 +454,7 @@ impl Game<'_> {
                 // LivingEntity.hurtServer reached resolvePlayerResponsibleForDamage:
                 // every hit that got past the cooldown, absorbed or blocked too.
                 MotionEvent::Health(HealthEvent::Criterion { source, .. }) => {
-                    if let Some(d) = self.motion.health.damage.definition(*source) {
+                    if let Some(d) = self.health_resources.damage.definition(*source) {
                         let attacker = match recorded.take() {
                             Some((t, id)) if t == d.name => Some(id),
                             _ => {
@@ -693,10 +697,11 @@ impl Game<'_> {
                 let at = knock.fall_location.unwrap_or("generic");
                 return Text::translate(&format!("death.fell.accident.{at}"), &[me]);
             }
-            // CombatTracker.getMessageForAssistedFall: the attacker's item
-            // with a custom name gets the `.item` message.
+            // CombatTracker.getFallMessage compares display names: the attacker
+            // is the killer when the two names are equal, so two unnamed
+            // zombies are the same attacker.
             let (key, args) = match (&knock.attacker, &killer) {
-                (Some(a), k) if k.as_ref().is_none_or(|k| k.0 != a.0) => {
+                (Some(a), k) if k.as_ref().is_none_or(|k| k.1 != a.1) => {
                     horizon_client::scoreboard::death_message_args(
                         "death.fell.assist",
                         &me,
@@ -704,6 +709,8 @@ impl Game<'_> {
                         self.entry_item(knock).as_ref(),
                     )
                 }
+                // CombatTracker.getMessageForAssistedFall: the attacker's item
+                // with a custom name gets the `.item` message.
                 (_, Some(k)) => horizon_client::scoreboard::death_message_args(
                     "death.fell.finish",
                     &me,
@@ -716,9 +723,18 @@ impl Game<'_> {
         }
         let key = format!("death.attack.{}", def.0);
         if def.1 == "intentional_game_design" {
+            // CombatTracker.INTENTIONAL_GAME_DESIGN_STYLE: the bracketed link
+            // opens the bug tracker and shows its id.
             let link = Text::literal("[")
                 .append(Text::translate(&format!("{key}.link"), &[]))
-                .append(Text::literal("]"));
+                .append(Text::literal("]"))
+                .with_style(&Style {
+                    click: Some(ClickEvent::OpenUrl(
+                        "https://bugs.mojang.com/browse/MCPE-28723".into(),
+                    )),
+                    hover: Some(std::sync::Arc::new(Text::literal("MCPE-28723"))),
+                    ..Style::default()
+                });
             return Text::translate(&format!("{key}.message"), &[me, link]);
         }
         // `getLocalizedDeathMessage`: the causing entity's name, or the
@@ -850,6 +866,7 @@ impl Game<'_> {
                 let direct = match e.source.kind {
                     _ if attacker.is_some() => None,
                     DamageKind::Arrow => Some(Text::translate("entity.minecraft.arrow", &[])),
+                    DamageKind::Trident => Some(Text::translate("entity.minecraft.trident", &[])),
                     DamageKind::Fireworks => {
                         Some(Text::translate("entity.minecraft.firework_rocket", &[]))
                     }
@@ -927,6 +944,21 @@ fn fall_location_of(name: &str, trapdoor: bool) -> &'static str {
         "minecraft:scaffolding" => "scaffolding",
         _ => "other_climbable",
     }
+}
+
+/// `DamageSource.getEntity()` of a mob's killing blow: the entity that caused
+/// it, which is no player for a fall, lava, fire or the void.
+fn causing_entity(m: &Mob) -> Option<Who> {
+    m.last_damage.and_then(|(d, _)| d.attacker)
+}
+
+/// Whether the killing blow's causing entity was a player: `Raider.die` grants
+/// hero of the village to that entity, not to the player `getKillCredit` names.
+/// `Villager.die` gossips about any causing entity, a mob's included, under its
+/// UUID; no player reputation reads a mob's, so only a player's blow is a murder
+/// here.
+pub(super) fn killed_by_player(m: &Mob) -> bool {
+    matches!(causing_entity(m), Some(Who::Player))
 }
 
 /// Whether the causing entity deals `kind` itself (`DamageSources.mobAttack`,
@@ -1267,3 +1299,7 @@ mod zombie_ignite_tests;
 #[cfg(test)]
 #[path = "combat/bee_sting_tests.rs"]
 mod bee_sting_tests;
+
+#[cfg(test)]
+#[path = "combat/death_message_tests.rs"]
+mod death_message_tests;

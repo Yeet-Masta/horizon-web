@@ -88,6 +88,9 @@ impl Game<'_> {
             state.session.reputation = self.villager_reputation_of(id, uuid);
             state.session.update_special_prices();
         }
+        if let Some(mob) = state.mob.and_then(|id| self.mobs.iter_mut().find(|m| m.id == id)) {
+            mob.extra.trade.get_or_insert_default().offers = state.session.offers.clone();
+        }
         let title = self.merchant_display_name(&state);
         if !self.guest_may_open(conn, "minecraft:merchant", None) {
             self.merchant_closed(&mut state);
@@ -357,14 +360,7 @@ impl Game<'_> {
                 }
             });
         }
-        let opaque = gm
-            .merchant
-            .mob
-            .and_then(|id| self.mobs.iter().find(|m| m.id == id))
-            .is_some_and(|m| {
-                m.species() == horizon_client::mobs::Species::Villager
-                    && m.extra.profession.index().is_none()
-            });
+        let opaque = gm.merchant.mob.is_some_and(|id| self.lan_merchant_opaque(id));
         let offers_refreshed = session
             .events
             .iter()
@@ -400,6 +396,19 @@ impl Game<'_> {
             host.play.entry(conn).or_default().merchant = Some(gm);
         }
         true
+    }
+    /// A villager whose profession doesn't resolve in the world's table (a saved
+    /// id no loaded mod provides): its trades aren't applied, as the host's own
+    /// `merchant_apply` path refuses them. A mod-registered profession resolves.
+    pub(super) fn lan_merchant_opaque(&self, id: u32) -> bool {
+        self.mobs.iter().find(|m| m.id == id).is_some_and(|m| {
+            m.species() == horizon_client::mobs::Species::Villager
+                && self
+                    .stations()
+                    .professions
+                    .state_index(&m.extra.profession)
+                    .is_none()
+        })
     }
     /// Close an open merchant whose profession became unresolved, returning inputs.
     pub(super) fn close_opaque_merchant(&mut self, id: u32) {
@@ -494,7 +503,9 @@ impl Game<'_> {
         true
     }
     /// `Merchant.stillValid` for a trader: it is alive and the guest is within
-    /// the entity interaction range plus 4 of its box.
+    /// the entity interaction range plus 4 of its box. A villager's profession
+    /// must resolve in the world's table: vanilla's, none, or one a mod
+    /// registered (an unknown saved id closes the screen).
     pub(super) fn lan_merchant_valid(
         &self,
         g: &horizon_client::lan::guest::Guest,
@@ -503,7 +514,11 @@ impl Game<'_> {
         self.mobs.iter().find(|m| m.id == id).is_some_and(|m| {
             m.alive()
                 && (m.species() != horizon_client::mobs::Species::Villager
-                    || m.extra.profession.index().is_some())
+                    || self
+                        .stations()
+                        .professions
+                        .state_index(&m.extra.profession)
+                        .is_some())
                 && guest_within_entity_range(g, &m.bounds(), 4.0)
         })
     }
@@ -541,7 +556,7 @@ impl Game<'_> {
             }
         }
     }
-    /// Refresh open guest prices after the actual villager reputation event.
+    /// Refresh open guest prices after reputation changes or a restock.
     pub(super) fn lan_merchant_reputation(&mut self, id: u32) {
         let conns: Vec<u32> = self
             .lan
@@ -559,7 +574,7 @@ impl Game<'_> {
             })
             .unwrap_or_default();
         for conn in conns {
-            let Some(uuid) = self
+            let Some((uuid, hero)) = self
                 .lan
                 .as_ref()
                 .and_then(|host| {
@@ -568,7 +583,7 @@ impl Game<'_> {
                         .iter()
                         .find(|g| g.conn == conn && host.hub.here(g))
                 })
-                .map(|g| uuid_words(g.uuid))
+                .map(|g| (uuid_words(g.uuid), g.effects.amplifier("hero_of_the_village")))
             else {
                 continue;
             };
@@ -576,6 +591,7 @@ impl Game<'_> {
             self.lan_merchant_op(conn, None, true, |menu, env| {
                 if let Some(s) = menu.merchant.as_mut() {
                     s.reputation = reputation;
+                    s.hero = hero;
                     s.update_special_prices();
                 }
                 menu.merchant_update(env);

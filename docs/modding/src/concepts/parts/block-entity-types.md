@@ -14,8 +14,8 @@ The builder qualifies the type ID and each bare block name with the registering 
 and valid blocks; `block_entity` returns only initial `Compound` data (or none for an empty compound). It is fired
 inside the write that creates the entity (`LevelChunk.setBlockState`) and receives the read-only level, a `LevelSide`,
 on a server and on a client of one.
-Unknown blocks, duplicate types, overlapping membership and attempts to own a `minecraft:` block are
-refused at load. Refused native block, item or block entity declarations stop startup, as does unreadable
+Unknown blocks, duplicate types, overlapping membership and attempts to own any `minecraft:` block
+other than the opt-in water cauldron are refused at load. Refused native block, item or block entity declarations stop startup, as does unreadable
 known-components input; the game does not fall back to vanilla content. An explicitly declared mod
 template block uses its declared type; undeclared template blocks retain their vanilla behavior. Adding mod blocks to vanilla types is not supported by this builder.
 The hooks about the entity (`block_entity_tick`, `block_entity_update_tag`, `pre_remove_side_effects`,
@@ -104,6 +104,31 @@ let done = Press::edit_state(host, entity, |_, progress| {
 identity and position. Like `merge_data`, it loads transactionally and synchronizes the change; it returns
 `Err(BlockEntityError::Stale)` for an invalidated handle, or `Ok(false)` for data the entity cannot
 load or an unchanged result.
+
+### State on a vanilla water cauldron
+
+Opt in during `Hooks::register` with
+`r.block_entity_type("cauldron_contents").blocks(&["minecraft:water_cauldron"]).build()`.
+Attach a `BlockEntityPart` to that type as for a custom block. Only one type may claim that factory;
+this does not allow replacing a chest's factory or claiming other vanilla blocks. The cauldron
+keeps its vanilla block ID, states, level, and stock interactions. The holder stays across level
+changes, is saved in the chunk and is discarded when the block stops being a water cauldron.
+A pre-mod save starts with empty payloads; reloading a chunk gives the holders fresh handles.
+
+In a [cauldron interaction](../../how-to/world/cauldron-interactions.md), take the holder with
+`host.block_entity(level, input.pos)` and write with `replace_data` or `merge_data`. To keep all the
+contents of a filled bottle and its last item type, store `input.held.to_nbt(host)` in a namespaced
+compound field. `ItemStack::from_nbt(host, data)` restores the item and its complete component patch;
+storing only the potion ID would lose custom effects, names and colors.
+
+Publish just the fields clients should see from `BlockEntityPart::block_entity_update_tag`. Use a
+single nested compound (including an explicit empty value when clearing the contents), so updating
+it replaces the previous value. A matching client sees the result through
+`block_entity_data_received`, `BlockEntityRef::data` or the entity's `nbt` in `block_entity_submit`
+(for example, to draw a liquid color). The usual content registry and manifest-side checks still apply.
+A vanilla peer permitted by those checks receives the vanilla block and level without the mod holder
+or its tag. To implement your own mixes, bottling or rain rules, use the ordinary interaction hooks;
+the registration grants storage, not new interaction slots or an override of vanilla dispatch entries.
 
 
 ## Transform saved data with a structure

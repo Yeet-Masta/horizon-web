@@ -193,6 +193,7 @@ impl Title {
                 label,
                 enabled,
                 id,
+                agent_id: None,
                 icon: None,
                 trailing: icon,
                 action: None,

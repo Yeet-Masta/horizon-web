@@ -1,4 +1,4 @@
-//! Chat: the message list (ChatComponent: wrapping, 100-line history,
+//! Chat: the message list (ChatComponent: wrapping, bounded history,
 //! 200-tick fade, scrolling, system message indicator) and the chat screen
 //! (ChatScreen + EditBox + CommandSuggestions: history navigation, argument
 //! colouring, usage hints, parse errors and tab completion).
@@ -11,10 +11,18 @@ use crate::{
     screen_draw::{self as d, Draw, Measure, TextField},
     text::{self, ClickEvent, Style, Text},
 };
+use std::collections::VecDeque;
 
 #[cfg(test)]
 #[path = "chat_tests.rs"]
 mod tests;
+
+/// A chat message's log line, with `\r` and `\n` written out as vanilla does. One line whatever the
+/// text holds: a later line of a multi-line message would carry no `[CHAT]` mark and stay in the
+/// log a bug report attaches.
+fn chat_log_line(plain: &str) -> String {
+    format!("[CHAT] {}", crate::logging::one_line(plain))
+}
 
 /// `FilterMask.applyWithFormatting` over a player message's signed content, as
 /// the packet's mask `(type, bit set)`: as it is when passed through, none when
@@ -58,6 +66,9 @@ pub fn filtered_message(
 /// `CommandHistory.PERSISTED_COMMANDS_FILE_NAME` and its size cap.
 const COMMAND_HISTORY_FILE: &str = "command_history.txt";
 const MAX_PERSISTED_COMMAND_HISTORY: usize = 50;
+/// The vanilla `ChatComponent` cap on each of its three histories.
+pub const DEFAULT_HISTORY_CAPACITY: u32 = 100;
+const MAX_HISTORY_CAPACITY: u32 = 16_384;
 /// GuiMessageTag.systemSinglePlayer's indicator colour.
 pub const SYSTEM_INDICATOR: u32 = 0xD0D0D0;
 /// `GuiMessageTag.CHAT_MODIFIED_INDICATOR_COLOR`.
@@ -315,11 +326,12 @@ fn time_alpha(ticks: f32, added: u64) -> f32 {
 }
 #[derive(Default)]
 pub struct Chat {
-    messages: Vec<Message>,
+    messages: VecDeque<Message>,
     /// Wrapped lines, newest first.
-    lines: Vec<Line>,
+    lines: VecDeque<Line>,
     /// Sent messages and commands (ChatComponent.recentChat).
-    pub recent: Vec<String>,
+    pub recent: VecDeque<String>,
+    history_capacity: Option<usize>,
     /// `CommandHistory`: the last commands, kept in `command_history.txt`
     /// in the game folder once `load_history` has set it.
     commands: Vec<String>,
@@ -373,6 +385,22 @@ pub fn queue_line(queued: usize) -> Text {
     })
 }
 impl Chat {
+    /// Apply the local client's history policy without reserving space or rewrapping chat.
+    /// A request can enlarge the histories, up to 16,384 entries each.
+    pub fn configure_history_capacity(&mut self, requested: u32) {
+        let capacity = requested.clamp(DEFAULT_HISTORY_CAPACITY, MAX_HISTORY_CAPACITY) as usize;
+        self.history_capacity = Some(capacity);
+        self.messages.truncate(capacity);
+        self.lines.truncate(capacity);
+        self.recent
+            .drain(..self.recent.len().saturating_sub(capacity));
+    }
+
+    fn history_capacity(&self) -> usize {
+        self.history_capacity
+            .unwrap_or(DEFAULT_HISTORY_CAPACITY as usize)
+    }
+
     pub fn lines_per_page(&self, focused: bool) -> usize {
         (self.options.height_px(focused) / self.options.line_height().max(1)) as usize
     }
@@ -380,7 +408,7 @@ impl Chat {
     fn max_width(&self) -> i32 {
         (f64::from(self.options.width_px()) / self.options.scale).floor() as i32
     }
-    /// ChatComponent.addMessage: wrap, prepend and trim to 100 lines. A
+    /// ChatComponent.addMessage: wrap, prepend and trim the display history. A
     /// message the Chat option hides is dropped, unlogged.
     #[horizon_mod_api_macros::replaceable]
     pub fn add(
@@ -468,24 +496,25 @@ impl Chat {
             focused,
         );
     }
+    #[horizon_mod_api_macros::replaceable]
     fn push_message(&mut self, font: &crate::font::Font, mut message: Message, focused: bool) {
         if !self.abilities.shows(message.source) {
             return;
         }
         // ChatComponent.logChatMessage: every message shown is in the log.
-        let plain = message.content.plain();
-        crate::logging::write_only(log::Level::Info, &format!("[CHAT] {plain}"));
+        let line = chat_log_line(&message.content.plain());
+        crate::logging::write_only(log::Level::Info, &line);
         if self.log {
-            println!("[CHAT] {plain}");
+            println!("{line}");
         }
         message.time = self.now();
         self.received += 1;
         if self.qol.compact
-            && let Some(last) = self.messages.first()
+            && let Some(last) = self.messages.front()
             && repeats(last, &message)
         {
             // The newest lines are that message's: they make way for its lines with the count.
-            let mut last = self.messages.remove(0);
+            let mut last = self.messages.pop_front().unwrap();
             let shown = last.wrapped.min(self.lines.len());
             self.lines.drain(..shown);
             // A reader scrolled up keeps their view: only lines the merge adds move it.
@@ -499,12 +528,14 @@ impl Chat {
                 self.new_since_scroll = new_since_scroll;
                 self.scroll_by(last.wrapped as i32 - shown as i32, focused);
             }
-            self.messages.insert(0, last);
+            self.messages.push_front(last);
             return;
         }
         message.wrapped = self.add_lines(font, &message, focused);
-        self.messages.insert(0, message);
-        self.messages.truncate(100);
+        if self.messages.len() == self.history_capacity() {
+            self.messages.pop_back();
+        }
+        self.messages.push_front(message);
     }
     fn now(&self) -> (u8, u8) {
         #[cfg(test)]
@@ -514,6 +545,7 @@ impl Chat {
         local_time()
     }
     /// The lines `message` wraps to (none when the chat search hides it), added newest first.
+    #[horizon_mod_api_macros::replaceable]
     fn add_lines(&mut self, font: &crate::font::Font, message: &Message, focused: bool) -> usize {
         // What the chat shows: legacy `§` codes format the text, they aren't part of it.
         let whole = message.content.strip_legacy().plain();
@@ -532,23 +564,26 @@ impl Chat {
         };
         let width = self.max_width() - icon;
         let content = self.message_text(message);
-        for line in font.wrap_components(&content, width) {
-            count += 1;
+        let capacity = self.history_capacity();
+        let previous_lines = self.lines.len();
+        font.for_each_wrapped_component(&content, width, |line| {
             if focused && self.scroll > 0 {
                 self.new_since_scroll = true;
-                self.scroll_by(1, focused);
+                // Vanilla scrolls against the pre-trim size, including earlier lines
+                // of this message. Keep that anchor without allocating those extra slots.
+                self.scroll_by_len(1, previous_lines + count, focused);
             }
-            self.lines.insert(
-                0,
-                Line {
-                    added: message.added,
-                    content: line,
-                    tag: message.tag.clone(),
-                    message: whole.clone(),
-                },
-            );
-        }
-        self.lines.truncate(100);
+            count += 1;
+            if self.lines.len() == capacity {
+                self.lines.pop_back();
+            }
+            self.lines.push_front(Line {
+                added: message.added,
+                content: line,
+                tag: message.tag.clone(),
+                message: whole.clone(),
+            });
+        });
         count
     }
     /// What a message's lines wrap (ComponentRenderUtils.wrapComponents):
@@ -739,12 +774,13 @@ impl Chat {
         self.history_file = Some(file);
     }
     /// `ChatComponent.addRecentChat`: a command also goes to the saved history.
+    #[horizon_mod_api_macros::replaceable]
     pub fn add_recent(&mut self, message: &str) {
-        if self.recent.last().map(String::as_str) != Some(message) {
-            if self.recent.len() >= 100 {
-                self.recent.remove(0);
+        if self.recent.back().map(String::as_str) != Some(message) {
+            if self.recent.len() >= self.history_capacity() {
+                self.recent.pop_front();
             }
-            self.recent.push(message.to_owned());
+            self.recent.push_back(message.to_owned());
         }
         if message.starts_with('/') && self.commands.last().map(String::as_str) != Some(message) {
             if self.commands.len() >= MAX_PERSISTED_COMMAND_HISTORY {
@@ -767,10 +803,11 @@ impl Chat {
         self.new_since_scroll = false;
     }
     pub fn scroll_by(&mut self, dir: i32, focused: bool) {
-        let max = self
-            .lines
-            .len()
-            .saturating_sub(self.lines_per_page(focused)) as i32;
+        self.scroll_by_len(dir, self.lines.len(), focused);
+    }
+    /// [`Chat::scroll_by`] for a list of `len` lines.
+    fn scroll_by_len(&mut self, dir: i32, len: usize, focused: bool) {
+        let max = len.saturating_sub(self.lines_per_page(focused)) as i32;
         let pos = (self.scroll as i32 + dir).min(max);
         if pos <= 0 {
             self.scroll = 0;
@@ -1373,6 +1410,8 @@ pub struct ChatScreen {
     /// The request to send (`ServerboundCommandSuggestionPacket`): id and
     /// the command up to the cursor.
     request: Option<(i32, String)>,
+    /// Whether mods may add to the list (`take_chat_query`).
+    chat_query: ChatQuery,
     suggestions: Option<SuggestionList>,
     completion: Option<SuggestionCompletion>,
     usage: Vec<Text>,
@@ -1387,6 +1426,19 @@ pub struct ChatScreen {
     /// `MouseHandler.lastClick`: a click within 250 ms of the last one on
     /// this screen is a double click.
     last_click: Option<horizon_std::time::Instant>,
+}
+/// Where the chat box's list stands with mods' completions
+/// (`ChatScreen::take_chat_query`, `ChatScreen::add_chat_suggestions`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChatQuery {
+    /// The list is a command's, blank text's, or already has mods' entries.
+    Closed,
+    /// The list is plain chat text's, worked out with the cursor at this
+    /// character, and mods are still to be asked.
+    Unasked(usize),
+    /// Mods were asked about this list, at its cursor; their entries may join
+    /// it.
+    Asked(usize),
 }
 /// Local completions waiting for the server's reply to request `id`.
 struct Awaiting {
@@ -1499,6 +1551,7 @@ impl ChatScreen {
             pending: None,
             awaiting: None,
             request: None,
+            chat_query: ChatQuery::Closed,
             suggestions: None,
             completion: None,
             usage: Vec::new(),
@@ -1538,6 +1591,7 @@ impl ChatScreen {
             pending: None,
             awaiting: None,
             request: None,
+            chat_query: ChatQuery::Closed,
             suggestions: None,
             completion: None,
             usage: Vec::new(),
@@ -1639,6 +1693,7 @@ impl ChatScreen {
             self.suggestions = None;
         }
         self.usage.clear();
+        self.chat_query = ChatQuery::Closed;
         let cursor = self.input.cursor;
         let cursor_b = byte_at(&command, cursor);
         let slash = command.starts_with('/');
@@ -1684,6 +1739,7 @@ impl ChatScreen {
             let (range, list) = merge_suggestions(partial, builder.out);
             self.awaiting = None;
             self.pending = Some((range.0, list));
+            self.chat_query = ChatQuery::Unasked(cursor);
             self.usage_width = 0;
             self.usage_position = 0;
             // CommandSuggestions.updateCommandInfo: the Chat option may take
@@ -1702,6 +1758,49 @@ impl ChatScreen {
     /// The completion request to send to the server, if one is waiting.
     pub fn take_request(&mut self) -> Option<(i32, String)> {
         self.request.take()
+    }
+    /// The plain chat text (no `/`) the list was just worked out for, and the
+    /// cursor it was worked out with, in characters: once each time that
+    /// happens (the text changed, or the screen opened or resized holding it),
+    /// for mods to add theirs with `add_chat_suggestions`. None for a command
+    /// or blank text. After a completion that cursor is the end of the text:
+    /// `EditBox.setValue` works the list out there, then `useSuggestion` moves
+    /// the cursor back.
+    pub fn take_chat_query(&mut self) -> Option<(String, usize)> {
+        let ChatQuery::Unasked(cursor) = self.chat_query else {
+            return None;
+        };
+        self.chat_query = ChatQuery::Asked(cursor);
+        Some((self.input.value.clone(), cursor))
+    }
+    /// Mods' completions for the plain chat text `input` with the cursor at
+    /// `cursor` (from `take_chat_query`). Each replaces the word before the
+    /// cursor (`getLastWordIndex`), as the players' names do, and joins
+    /// vanilla's list as `Suggestions.merge` joins two: one of each, sorted
+    /// ignoring case. One that only repeats that word is left out, as
+    /// Brigadier's `suggest` leaves it. Nothing changes unless the list is
+    /// still the one asked about, for that text and cursor.
+    pub fn add_chat_suggestions(&mut self, input: &str, cursor: usize, entries: Vec<String>) {
+        if self.chat_query != ChatQuery::Asked(cursor) || self.input.value != input {
+            return;
+        }
+        self.chat_query = ChatQuery::Closed;
+        if entries.is_empty() {
+            return;
+        }
+        let partial = &input[..byte_at(input, cursor)];
+        let mut builder = SuggestionsBuilder::new(partial, last_word_index(partial));
+        for text in entries {
+            builder.suggest(text);
+        }
+        let mut list = self
+            .pending
+            .take()
+            .map(|(_, list)| list)
+            .unwrap_or_default();
+        list.extend(builder.out);
+        let (range, list) = merge_suggestions(partial, list);
+        self.pending = Some((range.0, list));
     }
     /// `ClientSuggestionProvider.completeCustomSuggestions`: the server's
     /// completions for request `id`, with `range` in UTF-16 units of the
@@ -1932,7 +2031,7 @@ impl ChatScreen {
         &mut self,
         m: &Measure,
         c: &Commands,
-        history: &[String],
+        history: &VecDeque<String>,
         key: winit::keyboard::KeyCode,
         shift: bool,
         ctrl: bool,
@@ -2027,7 +2126,13 @@ impl ChatScreen {
         }
     }
     /// `ChatScreen.moveInHistory`.
-    fn move_in_history(&mut self, m: &Measure, c: &Commands, history: &[String], dir: isize) {
+    fn move_in_history(
+        &mut self,
+        m: &Measure,
+        c: &Commands,
+        history: &VecDeque<String>,
+        dir: isize,
+    ) {
         let max = history.len();
         let new = (self.history_pos as isize + dir).clamp(0, max as isize) as usize;
         if new == self.history_pos {

@@ -16,9 +16,14 @@ pub use model_reducing::set_mod_namespaces;
 use model_reducing::{full_size_sprites, mod_namespaces, reducible_model_sprites};
 
 mod animate;
+#[cfg(test)]
+mod atlas_32x_tests;
 pub mod cit_glint;
 mod clip_corner;
+pub mod dynamic_textures;
 mod gui_sprite;
+#[cfg(test)]
+mod material_name_tests;
 mod menu_pictures;
 mod model_reducing;
 mod pack_text;
@@ -73,6 +78,8 @@ pub struct HudAtlas {
     pictures: horizon_std::sync::Mutex<pictures::Cache>,
     /// Identity of this packed atlas, used to invalidate cached model UV data
     /// even when a resource reload places sprites at the same coordinates.
+    /// Client mods' dynamic textures (`dynamic_textures`) add and remove
+    /// sprites without changing it.
     pub revision: u64,
     /// RGBA8, `width` by `height`, as built: empty once `pack_pixels` has
     /// compressed them (read them through `pixels()`).
@@ -107,12 +114,22 @@ pub struct HudAtlas {
     /// `misc/enchanted_glint_armor`, the armour layers' `GlintSampler`.
     pub glint_armor: (Vec<u8>, u32, u32),
     pub text_shaders: crate::gfx::core_text::TextShaders,
+    pub(crate) model_shaders: crate::gfx::core_models::ModelShaders,
     /// A resource pack's own `core/rendertype_lines` shader for the block outline, translated;
     /// none draws the outline natively.
     pub lines_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     /// The packs' `core/sky` and `core/stars`, when a pack replaces them.
     pub sky_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     pub stars_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// The packs' `core/position_color` (`RenderPipelines.SUNRISE_SUNSET`).
+    pub sunrise_shader: Option<Arc<crate::core_shader::CoreProgram>>,
+    /// The packs' `core/gui` (`RenderPipelines.GUI` and its blend variants).
+    pub gui_shader: Option<Arc<crate::core_shader::CoreProgram>>,
+    /// The packs' `core/lightmap`, which draws the lightmap texture in place of the CPU
+    /// formula (`RenderPipelines.LIGHTMAP`).
+    pub lightmap_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
+    /// The packs' `core/position_tex_color` (`RenderPipelines.GUI_TEXTURED`).
+    pub blit_shader: Option<std::sync::Arc<crate::core_shader::CoreProgram>>,
     /// The packs' Polytone screen sprite modifiers.
     pub sprite_modifiers: std::sync::Arc<sprite_modifiers::SpriteModifiers>,
     /// The packs' OptiFine random entity textures, whose variants this atlas packs.
@@ -126,6 +143,9 @@ pub struct HudAtlas {
     pub material_maps: std::sync::Arc<[Option<crate::paged_maps::PagedMap>; 2]>,
     /// The white texel flat fills sample (also `hud_kit::shapes`).
     pub(crate) white: Rect,
+    /// Where client mods' dynamic textures go (`dynamic_textures`): packed only with a client
+    /// mod loaded, and out of `sprites`, which name each image instead.
+    pub dynamic_texture_page: Option<dynamic_textures::Page>,
 }
 /// Atlas rows reserved for glyphs rasterized at run time.
 pub const GLYPH_ROWS: u32 = 512;
@@ -290,14 +310,10 @@ pub fn decode_image_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
 
 /// A PNG in memory as RGBA pixels.
 pub fn decode_bytes(data: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
-    decoder.ignore_checksums(true);
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info()?;
-    let mut bytes = vec![0; reader.output_buffer_size().ok_or("image too large")?];
+    let (mut reader, mut bytes) = read_png(data)?;
     let info = reader.next_frame(&mut bytes)?;
     let channels = info.color_type.samples();
-    let mut rgba = Vec::with_capacity((info.width * info.height * 4) as usize);
+    let mut rgba = Vec::with_capacity(info.width as usize * info.height as usize * 4);
     for p in bytes[..info.buffer_size()].chunks_exact(channels) {
         rgba.extend(match channels {
             4 => [p[0], p[1], p[2], p[3]],
@@ -351,6 +367,92 @@ pub fn png_bytes_size(data: &[u8]) -> Option<(u32, u32)> {
     let field = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap_or_default());
     Some((field(16), field(20)))
 }
+/// A pack PNG's reader, set to give 8-bit samples, and the zeroed buffer its `next_frame` fills;
+/// an error when the header claims more pixels than any texture it could fill. The PNG reader
+/// trusts the header and leaves this buffer to its caller, so a pack file of a few dozen bytes
+/// could otherwise ask for gigabytes and end the game. The header is checked before `read_info`,
+/// whose own row-size arithmetic trusts it too. Only the pixel count is bounded, by a full
+/// [`MAX_ATLAS_SIZE`] atlas (1 GiB of RGBA): a sheet may be far longer than any texture side
+/// (an animation strip of small frames), so sides are checked on what is cut from it.
+pub(crate) fn read_png<B: AsRef<[u8]>>(
+    bytes: B,
+) -> std::result::Result<(png::Reader<std::io::Cursor<B>>, Vec<u8>), String> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    // As stb_image, which never checks chunk CRCs: packs ship PNGs with wrong ones.
+    decoder.ignore_checksums(true);
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let (width, height) = decoder
+        .read_header_info()
+        .map_err(|e| e.to_string())?
+        .size();
+    check_png_size(width, height)?;
+    let reader = decoder.read_info().map_err(|e| e.to_string())?;
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("a {width}x{height} PNG exceeds the decoder's limits"))?;
+    Ok((reader, vec![0; size]))
+}
+fn check_png_size(width: u32, height: u32) -> std::result::Result<(), String> {
+    let atlas = u64::from(MAX_ATLAS_SIZE);
+    if u64::from(width) * u64::from(height) > atlas * atlas {
+        return Err(format!(
+            "a {width}x{height} PNG is larger than any texture it could fill"
+        ));
+    }
+    Ok(())
+}
+/// A PNG whose header claims `width` x `height` RGBA pixels and whose image data is empty: a
+/// few dozen bytes that ask a decoder to reserve memory for every claimed pixel.
+#[cfg(test)]
+pub(crate) fn claimed_size_png(width: u32, height: u32) -> Vec<u8> {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        png.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let start = png.len();
+        png.extend_from_slice(kind);
+        png.extend_from_slice(data);
+        let crc = crc32(&png[start..]);
+        png.extend_from_slice(&crc.to_be_bytes());
+    };
+    let mut ihdr = [0; 13];
+    ihdr[..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    // 8 bits a channel, RGBA, no interlace.
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    chunk(b"IHDR", &ihdr);
+    // An empty zlib stream.
+    chunk(b"IDAT", &[0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    chunk(b"IEND", &[]);
+    png
+}
+/// A real `width` x `height` RGBA PNG, every pixel opaque grey.
+#[cfg(test)]
+pub(crate) fn grey_png(width: u32, height: u32) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    let pixels = [128, 128, 128, 255].repeat(width as usize * height as usize);
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    encoded
+}
 /// A PNG's width and height, from its header alone.
 fn png_size(source: &ResourceSource, path: &str) -> Option<(u32, u32)> {
     png_bytes_size(&source.read_head(path, 24).ok()?)
@@ -366,6 +468,20 @@ fn walk(source: &ResourceSource, directory: &str, out: &mut Vec<String>) {
 fn decode_resource(source: &ResourceSource, name: &str) -> Result<(u32, u32, Vec<u8>)> {
     decode_bytes(&source.read(name)?)
 }
+fn is_gui_sprite(name: &str) -> bool {
+    name.split_once(':')
+        .map_or(name, |(_, path)| path)
+        .starts_with("gui/")
+}
+
+/// A shelf needs a trailing column and row. Blurred sprites also have a
+/// wrapped texel on each edge, and glyphs occupy the rows after the shelves.
+fn gui_sprite_fits_atlas(w: u32, h: u32, blur: bool) -> bool {
+    let border = if blur { 2 } else { 0 };
+    u64::from(w) + border < u64::from(MAX_ATLAS_SIZE)
+        && u64::from(h) + border + u64::from(GLYPH_ROWS) < u64::from(MAX_ATLAS_SIZE)
+}
+
 /// A packed atlas image: sprite name, size and RGBA pixels.
 type PackedImage = (String, u32, u32, Vec<u8>);
 /// A frame of an animated strip at `x, y`, nearest-resampled to the longer
@@ -373,7 +489,7 @@ type PackedImage = (String, u32, u32, Vec<u8>);
 /// for the world's sprite arrays.
 fn strip_frame(pixels: &[u8], stride: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
     let side = w.max(h);
-    let mut out = Vec::with_capacity((side * side * 4) as usize);
+    let mut out = Vec::with_capacity(side as usize * side as usize * 4);
     for row in 0..side {
         let source_row = y + row * h / side;
         for column in 0..side {
@@ -399,8 +515,15 @@ fn first_frame(
         meta.frame_size(w as i32, h as i32)
     });
     match (u32::try_from(fw), u32::try_from(fh)) {
+        // A frame whose square no atlas holds keeps the whole image, as frame metadata that
+        // doesn't fit does, rather than ask for gigabytes.
         (Ok(fw), Ok(fh))
-            if fw > 0 && fh > 0 && w % fw == 0 && h % fh == 0 && (fw, fh) != (w, h) =>
+            if fw > 0
+                && fh > 0
+                && w % fw == 0
+                && h % fh == 0
+                && (fw, fh) != (w, h)
+                && crate::sprites::check_frames(fw.max(fh), 1).is_ok() =>
         {
             let side = fw.max(fh);
             (side, side, strip_frame(&pixels, w, 0, 0, fw, fh))
@@ -655,16 +778,18 @@ fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedIm
                 SpriteOrigin::File(texture) => {
                     // Its path under `textures/` in any namespace (a server
                     // pack's `lobby:item/...` as well as vanilla's).
-                    let path = texture.split_once(':').map_or(texture.as_str(), |(_, p)| p);
                     let file = atlas_sources::texture_resource(texture, "textures");
                     decode_resource(root, &file).ok().map(|image| {
                         // Animated strips keep their first frame and animate, like the
                         // packed files, under any folder: vanilla animates every sprite of
                         // these atlases (a server pack's `wynn/...` as well as `item/...`).
+                        // A still texture is the whole image (`SpriteResourceLoader`: the frame
+                        // size is the image's without an animation section), so a 64x32 item
+                        // texture keeps its right half.
                         let mcmeta = root.read_to_string(&format!("{file}.mcmeta")).ok();
                         let animation = animation_of(mcmeta.as_deref());
                         animated = animation.is_some();
-                        if animated || path.starts_with("block/") || path.starts_with("item/") {
+                        if animated {
                             first_frame(image, animation.as_ref())
                         } else {
                             image
@@ -673,7 +798,14 @@ fn atlas_sprites(root: &ResourceSource, packed: &[PackedImage]) -> (Vec<PackedIm
                 }
                 generated => atlas_sources::generate(generated, &load),
             };
-            image.map(|(w, h, pixels)| (*order, (name.clone(), w, h, pixels), animated))
+            let (w, h, pixels) = image?;
+            let gui = is_gui_sprite(name)
+                || matches!(origin, SpriteOrigin::File(texture) if is_gui_sprite(texture));
+            if gui && !gui_sprite_fits_atlas(w, h, false) {
+                log::warn!("skipped GUI atlas sprite {name}: {w}x{h} cannot fit the shared atlas");
+                return None;
+            }
+            Some((*order, (name.clone(), w, h, pixels), animated))
         })
     };
     let mut out: Vec<_> = crate::par::par_map(&names, first)
@@ -707,7 +839,7 @@ fn galactic_widths(
     let Some(sheet) = sprites.get("font/ascii_sga") else {
         return widths;
     };
-    let cell = sheet.w / 16;
+    let cell = sheet.texels((width, height)).0 / 16;
     let (px, py) = (
         (sheet.u0 * width as f32) as u32,
         (sheet.v0 * height as f32) as u32,
@@ -771,6 +903,19 @@ pub fn dump_atlas(
     }
     fs::write(dir.join(format!("{name}.txt")), list)?;
     Ok(png_path)
+}
+
+/// Whether `name` (`gui/icon_n`) is a LabPBR map of a texture beside it (`gui/icon`) that is
+/// read as one (`read_maps`): the world's sprites own it, so the atlas does not draw it again.
+/// With the maps not read it is an ordinary image like any other.
+fn is_companion_map(root: &ResourceSource, name: &str, read_maps: bool) -> bool {
+    read_maps
+        && name
+            .strip_suffix("_n")
+            .or_else(|| name.strip_suffix("_s"))
+            .is_some_and(|base| {
+                root.contains(&crate::atlas_sources::texture_resource(base, "textures"))
+            })
 }
 
 impl HudAtlas {
@@ -876,16 +1021,24 @@ impl HudAtlas {
         Self::build_over_with_image(root, defaults, false)
     }
     /// The atlas above, with a slot for a client mod's own image
-    /// (`horizon/modimage`) only when `mod_image` says a client mod is loaded,
-    /// native or wasm: the slot costs 4 MiB of pixels, so a game without
-    /// mods holds none of them.
+    /// (`horizon/modimage`) and the page of client mods' dynamic textures
+    /// (`dynamic_texture_page`) only when `mod_image` says a client mod is
+    /// loaded, native or wasm: the slot costs 4 MiB of pixels and the page 8.5,
+    /// so a game without mods holds none of them.
     pub fn build_over_with_image(
         root: &ResourceSource,
         defaults: &ResourceSource,
         mod_image: bool,
     ) -> Result<Self> {
         let mut atlas = Self::pack(root, defaults, WALKED_TEXTURE_FOLDERS, true, mod_image)?;
+        // Only the page the builder reserved: without a mod, a pack texture under the page's
+        // name stays one of the pack's sprites.
+        if mod_image {
+            atlas.dynamic_texture_page =
+                dynamic_textures::Page::take(&mut atlas.sprites, atlas.width, atlas.height);
+        }
         pack_text::load_shaders(&mut atlas, root, defaults);
+        atlas.model_shaders = crate::gfx::core_models::ModelShaders::load(root, defaults);
         atlas.sprite_modifiers = std::sync::Arc::new(sprite_modifiers::SpriteModifiers::read(
             root,
             atlas.sprites.keys(),
@@ -909,12 +1062,20 @@ impl HudAtlas {
             crate::minimap::SIZE as u32,
             Vec::new(),
         ));
-        // A mod's own image (`mod_image`), only when a client mod is loaded.
+        // A mod's own image (`mod_image`) and the mods' dynamic textures, only when a client
+        // mod is loaded.
         if mod_image {
             images.push((
                 MOD_IMAGE_SPRITE.into(),
                 MOD_IMAGE_SIZE,
                 MOD_IMAGE_SIZE,
+                Vec::new(),
+            ));
+            let [width, height] = dynamic_textures::PAGE;
+            images.push((
+                dynamic_textures::PAGE_SPRITE.into(),
+                width,
+                height,
                 Vec::new(),
             ));
         }
@@ -970,14 +1131,20 @@ impl HudAtlas {
             glint: (Vec::new(), 1, 1),
             glint_armor: (Vec::new(), 1, 1),
             text_shaders: Default::default(),
+            model_shaders: Default::default(),
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            sunrise_shader: None,
+            lightmap_shader: None,
+            blit_shader: None,
+            gui_shader: None,
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Arc::default(),
             blinks: Default::default(),
             white,
+            dynamic_texture_page: None,
         })
     }
     /// The boot screen's atlas, before any pack loads: the theme's run-time
@@ -1039,13 +1206,19 @@ impl HudAtlas {
             glint_armor: (vec![0; 4], 1, 1),
             white,
             text_shaders: Default::default(),
+            model_shaders: Default::default(),
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            sunrise_shader: None,
+            lightmap_shader: None,
+            blit_shader: None,
+            gui_shader: None,
             sprite_modifiers: Default::default(),
             random_textures: Default::default(),
             emissive: Default::default(),
             blinks: Default::default(),
+            dynamic_texture_page: None,
         }
     }
     /// Shelf placements of `images` (tallest first) in the narrowest atlas
@@ -1240,7 +1413,13 @@ impl HudAtlas {
             Option<(u32, u32)>,
             bool,
             Option<Box<Maps>>,
+            bool,
         );
+        let shadow = if defaults.same_generation(root) {
+            root.underlay()
+        } else {
+            Some(defaults)
+        };
         let decode_one = |path: &String| -> Option<Decoded> {
             let name = if let Some(name) = named.get(path) {
                 name.clone()
@@ -1255,9 +1434,8 @@ impl HudAtlas {
                 }
             };
             // LabPBR's maps beside a texture are the world's (sprites.rs), not images to draw.
-            if let Some(base) = name.strip_suffix("_n").or_else(|| name.strip_suffix("_s"))
-                && root.contains(&crate::atlas_sources::texture_resource(base, "textures"))
-            {
+            // Only while they are read: otherwise the names are ordinary images.
+            if is_companion_map(root, &name, read_maps) {
                 return None;
             }
             // A texture the pack cannot decode keeps the default it shadows: the
@@ -1268,42 +1446,56 @@ impl HudAtlas {
             // own resources passes the resolved overlay as its own `defaults`, as both
             // production call sites do: the default is then the layer that overlay was
             // resolved over (`ResourceSource::underlay`), not the broken file again.
-            let shadow = if defaults.same_generation(root) {
-                root.underlay()
-            } else {
-                Some(defaults)
+            let gui = is_gui_sprite(&name);
+            let decode = |source: &ResourceSource, path: &str| -> Result<_> {
+                let image = decode_resource(source, path)?;
+                let mcmeta = source.read_to_string(&format!("{path}.mcmeta")).ok();
+                let animation = animation_of(mcmeta.as_deref());
+                // A still sprite keeps its whole image, whatever its folder or shape.
+                let frames = animation.is_some();
+                let (w, h, pixels) = if frames {
+                    first_frame(image, animation.as_ref())
+                } else {
+                    image
+                };
+                let flags = mcmeta.as_deref().and_then(TextureFlags::from_mcmeta);
+                if gui && !gui_sprite_fits_atlas(w, h, flags.as_ref().is_some_and(|f| f.blur)) {
+                    return Err(format!("{w}x{h} cannot fit the shared atlas").into());
+                }
+                Ok(((w, h, pixels), flags, frames, animation.is_some()))
             };
-            let (source, path, image, defaulted) = match decode_resource(root, path) {
-                Ok(image) => (root, path.clone(), image, false),
+            let (source, path, decoded, defaulted) = match decode(root, path) {
+                Ok(decoded) => (root, path.clone(), decoded, false),
                 Err(e) => {
                     let shadowed = crate::atlas_sources::texture_resource(&name, "textures");
-                    match shadow.map(|shadow| (shadow, decode_resource(shadow, &shadowed))) {
-                        Some((shadow, Ok(image))) => {
+                    match shadow
+                        .and_then(|source| decode(source, &shadowed).ok().map(|d| (source, d)))
+                    {
+                        Some((source, decoded)) => {
                             log::warn!("GUI texture {path}: {e}; used the default's {name}");
-                            (shadow, shadowed, image, true)
+                            (source, shadowed, decoded, true)
                         }
-                        _ => {
+                        None => {
                             log::warn!("skipped GUI texture {path}: {e}");
                             return None;
                         }
                     }
                 }
             };
-            let mcmeta = source.read_to_string(&format!("{path}.mcmeta")).ok();
-            let animation = animation_of(mcmeta.as_deref());
-            // An animated strip keeps its first frame.
-            let frames =
-                animation.is_some() || name.starts_with("block/") || name.starts_with("item/");
-            let (w, h, pixels) = if frames {
-                first_frame(image, animation.as_ref())
-            } else {
-                image
-            };
+            let ((w, h, pixels), flags, frames, animated) = decoded;
             // The default texture's size, when a pack's differs from it. A sprite
             // that fell back to the default is at that size already: the broken
-            // file's header must not give it another one.
+            // file's header must not give it another one. Read the layer the
+            // pack resolved over (`shadow`, as the decode fallback does): the
+            // callers pass the resolved overlay itself as `defaults`, so
+            // `defaults` would answer a replaced texture with the pack's own
+            // file and a hi-res pack would draw its pixel size everywhere.
             let gui_size = png_size(
-                if defaulted { source } else { defaults },
+                if defaulted {
+                    source
+                } else {
+                    shadow.unwrap_or(defaults)
+                },
                 &crate::atlas_sources::texture_resource(&name, "textures"),
             )
             .map(|(dw, dh)| {
@@ -1311,8 +1503,6 @@ impl HudAtlas {
                 if frames { (side, side) } else { (dw, dh) }
             })
             .filter(|&size| size != (w, h));
-            let flags = mcmeta.as_deref().and_then(TextureFlags::from_mcmeta);
-            let animated = frames && animation.is_some();
             // Vanilla particle atlases accept sprites of any size.
             let particle = name.starts_with("particle/") || name.contains(":particle/");
             let (gw, gh) = if particle {
@@ -1328,17 +1518,14 @@ impl HudAtlas {
                     maps.iter().any(Option::is_some).then(|| Box::new(maps))
                 })
                 .flatten();
-            (gw <= 1024
-                && (gh <= 512
-                    || matches!(
-                        name.as_str(),
-                        "gui/title/background/panorama_0"
-                            | "gui/title/background/panorama_2"
-                            | "gui/title/background/panorama_3"
-                            | "gui/presets/isles"
-                    )
-                    || name.starts_with("font/")))
-            .then_some(((name, w, h, pixels), flags, gui_size, animated, maps))
+            (gui || (gw <= 1024 && (gh <= 512 || name.starts_with("font/")))).then_some((
+                (name, w, h, pixels),
+                flags,
+                gui_size,
+                animated,
+                maps,
+                gui && defaulted,
+            ))
         };
         let threads = horizon_std::thread::scope_parallelism();
         let chunk = files.len().div_ceil(threads).max(1);
@@ -1359,7 +1546,8 @@ impl HudAtlas {
         let mut animated: Vec<String> = Vec::new();
         let mut images: Vec<PackedImage> = Vec::with_capacity(decoded.len());
         let mut maps: HashMap<String, Box<Maps>> = HashMap::new();
-        for (image, image_flags, gui_size, is_animated, image_maps) in decoded {
+        let mut default_gui_animations = HashSet::new();
+        for (image, image_flags, gui_size, is_animated, image_maps, default_gui) in decoded {
             if let Some(m) = image_maps {
                 maps.insert(image.0.clone(), m);
             }
@@ -1370,6 +1558,9 @@ impl HudAtlas {
                 gui_sizes.insert(image.0.clone(), size);
             }
             if is_animated {
+                if default_gui {
+                    default_gui_animations.insert(image.0.clone());
+                }
                 animated.push(image.0.clone());
             }
             images.push(image);
@@ -1379,6 +1570,23 @@ impl HudAtlas {
             let (more, more_animated) = atlas_sprites(root, &images);
             images.extend(more);
             animated.extend(more_animated);
+            // A generated sprite keeps the generation the pack resolved over as
+            // its logical size, as a walked file's gui_size does: the pack's
+            // own hi-res source (a paletted permutation's palette, a renamed
+            // texture) is no logical size. The defaults' own generation names
+            // every sprite they generate; a sprite only the pack generates
+            // keeps its own size.
+            let generation = if defaults.same_generation(root) {
+                root.underlay()
+            } else {
+                Some(defaults)
+            };
+            if let Some(generation) = generation {
+                let (default_generated, _) = atlas_sprites(generation, &[]);
+                for (name, w, h, _) in default_generated {
+                    gui_sizes.entry(name).or_insert((w, h));
+                }
+            }
             for (image, image_flags, is_animated) in cit_sprites(root, &images) {
                 cit_names.insert(image.0.clone());
                 if let Some(f) = image_flags {
@@ -1459,17 +1667,32 @@ impl HudAtlas {
                         Ok(layout) => layout,
                         Err(_) => {
                             let keep = full_size_sprites(root, &images, &bordered);
-                            let layout = Self::layout_capping_mod_textures(
+                            let capped = Self::layout_capping_mod_textures(
                                 &mut images,
                                 &mut gui_sizes,
                                 &keep,
                                 &mod_namespaces(),
                                 MAX_ATLAS_SIZE,
-                            )?;
-                            log::warn!(
-                                "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
                             );
-                            return Ok(layout);
+                            match capped {
+                                Ok(layout) => {
+                                    log::warn!(
+                                        "reduced the resolution of mods' HUD textures to keep the resource packs: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                                Err(_) => {
+                                    let layout = Self::layout_reducing_hires(
+                                        &mut images,
+                                        &gui_sizes,
+                                        MAX_ATLAS_SIZE,
+                                    )?;
+                                    log::warn!(
+                                        "reduced the pack's high-resolution sprites toward their logical sizes to keep the resource pack: {error}"
+                                    );
+                                    return Ok(layout);
+                                }
+                            }
                         }
                     };
                     log::warn!(
@@ -1501,6 +1724,8 @@ impl HudAtlas {
             }
             let b = u32::from(bordered.contains(name));
             let (px, py, w, h) = (px + b, py + b, w - 2 * b, h - 2 * b);
+            // A sprite's logical size is its rect's: the region the UVs cover,
+            // past the wrapped border, whatever the default named.
             let (gw, gh) = gui_sizes.get(name).copied().unwrap_or((w, h));
             sprites.insert(
                 name.clone(),
@@ -1518,6 +1743,7 @@ impl HudAtlas {
         // frame, while the mcmeta's frame list may start anywhere, so each
         // animation's frame(0) overwrites its atlas rect before drawing.
         let mut loaded = crate::sprites::Sprites::new(root.clone());
+        let mut default_sprites = None;
         let mut sprite_animations = Vec::new();
         animated.sort();
         for name in animated {
@@ -1530,10 +1756,16 @@ impl HudAtlas {
             } else {
                 format!("minecraft:{name}")
             };
-            let Ok(layer) = loaded.insert(&id) else {
+            let loader = if default_gui_animations.contains(&name) {
+                let Some(shadow) = shadow else { continue };
+                default_sprites.get_or_insert_with(|| crate::sprites::Sprites::new(shadow.clone()))
+            } else {
+                &mut loaded
+            };
+            let Ok(layer) = loader.insert(&id) else {
                 continue;
             };
-            let Some(animation) = loaded.animations.iter().find(|a| a.layer == layer).cloned()
+            let Some(animation) = loader.animations.iter().find(|a| a.layer == layer).cloned()
             else {
                 continue;
             };
@@ -1601,15 +1833,21 @@ impl HudAtlas {
             glint,
             glint_armor,
             text_shaders: Default::default(),
+            model_shaders: Default::default(),
             lines_shader: None,
             sky_shader: None,
             stars_shader: None,
+            sunrise_shader: None,
+            lightmap_shader: None,
+            blit_shader: None,
+            gui_shader: None,
             sprite_modifiers: Default::default(),
             random_textures,
             emissive,
             blinks,
             font,
             white,
+            dynamic_texture_page: None,
         })
     }
     /// `misc/<name>.png` on its own, or a transparent texel if the resource
@@ -1639,9 +1877,42 @@ pub struct HudVertex {
     /// The `GLINT_TEXTURING` UV into the repeating glint texture, unused
     /// unless `uv.x >= 2`.
     pub glint_uv: [f32; 2],
-    /// 1 for the GUI's text (`RenderPipelines.GUI_TEXT`), which a resource
-    /// pack's text shader draws when it has one.
+    /// Zero for ordinary vertices, one for native HUD text, two and up for pack font pages.
+    /// Pack pages use `glint_uv` for their UV and keep `uv` for native drawing.
     pub text: u32,
+}
+
+const NATIVE_HUD_TEXT: u32 = 1;
+
+impl HudVertex {
+    fn set_font_page(&mut self, page: u32) {
+        self.text = page + NATIVE_HUD_TEXT;
+    }
+
+    /// Carry a baked font page through the GUI-to-world quad conversion.
+    /// The entity shaders use only the first two light bytes for text.
+    pub fn world_text_vertex(self, pos: [f32; 3], layer: u32, light: u32) -> crate::mesher::Vertex {
+        let [lo, hi, page_a, page_b] = self.text.saturating_sub(NATIVE_HUD_TEXT).to_le_bytes();
+        crate::mesher::Vertex {
+            pos,
+            uv: self.uv,
+            layer,
+            color: self.color,
+            light: (light & 0xffff) | (u32::from(u16::from_le_bytes([lo, hi])) << 16),
+            normal: [page_a as i8, page_b as i8, 0, 0],
+            glint_uv: self.glint_uv,
+        }
+    }
+}
+
+/// `BakedSheetGlyph.buildEffect`: a decoration uses a different UV corner order than a character.
+fn stamp_text_effect(vertices: &mut [HudVertex], effect: crate::font::PageGlyph) {
+    let r = effect.glyph.rect.unwrap();
+    let uv = [[r.u1, r.v0], [r.u1, r.v1], [r.u0, r.v1], [r.u0, r.v0]];
+    for (i, v) in vertices.iter_mut().enumerate() {
+        v.glint_uv = uv[[0, 1, 2, 0, 2, 3][i % 6]];
+        v.set_font_page(effect.page);
+    }
 }
 /// Sutherland-Hodgman against one half plane, interpolating every attribute.
 fn clip_polygon(poly: &[HudVertex], axis: usize, limit: f32, keep_below: bool) -> Vec<HudVertex> {
@@ -1688,6 +1959,54 @@ pub struct GuiScale {
     pub unicode: bool,
 }
 
+/// One positioned glyph prepared while drawing HUD text, held in [`HudGlyphScratch`]
+/// so text draws reuse one backing buffer across calls.
+struct PreparedGlyph {
+    x: f32,
+    glyph: crate::font::Glyph,
+    page: Option<crate::font::PageGlyph>,
+    effect: Option<crate::font::PageGlyph>,
+    color: u32,
+    custom_shadow: Option<u32>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    first: bool,
+    advance: f32,
+    object: Option<crate::text::InlineObject>,
+}
+
+/// Reusable scratch buffer for prepared glyphs across [`HudBatch`] text draws.
+///
+/// Store one in the HUD owner and pass it to [`HudBatch::text_with_scratch`],
+/// [`HudBatch::text_styled_with_scratch`], or [`crate::hud_layout::paint_with_scratch`]
+/// so text draws reuse one backing allocation while [`HudBatch`] keeps its public fields.
+#[derive(Default)]
+pub struct HudGlyphScratch(Vec<PreparedGlyph>);
+
+impl HudGlyphScratch {
+    /// Create an empty glyph scratch buffer.
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Clear any staged glyphs while retaining the backing allocation.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// Returns `true` when no prepared glyphs are currently staged.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Current backing capacity of the reusable glyph buffer.
+    pub fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+}
+
 /// One frame of overlay geometry in GUI pixels.
 pub struct HudBatch {
     pub pictures: Vec<Arc<pictures::Picture>>,
@@ -1699,6 +2018,7 @@ pub struct HudBatch {
     pub patches: Vec<crate::font::Patch>,
     /// Vertex ranges with another blend or depth/scissor state, in order.
     pub blends: Vec<(std::ops::Range<u32>, Blend)>,
+    next_scene_pass: u32,
     /// The textures and time of the `Blend::EndPortal` runs.
     pub end_portal: EndPortalFill,
     /// `options.glintStrength` for the glint pass (`GlintAlpha`).
@@ -1712,7 +2032,19 @@ pub struct HudBatch {
     pub blur_at: u32,
     /// Player object profiles encountered while painting text this frame.
     pub inline_profiles: Vec<std::sync::Arc<serde_json::Value>>,
+    /// The stock HUD's hotbar origin while that layer is drawing and in its post hooks.
+    pub stock_hotbar_origin: Option<[f32; 2]>,
 }
+
+/// How a GUI scene overlay compares against the scene's opaque depth.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OverlayDepth {
+    /// Hide pixels behind scene geometry.
+    Tested,
+    /// Draw regardless of scene geometry.
+    ThroughWalls,
+}
+
 /// How a run of HUD vertices blends and tests depth.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Blend {
@@ -1723,12 +2055,23 @@ pub enum Blend {
     Invert,
     /// `BlendFunction.ADDITIVE` (`RenderPipelines.GUI_TEXT_HIGHLIGHT`).
     Additive,
+    /// `SRC_ALPHA, ONE` for color; leave destination alpha unchanged.
+    AlphaAdd,
+    /// `dst - src * src_alpha` for color; leave destination alpha unchanged.
+    AlphaSubtract,
     /// Alpha blending with an isolated depth buffer and a pixel scissor.
     Depth([u32; 4]),
     /// The glint over the `Depth` run before it with the same scissor, in its
     /// pass: `RenderPipelines.GLINT`'s additive blend, depth tested against the
     /// model and never written.
     DepthGlint([u32; 4]),
+    /// One run in a scene's isolated depth pass. `overlay` is `None` for its
+    /// depth-writing base geometry, or the depth test for a read-only overlay.
+    DepthScene {
+        clip: [u32; 4],
+        pass: u32,
+        overlay: Option<OverlayDepth>,
+    },
     /// `RenderPipelines.VIGNETTE`: the destination darkened by the texture
     /// (`ZERO, ONE_MINUS_SRC_COLOR`).
     Vignette,
@@ -1738,6 +2081,80 @@ pub enum Blend {
     /// An OptiFine CIT glint layer (`cit_glint`), blended as entry `n` of
     /// `GlintTextures::blends` says.
     CitGlint(u8),
+    /// `RenderPipelines.GUI` (or its blend variants), with an optional GUI-space scissor.
+    GuiFill(GuiFill, Option<[u32; 4]>),
+    /// `GuiGraphicsExtractor.blit(GUI_TEXTURED, texture, ...)` as vanilla draws it: one quad
+    /// with the blit's own UVs, which the pack's `position_tex_color` draws with picture `id`
+    /// as `Sampler0` ([`HudBatch::pack_blit`]).
+    PackBlit(u64),
+    PackBlitClipped(u64, [u32; 4]),
+    /// The same blit as the atlas tiles it draws natively, translucent: drawn unless the pack's
+    /// shader draws the `PackBlit` of picture `id` after it.
+    PackBlitNative(u64),
+    /// A baked GUI item material, with `Lighting.Entry.ITEMS_3D` when true
+    /// and `ITEMS_FLAT` when false.
+    ItemModel(bool),
+}
+
+/// The blend selected by `GuiGraphicsExtractor.fill` and `textHighlight`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GuiFill {
+    Alpha,
+    Invert,
+    Additive,
+}
+
+impl Blend {
+    fn core_scissor(self) -> Option<[u32; 4]> {
+        match self {
+            Self::GuiFill(_, clip) => clip,
+            Self::PackBlitClipped(_, clip) => Some(clip),
+            _ => None,
+        }
+    }
+
+    fn depth_clip(self) -> Option<[u32; 4]> {
+        match self {
+            Self::Depth(clip) | Self::DepthGlint(clip) | Self::DepthScene { clip, .. } => {
+                Some(clip)
+            }
+            _ => None,
+        }
+    }
+
+    fn shares_depth_pass(self, next: Self) -> bool {
+        match (self, next) {
+            (Self::Depth(a) | Self::DepthGlint(a), Self::DepthGlint(b)) => a == b,
+            (
+                Self::DepthScene {
+                    clip: a, pass: p, ..
+                },
+                Self::DepthScene {
+                    clip: b, pass: q, ..
+                },
+            ) => p == q && a == b,
+            _ => false,
+        }
+    }
+
+    /// Keep vanilla's input vertices intact; its scissor runs after the pack's vertex shader.
+    fn scissor_core(&mut self, mut clip: [f32; 4]) {
+        if let Some(old) = self.core_scissor() {
+            let [x0, y0, x1, y1] = old.map(f32::from_bits);
+            clip = [
+                x0.max(clip[0]),
+                y0.max(clip[1]),
+                x1.min(clip[2]),
+                y1.min(clip[3]),
+            ];
+        }
+        let clip = clip.map(f32::to_bits);
+        *self = match *self {
+            Self::GuiFill(mode, _) => Self::GuiFill(mode, Some(clip)),
+            Self::PackBlit(id) | Self::PackBlitClipped(id, _) => Self::PackBlitClipped(id, clip),
+            _ => return,
+        };
+    }
 }
 /// What a `Blend::EndPortal` fill samples: the atlas rects (u0, v0, width,
 /// height) of `end_sky.png` and `end_portal.png`, and the `GameTime` uniform.
@@ -1746,34 +2163,99 @@ pub struct EndPortalFill {
     pub sprites: [[f32; 4]; 2],
     pub game_time: f32,
 }
+
+/// `GuiRenderState.findAppropriateNode`: a wholly scissored rectangle is not extracted.
+fn intersects_scissor(q: &[HudVertex; 6], [x0, y0, x1, y1]: [f32; 4]) -> bool {
+    let mut lo = q[0].pos;
+    let mut hi = lo;
+    for v in [&q[1], &q[2], &q[5]] {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(v.pos[axis]);
+            hi[axis] = hi[axis].max(v.pos[axis]);
+        }
+    }
+    lo[0].max(x0) < hi[0].min(x1) && lo[1].max(y0) < hi[1].min(y1)
+}
 pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
     (a as u32) << 24 | (b as u32) << 16 | (g as u32) << 8 | r as u32
 }
-thread_local! {
-    /// The vertex list of the last frame's HUD, given back once drawn ([`HudBatch::recycle`])
-    /// for the next one ([`HudBatch::for_frame`]): grown from empty every frame (thousands of
-    /// vertices with the frame graph shown), it was copied at each doubling.
-    static FRAME_VERTICES: std::cell::RefCell<Vec<HudVertex>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-impl HudBatch {
-    /// [`HudBatch::new`] for a frame's HUD, on the vertex list the last frame's gave back.
-    pub fn for_frame(window: [u32; 2], inputs: GuiScale) -> Self {
-        let mut batch = Self::new(window, inputs);
-        batch.vertices = FRAME_VERTICES.with_borrow_mut(std::mem::take);
-        batch
+/// What [`HudBatch::clip_since`] keeps of quad `q` inside `x0, y0, x1, y1`, appended to `out`.
+fn clip_quad(q: [HudVertex; 6], [x0, y0, x1, y1]: [f32; 4], out: &mut Vec<HudVertex>) {
+    // A quad wholly inside keeps all of itself. One wholly outside keeps nothing. Only a quad
+    // across an edge is cut below.
+    let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
+    for v in &q {
+        for axis in 0..2 {
+            lo[axis] = lo[axis].min(v.pos[axis]);
+            hi[axis] = hi[axis].max(v.pos[axis]);
+        }
     }
-    /// Gives this batch's vertex list, emptied, to the next [`HudBatch::for_frame`] on this
-    /// thread.
-    pub fn recycle(&mut self) {
-        let mut vertices = std::mem::take(&mut self.vertices);
-        vertices.clear();
-        FRAME_VERTICES.with_borrow_mut(|spare| {
-            if vertices.capacity() > spare.capacity() {
-                *spare = vertices;
+    if lo[0] >= x0 && hi[0] <= x1 && lo[1] >= y0 && hi[1] <= y1 {
+        out.extend_from_slice(&q);
+        return;
+    }
+    if hi[0] <= x0 || lo[0] >= x1 || hi[1] <= y0 || lo[1] >= y1 {
+        return;
+    }
+    let corners = [q[0], q[1], q[2], q[5]];
+    let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+    for v in &corners {
+        x_lo = x_lo.min(v.pos[0]);
+        x_hi = x_hi.max(v.pos[0]);
+        y_lo = y_lo.min(v.pos[1]);
+        y_hi = y_hi.max(v.pos[1]);
+    }
+    let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
+    let rect = (
+        find(x_lo, y_lo),
+        find(x_hi, y_lo),
+        find(x_hi, y_hi),
+        find(x_lo, y_hi),
+    );
+    let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
+        for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
+            let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
+                - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
+            if area == 0.0 {
+                continue;
             }
-        });
+            let mut poly = tri.to_vec();
+            for (axis, limit, keep_below) in
+                [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
+            {
+                poly = clip_polygon(&poly, axis, limit, keep_below);
+            }
+            for i in 1..poly.len().saturating_sub(1) {
+                let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+                out.extend_from_slice(&[a, b, c, a, c, c]);
+            }
+        }
+        return;
+    };
+    let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
+    let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
+    if cx0 >= cx1 || cy0 >= cy1 {
+        return;
     }
+    let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
+    let corner = |x, y| {
+        clip_corner::clip_corner(
+            [tl, tr, br, bl],
+            [x, y],
+            [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
+        )
+    };
+    let c = [
+        corner(cx0, cy0),
+        corner(cx1, cy0),
+        corner(cx1, cy1),
+        corner(cx0, cy1),
+    ];
+    out.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+}
+
+impl HudBatch {
     /// Window.calculateScale: the largest scale keeping >= 320x240 GUI pixels,
     /// capped by the GUI Scale option (0 = auto).
     pub fn new(window: [u32; 2], inputs: GuiScale) -> Self {
@@ -1794,13 +2276,40 @@ impl HudBatch {
             height: gui.size[1] as f32,
             patches: Vec::new(),
             blends: Vec::new(),
+            next_scene_pass: 0,
             end_portal: EndPortalFill::default(),
             glint_alpha: 0.75,
             glint_colour: 0,
             game_time: 0.0,
             blur_at: 0,
             inline_profiles: Vec::new(),
+            stock_hotbar_origin: None,
         }
+    }
+    /// Clear all geometry and per-frame state for reuse with `window` and `inputs`,
+    /// retaining the backing allocations of its buffers.
+    pub fn reset(&mut self, window: [u32; 2], inputs: GuiScale) {
+        let gui =
+            horizon_client_input::window::GuiSize::new(window, inputs.requested, inputs.unicode);
+        self.reset_with_gui_size(gui);
+    }
+    /// Clear all geometry and per-frame state for reuse with `gui`, retaining buffer capacity.
+    pub fn reset_with_gui_size(&mut self, gui: horizon_client_input::window::GuiSize) {
+        self.pictures.clear();
+        self.vertices.clear();
+        self.scale = gui.scale as f32;
+        self.width = gui.size[0] as f32;
+        self.height = gui.size[1] as f32;
+        self.patches.clear();
+        self.blends.clear();
+        self.next_scene_pass = 0;
+        self.end_portal = EndPortalFill::default();
+        self.glint_alpha = 0.75;
+        self.glint_colour = 0;
+        self.game_time = 0.0;
+        self.blur_at = 0;
+        self.inline_profiles.clear();
+        self.stock_hotbar_origin = None;
     }
     /// Draw the vertices added since `start` with the inverting blend.
     pub fn invert_since(&mut self, start: usize) {
@@ -1827,13 +2336,14 @@ impl HudBatch {
         invert_text: bool,
     ) {
         if invert_text {
-            let start = self.vertices.len();
-            self.fill(atlas, x, y, w, h, rgba(255, 255, 255, 255));
-            self.invert_since(start);
+            self.fill_with(
+                atlas,
+                [x, y, w, h],
+                rgba(255, 255, 255, 255),
+                GuiFill::Invert,
+            );
         }
-        let start = self.vertices.len();
-        self.fill(atlas, x, y, w, h, rgba(0, 0, 255, 255));
-        self.blend_since(start, Blend::Additive);
+        self.fill_with(atlas, [x, y, w, h], rgba(0, 0, 255, 255), GuiFill::Additive);
     }
     /// The vertex ranges in order, each with its blend.
     pub fn runs(&self) -> Vec<(std::ops::Range<u32>, Blend)> {
@@ -1878,6 +2388,20 @@ impl HudBatch {
             runs.push((at.max(vertices.start)..end, Blend::Alpha));
         }
         runs
+    }
+
+    /// Emit an expanded Java quad in its original corner order.
+    fn core_quad(&mut self, p: [[f32; 2]; 4], uv: [[f32; 2]; 4], color: [u32; 4]) {
+        for i in [0, 1, 2, 0, 2, 3] {
+            self.vertices.push(HudVertex {
+                pos: p[i],
+                uv: uv[i],
+                color: color[i],
+                depth: 0.0,
+                glint_uv: [0.0, 0.0],
+                text: 0,
+            });
+        }
     }
     /// `AbstractContainerScreen.init`: center in integer GUI coordinates.
     pub fn centered_origin(&self, width: f32, height: f32) -> (f32, f32) {
@@ -1930,6 +2454,26 @@ impl HudBatch {
             });
         }
     }
+    /// A face of `GuiItemAtlas.drawToSlot`. A non-glint model uses the spare
+    /// glint attribute for its three signed, quantized normal components.
+    pub fn item_model_quad(
+        &mut self,
+        p: [[f32; 3]; 4],
+        uv: [[f32; 2]; 4],
+        normal: [f32; 3],
+        color: u32,
+        block_light: bool,
+    ) {
+        let start = self.vertices.len();
+        self.quad_3d(p, uv, color);
+        let normal = normal.into_iter().enumerate().fold(0u32, |bits, (i, n)| {
+            bits | (((n.clamp(-1.0, 1.0) * 127.0).round() as i32 + 127) as u32) << (i * 8)
+        });
+        for v in &mut self.vertices[start..] {
+            v.glint_uv[0] = normal as f32;
+        }
+        self.blend_since(start, Blend::ItemModel(block_light));
+    }
     /// `RenderTypes.armorCutoutNoCullGlint` (and the items' glint types) over a
     /// [`Self::quad_3d`] face: `uv` is the face's atlas UV,
     /// which the shader masks by, and `glint_uv` the transformed glint UV.
@@ -1963,23 +2507,9 @@ impl HudBatch {
     /// depth buffer, and the glint is drawn over the model in the same pass.
     pub fn depth_glint_since(&mut self, start: usize, glint: usize, clip: [f32; 4]) {
         let glint = glint.clamp(start, self.vertices.len());
-        let vertices = &mut self.vertices[start..];
-        if vertices.is_empty() {
+        let Some(clip) = self.normalize_depth_since(start, self.vertices.len(), 1.0, clip) else {
             return;
-        }
-        let min = vertices
-            .iter()
-            .map(|v| v.depth)
-            .fold(f32::INFINITY, f32::min);
-        let max = vertices
-            .iter()
-            .map(|v| v.depth)
-            .fold(f32::NEG_INFINITY, f32::max);
-        for v in vertices {
-            v.depth = (max - v.depth) / (max - min).max(f32::EPSILON);
-        }
-        let [x0, y0, x1, y1] = clip.map(|v| (v * self.scale).max(0.0) as u32);
-        let clip = [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)];
+        };
         // Separate previews clear depth independently, even if their scissors match.
         if glint > start {
             self.blends
@@ -1990,6 +2520,105 @@ impl HudBatch {
             self.blends
                 .push((glint as u32..end as u32, Blend::DepthGlint(clip)));
         }
+    }
+
+    /// Draw a GUI scene and the overlays after it in one isolated depth pass.
+    /// `overlay_start` is the first overlay vertex; each run gives an exclusive
+    /// end vertex and a depth mode. The contiguous runs cover all vertices
+    /// from `overlay_start` onward. Overlays never write depth.
+    pub fn depth_overlays_since(
+        &mut self,
+        start: usize,
+        overlay_start: usize,
+        clip: [f32; 4],
+        runs: impl IntoIterator<Item = (usize, OverlayDepth)>,
+    ) {
+        let end = self.vertices.len();
+        debug_assert!((start..=end).contains(&overlay_start));
+        if overlay_start == end {
+            self.depth_since(start, clip);
+            return;
+        }
+        // The base scene keeps its own depth precision: overlays far from it are clamped
+        // instead of widening the range. Its farthest face sits at half depth, so an
+        // overlay clamped behind it still fails the test there.
+        let base_end = if start < overlay_start {
+            overlay_start
+        } else {
+            end
+        };
+        let Some(clip) = self.normalize_depth_since(start, base_end, 0.5, clip) else {
+            return;
+        };
+        // The pass identity stays the same even if CPU clipping removes its
+        // first run. Adjacent scenes may have identical scissors and modes.
+        let pass = self.next_scene_pass;
+        self.next_scene_pass += 1;
+        let first_run = self.blends.len();
+        if start < overlay_start {
+            self.blends.push((
+                start as u32..overlay_start as u32,
+                Blend::DepthScene {
+                    clip,
+                    pass,
+                    overlay: None,
+                },
+            ));
+        }
+        let mut at = overlay_start;
+        for (run_end, mode) in runs {
+            debug_assert!((at..=end).contains(&run_end));
+            if at == run_end {
+                continue;
+            }
+            let blend = Blend::DepthScene {
+                clip,
+                pass,
+                overlay: Some(mode),
+            };
+            match self.blends[first_run..].last_mut() {
+                Some((last, prev)) if *prev == blend => last.end = run_end as u32,
+                _ => self.blends.push((at as u32..run_end as u32, blend)),
+            }
+            at = run_end;
+        }
+        debug_assert_eq!(at, end);
+    }
+
+    /// Maps the depth range of `start..base_end` onto `0..=far` (nearest first) for every
+    /// vertex from `start`, clamping those outside it to `0..=1`.
+    fn normalize_depth_since(
+        &mut self,
+        start: usize,
+        base_end: usize,
+        far: f32,
+        clip: [f32; 4],
+    ) -> Option<[u32; 4]> {
+        if start >= self.vertices.len() {
+            return None;
+        }
+        let (min, max) = self.vertices[start..base_end]
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), v| {
+                (min.min(v.depth), max.max(v.depth))
+            });
+        let vertices = &mut self.vertices[start..];
+        let span = max - min;
+        if span.is_infinite() {
+            // Opposite finite depths can overflow the span before division.
+            let max = max * 0.5;
+            let span = max - min * 0.5;
+            for v in vertices {
+                v.depth = ((max - v.depth * 0.5) / span * far).clamp(0.0, 1.0);
+            }
+        } else {
+            let span = span.max(f32::EPSILON);
+            for v in vertices {
+                v.depth = ((max - v.depth) / span * far).clamp(0.0, 1.0);
+            }
+        }
+        let [x0, y0, x1, y1] = clip.map(|v| (v * self.scale).max(0.0) as u32);
+        Some([x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)])
     }
     pub fn rect_uv(&mut self, x: f32, y: f32, w: f32, h: f32, r: Rect, color: u32) {
         self.quad(
@@ -2037,78 +2666,96 @@ impl HudBatch {
         }
     }
     pub fn clip_since(&mut self, start: usize, x0: f32, y0: f32, x1: f32, y1: f32) {
-        let quads: Vec<[HudVertex; 6]> = self.vertices[start..].as_chunks::<6>().0.to_vec();
-        self.vertices.truncate(start);
-        // Where each source quad now begins, to move the blend ranges (foil
-        // items are an additive run) along with their vertices.
-        let mut moved = Vec::with_capacity(quads.len() + 1);
-        for q in quads {
-            moved.push(self.vertices.len() as u32);
-            let corners = [q[0], q[1], q[2], q[5]];
-            let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
-            let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
-            for v in &corners {
-                x_lo = x_lo.min(v.pos[0]);
-                x_hi = x_hi.max(v.pos[0]);
-                y_lo = y_lo.min(v.pos[1]);
-                y_hi = y_hi.max(v.pos[1]);
+        let start_vertex = start as u32;
+        let first = self
+            .blends
+            .partition_point(|(range, _)| range.end <= start_vertex);
+        // A scissor can start in a run coalesced with the fill immediately before it.
+        if let Some((range, blend)) = self.blends.get_mut(first)
+            && range.start < start_vertex
+        {
+            let tail = (start_vertex..range.end, *blend);
+            range.end = start_vertex;
+            self.blends.insert(first + 1, tail);
+        }
+        let bounds = [x0, y0, x1, y1];
+        for (range, blend) in &mut self.blends[first..] {
+            if range.start >= start_vertex {
+                blend.scissor_core(bounds);
             }
-            // An axis-aligned rectangle, its corners in any order.
-            let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
-            let rect = (
-                find(x_lo, y_lo),
-                find(x_hi, y_lo),
-                find(x_hi, y_hi),
-                find(x_lo, y_hi),
-            );
-            let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
-                // Item geometry arrives as triangles: clip each against the
-                // rectangle and re-emit the fan, so a triangle straddling the
-                // edge keeps its visible part instead of vanishing whole.
-                for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
-                    let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
-                        - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
-                    if area == 0.0 {
-                        continue;
-                    }
-                    let mut poly = tri.to_vec();
-                    for (axis, limit, keep_below) in
-                        [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
-                    {
-                        poly = clip_polygon(&poly, axis, limit, keep_below);
-                    }
-                    for i in 1..poly.len().saturating_sub(1) {
-                        // A triangle as the quad `a, b, c, c`.
-                        let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
-                        self.vertices.extend_from_slice(&[a, b, c, a, c, c]);
-                    }
+        }
+        let mut blends = self.blends[first..].iter().peekable();
+        let mut scissored = |read: usize| {
+            let read = read as u32;
+            while blends.peek().is_some_and(|(range, _)| range.end <= read) {
+                blends.next();
+            }
+            blends.peek().is_some_and(|(range, blend)| {
+                range.contains(&read) && blend.core_scissor().is_some()
+            })
+        };
+        // Cut where the quads are. The kept ones move down over what is gone, rather than taking
+        // all of them out and putting them back. Only when a cut quad grows past what is still
+        // to be read is the rest taken out and put back after it.
+        let count = (self.vertices.len() - start) / 6;
+        let mut moved = Vec::with_capacity(count + 1);
+        let mut cut = Vec::new();
+        let mut write = start;
+        let mut index = 0;
+        let mut appending = false;
+        while index < count {
+            let read = start + index * 6;
+            let q: [HudVertex; 6] = self.vertices[read..read + 6].try_into().expect("six");
+            moved.push(write as u32);
+            index += 1;
+            let inside = if scissored(read) {
+                if !intersects_scissor(&q, bounds) {
+                    continue;
                 }
-                continue;
+                true
+            } else {
+                q.iter()
+                    .all(|v| v.pos[0] >= x0 && v.pos[0] <= x1 && v.pos[1] >= y0 && v.pos[1] <= y1)
             };
-            let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
-            let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
-            if cx0 >= cx1 || cy0 >= cy1 {
+            if inside {
+                if write != read {
+                    self.vertices.copy_within(read..read + 6, write);
+                }
+                write += 6;
                 continue;
             }
-            let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
-            let corner = |x, y| {
-                clip_corner::clip_corner(
-                    [tl, tr, br, bl],
-                    [x, y],
-                    [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
-                )
-            };
-            let c = [
-                corner(cx0, cy0),
-                corner(cx1, cy0),
-                corner(cx1, cy1),
-                corner(cx0, cy1),
-            ];
-            self.vertices.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+            cut.clear();
+            clip_quad(q, bounds, &mut cut);
+            if write + cut.len() <= read + 6 {
+                self.vertices[write..write + cut.len()].copy_from_slice(&cut);
+                write += cut.len();
+                continue;
+            }
+            let rest: Vec<[HudVertex; 6]> = self.vertices[read + 6..start + count * 6]
+                .as_chunks::<6>()
+                .0
+                .to_vec();
+            self.vertices.truncate(write);
+            self.vertices.extend_from_slice(&cut);
+            for (offset, q) in rest.into_iter().enumerate() {
+                moved.push(self.vertices.len() as u32);
+                if scissored(read + (offset + 1) * 6) {
+                    if intersects_scissor(&q, bounds) {
+                        self.vertices.extend_from_slice(&q);
+                    }
+                } else {
+                    clip_quad(q, bounds, &mut self.vertices);
+                }
+            }
+            appending = true;
+            break;
+        }
+        if !appending {
+            self.vertices.truncate(write);
         }
         moved.push(self.vertices.len() as u32);
         let at = |v: u32| moved[((v as usize).saturating_sub(start) / 6).min(moved.len() - 1)];
-        for (range, _) in &mut self.blends {
+        for (range, _) in &mut self.blends[first..] {
             if range.start as usize >= start {
                 *range = at(range.start)..at(range.end);
             }
@@ -2130,14 +2777,65 @@ impl HudBatch {
             self.rect_uv(x, y, w, h, r, u32::MAX);
         }
     }
+    /// `GuiGraphicsExtractor.fill`: a solid rectangle on `RenderPipelines.GUI`.
     pub fn fill(&mut self, atlas: &HudAtlas, x: f32, y: f32, w: f32, h: f32, color: u32) {
-        let mut r = atlas.white;
-        let (cu, cv) = ((r.u0 + r.u1) / 2.0, (r.v0 + r.v1) / 2.0);
-        r.u0 = cu;
-        r.u1 = cu;
-        r.v0 = cv;
-        r.v1 = cv;
-        self.rect_uv(x, y, w, h, r, color);
+        self.fill_with(atlas, [x, y, w, h], color, GuiFill::Alpha);
+    }
+
+    fn fill_with(&mut self, atlas: &HudAtlas, [x, y, w, h]: [f32; 4], color: u32, mode: GuiFill) {
+        let start = self.vertices.len();
+        let r = atlas.white;
+        if atlas.gui_shader.is_some() {
+            // Java's solid fills put the larger coordinate first on both axes.
+            let x1 = x.min(x + w);
+            let y1 = y.min(y + h);
+            let x0 = x.max(x + w);
+            let y0 = y.max(y + h);
+            let uv = [(r.u0 + r.u1) / 2.0, (r.v0 + r.v1) / 2.0];
+            self.core_quad(
+                [[x0, y0], [x0, y1], [x1, y1], [x1, y0]],
+                [uv; 4],
+                [color; 4],
+            );
+            self.blend_since(start, Blend::GuiFill(mode, None));
+        } else {
+            let blend = match mode {
+                GuiFill::Alpha => Blend::Alpha,
+                GuiFill::Invert => Blend::Invert,
+                GuiFill::Additive => Blend::Additive,
+            };
+            self.fill_native(atlas, [x, y, w, h], color, blend);
+        }
+    }
+    /// A solid rectangle drawn natively with `blend`, never with the pack's `core/gui`: for
+    /// fills whose own pipeline replaces `RenderPipelines.GUI` (the End portal, an inverting
+    /// crosshair), so their vertices are recorded under that one blend only.
+    pub fn fill_native(
+        &mut self,
+        atlas: &HudAtlas,
+        [x, y, w, h]: [f32; 4],
+        color: u32,
+        blend: Blend,
+    ) {
+        let start = self.vertices.len();
+        let r = atlas.white;
+        let u = (r.u0 + r.u1) / 2.0;
+        let v = (r.v0 + r.v1) / 2.0;
+        self.rect_uv(
+            x,
+            y,
+            w,
+            h,
+            Rect {
+                u0: u,
+                v0: v,
+                u1: u,
+                v1: v,
+                ..r
+            },
+            color,
+        );
+        self.blend_since(start, blend);
     }
     /// Any four-cornered shape in one colour, corners in order round it.
     pub fn fill_quad(&mut self, atlas: &HudAtlas, corners: [[f32; 2]; 4], color: u32) {
@@ -2145,7 +2843,7 @@ impl HudBatch {
         let uv = [(w.u0 + w.u1) / 2.0, (w.v0 + w.v1) / 2.0];
         self.quad(corners, [uv; 4], color);
     }
-    /// GuiGraphics.fillGradient: `top` to `bottom`, down the rectangle.
+    /// `GuiGraphicsExtractor.fillGradient`: `top` to `bottom`, down the rectangle.
     pub fn fill_gradient(
         &mut self,
         atlas: &HudAtlas,
@@ -2155,6 +2853,16 @@ impl HudBatch {
     ) {
         let r = atlas.white;
         let uv = [(r.u0 + r.u1) / 2.0, (r.v0 + r.v1) / 2.0];
+        if atlas.gui_shader.is_some() {
+            let start = self.vertices.len();
+            self.core_quad(
+                [[x, y], [x, y + h], [x + w, y + h], [x + w, y]],
+                [uv; 4],
+                [top, bottom, bottom, top],
+            );
+            self.blend_since(start, Blend::GuiFill(GuiFill::Alpha, None));
+            return;
+        }
         let p = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
         let c = [top, top, bottom, bottom];
         for i in [0, 1, 2, 0, 2, 3] {
@@ -2181,12 +2889,40 @@ impl HudBatch {
         color: u32,
         shadow: bool,
     ) -> f32 {
+        let mut scratch = HudGlyphScratch::new();
+        self.text_with_scratch(atlas, text, x, y, color, shadow, &mut scratch)
+    }
+    /// [`Self::text`], reusing `scratch` for staged glyphs across draws.
+    pub fn text_with_scratch(
+        &mut self,
+        atlas: &HudAtlas,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: u32,
+        shadow: bool,
+        scratch: &mut HudGlyphScratch,
+    ) -> f32 {
+        if !crate::lang::bidirectional() && text.is_ascii() {
+            scratch.0.clear();
+            let cursor = prepare_glyphs_plain_ascii(
+                &atlas.font,
+                text,
+                x,
+                color,
+                atlas.text_shaders.has_gui(),
+                &mut scratch.0,
+            );
+            self.emit_prepared_glyphs(atlas, &scratch.0, y, shadow, false, None);
+            scratch.0.clear();
+            return cursor - x;
+        }
         let t = if text.contains('§') {
             crate::text::Text::legacy(text)
         } else {
             crate::text::Text::literal(text)
         };
-        self.text_styled(atlas, &t, x, y, color, shadow)
+        self.text_styled_with_scratch(atlas, &t, x, y, color, shadow, scratch)
     }
     /// Font.drawInternal: styled glyphs, shadows first, with bold, italic,
     /// underline and strikethrough. `color` is the default colour and alpha.
@@ -2199,7 +2935,41 @@ impl HudBatch {
         color: u32,
         shadow: bool,
     ) -> f32 {
-        self.styled_text(atlas, text, x, y, color, shadow, false, None)
+        self.styled_text(
+            atlas,
+            text,
+            x,
+            y,
+            color,
+            shadow,
+            false,
+            None,
+            atlas.text_shaders.has_gui(),
+        )
+    }
+    /// [`Self::text_styled`], reusing `scratch` for staged glyphs across draws.
+    pub fn text_styled_with_scratch(
+        &mut self,
+        atlas: &HudAtlas,
+        text: &crate::text::Text,
+        x: f32,
+        y: f32,
+        color: u32,
+        shadow: bool,
+        scratch: &mut HudGlyphScratch,
+    ) -> f32 {
+        self.styled_text_into(
+            atlas,
+            text,
+            x,
+            y,
+            color,
+            shadow,
+            false,
+            None,
+            atlas.text_shaders.has_gui(),
+            scratch,
+        )
     }
     /// `text_styled` for text drawn in the world (`TextRenderable.render`
     /// with `flat` false): each quad's `depth` is its z in text units, the
@@ -2215,7 +2985,17 @@ impl HudBatch {
         color: u32,
         shadow: bool,
     ) -> f32 {
-        self.styled_text(atlas, text, x, y, color, shadow, true, None)
+        self.styled_text(
+            atlas,
+            text,
+            x,
+            y,
+            color,
+            shadow,
+            true,
+            None,
+            atlas.text_shaders.has_world(),
+        )
     }
     /// `Font.prepare8xTextOutline`: eight glyph offsets in the outline color,
     /// then the original text. Returns (advance, first front-text vertex), so
@@ -2230,10 +3010,11 @@ impl HudBatch {
         color: u32,
         outline: u32,
     ) -> (f32, usize) {
+        let mut scratch = HudGlyphScratch::new();
         for dx in -1..=1 {
             for dy in -1..=1 {
                 if dx != 0 || dy != 0 {
-                    self.styled_text(
+                    self.styled_text_into(
                         atlas,
                         text,
                         x,
@@ -2242,13 +3023,26 @@ impl HudBatch {
                         false,
                         true,
                         Some((outline, [dx as f32, dy as f32])),
+                        atlas.text_shaders.has_world(),
+                        &mut scratch,
                     );
                 }
             }
         }
         let front = self.vertices.len();
         (
-            self.styled_text(atlas, text, x, y, color, false, true, None),
+            self.styled_text_into(
+                atlas,
+                text,
+                x,
+                y,
+                color,
+                false,
+                true,
+                None,
+                atlas.text_shaders.has_world(),
+                &mut scratch,
+            ),
             front,
         )
     }
@@ -2263,78 +3057,81 @@ impl HudBatch {
         shadow: bool,
         world: bool,
         outline: Option<(u32, [f32; 2])>,
+        use_pages: bool,
     ) -> f32 {
-        // StringDecomposer.iterateFormatted inside Font.drawInternal:
-        // `§` codes inside a span restyle what follows and are not drawn.
-        let text = text.resolved();
-        // Language.getVisualOrder: shaped and reordered for right-to-left text.
-        let text = crate::bidi::visual(&text);
+        let mut scratch = HudGlyphScratch::new();
+        self.styled_text_into(
+            atlas,
+            text,
+            x,
+            y,
+            color,
+            shadow,
+            world,
+            outline,
+            use_pages,
+            &mut scratch,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn styled_text_into(
+        &mut self,
+        atlas: &HudAtlas,
+        text: &crate::text::Text,
+        x: f32,
+        y: f32,
+        color: u32,
+        shadow: bool,
+        world: bool,
+        outline: Option<(u32, [f32; 2])>,
+        use_pages: bool,
+        scratch: &mut HudGlyphScratch,
+    ) -> f32 {
+        scratch.0.clear();
+        let cursor = if is_plain_ltr_ascii(text) {
+            prepare_glyphs_ascii(
+                &atlas.font,
+                text,
+                x,
+                color,
+                world,
+                use_pages,
+                &mut scratch.0,
+            )
+        } else {
+            prepare_glyphs_general(
+                &atlas.font,
+                text,
+                x,
+                color,
+                world,
+                use_pages,
+                &mut scratch.0,
+                &mut self.inline_profiles,
+            )
+        };
+        self.emit_prepared_glyphs(atlas, &scratch.0, y, shadow, world, outline);
+        scratch.0.clear();
+        cursor - x
+    }
+
+    fn emit_prepared_glyphs(
+        &mut self,
+        atlas: &HudAtlas,
+        glyphs: &[PreparedGlyph],
+        y: f32,
+        shadow: bool,
+        world: bool,
+        outline: Option<(u32, [f32; 2])>,
+    ) {
         let font = &atlas.font;
-        let alpha = (color >> 24) as u8;
-        let mut glyphs = Vec::new();
-        let mut cursor = x;
-        let mut previous = None;
-        for (i, (ch, style)) in text.chars().enumerate() {
-            let object = (ch == '\u{fffc}')
-                .then_some(style.inline_object.as_ref())
-                .flatten();
-            if let Some(crate::text::InlineObject::Player { profile, .. }) = object
-                && self.inline_profiles.len() < 256
-                && !self.inline_profiles.contains(profile)
-            {
-                self.inline_profiles.push(profile.clone());
-            }
-            // Font.PreparedTextBuilder.accept: lines start 1 left of a
-            // sequence's first character. Language.getVisualOrder makes a
-            // sequence of each run of one style, which world text has.
-            let first = i == 0 || world && previous != Some(style);
-            previous = Some(style);
-            // The style's font (`Style.getFont`), the default one unless set.
-            let mut g = if object.is_some() {
-                crate::font::Glyph {
-                    rect: None,
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 8.0,
-                    advance: 8.0,
-                    offset: 1.0,
-                }
-            } else {
-                font.glyph_styled(ch, style)
-            };
-            // Font.StringRenderOutput.accept: obfuscated characters draw a
-            // random glyph of the same width each frame.
-            if object.is_none() && style.obfuscated == Some(true) && ch != ' ' {
-                g = font.random_glyph(style, g.advance);
-            }
-            let c = style.color.map_or(color, |rgb| {
-                rgba((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, alpha)
-            });
-            let bold = object.is_none() && style.is_bold();
-            let advance = g.advance + if bold { g.offset } else { 0.0 };
-            glyphs.push((
-                cursor,
-                g,
-                c,
-                style.shadow_color,
-                bold,
-                style.is_italic(),
-                style.underlined == Some(true),
-                style.strikethrough == Some(true),
-                first,
-                advance,
-                object.cloned(),
-            ));
-            cursor += advance;
-        }
         self.patches.extend(font.take_patches());
         let white = font.white();
         let has_shadow = outline.is_none()
             && (shadow
                 || glyphs
                     .iter()
-                    .any(|glyph| glyph.3.is_some_and(|color| color != 0)));
+                    .any(|glyph| glyph.custom_shadow.is_some_and(|color| color != 0)));
         let passes: &[bool] = if has_shadow { &[true, false] } else { &[false] };
         // ARGB.scaleRGB(color, 0.25): the default shadow colour.
         let shade = |c: u32| {
@@ -2347,27 +3144,21 @@ impl HudBatch {
             )
         };
         for &is_shadow in passes {
-            for (
-                gx,
-                g,
-                c,
-                custom_shadow,
-                bold,
-                italic,
-                underline,
-                strike,
-                first,
-                advance,
-                object,
-            ) in &glyphs
-            {
+            for prepared in glyphs {
+                let gx = prepared.x;
+                let native_rect = prepared.glyph.rect;
+                let page = prepared.page;
+                let effect = prepared.effect;
+                let g = page.map_or(prepared.glyph, |p| p.glyph);
+                let c = prepared.color;
+                let custom_shadow = prepared.custom_shadow;
                 let shadow_color = if let Some(argb) = custom_shadow {
                     let text_alpha = (c >> 24) as u8 as u16;
                     let shadow_alpha = (argb >> 24) as u8 as u16;
                     let alpha = (shadow_alpha * text_alpha / 255) as u8;
-                    rgba((argb >> 16) as u8, (argb >> 8) as u8, *argb as u8, alpha)
+                    rgba((argb >> 16) as u8, (argb >> 8) as u8, argb as u8, alpha)
                 } else {
-                    shade(*c)
+                    shade(c)
                 };
                 let has_shadow = outline.is_none()
                     && (custom_shadow.is_some_and(|argb| argb != 0)
@@ -2379,14 +3170,14 @@ impl HudBatch {
                 let (dx, col) = if is_shadow {
                     (g.offset, shadow_color)
                 } else {
-                    (0.0, *c)
+                    (0.0, c)
                 };
                 let (px, py, col) = if let Some((color, [dx, dy])) = outline {
-                    (*gx + dx * g.offset, y + dy * g.offset, color)
+                    (gx + dx * g.offset, y + dy * g.offset, color)
                 } else {
-                    (*gx + dx, y + dx, col)
+                    (gx + dx, y + dx, col)
                 };
-                if let Some(object) = object {
+                if let Some(object) = &prepared.object {
                     // `PlainTextRenderable.render`: sprite glyphs use the same
                     // shadow colour and offset as text, with the front at SHADOW_DEPTH.
                     let start = self.vertices.len();
@@ -2398,8 +3189,8 @@ impl HudBatch {
                     }
                     continue;
                 }
-                let shear = |v: f32| if *italic { 1.0 - 0.25 * v } else { 0.0 };
-                let thick = if *bold { 0.1 } else { 0.0 };
+                let shear = |v: f32| if prepared.italic { 1.0 - 0.25 * v } else { 0.0 };
+                let thick = if prepared.bold { 0.1 } else { 0.0 };
                 let draw = |batch: &mut Self, ox: f32| match g.rect {
                     Some(r) => {
                         let (x0, x1, y0, y1) = (
@@ -2418,6 +3209,23 @@ impl HudBatch {
                             [[r.u0, r.v0], [r.u1, r.v0], [r.u1, r.v1], [r.u0, r.v1]],
                             col,
                         );
+                        if let Some(page) = page.filter(|p| p.page != 0) {
+                            let vertices = &mut batch.vertices;
+                            let start = vertices.len() - 6;
+                            let stock = native_rect.unwrap_or(white);
+                            for (v, (u, y)) in vertices[start..].iter_mut().zip([
+                                (stock.u0, stock.v0),
+                                (stock.u1, stock.v0),
+                                (stock.u1, stock.v1),
+                                (stock.u0, stock.v0),
+                                (stock.u1, stock.v1),
+                                (stock.u0, stock.v1),
+                            ]) {
+                                v.glint_uv = v.uv;
+                                v.uv = [u, y];
+                                v.set_font_page(page.page);
+                            }
+                        }
                     }
                     None if g.right > 0.0 => {
                         // SpecialGlyphs.MISSING: a 5x8 outline.
@@ -2441,32 +3249,35 @@ impl HudBatch {
                         }
                     }
                 };
-                let glyph = self.vertices.len();
-                let start = self.vertices.len();
+                let glyph_start = self.vertices.len();
                 draw(self, 0.0);
-                lift(self, start, base);
-                if *bold {
+                lift(self, glyph_start, base);
+                if prepared.bold {
                     let start = self.vertices.len();
                     draw(self, g.offset);
                     lift(self, start, base + 0.001);
                 }
-                let x0 = if *first { px - 1.0 } else { px };
+                let x0 = if prepared.first { px - 1.0 } else { px };
                 let start = self.vertices.len();
-                if *strike {
-                    self.rect_uv(x0, py + 3.5, px + *advance - x0, 1.0, white, col);
+                if prepared.strike {
+                    self.rect_uv(x0, py + 3.5, px + prepared.advance - x0, 1.0, white, col);
                 }
-                if *underline {
-                    self.rect_uv(x0, py + 8.0, px + *advance - x0, 1.0, white, col);
+                if prepared.underline {
+                    self.rect_uv(x0, py + 8.0, px + prepared.advance - x0, 1.0, white, col);
                 }
                 lift(self, start, base + 0.01);
+                if let Some(effect) = effect {
+                    stamp_text_effect(&mut self.vertices[start..], effect);
+                }
                 if !world {
-                    for v in &mut self.vertices[glyph..] {
-                        v.text = 1;
+                    for v in &mut self.vertices[glyph_start..] {
+                        if v.text == 0 {
+                            v.text = NATIVE_HUD_TEXT;
+                        }
                     }
                 }
             }
         }
-        cursor - x
     }
 
     fn draw_inline_object(
@@ -2543,7 +3354,17 @@ impl HudBatch {
     ) -> usize {
         let x = -atlas.font.width_text(text) / 2.0;
         let start = self.vertices.len();
-        let advance = self.text_styled(atlas, text, x, y, color, false);
+        let advance = self.styled_text(
+            atlas,
+            text,
+            x,
+            y,
+            color,
+            false,
+            false,
+            None,
+            atlas.text_shaders.has_world(),
+        );
         if background >> 24 == 0 {
             return 0;
         }
@@ -2551,10 +3372,240 @@ impl HudBatch {
         // from a pixel above the line to 9 below its top.
         let glyphs = self.vertices.split_off(start);
         self.fill(atlas, x - 1.0, y - 1.0, advance + 1.0, 10.0, background);
+        if atlas.text_shaders.has_world()
+            && let Some(effect) = atlas.font.page_white()
+        {
+            stamp_text_effect(&mut self.vertices[start..], effect);
+        }
         let behind = self.vertices.len() - start;
         self.vertices.extend(glyphs);
         behind
     }
+}
+
+/// True when `text` is pure ASCII in a left-to-right language: no legacy `§` codes
+/// (U+00A7), no U+FFFC inline objects, and no directional/RTL characters (>= U+0590),
+/// so `Text::resolved()` and `bidi::visual()` are exact no-ops.
+fn is_plain_ltr_ascii(text: &crate::text::Text) -> bool {
+    !crate::lang::bidirectional() && text.spans.iter().all(|span| span.text.is_ascii())
+}
+
+fn prepare_glyphs_plain_ascii(
+    font: &crate::font::Font,
+    text: &str,
+    x: f32,
+    color: u32,
+    use_pages: bool,
+    glyphs: &mut Vec<PreparedGlyph>,
+) -> f32 {
+    let default_style = crate::text::Style::default();
+    let mut cursor = x;
+    for byte in text.bytes() {
+        let ch = char::from(byte);
+        let mut g = font.glyph(ch);
+        let page = if use_pages {
+            font.page_glyph(ch, &default_style)
+        } else {
+            None
+        };
+        if g.rect.is_none() && page.is_some_and(|p| p.glyph.rect.is_some()) {
+            g.rect = font.native_missing_rect();
+        }
+        let advance = page.map_or(g.advance, |p| p.glyph.advance);
+        glyphs.push(PreparedGlyph {
+            x: cursor,
+            glyph: g,
+            page,
+            effect: None,
+            color,
+            custom_shadow: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            first: glyphs.is_empty(),
+            advance,
+            object: None,
+        });
+        cursor += advance;
+    }
+    cursor
+}
+
+fn prepare_glyphs_ascii(
+    font: &crate::font::Font,
+    text: &crate::text::Text,
+    x: f32,
+    color: u32,
+    world: bool,
+    use_pages: bool,
+    glyphs: &mut Vec<PreparedGlyph>,
+) -> f32 {
+    let alpha = (color >> 24) as u8;
+    let mut cursor = x;
+    let mut previous = None;
+    for span in &text.spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        let style = &span.style;
+        let style_changed = world && previous != Some(style);
+        previous = Some(style);
+        let c = style.color.map_or(color, |rgb| {
+            rgba((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, alpha)
+        });
+        let bold = style.is_bold();
+        let italic = style.is_italic();
+        let underline = style.underlined == Some(true);
+        let strike = style.strikethrough == Some(true);
+        let obfuscated = style.obfuscated == Some(true);
+        let effect = if use_pages && (underline || strike) {
+            font.page_white()
+        } else {
+            None
+        };
+        for (j, byte) in span.text.bytes().enumerate() {
+            let ch = char::from(byte);
+            let first = glyphs.is_empty() || (j == 0 && style_changed);
+            let mut g = font.glyph_styled(ch, style);
+            let page;
+            if obfuscated && ch != ' ' {
+                let source_advance = if use_pages {
+                    font.page_metric(ch, style).map_or(g.advance, |m| m.advance)
+                } else {
+                    g.advance
+                };
+                (g, page) = font.obfuscated_glyphs(style, source_advance, use_pages);
+            } else {
+                page = if use_pages {
+                    font.page_glyph(ch, style)
+                } else {
+                    None
+                };
+            }
+            if g.rect.is_none() && page.is_some_and(|p| p.glyph.rect.is_some()) {
+                g.rect = font.native_missing_rect();
+            }
+            let drawn_glyph = page.map_or(g, |p| p.glyph);
+            let advance = drawn_glyph.advance + if bold { drawn_glyph.offset } else { 0.0 };
+            glyphs.push(PreparedGlyph {
+                x: cursor,
+                glyph: g,
+                page,
+                effect,
+                color: c,
+                custom_shadow: style.shadow_color,
+                bold,
+                italic,
+                underline,
+                strike,
+                first,
+                advance,
+                object: None,
+            });
+            cursor += advance;
+        }
+    }
+    cursor
+}
+
+fn prepare_glyphs_general(
+    font: &crate::font::Font,
+    text: &crate::text::Text,
+    x: f32,
+    color: u32,
+    world: bool,
+    use_pages: bool,
+    glyphs: &mut Vec<PreparedGlyph>,
+    inline_profiles: &mut Vec<std::sync::Arc<serde_json::Value>>,
+) -> f32 {
+    // StringDecomposer.iterateFormatted inside Font.drawInternal:
+    // `§` codes inside a span restyle what follows and are not drawn.
+    let text = text.resolved();
+    // Language.getVisualOrder: shaped and reordered for right-to-left text.
+    let text = crate::bidi::visual(&text);
+    let alpha = (color >> 24) as u8;
+    let mut cursor = x;
+    let mut previous = None;
+    for (i, (ch, style)) in text.chars().enumerate() {
+        let object = (ch == '\u{fffc}')
+            .then_some(style.inline_object.as_ref())
+            .flatten();
+        if let Some(crate::text::InlineObject::Player { profile, .. }) = object
+            && inline_profiles.len() < 256
+            && !inline_profiles.contains(profile)
+        {
+            inline_profiles.push(profile.clone());
+        }
+        // Font.PreparedTextBuilder.accept: lines start 1 left of a
+        // sequence's first character. Language.getVisualOrder makes a
+        // sequence of each run of one style, which world text has.
+        let first = i == 0 || world && previous != Some(style);
+        previous = Some(style);
+        // The style's font (`Style.getFont`), the default one unless set.
+        let mut g = if object.is_some() {
+            crate::font::Glyph {
+                rect: None,
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 8.0,
+                advance: 8.0,
+                offset: 1.0,
+            }
+        } else {
+            font.glyph_styled(ch, style)
+        };
+        // Font.StringRenderOutput.accept: obfuscated characters draw a
+        // random glyph of the same width each frame.
+        let page;
+        if object.is_none() && style.obfuscated == Some(true) && ch != ' ' {
+            let source_advance = if use_pages {
+                font.page_metric(ch, style).map_or(g.advance, |m| m.advance)
+            } else {
+                g.advance
+            };
+            (g, page) = font.obfuscated_glyphs(style, source_advance, use_pages);
+        } else {
+            page = if use_pages && object.is_none() {
+                font.page_glyph(ch, style)
+            } else {
+                None
+            };
+        }
+        if g.rect.is_none() && page.is_some_and(|p| p.glyph.rect.is_some()) {
+            g.rect = font.native_missing_rect();
+        }
+        let effect =
+            if use_pages && (style.underlined == Some(true) || style.strikethrough == Some(true)) {
+                font.page_white()
+            } else {
+                None
+            };
+        let c = style.color.map_or(color, |rgb| {
+            rgba((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, alpha)
+        });
+        let bold = object.is_none() && style.is_bold();
+        let drawn_glyph = page.map_or(g, |p| p.glyph);
+        let advance = drawn_glyph.advance + if bold { drawn_glyph.offset } else { 0.0 };
+        glyphs.push(PreparedGlyph {
+            x: cursor,
+            glyph: g,
+            page,
+            effect,
+            color: c,
+            custom_shadow: style.shadow_color,
+            bold,
+            italic: style.is_italic(),
+            underline: style.underlined == Some(true),
+            strike: style.strikethrough == Some(true),
+            first,
+            advance,
+            object: object.cloned(),
+        });
+        cursor += advance;
+    }
+    cursor
 }
 
 fn inline_profile_name(profile: &serde_json::Value) -> Option<&str> {
@@ -2590,6 +3641,26 @@ impl HudUniform {
 }
 use crate::gfx::hud_coverage::{self, Pipeline};
 
+/// `BlendFunction.INVERT`: ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_COLOR, ONE, ZERO.
+const GUI_INVERT: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::OneMinusDst,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent::REPLACE,
+};
+const GUI_ADD: wgpu::BlendComponent = wgpu::BlendComponent {
+    src_factor: wgpu::BlendFactor::One,
+    dst_factor: wgpu::BlendFactor::One,
+    operation: wgpu::BlendOperation::Add,
+};
+/// `BlendFunction.ADDITIVE`: ONE, ONE.
+const GUI_ADDITIVE: wgpu::BlendState = wgpu::BlendState {
+    color: GUI_ADD,
+    alpha: GUI_ADD,
+};
+
 pub struct HudRenderer {
     pictures: HashMap<u64, (Arc<pictures::Picture>, wgpu::BindGroup)>,
     pub sprite_animations: Vec<(Rect, crate::sprites::SpriteAnimation, (usize, usize, u32))>,
@@ -2599,7 +3670,11 @@ pub struct HudRenderer {
     /// `RenderPipelines.CROSSHAIR`.
     invert_pipeline: Pipeline,
     additive_pipeline: Pipeline,
+    alpha_add_pipeline: Pipeline,
+    alpha_subtract_pipeline: Pipeline,
     depth_pipeline: Pipeline,
+    depth_overlay_pipeline: Pipeline,
+    through_walls_overlay_pipeline: Pipeline,
     /// `RenderPipelines.GLINT` over a GUI model (`Blend::DepthGlint`).
     depth_glint_pipeline: Pipeline,
     vignette_pipeline: Pipeline,
@@ -2617,6 +3692,17 @@ pub struct HudRenderer {
     atlas_view: wgpu::TextureView,
     /// The resource pack's text shader, when it has one that works.
     pack_text: Option<pack_text::PackText>,
+    pack_text_grayscale: Option<pack_text::PackText>,
+    font_pages: Option<crate::font::FontPages>,
+    font_page_sampler: Option<wgpu::Sampler>,
+    font_page_generation: u64,
+    font_page_groups: Vec<(crate::font::PageKind, Option<wgpu::BindGroup>)>,
+    pack_gui: Option<pack_text::PackText>,
+    /// The resource pack's `position_tex_color`, when it has one that works, and its bind
+    /// group for each picture a `Blend::PackBlit` reads.
+    pack_blit: Option<pack_text::PackText>,
+    pack_blit_groups: HashMap<u64, wgpu::BindGroup>,
+    pub(crate) pack_item: Option<crate::gfx::core_models::Gui>,
     /// Target pixels per window pixel: above 1 for a screenshot drawn larger than the
     /// window (`Renderer::screenshot_quality`).
     pub zoom: f32,
@@ -2755,8 +3841,8 @@ impl HudRenderer {
         });
         let attributes =
             wgpu::vertex_attr_array![0=>Float32x2,1=>Float32x2,2=>Unorm8x4,3=>Float32,4=>Float32x2];
-        // `depth`: the model's depth test, and whether the run writes depth.
-        let create = |label, blend, fragment_entry, depth: Option<bool>| {
+        // `depth`: which comparison to use, and whether the run writes depth.
+        let create = |label, blend, fragment_entry, depth: Option<_>| {
             let desc = wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -2771,10 +3857,10 @@ impl HudRenderer {
                     })],
                 },
                 primitive: Default::default(),
-                depth_stencil: depth.map(|write| wgpu::DepthStencilState {
+                depth_stencil: depth.map(|(compare, write)| wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(write),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_compare: Some(compare),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -2800,41 +3886,46 @@ impl HudRenderer {
             "HUD model",
             wgpu::BlendState::ALPHA_BLENDING,
             "fs_main",
-            Some(true),
+            Some((wgpu::CompareFunction::LessEqual, true)),
         );
-        // BlendFunction.INVERT: ONE_MINUS_DST_COLOR, ONE_MINUS_SRC_COLOR,
-        // ONE, ZERO.
-        let invert_pipeline = create(
-            "HUD crosshair",
-            wgpu::BlendState {
-                color: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::OneMinusDst,
-                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
-                    operation: wgpu::BlendOperation::Add,
-                },
-                alpha: wgpu::BlendComponent {
-                    src_factor: wgpu::BlendFactor::One,
-                    dst_factor: wgpu::BlendFactor::Zero,
-                    operation: wgpu::BlendOperation::Add,
-                },
-            },
-            "fs_crosshair",
-            None,
-        );
-        // BlendFunction.ADDITIVE: ONE, ONE.
-        let add = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let additive_pipeline = create(
-            "HUD text highlight",
-            wgpu::BlendState {
-                color: add,
-                alpha: add,
-            },
+        let depth_overlay_pipeline = create(
+            "HUD scene overlay",
+            wgpu::BlendState::ALPHA_BLENDING,
             "fs_main",
-            None,
+            Some((wgpu::CompareFunction::LessEqual, false)),
+        );
+        let through_walls_overlay_pipeline = create(
+            "HUD scene through-walls overlay",
+            wgpu::BlendState::ALPHA_BLENDING,
+            "fs_main",
+            Some((wgpu::CompareFunction::Always, false)),
+        );
+        let invert_pipeline = create("HUD crosshair", GUI_INVERT, "fs_crosshair", None);
+        let additive_pipeline = create("HUD text highlight", GUI_ADDITIVE, "fs_main", None);
+        let add = GUI_ADD;
+        let channel_delta = |label, operation| {
+            create(
+                label,
+                wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+                "fs_channel_delta",
+                None,
+            )
+        };
+        let alpha_add_pipeline = channel_delta("HUD add channels", wgpu::BlendOperation::Add);
+        let alpha_subtract_pipeline = channel_delta(
+            "HUD subtract channels",
+            wgpu::BlendOperation::ReverseSubtract,
         );
         // RenderPipelines.GLINT tests depth EQUAL and writes none; the faces are
         // the model's own, so LEQUAL passes the same pixels.
@@ -2845,7 +3936,7 @@ impl HudRenderer {
                 alpha: add,
             },
             "fs_main",
-            Some(false),
+            Some((wgpu::CompareFunction::LessEqual, false)),
         );
         // RenderPipelines.VIGNETTE: ZERO, ONE_MINUS_SRC_COLOR, ZERO, ONE.
         let vignette_pipeline = create(
@@ -2886,7 +3977,11 @@ impl HudRenderer {
             pipeline,
             invert_pipeline,
             additive_pipeline,
+            alpha_add_pipeline,
+            alpha_subtract_pipeline,
             depth_pipeline,
+            depth_overlay_pipeline,
+            through_walls_overlay_pipeline,
             depth_glint_pipeline,
             vignette_pipeline,
             end_portal_pipeline,
@@ -2900,8 +3995,21 @@ impl HudRenderer {
             coverage,
             atlas_view: view.clone(),
             pack_text: None,
+            pack_text_grayscale: None,
+            font_pages: None,
+            font_page_sampler: None,
+            font_page_generation: 0,
+            font_page_groups: Vec::new(),
+            pack_gui: None,
+            pack_blit: None,
+            pack_blit_groups: HashMap::new(),
+            pack_item: None,
             zoom: 1.0,
         })
+    }
+
+    pub(crate) fn pack_model_coverage(&self) -> bool {
+        self.coverage
     }
     /// Draw the CIT glint layers of `textures` (the pack's enchantment rules); `None` or no
     /// textures draws none.
@@ -2915,15 +4023,100 @@ impl HudRenderer {
             cit_glint::CitGlintPass::new(device, queue, self.format, &self.layout, t, self.coverage)
         });
     }
-    /// Draw the GUI's text with `shader` (`HudAtlas::text_shader`), or natively.
-    pub fn set_text_shader(
+    /// Install a generation's GUI text programs and its shared font textures.
+    pub fn set_text_shaders(
+        &mut self,
+        device: &wgpu::Device,
+        shaders: &crate::gfx::core_text::TextShaders,
+    ) {
+        let build = |shader: Option<&crate::core_shader::CoreProgram>| {
+            pack_text::PackText::new(
+                device,
+                self.format,
+                &self.atlas_view,
+                shader?,
+                self.coverage,
+                pack_text::Kind::Text,
+            )
+        };
+        self.pack_text = build(shaders.gui.as_deref());
+        self.pack_text_grayscale = build(shaders.gui_grayscale.as_deref());
+        self.font_pages.clone_from(&shaders.pages);
+        self.font_page_sampler = self
+            .font_pages
+            .as_ref()
+            .map(|_| crate::font::nearest_repeat(device));
+        self.font_page_groups.clear();
+    }
+
+    pub(crate) fn font_pages(&self) -> Option<&crate::font::FontPages> {
+        self.font_pages.as_ref()
+    }
+
+    fn prepare_font_groups(&mut self, device: &wgpu::Device) {
+        if let (Some(pages), Some(sampler)) = (&self.font_pages, &self.font_page_sampler) {
+            let generation = pages.generation();
+            if self.font_page_generation != generation {
+                self.font_page_groups.clear();
+                self.font_page_generation = generation;
+            }
+            let groups = &mut self.font_page_groups;
+            let (color, grayscale) = (&self.pack_text, &self.pack_text_grayscale);
+            pages.for_each_view(groups.len(), |kind, view| {
+                let pack = match kind {
+                    crate::font::PageKind::Color => color,
+                    crate::font::PageKind::Grayscale => grayscale,
+                };
+                groups.push((
+                    kind,
+                    pack.as_ref()
+                        .map(|p| p.texture_group(device, view, sampler)),
+                ));
+            });
+        }
+    }
+    /// Draw `GuiGraphicsExtractor.fill` and its blend variants with the pack's `core/gui`.
+    pub fn set_gui_shader(
         &mut self,
         device: &wgpu::Device,
         shader: Option<&crate::core_shader::CoreProgram>,
     ) {
-        self.pack_text = shader.and_then(|shader| {
-            pack_text::PackText::new(device, self.format, &self.atlas_view, shader, self.coverage)
+        self.pack_gui = shader.and_then(|shader| {
+            pack_text::PackText::new(
+                device,
+                self.format,
+                &self.atlas_view,
+                shader,
+                self.coverage,
+                pack_text::Kind::Fill,
+            )
         });
+    }
+
+    /// Draw original GUI textures `HudBatch::pack_blit` records with `shader`, or natively.
+    pub fn set_blit_shader(
+        &mut self,
+        device: &wgpu::Device,
+        shader: Option<&crate::core_shader::CoreProgram>,
+    ) {
+        // The pictures are made again with the new shader's bind groups.
+        self.pictures.clear();
+        self.pack_blit_groups.clear();
+        self.pack_blit = shader.and_then(|shader| {
+            pack_text::PackText::new(
+                device,
+                self.format,
+                &self.atlas_view,
+                shader,
+                self.coverage,
+                pack_text::Kind::Blit,
+            )
+        });
+    }
+    /// The pictures are made and uploaded again on the next `prepare`: a frame given up
+    /// (#13624) dropped their uploads.
+    pub fn forget_pictures(&mut self) {
+        self.pictures.clear();
     }
     /// Stage `patches` into the shared atlas texture.
     pub fn upload_patches(
@@ -2972,6 +4165,7 @@ impl HudRenderer {
         if batch.vertices.is_empty() || size.contains(&0) {
             return;
         }
+        self.prepare_font_groups(device);
         let count = batch.vertices.len() as u64;
         if count > self.capacity {
             self.capacity = count.next_power_of_two();
@@ -3003,8 +4197,19 @@ impl HudRenderer {
                 batch.glint_colour,
             )),
         );
-        if let Some(pack_text) = &self.pack_text {
-            pack_text.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
+        for pack in [
+            &self.pack_text,
+            &self.pack_text_grayscale,
+            &self.pack_gui,
+            &self.pack_blit,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            pack.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
+        }
+        if let Some(item) = &self.pack_item {
+            item.prepare(uploads, encoder, batch, size, batch.scale * self.zoom);
         }
     }
     /// Draw the batch `prepare` staged.
@@ -3063,23 +4268,8 @@ impl HudRenderer {
         let runs = batch.runs_in(vertices);
         let mut at = 0;
         while at < runs.len() {
-            let clip = match runs[at].1 {
-                Blend::Depth(clip) | Blend::DepthGlint(clip) => Some(clip),
-                _ => None,
-            };
-            let end = if let Some(clip) = clip {
-                // The model's glint shares its pass and depth buffer.
-                at + 1
-                    + runs[at + 1..]
-                        .iter()
-                        .take_while(|(_, b)| *b == Blend::DepthGlint(clip))
-                        .count()
-            } else {
-                runs[at..]
-                    .iter()
-                    .position(|(_, b)| matches!(b, Blend::Depth(_) | Blend::DepthGlint(_)))
-                    .map_or(runs.len(), |n| at + n)
-            };
+            let (clip, pass_runs) = hud_pass_runs(&runs[at..]);
+            let end = at + pass_runs;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("HUD"),
                 timestamp_writes: timing.as_deref_mut().and_then(|t| t.writes("HUD")),
@@ -3096,6 +4286,7 @@ impl HudRenderer {
             });
             pass.set_bind_group(0, &self.group, &[]);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
+            let mut scissor = None;
             if let Some(clip) = clip {
                 let [x, y, w, h] = clip.map(|v| (v as f32 * self.zoom) as u32);
                 let (x, y) = (x.min(size[0]), y.min(size[1]));
@@ -3107,6 +4298,22 @@ impl HudRenderer {
                 pass.set_scissor_rect(x, y, w, h);
             }
             for (range, blend) in &runs[at..end] {
+                if let Some(bounds) = blend.core_scissor() {
+                    let scale = batch.scale * self.zoom;
+                    let [x0, y0, x1, y1] = bounds.map(|b| (f32::from_bits(b) * scale) as u32);
+                    let (x, y) = (x0.min(size[0]), y0.min(size[1]));
+                    let w = x1.min(size[0]).saturating_sub(x);
+                    let h = y1.min(size[1]).saturating_sub(y);
+                    if w == 0 || h == 0 {
+                        continue;
+                    }
+                    if scissor != Some([x, y, w, h]) {
+                        pass.set_scissor_rect(x, y, w, h);
+                        scissor = Some([x, y, w, h]);
+                    }
+                } else if scissor.take().is_some() {
+                    pass.set_scissor_rect(0, 0, size[0], size[1]);
+                }
                 let pipeline = match blend {
                     Blend::Picture(id) => {
                         self.draw_picture(&mut pass, *id, range.clone(), coverage.is_some());
@@ -3115,39 +4322,112 @@ impl HudRenderer {
                     Blend::Alpha => &self.pipeline,
                     Blend::Invert => &self.invert_pipeline,
                     Blend::Additive => &self.additive_pipeline,
-                    Blend::Depth(_) => &self.depth_pipeline,
+                    Blend::AlphaAdd => &self.alpha_add_pipeline,
+                    Blend::AlphaSubtract => &self.alpha_subtract_pipeline,
+                    Blend::Depth(_) | Blend::DepthScene { overlay: None, .. } => {
+                        &self.depth_pipeline
+                    }
                     Blend::DepthGlint(_) => &self.depth_glint_pipeline,
+                    Blend::DepthScene {
+                        overlay: Some(OverlayDepth::Tested),
+                        ..
+                    } => &self.depth_overlay_pipeline,
+                    Blend::DepthScene {
+                        overlay: Some(OverlayDepth::ThroughWalls),
+                        ..
+                    } => &self.through_walls_overlay_pipeline,
                     Blend::Vignette => &self.vignette_pipeline,
                     Blend::EndPortal => &self.end_portal_pipeline,
+                    Blend::ItemModel(block_light) => {
+                        if let Some(item) = &self.pack_item {
+                            item.draw(&mut pass, range.clone(), *block_light, coverage.is_some());
+                            pass.set_bind_group(0, &self.group, &[]);
+                            continue;
+                        }
+                        &self.pipeline
+                    }
                     Blend::CitGlint(blend) => {
                         if let Some(cit) = &self.cit_glint {
                             cit.draw(&mut pass, *blend, range.clone(), coverage.is_some());
                         }
                         continue;
                     }
-                };
-                let pipeline = pipeline.get(coverage.is_some());
-                match &self.pack_text {
-                    Some(pack_text) if *blend == Blend::Alpha => {
-                        for (part, text) in pack_text::text_runs(&batch.vertices, range.clone()) {
-                            if text {
-                                pack_text.draw(&mut pass, part, coverage.is_some());
-                                pass.set_bind_group(0, &self.group, &[]);
-                            } else {
-                                pass.set_pipeline(pipeline);
-                                pass.draw(part, 0..1);
-                            }
+                    Blend::GuiFill(mode, _) => {
+                        if let Some(pack) = &self.pack_gui {
+                            pack.draw_fill(&mut pass, *mode, range.clone(), coverage.is_some());
+                            pass.set_bind_group(0, &self.group, &[]);
+                            continue;
+                        }
+                        match mode {
+                            GuiFill::Alpha => &self.pipeline,
+                            GuiFill::Invert => &self.invert_pipeline,
+                            GuiFill::Additive => &self.additive_pipeline,
                         }
                     }
-                    _ => {
-                        pass.set_pipeline(pipeline);
-                        pass.draw(range.clone(), 0..1);
+                    Blend::PackBlit(id) | Blend::PackBlitClipped(id, _) => {
+                        if let (Some(pack), Some(group)) =
+                            (&self.pack_blit, self.pack_blit_groups.get(id))
+                        {
+                            pack.draw_with(&mut pass, group, range.clone(), coverage.is_some());
+                            pass.set_bind_group(0, &self.group, &[]);
+                        }
+                        continue;
                     }
+                    Blend::PackBlitNative(id)
+                        if self.pack_blit.is_some() && self.pack_blit_groups.contains_key(id) =>
+                    {
+                        continue;
+                    }
+                    Blend::PackBlitNative(_) => &self.pipeline,
+                };
+                let pipeline = pipeline.get(coverage.is_some());
+                if *blend == Blend::Alpha
+                    && (self.pack_text.is_some() || self.pack_text_grayscale.is_some())
+                {
+                    for (part, page) in pack_text::text_runs(&batch.vertices, range.clone()) {
+                        let group = page
+                            .checked_sub(NATIVE_HUD_TEXT + 1)
+                            .and_then(|id| self.font_page_groups.get(id as usize));
+                        let text = group.and_then(|(kind, group)| {
+                            let pack = match kind {
+                                crate::font::PageKind::Color => &self.pack_text,
+                                crate::font::PageKind::Grayscale => &self.pack_text_grayscale,
+                            };
+                            Some((pack.as_ref()?, group.as_ref()?))
+                        });
+                        if let Some((pack, group)) = text {
+                            pack.draw_with(&mut pass, group, part, coverage.is_some());
+                            pass.set_bind_group(0, &self.group, &[]);
+                        } else {
+                            pass.set_pipeline(pipeline);
+                            pass.draw(part, 0..1);
+                        }
+                    }
+                } else {
+                    pass.set_pipeline(pipeline);
+                    pass.draw(range.clone(), 0..1);
                 }
             }
             at = end;
         }
     }
+}
+
+/// The scissor and length of the next pass in an ordered, non-empty run list.
+fn hud_pass_runs(runs: &[(std::ops::Range<u32>, Blend)]) -> (Option<[u32; 4]>, usize) {
+    let first = runs[0].1;
+    let clip = first.depth_clip();
+    let count = if clip.is_some() {
+        1 + runs[1..]
+            .iter()
+            .take_while(|(_, next)| first.shares_depth_pass(*next))
+            .count()
+    } else {
+        runs.iter()
+            .position(|(_, blend)| blend.depth_clip().is_some())
+            .unwrap_or(runs.len())
+    };
+    (clip, count)
 }
 
 #[cfg(test)]
@@ -3199,7 +4479,8 @@ mod tests {
         assert!(atlas.object_skins.is_empty());
     }
 
-    /// The mod image slot is paid only by a game with a client mod loaded.
+    /// The mod image slot and the dynamic texture page are paid only by a game with a client
+    /// mod loaded; no sprite name reaches the page.
     #[test]
     fn the_mod_image_slot_exists_only_when_a_mod_is_loaded() {
         let root = Path::new("/nonexistent/horizon-test-assets");
@@ -3208,6 +4489,7 @@ mod tests {
         ))
         .unwrap();
         assert!(!plain.sprites.contains_key(MOD_IMAGE_SPRITE));
+        assert_eq!(plain.dynamic_texture_page, None);
         let with_mod = HudAtlas::build_over_with_image(
             &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
             &horizon_assets::resource_source::ResourceSource::directory(root.to_path_buf()),
@@ -3215,6 +4497,10 @@ mod tests {
         )
         .unwrap();
         assert!(with_mod.sprites.contains_key(MOD_IMAGE_SPRITE));
+        let page = with_mod.dynamic_texture_page.expect("a page");
+        assert_eq!(page.size, dynamic_textures::PAGE);
+        assert_eq!(page.atlas, [with_mod.width, with_mod.height]);
+        assert!(!with_mod.sprites.contains_key(dynamic_textures::PAGE_SPRITE));
     }
 
     #[test]
@@ -3334,6 +4620,51 @@ mod tests {
         assert!(decode_bytes(webp).is_err());
     }
 
+    /// A pack PNG of a few dozen bytes whose header claims one row more than a full atlas would
+    /// make the decoder reserve 1 GiB; it is refused from its header, with nothing reserved.
+    #[test]
+    fn decode_bytes_refuses_a_png_claiming_a_huge_size() {
+        let error = decode_bytes(&claimed_size_png(16_385, 16_384)).unwrap_err();
+        assert!(
+            error.to_string().contains("16385x16384 PNG is larger"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn png_sizes_are_bounded_by_a_full_atlas() {
+        let texels = MAX_ATLAS_SIZE * MAX_ATLAS_SIZE;
+        assert_eq!(check_png_size(MAX_ATLAS_SIZE, MAX_ATLAS_SIZE), Ok(()));
+        assert_eq!(check_png_size(16, texels / 16), Ok(()));
+        assert_eq!(check_png_size(texels, 1), Ok(()));
+        assert!(check_png_size(MAX_ATLAS_SIZE + 1, MAX_ATLAS_SIZE).is_err());
+        assert!(check_png_size(texels + 1, 1).is_err());
+        assert!(check_png_size(u32::MAX, u32::MAX).is_err());
+    }
+
+    /// A strip of 16x16 frames longer than any texture side holds about 2 MiB and loads.
+    #[test]
+    fn decode_bytes_reads_a_strip_longer_than_any_texture_side() {
+        let height = crate::atlas_sources::MAX_SPRITE_SIDE as u32 + 16;
+        let (width, read_height, rgba) = decode_bytes(&grey_png(16, height)).unwrap();
+        assert_eq!((width, read_height), (16, height));
+        assert_eq!(rgba.len(), 16 * height as usize * 4);
+        assert_eq!(rgba[..4], [128, 128, 128, 255]);
+    }
+
+    /// A HUD sprite's first frame whose square no atlas holds keeps the whole image, as frame
+    /// metadata that doesn't fit does; an ordinary strip gives its first square frame.
+    #[test]
+    fn a_first_frame_too_large_to_square_keeps_the_image() {
+        let wide = AnimationMetadata::from_json(r#"{"width":16385,"height":1}"#).unwrap();
+        let image = (16_385, 2, vec![7; 16_385 * 2 * 4]);
+        let (w, h, pixels) = first_frame(image, Some(&wide));
+        assert_eq!((w, h, pixels.len()), (16_385, 2, 16_385 * 2 * 4));
+        let strip = AnimationMetadata::from_json("{}").unwrap();
+        let (w, h, pixels) = first_frame((16, 32, vec![7; 16 * 32 * 4]), Some(&strip));
+        assert_eq!((w, h, pixels.len()), (16, 16, 16 * 16 * 4));
+    }
+
     #[test]
     fn decode_bytes_ignores_crc_checksum_error() {
         let mut encoded = Vec::new();
@@ -3384,6 +4715,245 @@ mod tests {
         encoded[ihdr + 4 + 13] ^= 0xFF;
         let (w, h, rgba) = decode_bytes(&encoded).expect("a bad IHDR CRC decodes, as stb_image's");
         assert_eq!((w, h, rgba.len()), (2, 2, 16));
+    }
+
+    /// `clip_since` as it was: every quad taken out, and what is kept of each put back.
+    fn clip_by_copy(batch: &mut HudBatch, start: usize, x0: f32, y0: f32, x1: f32, y1: f32) {
+        let quads: Vec<[HudVertex; 6]> = batch.vertices[start..].as_chunks::<6>().0.to_vec();
+        batch.vertices.truncate(start);
+        let mut moved = Vec::new();
+        for q in quads {
+            moved.push(batch.vertices.len() as u32);
+            let corners = [q[0], q[1], q[2], q[5]];
+            let (mut x_lo, mut x_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut y_lo, mut y_hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for v in &corners {
+                x_lo = x_lo.min(v.pos[0]);
+                x_hi = x_hi.max(v.pos[0]);
+                y_lo = y_lo.min(v.pos[1]);
+                y_hi = y_hi.max(v.pos[1]);
+            }
+            let find = |x: f32, y: f32| corners.iter().find(|v| v.pos == [x, y]).copied();
+            let rect = (
+                find(x_lo, y_lo),
+                find(x_hi, y_lo),
+                find(x_hi, y_hi),
+                find(x_lo, y_hi),
+            );
+            let (Some(tl), Some(tr), Some(br), Some(bl)) = rect else {
+                for tri in [[q[0], q[1], q[2]], [q[3], q[4], q[5]]] {
+                    let area = (tri[1].pos[0] - tri[0].pos[0]) * (tri[2].pos[1] - tri[0].pos[1])
+                        - (tri[2].pos[0] - tri[0].pos[0]) * (tri[1].pos[1] - tri[0].pos[1]);
+                    if area == 0.0 {
+                        continue;
+                    }
+                    let mut poly = tri.to_vec();
+                    for (axis, limit, keep_below) in
+                        [(0, x0, false), (0, x1, true), (1, y0, false), (1, y1, true)]
+                    {
+                        poly = clip_polygon(&poly, axis, limit, keep_below);
+                    }
+                    for i in 1..poly.len().saturating_sub(1) {
+                        let (a, b, c) = (poly[0], poly[i], poly[i + 1]);
+                        batch.vertices.extend_from_slice(&[a, b, c, a, c, c]);
+                    }
+                }
+                continue;
+            };
+            let (cx0, cy0) = (x_lo.max(x0), y_lo.max(y0));
+            let (cx1, cy1) = (x_hi.min(x1), y_hi.min(y1));
+            if cx0 >= cx1 || cy0 >= cy1 {
+                continue;
+            }
+            let t = |p: f32, lo: f32, hi: f32| if hi == lo { 0.0 } else { (p - lo) / (hi - lo) };
+            let corner = |x, y| {
+                clip_corner::clip_corner(
+                    [tl, tr, br, bl],
+                    [x, y],
+                    [t(x, x_lo, x_hi), t(y, y_lo, y_hi)],
+                )
+            };
+            let c = [
+                corner(cx0, cy0),
+                corner(cx1, cy0),
+                corner(cx1, cy1),
+                corner(cx0, cy1),
+            ];
+            batch.vertices.extend([0, 1, 2, 0, 2, 3].map(|i| c[i]));
+        }
+        moved.push(batch.vertices.len() as u32);
+        let at = |v: u32| moved[((v as usize).saturating_sub(start) / 6).min(moved.len() - 1)];
+        for (range, _) in &mut batch.blends {
+            if range.start as usize >= start {
+                *range = at(range.start)..at(range.end);
+            }
+        }
+        batch.blends.retain(|(range, _)| !range.is_empty());
+    }
+
+    #[test]
+    fn a_clip_in_place_is_the_clip_by_copy() {
+        let mut seed = 0x2545_f491_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        let vertex = |x: f32, y: f32, color: u32| HudVertex {
+            pos: [x, y],
+            uv: [x / 64.0, y / 64.0],
+            color,
+            depth: 0.0,
+            glint_uv: [0.0, 0.0],
+            text: 0,
+        };
+        for case in 0..80 {
+            let mut batch = HudBatch::scratch([854, 480]);
+            let start = (next() * 3.0) as usize * 6;
+            for _ in 0..start {
+                batch.vertices.push(vertex(-500.0, -500.0, 1));
+            }
+            let quads = 1 + (next() * 24.0) as usize;
+            for i in 0..quads {
+                let (x, y) = (next() * 120.0 - 10.0, next() * 120.0 - 10.0);
+                let (w, h) = (next() * 40.0 + 1.0, next() * 40.0 + 1.0);
+                let color = i as u32;
+                let c = [
+                    vertex(x, y, color),
+                    vertex(x + w, y, color),
+                    vertex(x + w, y + h, color),
+                    vertex(x, y + h, color),
+                ];
+                let q = [0, 1, 2, 0, 2, 3].map(|k| c[k]);
+                batch.vertices.extend_from_slice(&q);
+            }
+            let len = batch.vertices.len() as u32;
+            batch.blends.push((start as u32..len, Blend::Alpha));
+            let mut by_copy = HudBatch::scratch([854, 480]);
+            by_copy.vertices = batch.vertices.clone();
+            by_copy.blends = batch.blends.clone();
+            batch.clip_since(start, 10.0, 10.0, 80.0, 80.0);
+            clip_by_copy(&mut by_copy, start, 10.0, 10.0, 80.0, 80.0);
+            let bytes = |b: &HudBatch| bytemuck::cast_slice::<HudVertex, u8>(&b.vertices).to_vec();
+            assert!(bytes(&batch) == bytes(&by_copy), "case {case}: vertices");
+            assert_eq!(batch.blends, by_copy.blends, "case {case}: blends");
+        }
+    }
+
+    #[test]
+    fn clipping_growth_keeps_following_quads_and_their_blends() {
+        let uv = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let outside = [[20.0, 1.0], [22.0, 1.0], [22.0, 3.0], [20.0, 3.0]];
+        let inside = [[10.0, 1.0], [12.0, 1.0], [12.0, 3.0], [10.0, 3.0]];
+        let triangle = [[0.0, 0.0], [16.0, 0.0], [0.0, 16.0], [0.0, 16.0]];
+        for discard_first in [false, true] {
+            let mut batch = HudBatch::scratch([320, 240]);
+            let mut draw = |corners, color, blend| {
+                let start = batch.vertices.len();
+                batch.quad(corners, uv, color);
+                batch.blend_since(start, blend);
+            };
+            // The cut triangle emits 12 vertices. A discarded first quad leaves six slots
+            // for its growth, otherwise clipping must move the unread quads out of the way.
+            if discard_first {
+                draw(outside, 0xff00_00ff, Blend::Picture(1));
+            }
+            draw(triangle, 0xff00_ff00, Blend::Additive);
+            draw(inside, 0xff00_ffff, Blend::Invert);
+            draw(outside, 0xffff_0000, Blend::Picture(2));
+
+            let mut by_copy = HudBatch::scratch([320, 240]);
+            by_copy.vertices = batch.vertices.clone();
+            by_copy.blends = batch.blends.clone();
+            batch.clip_since(0, -1.0, -1.0, 17.0, 4.0);
+            clip_by_copy(&mut by_copy, 0, -1.0, -1.0, 17.0, 4.0);
+            assert_eq!(
+                bytemuck::cast_slice::<HudVertex, u8>(&batch.vertices),
+                bytemuck::cast_slice::<HudVertex, u8>(&by_copy.vertices),
+                "discard_first={discard_first}"
+            );
+            assert_eq!(
+                batch.blends, by_copy.blends,
+                "discard_first={discard_first}"
+            );
+            assert_eq!(batch.vertices.len(), 18);
+            assert_eq!(
+                batch.blends,
+                [(0..12, Blend::Additive), (12..18, Blend::Invert)]
+            );
+        }
+    }
+
+    #[test]
+    fn clipping_in_place_is_faster_than_taking_every_quad_out() {
+        use horizon_std::time::Instant;
+        const QUADS: usize = 4000;
+        const RUNS: usize = 11;
+        let vertex = |x: f32, y: f32| HudVertex {
+            pos: [x, y],
+            uv: [0.0, 0.0],
+            color: 1,
+            depth: 0.0,
+            glint_uv: [0.0, 0.0],
+            text: 0,
+        };
+        let fill = || {
+            let mut batch = HudBatch::scratch([854, 480]);
+            for i in 0..QUADS {
+                let x = (i % 80) as f32;
+                let y = (i / 80) as f32;
+                let c = [
+                    vertex(x, y),
+                    vertex(x + 0.5, y),
+                    vertex(x + 0.5, y + 0.5),
+                    vertex(x, y + 0.5),
+                ];
+                batch.vertices.extend([0, 1, 2, 0, 2, 3].map(|k| c[k]));
+            }
+            batch
+        };
+        let bytes = |b: &HudBatch| bytemuck::cast_slice::<HudVertex, u8>(&b.vertices).to_vec();
+        let mut left = fill();
+        let mut right = fill();
+        left.clip_since(0, 0.0, 0.0, 100.0, 100.0);
+        clip_by_copy(&mut right, 0, 0.0, 0.0, 100.0, 100.0);
+        assert_eq!(bytes(&left), bytes(&right));
+        let mut inplace = Vec::new();
+        let mut copied = Vec::new();
+        for _ in 0..RUNS {
+            let mut batch = fill();
+            let start = Instant::now();
+            batch.clip_since(0, 0.0, 0.0, 100.0, 100.0);
+            inplace.push(start.elapsed().as_nanos());
+            let mut batch = fill();
+            let start = Instant::now();
+            clip_by_copy(&mut batch, 0, 0.0, 0.0, 100.0, 100.0);
+            copied.push(start.elapsed().as_nanos());
+        }
+        inplace.sort_unstable();
+        copied.sort_unstable();
+        let med = |s: &[u128]| s[s.len() / 2];
+        let p95 = |s: &[u128]| s[((s.len() as f64) * 0.95).ceil() as usize - 1];
+        let report = format!(
+            "scene quads={QUADS} all inside a 100x100 clip, runs={RUNS}\n\
+             copy_ns median={} p95={} worst={}\n\
+             inplace_ns median={} p95={} worst={}\n",
+            med(&copied),
+            p95(&copied),
+            copied[copied.len() - 1],
+            med(&inplace),
+            p95(&inplace),
+            inplace[inplace.len() - 1],
+        );
+        horizon_std::fs::write(
+            horizon_std::env::temp_dir().join("hz-measure-hud.txt"),
+            &report,
+        )
+        .unwrap();
+        println!("{report}");
+        // Keep the exact workload/output gate independent of host scheduling.
+        assert_eq!(left.vertices.len(), QUADS * 6);
     }
 
     #[test]
@@ -3714,10 +5284,9 @@ mod tests {
         assert!(!atlas.sprites.contains_key("gems:item/ruby"));
         fs::remove_dir_all(&root).unwrap();
     }
-    /// A pack's particle sprite of any size packs whole, as vanilla's particle atlas stitches
-    /// it (a light shaft drawn from a 1024-wide texture); the cap on GUI textures stays.
+    /// Large particle and GUI sprites keep their full dimensions and pixels.
     #[test]
-    fn large_particle_sprites_pack_and_large_gui_textures_dont() {
+    fn large_particle_and_gui_sprites_pack_at_full_size() {
         let root = horizon_std::env::temp_dir()
             .join(format!("horizon-atlas-big-particle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -3737,9 +5306,75 @@ mod tests {
         let rect = atlas.sprites["mypack:particle/light_rays/02"];
         assert_eq!(rect.texels((atlas.width, atlas.height)), (1024, 1024));
         assert_eq!(texel_at(&atlas, rect, 512, 512), [250, 240, 200, 255]);
-        assert!(!atlas.sprites.contains_key("gui/huge"));
+        let rect = atlas.sprites["gui/huge"];
+        assert_eq!((rect.w, rect.h), (2048, 64));
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (2048, 64));
+        assert_eq!(texel_at(&atlas, rect, 2047, 63), [1, 2, 3, 255]);
         fs::remove_dir_all(&root).unwrap();
     }
+    #[test]
+    fn unfit_gui_sprites_fall_back_without_losing_other_large_sprites() {
+        let temp = tempfile::tempdir().unwrap();
+        let defaults = temp.path().join("defaults");
+        let pack = temp.path().join("pack");
+        let gui = pack.join("assets/minecraft/textures/gui");
+        fs::create_dir_all(&gui).unwrap();
+        write_png(&defaults, "gui/panel", 16, 16);
+        write_strip(
+            &gui.join("panel.png"),
+            MAX_ATLAS_SIZE,
+            1,
+            &[[9, 8, 7, 255]],
+            None,
+        );
+        write_strip(
+            &gui.join("blurred.png"),
+            MAX_ATLAS_SIZE - 2,
+            1,
+            &[[9, 8, 7, 255]],
+            None,
+        );
+        fs::write(
+            gui.join("blurred.png.mcmeta"),
+            r#"{"texture":{"blur":true}}"#,
+        )
+        .unwrap();
+        write_strip(&gui.join("wide.png"), 2048, 64, &[[1, 2, 3, 255]], None);
+        let atlases = pack.join("assets/minecraft/atlases");
+        fs::create_dir_all(&atlases).unwrap();
+        fs::write(
+            atlases.join("items.json"),
+            r#"{"sources":[{"type":"single","resource":"gui/panel","sprite":"item/panel_alias"}]}"#,
+        )
+        .unwrap();
+
+        let atlas = HudAtlas::build_over(
+            &ResourceSource::directory(pack),
+            &ResourceSource::directory(defaults),
+        )
+        .unwrap();
+        let panel = atlas.sprites["gui/panel"];
+        assert_eq!(panel.texels((atlas.width, atlas.height)), (16, 16));
+        assert_eq!(texel_at(&atlas, panel, 15, 15), [255; 4]);
+        assert!(!atlas.sprites.contains_key("gui/blurred"));
+        assert!(!atlas.sprites.contains_key("item/panel_alias"));
+        let wide = atlas.sprites["gui/wide"];
+        assert_eq!(wide.texels((atlas.width, atlas.height)), (2048, 64));
+        assert_eq!(texel_at(&atlas, wide, 2047, 63), [1, 2, 3, 255]);
+    }
+
+    #[test]
+    fn gui_sprite_fit_accounts_for_shelves_glyphs_and_blur() {
+        let width = MAX_ATLAS_SIZE - 1;
+        let height = MAX_ATLAS_SIZE - GLYPH_ROWS - 1;
+        assert!(gui_sprite_fits_atlas(width, height, false));
+        assert!(!gui_sprite_fits_atlas(width + 1, 1, false));
+        assert!(!gui_sprite_fits_atlas(1, height + 1, false));
+        assert!(gui_sprite_fits_atlas(width - 2, height - 2, true));
+        assert!(!gui_sprite_fits_atlas(width - 1, 1, true));
+        assert!(!gui_sprite_fits_atlas(1, height - 1, true));
+    }
+
     /// OptiFine random entity variants outside `textures/` pack under the names
     /// `RandomTextures` gives them; one beside its texture packs once, under its own.
     #[test]
@@ -4050,6 +5685,42 @@ mod tests {
         assert_eq!(texel_at(&atlas, rect, 0, 0), [40, 180, 80, 255]);
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// A still item texture is the whole image, as `SpriteResourceLoader` loads one without an
+    /// animation section: a mod's 64x32 texture keeps the right half its model's UVs reach (a
+    /// cut to the top-left square left an item's parts drawing transparent texels).
+    #[test]
+    fn a_still_wide_item_texture_packs_whole() {
+        let root = horizon_std::env::temp_dir()
+            .join(format!("horizon-atlas-wide-item-{}", std::process::id()));
+        let atlases = root.join("assets/minecraft/atlases");
+        let item = root.join("assets/gear/textures/item");
+        fs::create_dir_all(&atlases).unwrap();
+        fs::create_dir_all(&item).unwrap();
+        fs::write(
+            atlases.join("items.json"),
+            r#"{"sources": [{"type": "directory", "source": "item", "prefix": "item/"}]}"#,
+        )
+        .unwrap();
+        // Top rows green, bottom rows red, no mcmeta.
+        write_strip(
+            &item.join("wide.png"),
+            64,
+            32,
+            &[[0, 255, 0, 255], [255, 0, 0, 255]],
+            None,
+        );
+        let atlas = HudAtlas::build(&horizon_assets::resource_source::ResourceSource::directory(
+            root.to_path_buf(),
+        ))
+        .unwrap();
+        let _ = fs::remove_dir_all(&root);
+        let rect = atlas.sprites["gear:item/wide"];
+        assert_eq!(rect.texels((atlas.width, atlas.height)), (64, 32));
+        assert_eq!(texel_at(&atlas, rect, 63, 0), [0, 255, 0, 255]);
+        assert_eq!(texel_at(&atlas, rect, 63, 31), [255, 0, 0, 255]);
+    }
+
     #[test]
     fn another_namespaces_animated_item_texture_packs_its_first_frame_and_animates() {
         let root = horizon_std::env::temp_dir()
@@ -4552,6 +6223,11 @@ texture=wide",
         write_png(&pack, "block/stone", 32, 32);
         write_png(&pack, "item/compass", 32, 1024);
         write_png(&pack, "gui/sprites/pack_only", 30, 10);
+        // The strip animates in each: a still texture is the whole image, its folder aside.
+        for root in [&defaults, &pack] {
+            let meta = root.join("assets/minecraft/textures/item/compass.png.mcmeta");
+            fs::write(meta, r#"{"animation": {}}"#).unwrap();
+        }
         let atlas = HudAtlas::build_over(
             &horizon_assets::resource_source::ResourceSource::directory(pack.to_path_buf()),
             &horizon_assets::resource_source::ResourceSource::directory(defaults.to_path_buf()),
@@ -4683,6 +6359,60 @@ texture=wide",
         assert_eq!(atlas.sprites["mymod:gui/container/machine"].w, 176);
         assert!(atlas.sprites.contains_key("gui/container/furnace"));
         assert!(!atlas.sprites.contains_key("mymod:block/machine"));
+    }
+
+    #[test]
+    fn a_packaged_wide_gui_texture_survives_an_atlas_rebuild() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("example.hmod");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1230, 216);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer
+            .write_image_data(&[19, 71, 131, 255].repeat(1230 * 216))
+            .unwrap();
+        writer.finish().unwrap();
+        zip.start_file(
+            "assets/example/textures/gui/title/panorama.png",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(&png).unwrap();
+        zip.finish().unwrap();
+
+        for _ in 0..2 {
+            let pack = crate::packs::Pack::mod_layer(
+                "example".into(),
+                crate::packs::Source::Zip(archive.clone()),
+            );
+            let source = crate::packs::resources(ResourceSource::default(), &[pack]).unwrap();
+            let atlas = HudAtlas::build(&source).unwrap();
+            let rect = atlas.sprites["example:gui/title/panorama"];
+            assert_eq!((rect.w, rect.h), (1230, 216));
+            assert_eq!(texel_at(&atlas, rect, 1229, 215), [19, 71, 131, 255]);
+            let mut batch = HudBatch::scratch([320, 240]);
+            batch.sprite_scaled(
+                &atlas,
+                "example:gui/title/panorama",
+                0.0,
+                0.0,
+                320.0,
+                240.0,
+                u32::MAX,
+            );
+            assert_eq!(batch.vertices.len(), 6);
+        }
+        let without_mod = HudAtlas::build(&ResourceSource::default()).unwrap();
+        assert!(
+            !without_mod
+                .sprites
+                .contains_key("example:gui/title/panorama")
+        );
     }
     #[test]
     fn the_default_textures_keep_a_4096_wide_atlas() {
@@ -5391,6 +7121,100 @@ texture=wide",
     }
 
     #[test]
+    fn gui_scene_overlays_share_depth_without_reordering_runs() {
+        use OverlayDepth::{Tested, ThroughWalls};
+
+        let mut batch = HudBatch::scratch([640, 480]);
+        batch.scale = 2.0;
+        let uv = [[0.0; 2]; 4];
+        let face = |z| [[1.0, 2.0, z], [2.0, 2.0, z], [2.0, 3.0, z], [1.0, 3.0, z]];
+        let clip = [1.0, 2.0, 4.0, 6.0];
+        let scissor = [2, 4, 6, 8];
+        batch.quad([[0.0; 2]; 4], uv, u32::MAX);
+        for z in [3.0, 3.0, -1.0, 7.0, 5.0] {
+            batch.quad_3d(face(z), uv, u32::MAX);
+        }
+        batch.depth_overlays_since(
+            6,
+            12,
+            clip,
+            [(18, Tested), (24, Tested), (30, ThroughWalls), (36, Tested)],
+        );
+        // An adjacent overlay-only scene starts clean even with the same
+        // scissor and the tested mode on both sides of the boundary.
+        batch.quad_3d(face(-f32::MAX), uv, u32::MAX);
+        batch.quad_3d(face(f32::MAX), uv, u32::MAX);
+        batch.depth_overlays_since(36, 36, clip, [(42, Tested), (48, ThroughWalls)]);
+        batch.quad([[0.0; 2]; 4], uv, u32::MAX);
+
+        let scene = |pass, overlay| Blend::DepthScene {
+            clip: scissor,
+            pass,
+            overlay,
+        };
+        let runs = batch.runs();
+        assert_eq!(
+            runs,
+            [
+                (0..6, Blend::Alpha),
+                (6..12, scene(0, None)),
+                (12..24, scene(0, Some(Tested))),
+                (24..30, scene(0, Some(ThroughWalls))),
+                (30..36, scene(0, Some(Tested))),
+                (36..42, scene(1, Some(Tested))),
+                (42..48, scene(1, Some(ThroughWalls))),
+                (48..54, Blend::Alpha),
+            ]
+        );
+        assert_eq!(hud_pass_runs(&runs), (None, 1));
+        assert_eq!(hud_pass_runs(&runs[1..]), (Some(scissor), 4));
+        assert_eq!(hud_pass_runs(&runs[5..]), (Some(scissor), 2));
+        assert_eq!(hud_pass_runs(&runs[7..]), (None, 1));
+        // The overlays don't widen the base scene's range: those behind it clamp to the
+        // far plane, those in front to the near one.
+        assert_eq!(batch.vertices[6].depth, 0.0);
+        assert_eq!(batch.vertices[12].depth, batch.vertices[6].depth);
+        assert_eq!(batch.vertices[18].depth, 1.0);
+        assert_eq!(batch.vertices[24].depth, 0.0);
+        assert_eq!(batch.vertices[30].depth, 0.0);
+        assert_eq!(batch.vertices[36].depth, 0.5);
+        assert_eq!(batch.vertices[42].depth, 0.0);
+    }
+
+    #[test]
+    fn gui_scene_overlays_keep_separate_passes_when_their_base_is_clipped() {
+        let mut batch = HudBatch::scratch([320, 240]);
+        let face = |x| {
+            [
+                [x, 0.0, 0.0],
+                [x + 1.0, 0.0, 0.0],
+                [x + 1.0, 1.0, 0.0],
+                [x, 1.0, 0.0],
+            ]
+        };
+        let clip = [0.0, 0.0, 10.0, 10.0];
+        for _ in 0..2 {
+            let start = batch.vertices.len();
+            batch.quad_3d(face(5.0), [[0.0; 2]; 4], u32::MAX);
+            batch.quad_3d(face(1.0), [[0.0; 2]; 4], u32::MAX);
+            batch.depth_overlays_since(
+                start,
+                start + 6,
+                clip,
+                [(start + 12, OverlayDepth::Tested)],
+            );
+        }
+        batch.clip_since(0, 0.0, 0.0, 4.0, 4.0);
+
+        let runs = batch.runs();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(batch.vertices.len(), 12);
+        let scissor = Some([0, 0, 10, 10]);
+        assert_eq!(hud_pass_runs(&runs), (scissor, 1));
+        assert_eq!(hud_pass_runs(&runs[1..]), (scissor, 1));
+    }
+
+    #[test]
     fn a_gui_models_glint_follows_it_in_its_depth_pass() {
         let mut batch = HudBatch::scratch([640, 480]);
         batch.scale = 2.0;
@@ -5508,12 +7332,14 @@ texture=wide",
                 height: height as f32,
                 patches: Vec::new(),
                 blends: Vec::new(),
+                next_scene_pass: 0,
                 end_portal: EndPortalFill::default(),
                 glint_alpha: 0.75,
                 glint_colour: 0,
                 game_time: 0.0,
                 blur_at: 0,
                 inline_profiles: Vec::new(),
+                stock_hotbar_origin: None,
             };
             for (image_width, image_height) in [(195, 136), (176, 166), (176, 222)] {
                 assert_eq!(
@@ -5525,5 +7351,384 @@ texture=wide",
                 );
             }
         }
+    }
+
+    #[test]
+    fn reset_matches_fresh_batch_and_retains_buffer_capacity() {
+        let root = two_glyph_font("reset-reuse");
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        let scale_a = GuiScale {
+            requested: 2,
+            unicode: false,
+        };
+        let scale_b = GuiScale {
+            requested: 3,
+            unicode: true,
+        };
+        // Downstream callers can still construct `HudBatch` by struct literal using only
+        // its original public fields.
+        let literal = HudBatch {
+            pictures: Vec::new(),
+            vertices: Vec::new(),
+            scale: 1.0,
+            width: 320.0,
+            height: 240.0,
+            patches: Vec::new(),
+            blends: Vec::new(),
+            next_scene_pass: 0,
+            end_portal: EndPortalFill::default(),
+            glint_alpha: 0.75,
+            glint_colour: 0,
+            game_time: 0.0,
+            blur_at: 0,
+            inline_profiles: Vec::new(),
+            stock_hotbar_origin: None,
+        };
+        assert_eq!(literal.width, 320.0);
+
+        let mut reused = HudBatch::new([1280, 720], scale_a);
+        let mut glyph_scratch = HudGlyphScratch::new();
+        // Frame 1: populate every per-frame buffer and scalar field, including Blend::Depth,
+        // Blend::DepthGlint, Blend::Invert, patches, inline_profiles, and glyph_scratch.
+        reused.text_with_scratch(
+            &atlas,
+            "abbaabbaabba",
+            4.0,
+            6.0,
+            u32::MAX,
+            true,
+            &mut glyph_scratch,
+        );
+        let depth_start = reused.vertices.len();
+        let face = |z: f32| [[0.0, 0.0, z], [0.0, 4.0, z], [4.0, 4.0, z], [4.0, 0.0, z]];
+        let uv = [[0.25, 0.5]; 4];
+        reused.quad_3d(face(1.0), uv, u32::MAX);
+        let glint_start = reused.vertices.len();
+        reused.quad_3d_glint(face(2.0), uv, [[1.0, 2.0]; 4], false);
+        reused.depth_glint_since(depth_start, glint_start, [0.0, 0.0, 8.0, 8.0]);
+        let inv_start = reused.vertices.len();
+        reused.fill(&atlas, 2.0, 3.0, 10.0, 5.0, rgba(10, 20, 30, 255));
+        reused.invert_since(inv_start);
+        reused.patches.push(crate::font::Patch {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            rgba: vec![255; 4],
+        });
+        reused
+            .inline_profiles
+            .push(Arc::new(serde_json::json!({"name": "Alex"})));
+        reused.end_portal = EndPortalFill {
+            sprites: [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]],
+            game_time: 12.5,
+        };
+        reused.glint_alpha = 0.25;
+        reused.glint_colour = rgba(12, 34, 56, 255);
+        reused.game_time = 99.0;
+        reused.blur_at = 18;
+
+        let vert_cap = reused.vertices.capacity();
+        let blend_cap = reused.blends.capacity();
+        let patch_cap = reused.patches.capacity();
+        let profile_cap = reused.inline_profiles.capacity();
+        let glyph_cap = glyph_scratch.capacity();
+        let glyph_ptr = glyph_scratch.0.as_ptr();
+        assert!(vert_cap > 0 && blend_cap > 0 && patch_cap > 0 && profile_cap > 0 && glyph_cap > 0);
+        assert!(glyph_scratch.is_empty());
+
+        // Reset for frame 2 with a different window and GUI scale.
+        reused.reset([1920, 1080], scale_b);
+        let fresh = HudBatch::new([1920, 1080], scale_b);
+        assert!(reused.vertices.is_empty());
+        assert!(reused.blends.is_empty());
+        assert!(reused.patches.is_empty());
+        assert!(reused.pictures.is_empty());
+        assert!(reused.inline_profiles.is_empty());
+        assert_eq!(reused.scale, fresh.scale);
+        assert_eq!(reused.width, fresh.width);
+        assert_eq!(reused.height, fresh.height);
+        assert_eq!(reused.end_portal, fresh.end_portal);
+        assert_eq!(reused.glint_alpha, fresh.glint_alpha);
+        assert_eq!(reused.glint_colour, fresh.glint_colour);
+        assert_eq!(reused.game_time, fresh.game_time);
+        assert_eq!(reused.blur_at, fresh.blur_at);
+        assert!(reused.vertices.capacity() >= vert_cap);
+        assert!(reused.blends.capacity() >= blend_cap);
+        assert!(reused.patches.capacity() >= patch_cap);
+        assert!(reused.inline_profiles.capacity() >= profile_cap);
+
+        // Frame 2: draw identical geometry into both the reused (with external glyph scratch)
+        // and fresh batches.
+        let draw_frame = |b: &mut HudBatch, mut scratch: Option<&mut HudGlyphScratch>| {
+            b.fill_gradient(
+                &atlas,
+                (1.0, 2.0, 20.0, 10.0),
+                rgba(255, 0, 0, 255),
+                rgba(0, 0, 255, 128),
+            );
+            if let Some(s) = &mut scratch {
+                b.text_with_scratch(
+                    &atlas,
+                    "ab ba",
+                    8.0,
+                    12.0,
+                    rgba(250, 240, 230, 255),
+                    true,
+                    s,
+                );
+            } else {
+                b.text(&atlas, "ab ba", 8.0, 12.0, rgba(250, 240, 230, 255), true);
+            }
+            let start = b.vertices.len();
+            b.quad_3d(face(1.5), uv, u32::MAX);
+            b.depth_since(start, [1.0, 1.0, 10.0, 10.0]);
+            b.blur_at = b.vertices.len() as u32;
+            let colored = crate::text::Text::colored("ba", 0x00ff00);
+            if let Some(s) = scratch {
+                b.text_styled_with_scratch(&atlas, &colored, 3.0, 5.0, u32::MAX, false, s);
+            } else {
+                b.text_styled(&atlas, &colored, 3.0, 5.0, u32::MAX, false);
+            }
+        };
+        let mut expected = HudBatch::new([1920, 1080], scale_b);
+        draw_frame(&mut reused, Some(&mut glyph_scratch));
+        draw_frame(&mut expected, None);
+
+        assert!(glyph_scratch.is_empty());
+        assert_eq!(glyph_scratch.capacity(), glyph_cap);
+        assert_eq!(glyph_scratch.0.as_ptr(), glyph_ptr);
+        assert_eq!(
+            bytemuck::cast_slice::<HudVertex, u8>(&reused.vertices),
+            bytemuck::cast_slice::<HudVertex, u8>(&expected.vertices),
+        );
+        assert_eq!(reused.blends, expected.blends);
+        assert_eq!(reused.blur_at, expected.blur_at);
+        assert_eq!(reused.runs(), expected.runs());
+    }
+
+    #[test]
+    fn ascii_fast_path_matches_general_bidi_path_bit_for_bit() {
+        let root = two_glyph_font("ascii-bidi-parity");
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        let bold_italic = crate::text::Style {
+            color: Some(0x33aa55),
+            shadow_color: Some(0x8020_3040),
+            bold: Some(true),
+            italic: Some(true),
+            underlined: Some(true),
+            strikethrough: Some(true),
+            ..Default::default()
+        };
+        let plain_style = crate::text::Style::color(0xffcc00);
+        let multi_span = crate::text::Text::from_spans(vec![
+            crate::text::Span::new("", plain_style.clone()),
+            crate::text::Span::new("ab", plain_style.clone()),
+            crate::text::Span::new("", bold_italic.clone()),
+            crate::text::Span::new("ba", plain_style.clone()),
+            crate::text::Span::new("ab (12)", bold_italic),
+        ]);
+        let cases = [
+            crate::text::Text::empty(),
+            crate::text::Text::literal("abba"),
+            crate::text::Text::literal("ab (123) - [ba]"),
+            crate::text::Text::styled(
+                "aba",
+                crate::text::Style {
+                    bold: Some(true),
+                    underlined: Some(true),
+                    ..Default::default()
+                },
+            ),
+            multi_span,
+        ];
+
+        for text in &cases {
+            assert!(is_plain_ltr_ascii(text));
+            for world in [false, true] {
+                for shadow in [false, true] {
+                    for outline in [None, Some((rgba(1, 2, 3, 200), [1.0, -1.0]))] {
+                        let color = rgba(220, 210, 200, 240);
+                        let mut fast_batch = HudBatch::scratch([320, 240]);
+                        let mut fast_glyphs = Vec::new();
+                        let fast_cursor = prepare_glyphs_ascii(
+                            &atlas.font,
+                            text,
+                            10.0,
+                            color,
+                            world,
+                            false,
+                            &mut fast_glyphs,
+                        );
+                        fast_batch.emit_prepared_glyphs(
+                            &atlas,
+                            &fast_glyphs,
+                            20.0,
+                            shadow,
+                            world,
+                            outline,
+                        );
+
+                        let mut general_batch = HudBatch::scratch([320, 240]);
+                        let mut general_glyphs = Vec::new();
+                        let general_cursor = prepare_glyphs_general(
+                            &atlas.font,
+                            text,
+                            10.0,
+                            color,
+                            world,
+                            false,
+                            &mut general_glyphs,
+                            &mut general_batch.inline_profiles,
+                        );
+                        general_batch.emit_prepared_glyphs(
+                            &atlas,
+                            &general_glyphs,
+                            20.0,
+                            shadow,
+                            world,
+                            outline,
+                        );
+
+                        assert_eq!(fast_cursor.to_bits(), general_cursor.to_bits());
+                        assert_eq!(
+                            bytemuck::cast_slice::<HudVertex, u8>(&fast_batch.vertices),
+                            bytemuck::cast_slice::<HudVertex, u8>(&general_batch.vertices),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Plain `&str` `HudBatch::text_with_scratch` fast path matches
+        // `text_styled_with_scratch(&Text::literal(...))` and `text(...)` while reusing
+        // `HudGlyphScratch` capacity across calls.
+        let mut fast_str = HudBatch::scratch([320, 240]);
+        let mut styled_lit = HudBatch::scratch([320, 240]);
+        let mut plain_str = HudBatch::scratch([320, 240]);
+        let mut fast_scratch = HudGlyphScratch::new();
+        let mut styled_scratch = HudGlyphScratch::new();
+        for s in ["", "a", "abba", "ab (123) [ba]"] {
+            for shadow in [false, true] {
+                let adv_fast = fast_str.text_with_scratch(
+                    &atlas,
+                    s,
+                    5.0,
+                    7.0,
+                    rgba(200, 180, 160, 255),
+                    shadow,
+                    &mut fast_scratch,
+                );
+                let adv_styled = styled_lit.text_styled_with_scratch(
+                    &atlas,
+                    &crate::text::Text::literal(s),
+                    5.0,
+                    7.0,
+                    rgba(200, 180, 160, 255),
+                    shadow,
+                    &mut styled_scratch,
+                );
+                let adv_plain =
+                    plain_str.text(&atlas, s, 5.0, 7.0, rgba(200, 180, 160, 255), shadow);
+                assert_eq!(adv_fast.to_bits(), adv_styled.to_bits());
+                assert_eq!(adv_fast.to_bits(), adv_plain.to_bits());
+            }
+        }
+        assert_eq!(
+            bytemuck::cast_slice::<HudVertex, u8>(&fast_str.vertices),
+            bytemuck::cast_slice::<HudVertex, u8>(&styled_lit.vertices),
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<HudVertex, u8>(&fast_str.vertices),
+            bytemuck::cast_slice::<HudVertex, u8>(&plain_str.vertices),
+        );
+        assert!(fast_scratch.is_empty());
+        assert!(styled_scratch.is_empty());
+        assert!(fast_scratch.capacity() >= "ab (123) [ba]".len());
+        assert!(styled_scratch.capacity() >= "ab (123) [ba]".len());
+    }
+
+    #[test]
+    fn non_ascii_legacy_and_rtl_text_bypass_ascii_fast_path() {
+        let root = two_glyph_font("rtl-legacy-bypass");
+        let atlas = HudAtlas::build(&ResourceSource::directory(root.clone())).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        let legacy_span = crate::text::Text::literal("§cab");
+        let rtl_text = crate::text::Text::literal("مرحبا ab");
+        let accented = crate::text::Text::literal("café");
+        let profile = Arc::new(serde_json::json!({"name": "Steve"}));
+        let object_text = crate::text::Text::styled(
+            "\u{fffc}",
+            crate::text::Style {
+                inline_object: Some(crate::text::InlineObject::Player {
+                    profile: Arc::clone(&profile),
+                    hat: false,
+                    fallback: String::new(),
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(!is_plain_ltr_ascii(&legacy_span));
+        assert!(!is_plain_ltr_ascii(&rtl_text));
+        assert!(!is_plain_ltr_ascii(&accented));
+        assert!(!is_plain_ltr_ascii(&object_text));
+
+        // Legacy `§` through `HudBatch::text` still formats color and omits the `§c` code.
+        let mut via_text = HudBatch::scratch([320, 240]);
+        let mut via_legacy = HudBatch::scratch([320, 240]);
+        let adv_a = via_text.text(&atlas, "§cab", 4.0, 8.0, u32::MAX, false);
+        let adv_b = via_legacy.text_styled(
+            &atlas,
+            &crate::text::Text::legacy("§cab"),
+            4.0,
+            8.0,
+            u32::MAX,
+            false,
+        );
+        assert_eq!(adv_a.to_bits(), adv_b.to_bits());
+        assert_eq!(
+            bytemuck::cast_slice::<HudVertex, u8>(&via_text.vertices),
+            bytemuck::cast_slice::<HudVertex, u8>(&via_legacy.vertices),
+        );
+
+        // RTL text takes the general bidi path and matches `text(&str)` identically.
+        assert_ne!(crate::bidi::visual(&rtl_text).as_ref(), &rtl_text);
+        let mut rtl_styled = HudBatch::scratch([320, 240]);
+        let mut rtl_str = HudBatch::scratch([320, 240]);
+        let adv_rtl = rtl_styled.text_styled(&atlas, &rtl_text, 4.0, 8.0, u32::MAX, true);
+        let adv_str = rtl_str.text(&atlas, "مرحبا ab", 4.0, 8.0, u32::MAX, true);
+        assert_eq!(adv_rtl.to_bits(), adv_str.to_bits());
+        assert_eq!(
+            bytemuck::cast_slice::<HudVertex, u8>(&rtl_styled.vertices),
+            bytemuck::cast_slice::<HudVertex, u8>(&rtl_str.vertices),
+        );
+
+        // Inline player object still records its profile and clears `HudGlyphScratch` after draw
+        // so no `InlineObject` `Arc`s are retained between calls while capacity stays warm.
+        let mut obj_batch = HudBatch::scratch([320, 240]);
+        let mut obj_scratch = HudGlyphScratch::new();
+        obj_batch.text_styled_with_scratch(
+            &atlas,
+            &object_text,
+            0.0,
+            0.0,
+            u32::MAX,
+            false,
+            &mut obj_scratch,
+        );
+        assert_eq!(obj_batch.inline_profiles.len(), 1);
+        assert!(obj_scratch.is_empty());
+        assert!(obj_scratch.capacity() >= 1);
+        drop(object_text);
+        obj_batch.inline_profiles.clear();
+        assert_eq!(Arc::strong_count(&profile), 1);
+        obj_scratch.clear();
+        assert!(obj_scratch.is_empty());
+        assert!(obj_scratch.capacity() >= 1);
     }
 }

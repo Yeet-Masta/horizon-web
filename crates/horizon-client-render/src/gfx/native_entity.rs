@@ -12,11 +12,17 @@
 //! `Renderer::take_entity_runs`) and the batch writes each one's kind into its quads' layer.
 //! What no run names is Horizon's own draw: it goes through `entity_color` with what
 //! `entity_vertex` computed for it, as without the stage.
+//!
+//! A stage that calls a trace function (`[ray_tracing]`) is built a second time against the
+//! scene, as the material stage's terrain is (`native_post/trace.rs`), and draws with it in
+//! frames that have the scene. Only the world's colour pass runs the stage: the native shadow
+//! pass draws the entities with its own depth shader, which traces nothing.
 
 use horizon_shader_api::{Fog, check::CheckedStage, stages::GROUP};
 
 use super::external::EntityLayers;
 use super::native_post::kept::StageReads;
+use super::native_post::trace::{StageTrace, TraceShape};
 use super::native_post::{NativeFrame, present_constants};
 
 /// What a run of the entity geometry is to the stage, as `EntityInput.kind` numbers it. Items
@@ -302,37 +308,70 @@ pub(super) fn shader_source(source: &str, fog: Fog, light: bool) -> String {
     )
 }
 
+/// The fragment header of `ENTRIES`, which `surfaced` renames into the colour's function.
+const FRAGMENT: &str =
+    "@fragment fn horizon_entity_fs(in: horizon_entity_out, @builtin(front_facing) front: bool)
+    -> @location(0) vec4<f32> {";
+
+/// Under `[entity] surface = true` the entries' fragment is a function of the colour, and the
+/// entry point around it also writes the surface target, as the material stage's solid terrain
+/// does: `set_surface`'s value (the triangle's normal, 0 and 0 where the stage leaves it
+/// unset) and the fragment's depth, which the post stage's `surface_at` compares with the final
+/// depth. A quad Horizon draws itself writes none (`w` 0, which `surface_at` reads as absent).
+const SURFACE: &str = "struct horizon_entity_surfaced {
+    @location(0) color: vec4<f32>,
+    // Its four floats' bits (`SURFACE_FORMAT` is an integer format).
+    @location(1) surface: vec4<u32>,
+}
+@fragment fn horizon_entity_fs(in: horizon_entity_out, @builtin(front_facing) front: bool)
+    -> horizon_entity_surfaced {
+    // In uniform control flow, before the colour's discards.
+    let normal = horizon_entity_normal(in.proj.xyz);
+    horizon_surface = vec4(0.0);
+    var out: horizon_entity_surfaced;
+    out.color = horizon_entity_color(in, front);
+    if ((in.flags >> 3u) & 7u) != 0u {
+        if horizon_surface.w == 0.0 {
+            set_surface(normal, 0.0, 0.0);
+        }
+        out.surface = bitcast<vec4<u32>>(vec4(horizon_surface.xyz, in.clip.z));
+    }
+    return out;
+}
+";
+
+/// `shader_source`'s shader writing the surface target too (`SURFACE`), for a pack's
+/// `[entity] surface = true`.
+pub(super) fn surfaced(text: &str) -> String {
+    let colour = "fn horizon_entity_color(in: horizon_entity_out, front: bool) -> vec4<f32> {";
+    assert!(
+        text.contains(FRAGMENT),
+        "the entries' fragment header moved"
+    );
+    text.replacen(FRAGMENT, colour, 1) + SURFACE
+}
+
 /// The entities' group 0 (gfx.rs's entity draws, the native shadow pass's): their globals, the
 /// atlas, the lightmap and the glint, each with its sampler after it, and the armour glint.
-pub(super) fn entity_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
-    let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-        ty,
-        count: None,
-    };
-    let texture = wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-        view_dimension: wgpu::TextureViewDimension::D2,
-        multisampled: false,
-    };
-    let sampler = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering);
-    let globals = wgpu::BindingType::Buffer {
-        ty: wgpu::BufferBindingType::Uniform,
-        has_dynamic_offset: false,
-        min_binding_size: None,
-    };
-    let mut entries = vec![entry(0, globals)];
-    entries.extend((1..=6).map(|b| entry(b, if b % 2 == 1 { texture } else { sampler })));
-    entries.push(entry(7, texture));
-    entries
+pub(super) fn entity_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
+    super::entity_binding_entries()
 }
 
 /// The pack's entity pipelines: the entity stream's ordinary quads, and the retained block
 /// entities.
-pub struct NativeEntity {
+pub struct EntityPipelines {
     entities: wgpu::RenderPipeline,
     retained: wgpu::RenderPipeline,
+}
+
+/// The pack's entity stage: its pipelines, and for a stage that calls a trace function, where
+/// the device takes the scene, the same against the scene.
+pub struct NativeEntity {
+    /// `[entity] surface = true`: the pipelines write the surface target too.
+    pub(super) writes_surface: bool,
+    /// Built with a `trace` that misses: every device, every frame without the scene.
+    pipelines: EntityPipelines,
+    pub(super) scene: Option<StageTrace<EntityPipelines>>,
     /// `[entity] reads`: none without.
     pub(super) kept: Option<StageReads>,
 }
@@ -341,12 +380,13 @@ impl NativeEntity {
     /// The pipelines of the pack's entity `stage` with the option values `constants`, into a
     /// frame of `format`, against the entities' group 0 and the retained block entities' group 1,
     /// and the kept resources the stage reads (`kept`) with the frame at its group 3.
+    /// A tracing stage also builds pipelines against the scene of the given shape.
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
-        [entities, retained]: [&wgpu::BindGroupLayout; 2],
+        groups: [&wgpu::BindGroupLayout; 2],
         frame: &NativeFrame,
-        (stage, kept): (&CheckedStage, Option<StageReads>),
+        (stage, kept, shape): (&CheckedStage, Option<StageReads>, &TraceShape<'_>),
         constants: &[(String, f64)],
         manifest: &horizon_shader_api::Manifest,
     ) -> Result<Self, String> {
@@ -355,7 +395,65 @@ impl NativeEntity {
         if let Some(why) = (kept.as_ref()).and_then(|k| k.over(frame, &entity_entries(), &limits)) {
             return Err(format!("{}: {why}", stage.file));
         }
-        let text = shader_source(&stage.source, manifest.fog, stage.light_source());
+        let build = |source: &str, group: &wgpu::BindGroupLayout| {
+            Self::pipelines(
+                device,
+                (format, groups, group),
+                frame,
+                (stage, source),
+                constants,
+                manifest,
+            )
+        };
+        let plain = kept.as_ref().map_or(&frame.layout, |k| &k.layout);
+        let pipelines = build(&stage.source, plain)?;
+        let scene = stage.scene_source.as_deref().and_then(|source| {
+            let shape = TraceShape {
+                entities: stage.traces_entities(),
+                ..shape.clone()
+            };
+            let reads = (stage.traces_looks(), stage.traces_lights());
+            let scene = (&entity_entries()[..], &shape, reads);
+            let reads = kept.as_ref().map_or(&[][..], |k| &k.entries);
+            StageTrace::new(device, frame, scene, reads, |group| build(source, group))
+        });
+        Ok(Self {
+            writes_surface: manifest.entity_surface,
+            pipelines,
+            scene,
+            kept,
+        })
+    }
+
+    /// The pipelines and group 3 for the scene, or the stub and the given fallback group.
+    pub(super) fn drawn<'a>(
+        &'a self,
+        group: &'a wgpu::BindGroup,
+        parity: usize,
+    ) -> (&'a EntityPipelines, &'a wgpu::BindGroup) {
+        self.scene
+            .as_ref()
+            .and_then(|s| s.drawn(parity))
+            .unwrap_or((&self.pipelines, group))
+    }
+
+    /// One set of pipelines, against the scene or the stub.
+    fn pipelines(
+        device: &wgpu::Device,
+        (format, [entities, retained], frame_group): (
+            wgpu::TextureFormat,
+            [&wgpu::BindGroupLayout; 2],
+            &wgpu::BindGroupLayout,
+        ),
+        frame: &NativeFrame,
+        (stage, source): (&CheckedStage, &str),
+        constants: &[(String, f64)],
+        manifest: &horizon_shader_api::Manifest,
+    ) -> Result<EntityPipelines, String> {
+        let mut text = shader_source(source, manifest.fog, stage.light_source());
+        if manifest.entity_surface {
+            text = surfaced(&text);
+        }
         let module = naga::front::wgsl::parse_str(&text)
             .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))?;
         let mut constants = present_constants(&module, constants);
@@ -365,7 +463,8 @@ impl NativeEntity {
         constants.push(("horizon_vanilla_FRAME_LINEAR", linear));
         let pack = manifest.entity_coverage == horizon_shader_api::Coverage::Pack;
         constants.push(("horizon_entity_coverage_pack", f64::from(u8::from(pack))));
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(&stage.label),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -393,7 +492,7 @@ impl NativeEntity {
                 Default::default();
             groups[0] = Some(entities);
             groups[1] = retained;
-            groups[GROUP as usize] = Some(kept.as_ref().map_or(&frame.layout, |k| &k.layout));
+            groups[GROUP as usize] = Some(frame_group);
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Native shader pack entities"),
                 bind_group_layouts: &groups,
@@ -428,13 +527,21 @@ impl NativeEntity {
                     module: &module,
                     entry_point: Some("horizon_entity_fs"),
                     compilation_options: options,
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: retained
-                            .is_none()
-                            .then_some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format,
+                            blend: retained
+                                .is_none()
+                                .then_some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        // `[entity] surface`: the surface target, the frontmost point's.
+                        Some(wgpu::ColorTargetState {
+                            format: super::native_material::SURFACE_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ][..1 + usize::from(manifest.entity_surface)],
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -444,12 +551,9 @@ impl NativeEntity {
             pipeline("horizon_entity_vs", None),
             pipeline("horizon_entity_vs_static", Some(retained)),
         );
-        let built = Self {
-            entities,
-            retained,
-            kept,
-        };
-        if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
+        let built = EntityPipelines { entities, retained };
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             return Err(format!("{}: {e}", stage.file));
         }
         Ok(built)
@@ -461,10 +565,12 @@ impl super::native_pack::NativePack {
     /// they read (`entities`: the frame's, or this frame's version of its kept resources).
     pub fn entity_layers(&self) -> Option<EntityLayers<'_>> {
         let (stage, frame) = self.entities()?;
+        let writes = self.entity.as_ref().is_some_and(|e| e.writes_surface);
         Some(EntityLayers {
             entities: &stage.entities,
             retained: &stage.retained,
             frame,
+            surface: writes.then_some(&self.frame.surface_view),
         })
     }
 }

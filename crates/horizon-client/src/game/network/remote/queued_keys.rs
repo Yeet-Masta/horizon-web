@@ -45,8 +45,5 @@ impl Game<'_> {
                 _ => {}
             }
         }
-        if self.clicks.miss_time > 0 {
-            self.clicks.miss_time -= 1;
-        }
     }
 }

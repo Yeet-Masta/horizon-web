@@ -3,15 +3,14 @@
 //! Feeds recorded `.mcpr` packet streams into the client's packet processing
 //! loop at user-controlled playback speeds (slow-motion, 1x, fast-forward, pause).
 
-use super::{
-    mcpr::{Marker, McprReader, McprWriter, Metadata, TimestampedPacket},
-    spline::CameraTrack,
-};
+use super::mcpr::{Marker, McprReader, Metadata, TimestampedPacket};
+use crate::file_id::FileIdentity;
 use crate::packet_source::PacketSource;
-use horizon_std::time::Duration;
+use horizon_std::{fs::File, time::Duration};
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::atomic::AtomicBool,
 };
 
 /// Playback controller driving recorded packets according to a virtual timeline.
@@ -19,18 +18,43 @@ pub struct ReplayDriver {
     pub metadata: Metadata,
     reader: McprReader,
     path: PathBuf,
+    /// Where the recording ends: its recorded duration, or its last packet when that is later,
+    /// so no packet is ever past the end. The clock never goes past it.
+    end_ms: u32,
+    /// The Login's time: the recording's opening snapshot is every packet up to it, applied
+    /// whenever the world is built from the start, wherever the clock is.
+    start_ms: u32,
     cursor_ms: f64,
     speed: f64,
     paused: bool,
     looping: bool,
     finished: bool,
     next_packet_cache: Option<TimestampedPacket>,
+    /// A packet read failed since the stream was last read from a seek: the packets taken with
+    /// it may be lost, so the stream no longer reads on from the clock (`seek_forward`
+    /// refuses) until a seek reads it again.
+    broken: bool,
+    /// The next packet read fails, as a failing archive's would.
+    #[cfg(test)]
+    fail_next_read: bool,
 }
 
 impl ReplayDriver {
     /// Open an `.mcpr` recording archive for replay playback.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut reader = McprReader::open(path)?;
+        Self::from_file(horizon_std::fs::File::open(path)?, path)
+    }
+
+    /// As [`ReplayDriver::open`], from the archive already open as `file`; `path` is where
+    /// edits are saved only while it still names that archive.
+    pub fn from_file(file: File, path: &Path) -> io::Result<Self> {
+        Self::from_file_cancellable(file, path, &AtomicBool::new(false))
+    }
+
+    /// As [`ReplayDriver::from_file`], giving up with `Interrupted` soon after `cancel` is set
+    /// ([`McprReader::from_file_cancellable`]).
+    pub fn from_file_cancellable(file: File, path: &Path, cancel: &AtomicBool) -> io::Result<Self> {
+        let mut reader = McprReader::from_file_cancellable(file, cancel)?;
         validate_metadata(&reader.metadata)?;
         let metadata = reader.metadata.clone();
         let next_packet_cache = reader.next_packet()?;
@@ -38,23 +62,80 @@ impl ReplayDriver {
             .as_ref()
             .ok_or_else(|| invalid_replay("recording contains no play-state packets"))?;
         validate_play_stream_start(first)?;
+        let start_ms = first.timestamp_ms;
+        let end_ms = metadata.duration.max(reader.last_timestamp_ms());
 
         Ok(Self {
             metadata,
             reader,
             path: path.to_path_buf(),
+            end_ms,
+            start_ms,
             cursor_ms: 0.0,
             speed: 1.0,
             paused: false,
             looping: false,
             finished: false,
             next_packet_cache,
+            broken: false,
+            #[cfg(test)]
+            fail_next_read: false,
         })
     }
 
-    /// Camera keyframes saved alongside the packet stream, if present.
-    pub fn camera_track(&self) -> Option<&CameraTrack> {
-        self.reader.camera_track.as_ref()
+    /// The archive this replay read, as of its most recent successful edit.
+    pub fn archive_identity(&self) -> FileIdentity {
+        self.reader.archive_identity()
+    }
+
+    /// The next packet into the cache; a failure marks the stream broken.
+    fn read_next(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_read) {
+            self.broken = true;
+            return Err(io::Error::other("injected read failure"));
+        }
+        match self.reader.next_packet() {
+            Ok(packet) => {
+                self.next_packet_cache = packet;
+                Ok(())
+            }
+            Err(error) => {
+                self.broken = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// The recording's opening snapshot, the Login and every packet with its time, still to be
+    /// handed out: what the replay's first frame is set up from, even when the Login is
+    /// recorded after 0 ms. The clock doesn't move.
+    pub fn take_opening(&mut self) -> io::Result<Vec<TimestampedPacket>> {
+        let mut packets = Vec::new();
+        while self
+            .next_packet_cache
+            .as_ref()
+            .is_some_and(|packet| packet.timestamp_ms <= self.start_ms)
+        {
+            packets.push(self.next_packet_cache.take().expect("checked above"));
+            self.read_next()?;
+        }
+        Ok(packets)
+    }
+
+    /// The archive this replay reads and saves edits to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The owner's data in this replay's archive. The host supplies the authenticated id.
+    pub fn read_mod_data(&mut self, owner: &str) -> io::Result<Option<Vec<u8>>> {
+        self.reader.read_mod_data(owner)
+    }
+
+    /// Atomically replace or remove one owner's data. The playback stream is untouched.
+    pub fn write_mod_data(&mut self, owner: &str, data: Option<&[u8]>) -> io::Result<()> {
+        self.reader.write_mod_data(&self.path, owner, data)
     }
 
     /// Markers saved alongside the packet stream, in timeline order.
@@ -68,29 +149,44 @@ impl ReplayDriver {
             time_ms: self.position_ms(),
             label,
         };
-        let mut markers = self.reader.markers.clone();
-        markers.push(marker.clone());
-        markers.sort_by_key(|entry| entry.time_ms);
-        McprWriter::replace_markers(&self.path, &markers)?;
-        self.reader.markers = markers;
+        self.reader.insert_marker(&self.path, marker.clone())?;
         Ok(marker)
     }
 
-    /// Save the edited camera path in the recording archive.
-    pub fn save_camera_track(&mut self, track: &CameraTrack) -> io::Result<()> {
-        McprWriter::replace_camera_track(&self.path, track)?;
-        self.reader.camera_track = (!track.is_empty()).then(|| track.clone());
-        Ok(())
+    /// Persist a complete replacement of the replay's bookmarks.
+    pub fn replace_markers(&mut self, mut markers: Vec<Marker>) -> io::Result<()> {
+        markers.sort_by_key(|entry| entry.time_ms);
+        self.reader.replace_markers(&self.path, markers)
+    }
+
+    /// Exact playhead for fixed-clock playback.
+    pub fn position_ms_f64(&self) -> f64 {
+        self.cursor_ms
+    }
+
+    /// Deliver packets up to an absolute recording time independently of playback speed,
+    /// pause and looping, which the export clock handles.
+    pub fn advance_to(&mut self, cursor_ms: f64) -> io::Result<Vec<TimestampedPacket>> {
+        if !cursor_ms.is_finite() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "non-finite replay time",
+            ));
+        }
+        let cursor_ms = cursor_ms.clamp(self.cursor_ms, f64::from(self.end_ms));
+        let packets = self.seek_forward(cursor_ms as u32)?;
+        self.cursor_ms = cursor_ms;
+        Ok(packets)
     }
 }
 
 impl PacketSource for ReplayDriver {
     fn position_ms(&self) -> u32 {
-        self.cursor_ms as u32
+        (self.cursor_ms as u32).min(self.end_ms)
     }
 
     fn duration_ms(&self) -> u32 {
-        self.metadata.duration
+        self.end_ms
     }
 
     fn packet_count(&self) -> usize {
@@ -98,10 +194,10 @@ impl PacketSource for ReplayDriver {
     }
 
     fn progress(&self) -> f32 {
-        if self.metadata.duration == 0 {
+        if self.end_ms == 0 {
             0.0
         } else {
-            (self.cursor_ms / self.metadata.duration as f64).clamp(0.0, 1.0) as f32
+            (self.cursor_ms / f64::from(self.end_ms)).clamp(0.0, 1.0) as f32
         }
     }
 
@@ -109,8 +205,11 @@ impl PacketSource for ReplayDriver {
         self.speed
     }
 
+    /// A speed that isn't a number changes nothing: `clamp` would keep a NaN.
     fn set_speed(&mut self, speed: f64) {
-        self.speed = speed.clamp(0.01, 20.0);
+        if !speed.is_nan() {
+            self.speed = speed.clamp(0.01, 20.0);
+        }
     }
 
     fn is_paused(&self) -> bool {
@@ -134,33 +233,32 @@ impl PacketSource for ReplayDriver {
     }
 
     fn advance(&mut self, delta: Duration) -> io::Result<Vec<TimestampedPacket>> {
-        if self.paused || self.finished {
+        // An ended clock still hands out what a seek left pending at the end (a zero-length
+        // recording's snapshot after `restart`).
+        if self.paused || (self.finished && self.next_packet_cache.is_none()) {
             return Ok(Vec::new());
         }
 
         let delta_ms = delta.as_secs_f64() * 1000.0 * self.speed;
-        self.cursor_ms += delta_ms;
+        self.cursor_ms = (self.cursor_ms + delta_ms).min(f64::from(self.end_ms));
 
         let mut ready = Vec::new();
         let target_ms = self.cursor_ms as u32;
-
-        loop {
-            let Some(pkt) = &self.next_packet_cache else {
-                if self.cursor_ms >= self.metadata.duration as f64 {
-                    if self.looping {
-                        self.seek(0)?;
-                    } else {
-                        self.finished = true;
-                    }
-                }
-                break;
-            };
-
-            if pkt.timestamp_ms <= target_ms {
-                ready.push(self.next_packet_cache.take().unwrap());
-                self.next_packet_cache = self.reader.next_packet()?;
+        while self
+            .next_packet_cache
+            .as_ref()
+            .is_some_and(|pkt| pkt.timestamp_ms <= target_ms)
+        {
+            ready.push(self.next_packet_cache.take().expect("checked above"));
+            self.read_next()?;
+        }
+        // The end is the clock reaching `end_ms`; every packet is at or before it, so all of
+        // them have been handed out by then.
+        if target_ms >= self.end_ms {
+            if self.looping {
+                self.seek(0)?;
             } else {
-                break;
+                self.finished = true;
             }
         }
 
@@ -168,41 +266,52 @@ impl PacketSource for ReplayDriver {
     }
 
     fn seek(&mut self, target_ms: u32) -> io::Result<()> {
-        let clamped_ms = target_ms.min(self.metadata.duration);
+        let clamped_ms = target_ms.min(self.end_ms);
         self.cursor_ms = clamped_ms as f64;
-        self.finished = false;
+        self.finished = clamped_ms >= self.end_ms;
 
         self.reader.seek_to_timestamp(clamped_ms)?;
-        self.next_packet_cache = self.reader.next_packet()?;
+        self.read_next()?;
+        self.broken = false;
         Ok(())
     }
 
     fn seek_and_collect(&mut self, target_ms: u32) -> io::Result<Vec<TimestampedPacket>> {
-        let target_ms = target_ms.min(self.metadata.duration);
+        let target_ms = target_ms.min(self.end_ms);
         self.reader.seek_to_timestamp(0)?;
-        self.next_packet_cache = self.reader.next_packet()?;
+        self.read_next()?;
 
+        // A world rebuilt from the start always gets the opening snapshot.
+        let through_ms = target_ms.max(self.start_ms);
         let mut packets = Vec::new();
         while self
             .next_packet_cache
             .as_ref()
-            .is_some_and(|packet| packet.timestamp_ms <= target_ms)
+            .is_some_and(|packet| packet.timestamp_ms <= through_ms)
         {
             packets.push(self.next_packet_cache.take().expect("checked above"));
-            self.next_packet_cache = self.reader.next_packet()?;
+            self.read_next()?;
         }
 
         self.cursor_ms = target_ms as f64;
-        self.finished = false;
+        self.finished = target_ms >= self.end_ms;
+        self.broken = false;
         Ok(packets)
     }
 
     fn seek_forward(&mut self, target_ms: u32) -> io::Result<Vec<TimestampedPacket>> {
-        let target_ms = target_ms.min(self.metadata.duration);
-        if (target_ms as f64) < self.cursor_ms {
+        let target_ms = target_ms.min(self.end_ms);
+        // Against the whole millisecond, not the fractional cursor: every packet up to it has
+        // been handed out, so a seek to the position shown is forward too.
+        if target_ms < self.position_ms() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "cannot seek backwards without rebuilding replay state",
+            ));
+        }
+        if self.broken {
+            return Err(io::Error::other(
+                "a packet read failed: the replay has to be rebuilt to seek",
             ));
         }
 
@@ -213,11 +322,11 @@ impl PacketSource for ReplayDriver {
             .is_some_and(|packet| packet.timestamp_ms <= target_ms)
         {
             packets.push(self.next_packet_cache.take().expect("checked above"));
-            self.next_packet_cache = self.reader.next_packet()?;
+            self.read_next()?;
         }
 
         self.cursor_ms = target_ms as f64;
-        self.finished = false;
+        self.finished = target_ms >= self.end_ms;
         Ok(packets)
     }
 
@@ -459,6 +568,79 @@ mod tests {
             [4]
         );
         assert_eq!(driver.position_ms(), 500);
+
+        // A clock between two whole milliseconds: a seek to the one shown is forward, and
+        // hands out nothing again.
+        driver.set_speed(0.5);
+        assert!(
+            driver
+                .advance(Duration::from_millis(33))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(driver.position_ms(), 516);
+        assert!(driver.seek_forward(516).unwrap().is_empty());
+        assert_eq!(driver.position_ms(), 516);
+        assert_eq!(
+            driver.seek_forward(515).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        let _ = fs::remove_file(mcpr_path);
+        let _ = fs::remove_dir(temp_dir);
+    }
+
+    /// A packet read that fails while playing loses the packets taken with it: a later forward
+    /// seek refuses (the caller rebuilds) rather than skip them, until a seek reads the stream
+    /// again.
+    #[test]
+    fn a_failed_read_makes_forward_seeks_refuse_until_the_stream_is_read_again() {
+        let temp_dir = horizon_std::env::temp_dir()
+            .join(format!("replay_driver_broken_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let mcpr_path = temp_dir.join("broken_test.mcpr");
+        let meta = Metadata {
+            duration: 1000,
+            ..Default::default()
+        };
+        let mut writer = McprWriter::new(mcpr_path.clone(), meta).unwrap();
+        let (login_id, login_payload) = play_login_packet();
+        writer.write_packet(0, login_id, &login_payload).unwrap();
+        for (timestamp, id) in [(200, 2), (300, 3), (500, 4)] {
+            writer.write_packet(timestamp, id, &[id as u8]).unwrap();
+        }
+        writer.finish(1000).unwrap();
+
+        let mut driver = ReplayDriver::open(&mcpr_path).unwrap();
+        assert_eq!(driver.advance(Duration::from_millis(100)).unwrap().len(), 1);
+        // Reading on after the packet at 200 fails: it is taken, and lost with the batch.
+        driver.fail_next_read = true;
+        assert!(driver.advance(Duration::from_millis(150)).is_err());
+        assert!(driver.seek_forward(400).is_err(), "refused, not skipped");
+        assert!(driver.seek_forward(600).is_err());
+
+        let rebuilt = driver.seek_and_collect(400).unwrap();
+        assert_eq!(
+            rebuilt.iter().map(|packet| packet.id).collect::<Vec<_>>(),
+            [login_id, 2, 3]
+        );
+        let forward = driver.seek_forward(600).unwrap();
+        assert_eq!(
+            forward.iter().map(|packet| packet.id).collect::<Vec<_>>(),
+            [4]
+        );
+
+        // A failed forward seek breaks it too; a plain seek reads it again.
+        driver.seek(0).unwrap();
+        driver.fail_next_read = true;
+        assert!(driver.seek_forward(250).is_err());
+        assert!(driver.seek_forward(900).is_err());
+        driver.seek(0).unwrap();
+        assert_eq!(
+            driver.seek_forward(250).unwrap().len(),
+            2,
+            "the Login and the packet at 200"
+        );
 
         let _ = fs::remove_file(mcpr_path);
         let _ = fs::remove_dir(temp_dir);

@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import lzma
 import os
 import shutil
 import sys
@@ -15,8 +16,22 @@ from pathlib import Path
 
 from tools import prebuilt_game
 from tests.test_ci_concurrency import yaml
+from tests.symlinks import symlink_or_skip
 
 COMMIT = "c" * 40
+
+
+def tar_members(archive: bytes) -> list[tuple]:
+    """An xz-compressed tar's members with everything but their mode: name, type, size, times, owners, contents."""
+    with tarfile.open(fileobj=io.BytesIO(lzma.decompress(archive))) as tar:
+        return [(m.name, m.type, m.size, m.mtime, m.uid, m.gid, m.uname, m.gname,
+                 tar.extractfile(m).read() if m.isfile() else None) for m in tar.getmembers()]
+
+
+# Packing the Linux fixture (`SdkAssetTests.out`) runs a process pool, and Python can't start one on Windows while
+# `sys.platform` says "linux" (it takes the POSIX spawn path). The fixture's `.so` names and Linux target triple are
+# also only what the tool expects on Linux. CI runs these on Linux, where the fixture is native.
+packs_the_linux_fixture = unittest.skipUnless(sys.platform.startswith("linux"), "packs the Linux fixture")
 
 
 def write_build_data(root: Path, identity: dict | None = None, commit: str = COMMIT) -> None:
@@ -40,6 +55,32 @@ def write_build_data(root: Path, identity: dict | None = None, commit: str = COM
 
 
 class StageToolTests(unittest.TestCase):
+    def test_tracked_blobs_drains_tar_padding_before_waiting_for_git(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "fixture.tar"
+            content = b"tracked file contents"
+            with tarfile.open(archive_path, "w") as archive:
+                member = tarfile.TarInfo("tracked.txt")
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+            with archive_path.open("ab") as archive:
+                # Use more padding than a pipe can buffer, so the writer needs the reader to finish.
+                archive.write(bytes(2 * 1024 * 1024))
+
+            pipe_archive = (
+                "from pathlib import Path; import sys; "
+                "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
+            )
+            real_popen = subprocess.Popen
+
+            def archive_process(_command, **kwargs):
+                return real_popen([sys.executable, "-c", pipe_archive, str(archive_path)],
+                                  stderr=subprocess.DEVNULL, **kwargs)
+
+            with patch.object(prebuilt_game.subprocess, "Popen", side_effect=archive_process):
+                self.assertEqual(list(prebuilt_game.tracked_blobs(root, COMMIT)), [("tracked.txt", content)])
+
     def test_prebuilt_tool_stages_fresh_tracked_copy_without_cargo(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -73,7 +114,8 @@ class StageToolTests(unittest.TestCase):
                                           str(fresh / "points.json"),
                                           str(fresh / "internals.json"), commit])
                 self.assertEqual(kwargs["cwd"], fresh)
-                self.assertIsNone(kwargs["env"])
+                # Never the whole mapping in a failure message: it would print the caller's environment.
+                self.assertTrue(kwargs["env"] is None, "the staged tool runs in the caller's own environment")
                 self.assertEqual((fresh / "tracked.rs").read_bytes(), committed)
                 self.assertFalse((fresh / "untracked.rs").exists())
                 (fresh / "tracked.rs").write_text("staged")
@@ -204,7 +246,7 @@ class RegistryPatchTests(unittest.TestCase):
             (source / "Cargo.toml").write_text("[patch.crates-io]\nallocator-sys={path='patch'}\n")
             outside = root / "private.txt"
             outside.write_text("must not ship")
-            (patched / "leak").symlink_to(outside)
+            symlink_or_skip(patched / "leak", outside)
             with self.assertRaisesRegex(ValueError, "symlink"):
                 prebuilt_game.carry_patches(source, sdk)
             self.assertFalse((sdk / "patches").exists())
@@ -227,7 +269,7 @@ class RegistryPatchTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "aren't compiler outputs"):
                 prebuilt_game.check(sdk)
             extra.unlink()
-            extra.symlink_to(declared)
+            symlink_or_skip(extra, declared)
             with self.assertRaisesRegex(SystemExit, "symlinks"):
                 prebuilt_game.check(sdk)
             extra.unlink()
@@ -241,6 +283,13 @@ class SdkAssetTests(unittest.TestCase):
                "deps/libmod_api.so", "deps/libmod_vocab.so", "deps/libmod_points.so"]
     API = ["deps/libmod_api-1.rmeta", "deps/libmod_points-1.rmeta", "host/libserde_derive.so"]
     ENGINE = ["deps/libhorizon_client-1.rmeta", "native/libwindows.a"]
+
+    def setUp(self):
+        # The fixture is a Linux build (`out`), so its executable has no ".exe" on whatever OS the tests run:
+        # `EXECUTABLE` is set when the tool is imported, which the `sys.platform` patches below come after.
+        patcher = patch.object(prebuilt_game, "EXECUTABLE", "horizon-client")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def out(self, root: Path, mtime: int) -> Path:
         out = root / "prebuilt"
@@ -263,6 +312,7 @@ class SdkAssetTests(unittest.TestCase):
         with patch.object(prebuilt_game, "head", return_value=COMMIT), patch.object(prebuilt_game, "run", side_effect=run):
             prebuilt_game.pack(out, dist, stage_tool=Path("horizon-stage"))
 
+    @packs_the_linux_fixture
     def test_pack_writes_three_archives_that_split_the_package_and_the_same_every_run(self):
         import lzma
         import tarfile
@@ -298,6 +348,7 @@ class SdkAssetTests(unittest.TestCase):
                 archives.append([(dist / name).read_bytes() for name in names])
         self.assertEqual(archives[0], archives[1])
 
+    @packs_the_linux_fixture
     def test_parallel_pack_matches_serial_with_spawn(self):
         import multiprocessing
         from concurrent.futures import ProcessPoolExecutor
@@ -316,6 +367,7 @@ class SdkAssetTests(unittest.TestCase):
             for archive in serial.iterdir():
                 self.assertEqual(archive.read_bytes(), (parallel / archive.name).read_bytes(), archive.name)
 
+    @packs_the_linux_fixture
     def test_worker_failure_names_archive_and_stops_surface_export(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -387,6 +439,7 @@ class SdkAssetTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "horizon-mod-wasm"):
             prebuilt_game.slices(metadata, copied, ["bin/horizon-client"])
 
+    @packs_the_linux_fixture
     def test_gather_takes_every_legs_archives_once_and_one_build_data_that_all_copies_match(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(sys, "platform", "linux"):
             root = Path(directory)
@@ -431,26 +484,61 @@ class SdkAssetTests(unittest.TestCase):
                 legs / "sdk-linux-client/engine-x86_64-unknown-linux-gnu.tar.xz", leg))
             refused("no build-data.tar.xz", lambda leg: (leg / "build-data.tar.xz").unlink())
 
+    def test_pack_exports_the_surface_with_the_tool_staging_built(self):
+        # Staging builds horizon-stage in <target>/prebuilt/tools: the surface export runs that binary, and builds one
+        # in the same place only when staging left none, never a second copy in <target>/release.
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "cargo-target"
+            tools = (target / "prebuilt" / "tools").resolve()
+            for platform, name in (("linux", "horizon-stage"), ("darwin", "horizon-stage"), ("win32", "horizon-stage.exe")):
+                with self.subTest(platform=platform), patch.object(sys, "platform", platform), \
+                        patch.dict(os.environ, {"CARGO_TARGET_DIR": str(target)}), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    # No staged tool: Cargo builds it in staging's target folder.
+                    command, env = prebuilt_game.surface_tool()
+                    self.assertEqual(command, ["cargo", "run", "--locked", "--release", "-q", "-p",
+                                               "horizon-mod-api-gen", "--bin", "horizon-stage", "--"])
+                    self.assertEqual(env["CARGO_TARGET_DIR"], str(tools))
+                    # Another platform's name is not this platform's tool.
+                    other = tools / "release" / ("horizon-stage" if name.endswith(".exe") else "horizon-stage.exe")
+                    other.parent.mkdir(parents=True, exist_ok=True)
+                    other.write_bytes(b"")
+                    self.assertEqual(prebuilt_game.surface_tool()[0][0], "cargo")
+                    tool = tools / "release" / name
+                    tool.write_bytes(b"")
+                    self.assertEqual(prebuilt_game.surface_tool(), ([str(tool)], None))
+                    shutil.rmtree(tools)
+
     def test_pack_refuses_another_commits_package(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             out = self.out(root, 1000)
-            with patch.object(prebuilt_game, "head", return_value="d" * 40), \
+            with patch.object(prebuilt_game, "head", return_value="d" * 40), patch.object(sys, "platform", "linux"), \
                     self.assertRaisesRegex(SystemExit, "not this source's package"):
                 prebuilt_game.pack(out, root / "dist")
             self.assertFalse((root / "dist").exists())
 
     def test_the_rust_reader_fixture_is_what_pack_writes(self):
-        # crates/horizon-mod-package/src/sdk/fixture.tar.xz is unpacked by the Rust reader's test: the two agree.
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "deps").mkdir()
-            (root / "deps/a.rmeta").write_text("metadata")
-            for path in (root / "deps", root / "deps/a.rmeta"):
-                os.utime(path, (0, 0))
-            prebuilt_game.tar_xz(root, prebuilt_game.tree(root), root / "fixture.tar.xz")
-            fixture = prebuilt_game.ROOT / "crates/horizon-mod-package/src/sdk/fixture.tar.xz"
-            self.assertEqual((root / "fixture.tar.xz").read_bytes(), fixture.read_bytes())
+        # crates/horizon-mod-package/src/sdk/fixture.tar.xz is unpacked by the Rust reader's test: the two agree,
+        # whatever the umask (0002, 0022 and 0027 give these modes).
+        for folder_mode, file_mode in ((0o775, 0o664), (0o755, 0o644), (0o750, 0o640)):
+            with self.subTest(folder=oct(folder_mode)), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "deps").mkdir()
+                (root / "deps/a.rmeta").write_text("metadata")
+                for path, mode in ((root, folder_mode), (root / "deps", folder_mode), (root / "deps/a.rmeta", file_mode)):
+                    os.chmod(path, mode)
+                for path in (root / "deps", root / "deps/a.rmeta"):
+                    os.utime(path, (0, 0))
+                prebuilt_game.tar_xz(root, prebuilt_game.tree(root), root / "fixture.tar.xz")
+                fixture = prebuilt_game.ROOT / "crates/horizon-mod-package/src/sdk/fixture.tar.xz"
+                written = (root / "fixture.tar.xz").read_bytes()
+                if os.name == "nt":
+                    # Windows has no POSIX modes (a folder stats as 0o777, a file as 0o666) and the archive keeps the
+                    # folder's own, so there the members are compared without them; the bytes, everywhere else.
+                    self.assertEqual(tar_members(written), tar_members(fixture.read_bytes()))
+                else:
+                    self.assertEqual(written, fixture.read_bytes())
 
 
 class TrackedBlobsTests(unittest.TestCase):
@@ -504,16 +592,100 @@ class AllocatorSelectionTests(unittest.TestCase):
             self.assertEqual(command[command.index("--target") + 1], "fixture-host")
             self.assertEqual(kwargs["env"]["HORIZON_GAME_BUILD_ID"], "fixture-commit")
             self.assertIn("-C prefer-dynamic", kwargs["env"]["RUSTFLAGS"])
-            self.assertNotIn("CARGO_ENCODED_RUSTFLAGS", kwargs["env"])
+            # Single keys only: a failure must never print the caller's whole environment.
+            self.assertFalse("CARGO_ENCODED_RUSTFLAGS" in kwargs["env"], "encoded flags would override RUSTFLAGS")
+            commands.append(command)
+            lto.append(kwargs["env"].get("CARGO_PROFILE_RELEASE_LTO"))
             raise Captured
 
-        with patch.object(prebuilt_game, "stage", return_value=Path("staged")), \
-             patch.object(prebuilt_game, "head", return_value="fixture-commit"), \
-             patch.object(prebuilt_game, "rustc_host", return_value="fixture-host"), \
-             patch.object(prebuilt_game, "run", side_effect=capture), \
-             patch.dict(prebuilt_game.os.environ, {"CARGO_ENCODED_RUSTFLAGS": "-Cprefer-dynamic=no"}):
-            with self.assertRaises(Captured):
-                prebuilt_game.build(Path("unused-sdk"), False)
+        commands, lto = [], []
+        # The timing report only when the workflow asks for one (dry runs): writing it can fail a build that compiled.
+        for timings, server in ((None, False), ("1", False), (None, True)):
+            with patch.object(prebuilt_game, "stage", return_value=Path("staged")), \
+                 patch.object(prebuilt_game, "head", return_value="fixture-commit"), \
+                 patch.object(prebuilt_game, "rustc_host", return_value="fixture-host"), \
+                 patch.object(prebuilt_game, "run", side_effect=capture), \
+                 patch.object(prebuilt_game.sys, "platform", "win32"), \
+                 patch.dict(prebuilt_game.os.environ, {"CARGO_ENCODED_RUSTFLAGS": "-Cprefer-dynamic=no",
+                                                       "CARGO_PROFILE_RELEASE_LTO": "fat-sentinel"}):
+                prebuilt_game.os.environ.pop("HORIZON_SDK_TIMINGS", None)
+                if timings:
+                    prebuilt_game.os.environ["HORIZON_SDK_TIMINGS"] = timings
+                with self.assertRaises(Captured):
+                    prebuilt_game.build(Path("unused-sdk"), server)
+        self.assertEqual(["--timings" in command for command in commands], [False, True, False])
+        # A client's game library builds with the official parts, in one feature resolution (#19384); a server's alone.
+        client, _, server = commands
+        self.assertEqual(client[:2], ["cargo", "build"])
+        self.assertIn(prebuilt_game.OFFICIAL, client)
+        self.assertEqual(client[client.index("--features") + 1], f"{prebuilt_game.GAME}/system-allocator")
+        self.assertEqual(server[:2], ["cargo", "rustc"])
+        self.assertNotIn(prebuilt_game.OFFICIAL, server)
+        # An rlib root would make the parts' own crates bitcode only (`-C linker-plugin-lto`), which rustc refuses with
+        # prefer-dynamic on Windows; the server's dylib-only build keeps the profile as it is.
+        self.assertEqual(lto, ["false", "false", "fat-sentinel"])
+
+    def test_the_official_link_folder_takes_the_rlib_beside_the_metadata_cargo_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target" / "host"
+            deps = target / "release/deps"
+            deps.mkdir(parents=True)
+            for name in ("libhorizon_official-1.rlib", "libhorizon_official-1.rmeta", "libserde-2.rlib", "libserde-2.rmeta"):
+                (deps / name).write_bytes(name.encode())
+            # Cargo lists only the metadata when RUSTFLAGS carries --emit=metadata; a dylib has no rlib beside it.
+            artifacts = [
+                {"reason": "compiler-artifact", "filenames": [str(deps / "libhorizon_official-1.rmeta")]},
+                {"reason": "compiler-artifact", "filenames": [str(deps / "libserde-2.rlib"), str(deps / "libserde-2.rmeta")]},
+                {"reason": "compiler-artifact", "filenames": [str(deps / "horizon_mod_host.dll")]},
+                {"reason": "build-script-executed"},
+            ]
+            folder = prebuilt_game.official_link(artifacts, target, root / "official-link")
+            self.assertEqual(sorted(path.name for path in folder.iterdir()),
+                             ["libhorizon_official-1.rlib", "libserde-2.rlib"])
+
+    def test_a_crate_shared_with_the_official_parts_compiled_twice_stops_the_build(self):
+        target = Path("target-dir")
+
+        def artifact(crate: str, unit: str) -> dict:
+            return {"reason": "compiler-artifact", "package_id": unit, "target": {"name": crate, "kind": ["lib"]},
+                    "filenames": [str(target / "release/deps" / f"lib{crate}-{unit}.rlib")]}
+
+        once = [*(artifact(crate, "a") for crate in prebuilt_game.SHARED_ONCE), artifact("log", "a")]
+        prebuilt_game.compiled_once(once, target)
+        for crate in prebuilt_game.SHARED_ONCE:
+            with self.subTest(crate), self.assertRaisesRegex(SystemExit, crate):
+                prebuilt_game.compiled_once([*once, artifact(crate, "b")], target)
+        # A host build of the same crate (a build script's) is not a second copy in the game.
+        host = {**artifact("horizon_hooks", "h"), "filenames": [str(Path("elsewhere/libhorizon_hooks-h.rlib"))]}
+        prebuilt_game.compiled_once([*once, host], target)
+
+    def test_a_client_executable_registers_the_official_parts_and_a_server_one_does_not(self):
+        for official in (False, True):
+            with self.subTest(official=official), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                out = root / "out"
+                (out / "deps").mkdir(parents=True)
+                # The rlib as Cargo leaves it: beside the metadata its artifact record names (--emit=metadata).
+                target = root / "target" / "host"
+                deps = target / "release/deps"
+                deps.mkdir(parents=True)
+                for name in ("libhorizon_official-0123.rlib", "libhorizon_official-0123.rmeta"):
+                    (deps / name).write_bytes(b"")
+                record = {"reason": "compiler-artifact", "filenames": [str(deps / "libhorizon_official-0123.rmeta")]}
+                link = prebuilt_game.official_link([record], target, root / "official-link")
+                commands = []
+                with patch.object(prebuilt_game, "extern_args", side_effect=lambda _, crate: ["--extern", crate]), \
+                     patch.object(prebuilt_game, "dylib", return_value=Path("host.dll")), \
+                     patch.object(prebuilt_game, "run", side_effect=lambda command, **_: commands.append(command)):
+                    prebuilt_game.api_route(out, [], link if official else None)
+                [command] = commands
+                self.assertEqual("--cfg" in command, official)
+                self.assertEqual(any(arg.startswith("horizon_official=") for arg in command), official)
+                if official:
+                    self.assertEqual(command[command.index("--cfg") + 1], "horizon_official")
+                    self.assertIn(f"horizon_official={link / 'libhorizon_official-0123.rlib'}", command)
+                    self.assertIn(f"dependency={link}", command)
 
 
 class ExecutableLinkPolicyTests(unittest.TestCase):
@@ -554,7 +726,7 @@ class ExecutableLinkPolicyTests(unittest.TestCase):
                             *externs, "-o", str(binary)], check=True)
             for target_os, env, expected in [("windows", "msvc", ["/STACK:142606336"]),
                                       ("windows", "gnu", ["-Wl,--stack,142606336"]),
-                                      ("linux", "gnu", []), ("macos", "", ["-Wl,-stack_size,0x8800000"])]:
+                                      ("linux", "gnu", []), ("macos", "", ["-Wl,-stack_size,0x9000000"])]:
                 with self.subTest(os=target_os, env=env):
                     output = root / "output"
                     output.write_text(subprocess.check_output([str(binary)], text=True, env={
@@ -811,13 +983,19 @@ if __name__ == "__main__":
     unittest.main()
 
 
+# `start` bundles the installation into a Horizon.app and probes it on macOS, which the stubbed `subprocess.run`
+# these tests give it cannot answer; every other platform takes the plain executable's path.
+@unittest.skipIf(sys.platform == "darwin", "start bundles and probes a Horizon.app on macOS")
 class SmokeStartTests(unittest.TestCase):
     def test_only_expected_missing_resources_exit_is_accepted_and_homes_are_scratch(self):
         from types import SimpleNamespace
         for code in (1, 0, 2, 3221225477):
             with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                result = subprocess.CompletedProcess([], code, stdout=prebuilt_game.NO_RESOURCES)
+                (root / "out").mkdir()
+                (root / "out" / prebuilt_game.IDENTITY).write_text(json.dumps({"side": "client"}))
+                result = subprocess.CompletedProcess(
+                    [], code, stdout=f"{prebuilt_game.NO_RESOURCES}\n{prebuilt_game.OFFICIAL_PARTS}: download it")
                 with patch.dict(sys.modules, {"lab": SimpleNamespace(game_env=lambda **_: {"HORIZON_HOME": "/inherited"})}), \
                      patch.object(prebuilt_game.subprocess, "run", return_value=result) as run, \
                      contextlib.redirect_stdout(io.StringIO()):
@@ -829,6 +1007,27 @@ class SmokeStartTests(unittest.TestCase):
                 environment = run.call_args.kwargs["env"]
                 for key in ("HORIZON_HOME", "HORIZON_LAUNCHER_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"):
                     self.assertTrue(Path(environment[key]).is_relative_to(root))
+
+    def test_a_client_without_the_official_parts_or_a_server_with_them_fails(self):
+        from types import SimpleNamespace
+        # Only the official parts' hooks point the missing-files error at the launcher (#19384).
+        missing = f"{prebuilt_game.NO_RESOURCES}: no horizon-resources.json in /x\n"
+        official = missing + f"{prebuilt_game.OFFICIAL_PARTS}: download it at https://example.org (Download)."
+        for side, stdout, passes in (("client", official, True), ("client", missing, False),
+                                     ("server", missing, True), ("server", official, False)):
+            with self.subTest(side=side, passes=passes), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory) / "out"
+                out.mkdir()
+                (out / prebuilt_game.IDENTITY).write_text(json.dumps({"side": side}))
+                result = subprocess.CompletedProcess([], 1, stdout=stdout)
+                with patch.dict(sys.modules, {"lab": SimpleNamespace(game_env=lambda **_: {})}), \
+                     patch.object(prebuilt_game.subprocess, "run", return_value=result), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    if passes:
+                        prebuilt_game.start(out)
+                    else:
+                        with self.assertRaisesRegex(SystemExit, side):
+                            prebuilt_game.start(out)
 
 
 class PublicationGateTests(unittest.TestCase):
@@ -875,7 +1074,9 @@ class PublicationInventoryTests(unittest.TestCase):
                     "crates/horizon-mod-package/src/sdk/package-format": "6\n"}.items():
                 path = source / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(text)
+                # LF as the commit keeps it: Windows' text mode would write CRLF, which the patch copy carries and
+                # the commit's bytes don't.
+                path.write_text(text, newline="\n")
             def git(*args):
                 return subprocess.check_output(["git", "-C", str(source), *args], text=True).strip()
             git("init", "-q")

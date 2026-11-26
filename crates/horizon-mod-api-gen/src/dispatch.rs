@@ -253,6 +253,7 @@ pub(super) fn emit<'a>(
                 name == "cancel" && ty.to_token_stream().to_string() == "& mut bool"
             });
         let cancel_out = if collect_cancel { Some("cancel") } else { out };
+        let sticky_cancel = name == "registered_player_command";
         let result = if collect_cancel {
             " -> Flow".to_owned()
         } else if let Some((_, ty)) = &output {
@@ -516,7 +517,13 @@ pub(super) fn emit<'a>(
                     "{name}: a cancel hook's event has its own `cancelled` field"
                 ));
             }
-            fields.push_str("/// Whether the event is cancelled: by the game or an earlier listener, or by this one\n/// setting it. Only a listener that receives cancelled events (`#[listener(receive_cancelled)]`)\n/// sees `true`, and setting it back to `false` lets the game's behaviour run.\npub cancelled: bool,\n");
+            fields.push_str("/// Whether the event is cancelled: by the game or an earlier listener, or by this one\n/// setting it. Only a listener that receives cancelled events (`#[listener(receive_cancelled)]`)\n");
+            fields.push_str(if sticky_cancel {
+                "/// sees `true`. Once handled, the command skips ordinary parsing even if a later listener clears this field.\n"
+            } else {
+                "/// sees `true`, and setting it back to `false` lets the game's behaviour run.\n"
+            });
+            fields.push_str("pub cancelled: bool,\n");
             inits.push(format!("cancelled: *{}", cancel_out.unwrap()));
         }
         if let Some((name, ty)) = output.as_ref().filter(|_| contract != Contract::Collect) {
@@ -925,6 +932,14 @@ pub(super) fn emit<'a>(
             let cancel = format!(
                 "if matches!({mod_item}.{name}({invoke}), Flow::Cancel) {{ {event}.cancelled = true; }}"
             );
+            // The raw player-command hook can already have executed the command.
+            let cancel = if sticky_cancel {
+                format!(
+                    "let __was_cancelled = {event}.cancelled; {cancel} {event}.cancelled |= __was_cancelled;"
+                )
+            } else {
+                cancel
+            };
             if stack_after.is_empty() {
                 cancel
             } else {
@@ -942,6 +957,13 @@ pub(super) fn emit<'a>(
                 String::new(),
                 format!(
                     "{{ let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if owner.id != {event}.mod_id {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
+                    call(&mod_item, "break"),
+                ),
+            ),
+            None if name == "apply_effect_tick" => (
+                String::new(),
+                format!(
+                    "{{ let __owner = super::effect_owner({event}.effect); let mut {entered} = super::runtime::ListenerScope::new(); for (_, owner) in super::listening(HookId::{hook_id}) {{ if let Some(expected) = __owner && owner.id != expected {{ continue; }} let {mod_item} = {entered}.enter(owner, \"{name}\"); {} }} }}",
                     call(&mod_item, "break"),
                 ),
             ),

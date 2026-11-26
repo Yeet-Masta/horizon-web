@@ -1116,27 +1116,24 @@ fn block_animate_tick(
             }
         }
         Animate::EnchantingTable => {
-            for ox in -2i32..=2 {
-                for oy in 0..=1 {
-                    for oz in -2i32..=2 {
-                        if ox.abs() != 2 && oz.abs() != 2 {
-                            continue;
-                        }
-                        if next_int(engine.random(), 16) != 0 {
-                            continue;
-                        }
-                        let provider = ctx.state([pos[0] + ox, pos[1] + oy, pos[2] + oz]);
-                        let between = ctx.state([pos[0] + ox / 2, pos[1] + oy, pos[2] + oz / 2]);
-                        if ctx.enchant_power.has(provider, 1) && ctx.enchant_power.has(between, 2) {
-                            let r = engine.random();
-                            let v = [
-                                f64::from(ox as f32 + r.next_float() - 0.5),
-                                f64::from(oy as f32 - r.next_float() - 1.0),
-                                f64::from(oz as f32 + r.next_float() - 0.5),
-                            ];
-                            add(engine, T::Enchant, [fx + 0.5, fy + 2.0, fz + 0.5], v);
-                        }
-                    }
+            // EnchantingTableBlock.animateTick walks BOOKSHELF_OFFSETS in
+            // BlockPos.betweenClosed order (x fastest), so each 1-in-16 roll
+            // and its velocity draws belong to the same bookshelf vanilla
+            // attaches them to.
+            for [ox, oy, oz] in crate::stations::bookshelf_offsets() {
+                if next_int(engine.random(), 16) != 0 {
+                    continue;
+                }
+                let provider = ctx.state([pos[0] + ox, pos[1] + oy, pos[2] + oz]);
+                let between = ctx.state([pos[0] + ox / 2, pos[1] + oy, pos[2] + oz / 2]);
+                if ctx.enchant_power.has(provider, 1) && ctx.enchant_power.has(between, 2) {
+                    let r = engine.random();
+                    let v = [
+                        f64::from(ox as f32 + r.next_float() - 0.5),
+                        f64::from(oy as f32 - r.next_float() - 1.0),
+                        f64::from(oz as f32 + r.next_float() - 0.5),
+                    ];
+                    add(engine, T::Enchant, [fx + 0.5, fy + 2.0, fz + 0.5], v);
                 }
             }
         }
@@ -1895,15 +1892,17 @@ fn dripstone_drip(
     };
     let above = ctx.facts.get(ctx.state([root[0], root[1] + 1, root[2]]));
     // Mud above the root counts as a water source unless water evaporates here.
-    let fluid = if &*above.name == "minecraft:mud" && !ctx.ultrawarm {
+    let mud_source = &*above.name == "minecraft:mud" && !ctx.ultrawarm;
+    let fluid = if mud_source {
         Fluid::Water
     } else {
         above.fluid
     };
-    // canFillCauldron is `fluid == Fluids.LAVA || fluid == Fluids.WATER`: the
-    // fluid above the root by its type, not by whether it is still a source, so
-    // a flowing fluid drips under the same 2% roll a source does.
-    if roll >= 0.02 && fluid == Fluid::None {
+    // getFluidAboveStalactite takes the exact state: canFillCauldron is false
+    // for a flowing fluid, which drips only with the dimension's 2% roll,
+    // while a source (level 8, not falling) uses the 12% roll.
+    let source = mud_source || (above.fluid_level == 8 && !above.fluid_falling);
+    if roll >= 0.02 && !source {
         return;
     }
     // getDripParticle: no fluid drips what the dimension's default says.

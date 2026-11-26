@@ -1,6 +1,6 @@
 //! Build each API-only native mod as its own Rust dylib from SDK metadata.
 //! The executable is fixed and the engine archive is never read.
-use super::{api, dependencies, internals, prebuilt};
+use super::{api, dependencies, prebuilt};
 use crate::rust_toolchain::Toolchain;
 use std::collections::HashMap;
 use std::fs;
@@ -30,13 +30,7 @@ pub(super) fn compile(
     let runtime_deps = runtime.join("deps");
     let search =
         |edition: &str| prebuilt::rustc_with(rust, &[&deps, &host, &runtime_deps, out], edition);
-    let mut libraries = HashMap::new();
-    for (package, name) in api::PACKAGES {
-        if package != api::INTERNALS_PACKAGE {
-            libraries.insert(name, prebuilt::library(&runtime_deps, name)?);
-        }
-    }
-    libraries.insert("mod_vocab", prebuilt::library(&runtime_deps, "mod_vocab")?);
+    let libraries = prebuilt::sdk_libraries(&runtime_deps, projects)?;
     let mut rlibs: HashMap<&str, PathBuf> = HashMap::new();
     for (n, &index) in resolution.order.iter().enumerate() {
         let project = &projects[index];
@@ -51,7 +45,6 @@ pub(super) fn compile(
             &prebuilt::library_entry(
                 &api::template(&api.join(TEMPLATE))?,
                 &[&project.bundle.manifest],
-                &internals::Catalog::read(api)?,
                 sdk.commit(),
                 &project.bundle.manifest.id,
                 &project.bundle.manifest.version.to_string(),

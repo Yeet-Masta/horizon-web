@@ -144,6 +144,13 @@ pub trait BlockStatesBackend {
     #[access(Metadata)]
     fn block_state_has_block_entity(&self, state: BlockState) -> Option<bool>;
     /// Side: both.
+    /// The id of the block entity type a block of this state carries (`minecraft:chest`): the type
+    /// its `newBlockEntity` makes, as the game picks it when the block is placed. None for an
+    /// unknown state and for a state with no block entity, as `has_block_entity` answers `false`.
+    /// A Horizon addition: vanilla has no single call for it.
+    #[access(Metadata)]
+    fn block_state_block_entity_type(&self, state: BlockState) -> Option<String>;
+    /// Side: both.
     /// `BlockState.getMapColor(level, pos)` for a state whose colour does not depend on where it
     /// stands: its `MapColor.id`, 0 (`MapColor.NONE`) for no colour. Map items colour a column
     /// by it (`MapItem.update`). None for an unknown state.
@@ -194,4 +201,47 @@ pub trait BlockStatesBackend {
         fluid: FluidKey,
         constraints: &[StateConstraint],
     ) -> Result<(), FluidStateError>;
+    /// Side: both.
+    /// `BlockState.getLightEmission()`: the light the state gives off, 0 to 15 (glowstone 15,
+    /// a torch 14). A block declaring `dynamic_light` may emit another level at a position
+    /// through its parts' `light_emission`; this is the state's own. None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_light_emission(&self, state: BlockState) -> Option<u8>;
+    /// Side: both.
+    /// `Block.getFriction()`: how slippery the block is, 0.6 for most, ice 0.98, blue ice
+    /// 0.989, slime 0.8. None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_friction(&self, state: BlockState) -> Option<f32>;
+    /// Side: both.
+    /// `BlockState.isSolidRender()`: an opaque full cube that hides the faces beside it (stone
+    /// yes; glass, leaves and single slabs no). None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_solid_render(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `BlockTags.FIRE`: the state's block is `minecraft:fire` or `minecraft:soul_fire`, the two
+    /// fire blocks of vanilla's tag. Air and other blocks answer false. None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_is_fire(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `BlockState.isRedstoneConductor` for the state alone (without a level position): true for
+    /// blocks whose state conducts redstone power (stone yes, glass and air no). Positional
+    /// overrides such as open shulker boxes require [`LevelRef::is_redstone_conductor`]. None for
+    /// an unknown state.
+    #[access(Metadata)]
+    fn block_state_is_redstone_conductor(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `BlockState.requiresCorrectToolForDrops()`: the block drops its loot only when mined
+    /// with a correct tool (stone and obsidian yes, dirt no). None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_requires_correct_tool(&self, state: BlockState) -> Option<bool>;
+    /// Side: both.
+    /// `ItemStack.isCorrectToolForDrops(state)`: the `minecraft:tool` rules of `stack` (its
+    /// component, else its item's) name the block as one it harvests. False for an empty stack
+    /// and for an item that is no tool. None for an unknown state.
+    #[access(Metadata)]
+    fn block_state_correct_tool_for_drops(
+        &self,
+        state: BlockState,
+        stack: &ItemStack,
+    ) -> Option<bool>;
 }

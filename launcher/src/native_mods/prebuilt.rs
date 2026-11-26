@@ -397,6 +397,39 @@ fn check_identity(dir: &Path, revision: &str, host: &str, target: Target) -> Res
     }
 }
 
+/// The SDK libraries a native build links, by library name, found in `deps`. `mod_points` is
+/// empty since the injection points were removed (#19576): it is resolved only when one of the
+/// mods being built names it, so an SDK that no longer ships it still builds every other mod.
+pub(super) fn sdk_libraries(
+    deps: &Path,
+    projects: &[api::Project<'_>],
+) -> Result<std::collections::HashMap<&'static str, PathBuf>, String> {
+    let named = |library: &str| {
+        projects.iter().any(|project| {
+            project
+                .api_dependencies()
+                .iter()
+                .any(|(_, used)| *used == library)
+        })
+    };
+    sdk_libraries_named(deps, named)
+}
+
+fn sdk_libraries_named(
+    deps: &Path,
+    named: impl Fn(&str) -> bool,
+) -> Result<std::collections::HashMap<&'static str, PathBuf>, String> {
+    let mut libraries = std::collections::HashMap::new();
+    for (package, name) in api::PACKAGES {
+        if package == api::INTERNALS_PACKAGE || (package == api::POINTS_PACKAGE && !named(name)) {
+            continue;
+        }
+        libraries.insert(name, library(deps, name)?);
+    }
+    libraries.insert("mod_vocab", library(deps, "mod_vocab")?);
+    Ok(libraries)
+}
+
 /// The library file a crate named `krate` left in `deps`: its metadata, or its own dylib.
 pub(super) fn library(deps: &Path, krate: &str) -> Result<PathBuf, String> {
     // A cached target can still contain metadata from an earlier static build. Prefer the dylib:
@@ -439,7 +472,6 @@ pub(super) fn wrapper_externs(deps: &Path) -> Result<BTreeMap<String, PathBuf>, 
         "horizon_client",
         "mod_api",
         "mod_vocab",
-        "mod_points",
         "horizon_mod_package",
     ] {
         externs.insert(name.to_owned(), library(deps, name)?);
@@ -580,37 +612,10 @@ impl Route {
 /// for: a `[native]` table row (named by its table), or game internals (`internals`); `None` for
 /// a mod on the mod API alone.
 pub(super) fn changes_game(project: &api::Project<'_>) -> Option<&'static str> {
-    let manifest = &project.bundle.manifest;
-    // Every row kind by name: a new one does not compile until it is routed here.
-    if let Some(native) = &manifest.native {
-        let horizon_platform::mod_package::manifest::Native {
-            game: _,
-            horizon: _,
-            mixins: _,
-            mixin,
-            module,
-            bridge,
-            state,
-            r#loop,
-            world_control: _,
-        } = native;
-        for (empty, table) in [
-            (mixin.is_empty(), "[[native.mixin]]"),
-            (module.is_empty(), "[[native.module]]"),
-            (bridge.is_empty(), "[[native.bridge]]"),
-            (state.is_empty(), "[[native.state]]"),
-            (r#loop.is_empty(), "[[native.loop]]"),
-        ] {
-            if !empty {
-                return Some(table);
-            }
-        }
-    }
-    let facade = project
-        .api_dependencies()
-        .iter()
-        .any(|(_, package)| *package == "internals");
-    (internals::needed(manifest) || facade).then_some("internals")
+    horizon_platform::mod_package::index::native::changes_game(
+        &project.bundle.manifest,
+        Some(&project.cargo),
+    )
 }
 
 /// Whether `project` depends on a crate that is not one of the game's own packages.
@@ -715,15 +720,9 @@ pub(super) fn compile(
     crate::storage::mark_used(out).map_err(super::cache_error)?;
     let deps = game.join("deps");
     let sdk = identity(game)?;
-    let mut libraries = std::collections::HashMap::new();
-    for (package, name) in api::PACKAGES {
-        if package != api::INTERNALS_PACKAGE {
-            libraries.insert(name, library(&deps, name)?);
-        }
-    }
+    let libraries = sdk_libraries(&deps, projects)?;
     let game_library = library(&deps, "horizon_client")?;
     let mut facades = std::collections::HashMap::new();
-    libraries.insert("mod_vocab", library(&deps, "mod_vocab")?);
     let mut rlibs: std::collections::HashMap<&str, PathBuf> = std::collections::HashMap::new();
     let mut crate_names: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
     for (n, &index) in resolution.order.iter().enumerate() {
@@ -777,7 +776,6 @@ pub(super) fn compile(
             &library_entry(
                 &api::template(&game.join(super::api_route::TEMPLATE))?,
                 &[&project.bundle.manifest],
-                &catalog,
                 sdk.commit(),
                 id,
                 &project.bundle.manifest.version.to_string(),
@@ -809,7 +807,6 @@ pub(super) fn compile(
         let mut entry = library_entry(
             &template,
             &[],
-            &catalog,
             sdk.commit(),
             "horizon_patch",
             "0",
@@ -874,13 +871,12 @@ pub(super) fn dylib_name(krate: &str) -> String {
 pub(super) fn library_entry(
     template: &str,
     mods: &[&horizon_platform::mod_package::Manifest],
-    catalog: &internals::Catalog,
     build: &str,
     id: &str,
     version: &str,
     installs: &[String],
 ) -> String {
-    api::main_rs(template, mods, catalog)
+    api::main_rs(template, mods)
         .replace("mod_0::", "crate::")
         .replace(
             "/* NATIVE_BUILD */",
@@ -939,7 +935,9 @@ pub(super) fn compile_mod<'a>(
     cmd.args(["--crate-type", "dylib", "--crate-name", &krate])
         .arg("-C")
         .arg(format!("metadata={id}"));
-    for name in ["mod_api", "mod_vocab", "mod_points"] {
+    // `mod_points` is an extern only for a mod that names it (`api_dependencies`): it is empty
+    // since the injection points were removed (#19576), and a later SDK may not ship it.
+    for name in ["mod_api", "mod_vocab"] {
         refuse_closure_rlib(id, name, library(name))?;
         cmd.arg("--extern")
             .arg(format!("{name}={}", library(name).display()));
@@ -1249,6 +1247,21 @@ mod tests {
     }
 
     #[test]
+    fn sdk_without_mod_points_builds_mods_that_do_not_name_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["mod_api", "mod_vocab"] {
+            std::fs::write(dir.path().join(super::dylib_name(name)), b"dylib").unwrap();
+        }
+        let libraries = super::sdk_libraries_named(dir.path(), |_| false).unwrap();
+        let mut names: Vec<_> = libraries.keys().copied().collect();
+        names.sort();
+        assert_eq!(names, ["mod_api", "mod_vocab"]);
+        let message =
+            super::sdk_libraries_named(dir.path(), |name| name == "mod_points").unwrap_err();
+        assert!(message.contains("mod_points"), "{message}");
+    }
+
+    #[test]
     fn closure_rlib_refusal_names_the_mod_and_crate() {
         let message = super::refuse_closure_rlib(
             "example",
@@ -1313,6 +1326,7 @@ mod tests {
                     target: "Game::tick".into(),
                     kind: mixin::Kind::Head,
                     helper: "m.rs".into(),
+                    fingerprint: None,
                     options: toml::Table::new(),
                 })
             }),

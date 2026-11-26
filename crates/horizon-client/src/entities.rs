@@ -14,7 +14,7 @@ use crate::{
 };
 use horizon_core::{
     geometry::{Aabb, Direction, Vec3, VoxelShape, border::BorderGeometry},
-    position::BlockPos,
+    position::{BlockPos, SectionPos},
     random::{EntityRandom, RandomSource},
 };
 use horizon_world::{
@@ -22,6 +22,7 @@ use horizon_world::{
     level::portal_travel::{BorderBounds, find_free_position},
     movement_properties::BoundMovementProperties,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Gravity applied each tick when the item is not in a fluid (`ItemEntity.tick`).
 const ITEM_GRAVITY: f64 = 0.04;
@@ -87,6 +88,7 @@ mod item_damage;
 pub use item_damage::ItemHits;
 mod item_environment;
 mod item_fall;
+mod item_fire;
 mod item_merge;
 mod item_move;
 mod item_no_physics;
@@ -369,6 +371,9 @@ pub struct ItemEnvironmentTick {
     /// The `entity_damage` events its block hits post at its own position
     /// (`ItemEntity.hurtServer`).
     pub damage_events: u32,
+    /// `Entity.applyEffectsFromBlocks` put the burning item out: water or rain
+    /// cleared its fire after it had burned, so the hiss plays.
+    pub extinguished: bool,
     /// `ItemStack.onDestroyed` of the damage that emptied the health: the
     /// stacks the destroyed item left, which `ItemUtils.onContainerDestroyed`
     /// adds to the level where it lay.
@@ -417,6 +422,7 @@ impl crate::entity_rules::EntityRules for ArmorStand {
 pub struct ItemStep {
     old_velocity: Vec3,
     landed: Option<(BlockPos, f64)>,
+    /// The displacement requested by `Entity.move`, when the item tried to move.
     movement: Option<Vec3>,
     pub vertical_contact: Option<BlockPos>,
     /// `Entity.move` with physics: where it started, what it moved, and
@@ -429,6 +435,12 @@ impl ItemStep {
     /// The landing position and accumulated fall distance, before block contact.
     pub fn landed(&self) -> Option<(BlockPos, f64)> {
         self.landed
+    }
+
+    /// The attempted displacement before collision clipping, used to order the block sweep.
+    pub fn original_movement(&self) -> Option<Vec3> {
+        self.movement
+            .filter(|_| self.fall_move.is_some_and(|(_, _, applied)| applied))
     }
 }
 #[cfg(test)]
@@ -785,7 +797,7 @@ impl ItemEntity {
 /// `LavaCauldronBlock.getEntityInsideCollisionShape`: the cauldron's solid
 /// shape plus its contents (12 pixels wide, from 4 through 15 pixels high).
 /// In particular, the rim and feet count too, but air above the contents does not.
-fn lava_cauldron_contacts(
+pub(crate) fn lava_cauldron_contacts(
     world: &World,
     registry: &horizon_world::registry::BlockRegistry,
     bounds: Aabb,
@@ -852,6 +864,8 @@ fn lava_cauldron_contacts(
 pub const ORB_QUAD: [[f32; 2]; 4] = [[-0.5, -0.25], [0.5, -0.25], [0.5, 0.75], [-0.5, 0.75]];
 /// `poseStack.scale(0.3F, 0.3F, 0.3F)`.
 pub const ORB_QUAD_SCALE: f32 = 0.3;
+static NEXT_ORB_SECTION_ORDER: AtomicU64 = AtomicU64::new(1);
+
 /// ExperienceOrb: gravity 0.03, homing towards the player within 8 blocks.
 #[derive(Clone, Debug)]
 pub struct ExperienceOrb {
@@ -861,6 +875,8 @@ pub struct ExperienceOrb {
     pub rotation: [f32; 2],
     /// When it joined its list ([`crate::join_seq`]); set by the list, not by the spawn site.
     pub join: crate::join_seq::JoinSeq,
+    /// Order of entry into the current section. Zero before joining the level.
+    pub section_order: u64,
     /// The entity id servers track it by.
     pub id: u32,
     pub position: Vec3,
@@ -908,6 +924,7 @@ impl ExperienceOrb {
             attachment_lifetime: Default::default(),
             rotation: [0.0, 0.0],
             join: Default::default(),
+            section_order: 0,
             id,
             position,
             previous: position,
@@ -925,6 +942,20 @@ impl ExperienceOrb {
             fire_ticks: 0,
         }
     }
+    /// `PersistentEntitySectionManager.Callback.onMove` appends to the new section.
+    pub fn set_position(&mut self, position: Vec3) {
+        if self.join.is_joined()
+            && SectionPos::containing(self.position) != SectionPos::containing(position)
+        {
+            self.enter_section();
+        }
+        self.position = position;
+    }
+
+    fn enter_section(&mut self) {
+        self.section_order = NEXT_ORB_SECTION_ORDER.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// `ExperienceOrb.hurtServer`: the damage comes off the health as an
     /// `int`; an orb at 0 or below is discarded. True when it is gone.
     pub fn hurt(&mut self, damage: f32) -> bool {
@@ -1095,7 +1126,7 @@ impl ExperienceOrb {
             context,
             on_sound,
             entities,
-            &mut |_| false,
+            &mut |_, _| false,
         )
     }
 
@@ -1114,7 +1145,7 @@ impl ExperienceOrb {
         context: &horizon_world::native_load_context::LoopContext,
         on_sound: &mut dyn FnMut([f64; 3], f32),
         entities: &[Aabb],
-        invulnerable: &mut dyn FnMut(&mut World) -> bool,
+        invulnerable: &mut dyn FnMut(&mut World, &str) -> bool,
     ) -> (bool, OrbMove) {
         self.tick_among_inner(
             &mut world,
@@ -1128,7 +1159,7 @@ impl ExperienceOrb {
             context,
             on_sound,
             entities,
-            &mut |world| invulnerable(world),
+            &mut |world, damage| invulnerable(world, damage),
         )
     }
 
@@ -1146,7 +1177,7 @@ impl ExperienceOrb {
         context: &horizon_world::native_load_context::LoopContext,
         on_sound: &mut dyn FnMut([f64; 3], f32),
         entities: &[Aabb],
-        invulnerable: &mut dyn FnMut(&mut W) -> bool,
+        invulnerable: &mut dyn FnMut(&mut W, &str) -> bool,
     ) -> (bool, OrbMove) {
         self.ticks += 1;
         self.previous = self.position;
@@ -1155,7 +1186,9 @@ impl ExperienceOrb {
         let (eye_in_water, in_water, in_lava) = self.update_fluids(world, fluids, context);
         // `Entity.baseTick`'s fire step, right after the fluid step: an orb is
         // not fire immune, so each 20th tick of a burn hurts it for 1 (out of
-        // lava; `isInLava` is false on the first tick). The client only
+        // lava; `isInLava` is false on the first tick), unless it refuses
+        // `on_fire` (`ExperienceOrb.hurtServer`'s `isInvulnerableToBase`: an
+        // `Invulnerable` orb keeps its health). The client only
         // `clearFire`s (`min(0, ticks)`). A burn that empties its health discards it.
         let mut burnt_out = false;
         if !server {
@@ -1163,7 +1196,7 @@ impl ExperienceOrb {
         } else {
             if self.fire_ticks > 0 {
                 if self.fire_ticks % 20 == 0 && !(in_lava && self.ticks > 1) {
-                    burnt_out = self.hurt(1.0);
+                    burnt_out = !invulnerable(world, "minecraft:on_fire") && self.hurt(1.0);
                 }
                 self.fire_ticks -= 1;
             }
@@ -1256,11 +1289,11 @@ impl ExperienceOrb {
         )
         .unwrap_or(Vec3::ZERO);
         let from = self.position;
-        self.position = Vec3::new(
+        self.set_position(Vec3::new(
             self.position.x + moved.x,
             self.position.y + moved.y,
             self.position.z + moved.z,
-        );
+        ));
         self.on_ground = wanted.y < 0.0 && moved.y != wanted.y;
         // Entity.move's restituteMovementAfterCollisions, an orb's bounciness
         // 0: each collided axis's velocity is zeroed — x and z by Mth.equal's
@@ -1276,6 +1309,7 @@ impl ExperienceOrb {
         }
         // ExperienceOrb.tick applies block effects after moving, before drag.
         let discarded = server
+            && !burnt_out
             && self.apply_lava_contact_damage_inner(
                 world,
                 fluids,
@@ -1334,7 +1368,7 @@ impl ExperienceOrb {
             wanted,
             next_float,
             on_sound,
-            &mut |_| false,
+            &mut |_, _| false,
         )
     }
 
@@ -1345,11 +1379,8 @@ impl ExperienceOrb {
         wanted: Vec3,
         next_float: &mut dyn FnMut() -> f32,
         on_sound: &mut dyn FnMut([f64; 3], f32),
-        invulnerable: &mut dyn FnMut(&mut W) -> bool,
+        invulnerable: &mut dyn FnMut(&mut W, &str) -> bool,
     ) -> bool {
-        if self.health <= 0 {
-            return true;
-        }
         let contacts = orb_lava_contacts(self.previous, self.position, wanted, |p| {
             let fluid = fluids.fluid(world.block(p.x, p.y, p.z));
             if !fluid
@@ -1366,7 +1397,12 @@ impl ExperienceOrb {
             })
         });
         for _ in 0..contacts {
-            let dead = !invulnerable(world) && self.hurt(4.0);
+            // Entity.lavaHurt: the burn sound (and its pitch draw) only for a
+            // hurt `hurtServer` took; an Invulnerable orb's refusal makes none.
+            if invulnerable(world, "minecraft:lava") {
+                continue;
+            }
+            let dead = self.hurt(4.0);
             let pitch = 2.0 + next_float() * 0.4;
             on_sound([self.position.x, self.position.y, self.position.z], pitch);
             if dead {
@@ -1776,6 +1812,9 @@ pub struct ArmorStand {
     pub no_base_plate: bool,
     pub invisible: bool,
     pub marker: bool,
+    /// Its `minecraft:scale` attribute (`LivingEntity.getScale`), which sizes its box as any
+    /// living entity's: servers build balls, NPC parts and holograms from scaled stands.
+    pub scale: f32,
     /// `Entity.isNoGravity` (`NoGravity` in the save). `ArmorStand.hasPhysics`
     /// is false with it, as with `Marker`: `travel` does nothing, so the stand
     /// never moves, and the blocks it stands in do not touch it.
@@ -1820,8 +1859,33 @@ pub struct ArmorStand {
     /// (`getAttribute`) on the stand's first server tick, and a save that lists
     /// it loads it back, so a stand summoned this tick has none yet.
     pub speed_instance: bool,
+    /// What a tick that changed nothing started from (see [`StandRestKey`]); None after a tick
+    /// that changed something, or one that could not be proven to change nothing next time.
+    pub rest: Option<StandRestKey>,
+    /// Set by every mutable access ([`crate::join_seq::Joined::touch`]), cleared when the state
+    /// sent to the network was built from the stand as it is.
+    pub sync_dirty: bool,
     /// `NAME_TAG_DISTANCE` and `BELOW_NAME_DISTANCE` from server attribute updates.
     pub nameplate: crate::entities::nameplate::NameplateDistances,
+}
+/// Everything the physics and environment phases of a stand's tick read: its own movement state,
+/// the identity and write count of the block containers around it, and the world border. A tick
+/// that starts from a key and ends at the same key is a fixed point of those phases: they are
+/// functions of the key alone (when no mod listens and nothing can stop it), so the next tick from
+/// that key does nothing either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StandRestKey {
+    pub position: [u64; 3],
+    pub velocity: [u64; 3],
+    pub on_ground: bool,
+    pub fire_ticks: i32,
+    pub health: u32,
+    pub fall_distance: u64,
+    pub support: horizon_world::ground_support::GroundState,
+    /// marker, no_gravity, invisible, small, leather boots, no_physics set, no_physics value.
+    pub flags: [bool; 7],
+    pub blocks: crate::world::RegionStamp,
+    pub border: [u64; 4],
 }
 /// The fluid a stand travels in (`LivingEntity.travelInFluid`: water first,
 /// then lava), from the heights `Entity::push_by_fluid` measured.
@@ -2050,6 +2114,7 @@ impl ArmorStand {
             no_base_plate: false,
             invisible: false,
             marker: false,
+            scale: 1.0,
             no_gravity: false,
             no_physics: None,
             custom_name: None,
@@ -2065,7 +2130,28 @@ impl ArmorStand {
             first_tick: true,
             support: Default::default(),
             speed_instance: false,
+            rest: None,
+            sync_dirty: true,
             nameplate: Default::default(),
+        }
+    }
+    /// The cells [`Self::on_pos_legacy`] answers one of, whatever `tall` says: the supporting
+    /// block and the cell 0.2 below the feet in its column, or the cell the feet are in.
+    pub fn on_pos_candidates(&self) -> ([BlockPos; 2], usize) {
+        let y = (self.position.y - f64::from(0.2_f32)).floor() as i32;
+        match self.support.supporting_block {
+            Some(p) => ([p, BlockPos::new(p.x, y, p.z)], 2),
+            None => (
+                [
+                    BlockPos::new(
+                        self.position.x.floor() as i32,
+                        y,
+                        self.position.z.floor() as i32,
+                    ),
+                    BlockPos::new(0, 0, 0),
+                ],
+                1,
+            ),
         }
     }
     /// `Entity.getOnPos(0.2)` (`getOnPosLegacy`): the supporting block's
@@ -2112,6 +2198,30 @@ impl ArmorStand {
         self.environment_tick_inner(&mut world, facts, registry, |_, _| false)
     }
     /// As `environment_tick`, allowing the caller to decide each actual damage attempt.
+    /// Whether a block clears the stand's freeze this tick through
+    /// `applyEffectsFromBlocks`: a fire block applies `CLEAR_FREEZE` itself
+    /// (`BaseFireBlock.entityInside`), whatever the stand's `Fire`, and lava's
+    /// `LAVA_IGNITE` (`Entity.lavaIgnite`) reaches `igniteForTicks`, which calls
+    /// `clearFreeze`. A marker or `NoGravity` stand has `noPhysics`, so no
+    /// block reaches it.
+    pub fn freeze_cleared_by_blocks(
+        &self,
+        world: &World,
+        facts: &BlockFacts,
+        registry: &horizon_world::registry::BlockRegistry,
+    ) -> bool {
+        if self.no_physics.unwrap_or(self.marker || self.no_gravity) {
+            return false;
+        }
+        let (lo, hi) = (self.bounds().min_position(), self.bounds().max_position());
+        let lava = (lo.x.floor() as i32..=hi.x.floor() as i32).any(|x| {
+            (lo.y.floor() as i32..hi.y.ceil() as i32).any(|y| {
+                (lo.z.floor() as i32..=hi.z.floor() as i32)
+                    .any(|z| facts.get(world.block(x, y, z)).fluid == Fluid::Lava)
+            })
+        });
+        lava || crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0
+    }
     pub fn environment_tick_with_hook(
         &mut self,
         mut world: &mut World,
@@ -2162,29 +2272,80 @@ impl ArmorStand {
             }
             self.fire_ticks -= 1;
         }
-        if lava {
-            self.fire_ticks = self.fire_ticks.max(300);
-        }
-        let fire = crate::motion::environment::fire_contact(world, registry, self.bounds()) > 0.0;
-        // The fire block reaches a stand through `applyEffectsFromBlocks`,
-        // which a NoGravity stand does not feel (measured beside the server).
-        if fire && !self.invisible && !self.marker && !self.no_gravity {
-            if self.fire_ticks > 0 {
-                if !invulnerable(world, "minecraft:in_fire") {
+        // `applyEffectsFromBlocks` reaches a stand with physics only (a marker or
+        // NoGravity stand has `noPhysics`), and none that `baseTick`'s burn just
+        // broke (`isAffectedByBlocks` wants it not removed).
+        let affected =
+            !self.no_physics.unwrap_or(self.marker || self.no_gravity) && self.health > 0.5;
+        // The fire blocks the box (less 1e-5) is in, each visited once by
+        // `Entity.checkInsideBlocks`.
+        let fires = if affected {
+            let b = self.bounds().deflate(Vec3::new(1e-5, 1e-5, 1e-5));
+            let (lo, hi) = (b.min_position(), b.max_position());
+            let mut n = 0;
+            for x in lo.x.floor() as i32..=hi.x.floor() as i32 {
+                for y in lo.y.floor() as i32..=hi.y.floor() as i32 {
+                    for z in lo.z.floor() as i32..=hi.z.floor() as i32 {
+                        let name = registry
+                            .state(world.block(x, y, z))
+                            .map(|s| s.name.as_str());
+                        if matches!(name, Some("minecraft:fire" | "minecraft:soul_fire")) {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        } else {
+            0
+        };
+        if fires > 0 {
+            // FIRE_IGNITE, `BaseFireBlock.fireIgnite`, once a tick however many
+            // fire blocks: a negative `Fire` counts up by one; from 0 the stand
+            // is lit for 8 seconds, every tick it stays in the fire, against
+            // `baseTick`'s countdown.
+            if self.fire_ticks < 0 {
+                self.fire_ticks += 1;
+            }
+            if self.fire_ticks >= 0 {
+                self.fire_ticks = self.fire_ticks.max(160);
+            }
+            // Then each fire block's `runAfter` `hurt(inFire)`: `ArmorStand.hurtServer`
+            // refuses it for an invulnerable, invisible or marker stand;
+            // IGNITES_ARMOR_STANDS takes 0.15 off a burning stand and lights one
+            // that is not for 5 seconds (`igniteForSeconds(5)`).
+            for _ in 0..fires {
+                if self.health <= 0.5
+                    || self.invisible
+                    || self.marker
+                    || invulnerable(world, "minecraft:in_fire")
+                {
+                    break;
+                }
+                if self.fire_ticks > 0 {
                     self.health -= 0.15;
                     hit_by = Some("minecraft:in_fire");
+                } else {
+                    self.fire_ticks = self.fire_ticks.max(100);
                 }
-            } else {
-                self.fire_ticks = 100;
             }
+        }
+        // LAVA_IGNITE after FIRE_IGNITE (`InsideBlockEffectType` order).
+        if lava {
+            self.fire_ticks = self.fire_ticks.max(300);
         }
         // Dead: the damage type that ran its health out, which vanilla's
         // `brokenByAnything` receives as the `DamageSource`.
         (self.health <= 0.5).then(|| hit_by.unwrap_or("minecraft:generic"))
     }
-    /// EntityType.ARMOR_STAND dimensions (0.5 x 1.975F, half for small).
+    /// EntityType.ARMOR_STAND dimensions (0.5 x 1.975F, half for small), times its scale
+    /// (`LivingEntity.getDimensions`: `getDefaultDimensions(pose).scale(getScale())`); a
+    /// marker's are empty (`ArmorStand.MARKER_DIMENSIONS`), its box a point.
     pub fn bounds(&self) -> Aabb {
-        let s = if self.small { 0.5 } else { 1.0 };
+        if self.marker {
+            return Aabb::new(self.position, self.position);
+        }
+        let s = if self.small { 0.5 } else { 1.0 } * f64::from(self.scale);
         // EntityDimensions.makeBoundingBox adds the float height, widened
         // (halving it for the small stand is exact).
         let (w, h) = (0.25 * s, f64::from(1.975_f32) * s);
@@ -2193,6 +2354,15 @@ impl ArmorStand {
             Vec3::new(p.x - w, p.y, p.z - w),
             Vec3::new(p.x + w, p.y + h, p.z + w),
         )
+    }
+    /// `getBbWidth` and `getBbHeight`: none for a marker, half for a small stand, times its
+    /// `minecraft:scale` as `bounds` (a server's scaled stand draws, culls and tags at that size).
+    pub fn box_size(&self) -> (f32, f32) {
+        if self.marker {
+            return (0.0, 0.0);
+        }
+        let s = if self.small { 0.5 } else { 1.0 } * self.scale;
+        (0.5 * s, 1.975 * s)
     }
     /// Leather boots on its feet: it walks on powder snow (`PowderSnowBlock.canEntityWalkOnPowderSnow`).
     fn feet_are_leather_boots(&self) -> bool {
@@ -2619,6 +2789,7 @@ mod fire_environment_tests {
             facts,
             assets.registry,
             &can_hurt,
+            false,
             |_, damage| {
                 heard.push(damage.to_owned());
                 damage == "minecraft:lava"
@@ -2633,7 +2804,7 @@ mod fire_environment_tests {
         );
         let mut wood = make("minecraft:oak_planks");
         let mut metal = make("minecraft:netherite_ingot");
-        let first = wood.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let first = wood.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert!(first.alive && first.lava_hurt);
         assert!(
             !first.should_play_lava_hurt_sound(1),
@@ -2644,7 +2815,7 @@ mod fire_environment_tests {
             wood.fire_ticks > 0,
             "lava contact must ignite dropped items"
         );
-        let last = wood.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let last = wood.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert!(
             !last.alive && last.lava_hurt,
             "lethal lava damage still emits burn sound"
@@ -2655,7 +2826,7 @@ mod fire_environment_tests {
         );
         for _ in 0..40 {
             let (result, allocations) = horizon_threads::allocation_probe::measure(|| {
-                metal.environment_tick(&world, facts, assets.registry, &can_hurt)
+                metal.environment_tick(&world, facts, assets.registry, &can_hurt, false)
             });
             assert_eq!(
                 allocations.calls, 0,
@@ -2675,7 +2846,7 @@ mod fire_environment_tests {
             )
             .unwrap();
         let mut burning = make("minecraft:oak_planks");
-        let result = burning.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let result = burning.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert!(result.alive && !result.lava_hurt);
         assert!(burning.fire_ticks > 0);
         world
@@ -2690,7 +2861,7 @@ mod fire_environment_tests {
             )
             .unwrap();
         let mut soul = make("minecraft:oak_planks");
-        soul.environment_tick(&world, facts, assets.registry, &can_hurt);
+        soul.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert_eq!(soul.health, 3);
         let mut stand = ArmorStand::new(2, at, 0.0);
         world
@@ -2807,9 +2978,9 @@ mod destroyed_bundle_environment_tests {
             was_touching_water: false,
         };
         // 5 health against 4 a tick: the first tick leaves 1 and nothing out.
-        let first = bundle.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let first = bundle.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert!(first.alive && first.spilled.is_empty());
-        let second = bundle.environment_tick(&world, facts, assets.registry, &can_hurt);
+        let second = bundle.environment_tick(&world, facts, assets.registry, &can_hurt, false);
         assert!(!second.alive);
         assert_eq!(
             second
@@ -2876,112 +3047,7 @@ mod armor_stand_render_tests {
     }
 }
 #[cfg(test)]
-mod armor_stand_light_tests {
-    use super::*;
-
-    fn stand(x: f64, y: f64, z: f64) -> ArmorStand {
-        ArmorStand::new(1, Vec3::new(x, y, z), 0.0)
-    }
-
-    /// `ArmorStand.getLightProbePosition` for a stand that is not a marker is
-    /// `Entity.getEyePosition`: `EntityType.ARMOR_STAND` declares
-    /// `eyeHeight(1.7775)`, and a small stand (`isBaby()`) is the same type
-    /// scaled by 0.5 with `withEyeHeight(0.9875)`. Horizon read
-    /// `floor(base + 0.5)` for every stand, so a stand standing on a lit floor
-    /// took the floor's light instead of the light at its head.
-    #[test]
-    fn a_stand_is_lit_from_the_block_its_eye_is_in() {
-        let dark = |_: i32, _: i32, _: i32| 0u8;
-        // Full stand on y = 64: eye 65.7775, cell 65 (the old 64.5 was 64).
-        assert_eq!(stand(0.5, 64.0, 0.5).light_probe(1.0, dark), [0, 65, 0]);
-        assert_eq!((64.0_f64 + 0.5).floor() as i32, 64);
-        // Small stand: eye 0.9875 above its base, so y = 64.2 is 65.1875.
-        let mut small = stand(0.5, 64.2, 0.5);
-        small.small = true;
-        assert_eq!(small.light_probe(1.0, dark), [0, 65, 0]);
-        assert_eq!((64.2_f64 + 0.5).floor() as i32, 64);
-        // A small stand at y = 64.0 stays in its own cell: eye 64.9875.
-        let mut low = stand(0.5, 64.0, 0.5);
-        low.small = true;
-        assert_eq!(low.light_probe(1.0, dark), [0, 64, 0]);
-    }
-
-    /// `getEyePosition(partialTick)` interpolates: a stand falling from 70 to
-    /// 69 is probed 0.5 down at the middle of the frame, 69.5 + 1.7775 in the
-    /// cell at 71, while its feet's cell is 69.
-    #[test]
-    fn a_stand_probe_follows_the_frame() {
-        let dark = |_: i32, _: i32, _: i32| 0u8;
-        let mut falling = stand(0.5, 70.0, 0.5);
-        falling.interpolate(Some((Vec3::new(0.5, 69.0, 0.5), 0.0)));
-        assert_eq!(falling.light_probe(0.0, dark), [0, 71, 0]);
-        assert_eq!(falling.light_probe(0.5, dark), [0, 71, 0]);
-        assert_eq!(falling.light_probe(1.0, dark), [0, 70, 0]);
-        assert_eq!(falling.position.y.floor() as i32, 69);
-    }
-
-    /// A marker walks `BlockPos.betweenClosed` of its own box - the size it has
-    /// without the marker flag, 0.5 by 1.975 - from `position()`, taking the
-    /// first cell at brightness 15 and else the brightest. Horizon used the
-    /// stand's own cell, so a marker (a hologram on a dark ceiling) was lit by
-    /// its feet's block.
-    #[test]
-    fn a_marker_scans_the_cells_of_its_own_box() {
-        let at = |want: [i32; 3], level: u8| {
-            move |x: i32, y: i32, z: i32| {
-                if [x, y, z] == want { level } else { 0 }
-            }
-        };
-        let mut marker = stand(0.5, 64.0, 0.5);
-        marker.marker = true;
-        // The box is x/z 0.25..0.75 - the cell at 0 - and y 64..65.975.
-        assert_eq!(marker.light_probe(1.0, at([0, 65, 0], 15)), [0, 65, 0]);
-        assert_eq!(marker.light_probe(1.0, at([0, 65, 0], 9)), [0, 65, 0]);
-        // Nothing lit: the first cell walked, x fastest then y then z.
-        assert_eq!(marker.light_probe(1.0, |_, _, _| 0u8), [0, 64, 0]);
-        // The cell above the box is not scanned, so its 15 does not win.
-        assert_eq!(marker.light_probe(1.0, at([0, 66, 0], 15)), [0, 64, 0]);
-        // 15 wins over a brighter-looking neighbour, and y is walked before z:
-        // (0, 65, 0) comes before (0, 64, 1) though both are at 15.
-        let mut wide = stand(0.5, 64.0, 0.9);
-        wide.marker = true;
-        let two = |x: i32, y: i32, z: i32| {
-            if (x, y, z) == (0, 65, 0) || (x, y, z) == (0, 64, 1) {
-                15
-            } else {
-                0
-            }
-        };
-        assert_eq!(wide.light_probe(1.0, two), [0, 65, 0]);
-        // `getLightProbePosition`'s marker branch reads `position()`, not the
-        // partial-tick position: falling does not move the scan.
-        let mut moving = stand(0.5, 64.0, 0.5);
-        moving.marker = true;
-        moving.interpolate(Some((Vec3::new(0.5, 70.0, 0.5), 0.0)));
-        assert_eq!(moving.light_probe(0.0, |_, _, _| 0u8), [0, 70, 0]);
-        assert_eq!(moving.light_probe(0.5, |_, _, _| 0u8), [0, 70, 0]);
-    }
-
-    /// `EntityRenderer.getBlockLightLevel`: a stand `isOnFire` is drawn at 15
-    /// block light whatever the level says, and the sky light is the probe
-    /// cell's own.
-    #[test]
-    fn a_burning_stand_is_drawn_at_full_block_light() {
-        let light = |sky: u8, block: u8| (sky << 4) | block;
-        let cold = stand(0.5, 64.0, 0.5);
-        assert_eq!(cold.render_light(light(15, 0)), (15 * 16) as u32);
-        assert_eq!(cold.render_light(light(0, 9)), ((9 * 16) << 8) as u32);
-        let burning = ArmorStand {
-            fire_ticks: 100,
-            ..stand(0.5, 64.0, 0.5)
-        };
-        assert_eq!(
-            burning.render_light(light(15, 0)),
-            ((15 * 16) | ((15 * 16) << 8)) as u32
-        );
-        assert_eq!(burning.render_light(light(0, 0)), ((15 * 16) << 8) as u32);
-    }
-}
+mod armor_stand_light_tests;
 #[cfg(test)]
 mod merge_tests {
     use super::*;
@@ -3318,6 +3384,7 @@ mod world_border_tests {
                 fall_distance: 0.0,
                 rotation: [0.0, 0.0],
                 join: Default::default(),
+                section_order: 0,
                 no_gravity: false,
                 id: 2,
                 position: Vec3::new(24.0, 4.0, 20.5),
@@ -4662,75 +4729,7 @@ mod experience_cost_tests {
     }
 }
 #[cfg(test)]
-mod orb_underwater_tests {
-    use super::*;
-
-    #[test]
-    fn matches_the_executed_java_private_method() {
-        // Actual 26.3 setUnderwaterMovement calls on server-level orbs,
-        // captured by test_orb_water_parity.py (orb-water-reference.json).
-        // Cover both horizontal signs, falling/rising, and the vertical cap.
-        let cases: [([f64; 3], [u64; 3]); 6] = [
-            (
-                [0.0, 0.0, 0.0],
-                [0x0000000000000000, 0x3f40624de0000000, 0x0000000000000000],
-            ),
-            (
-                [0.1, 0.01, -0.2],
-                [0x3fb9581066666667, 0x3f85810625ae147b, 0xbfc9581066666667],
-            ),
-            (
-                [-0.25, -0.03, 0.125],
-                [0xbfcfae1480000000, 0xbf9e353f7c851eb8, 0x3fbfae1480000000],
-            ),
-            (
-                [0.0, 0.059, 0.0],
-                [0x0000000000000000, 0x3fae76c8b46d9168, 0x0000000000000000],
-            ),
-            (
-                [0.5, 0.0595, -0.5],
-                [0x3fdfae1480000000, 0x3faeb851e0000000, 0xbfdfae1480000000],
-            ),
-            (
-                [-1.0, 0.2, 1.0],
-                [0xbfefae1480000000, 0x3faeb851e0000000, 0x3fefae1480000000],
-            ),
-        ];
-        let actual: Vec<_> = cases
-            .iter()
-            .map(|(v, _)| {
-                let mut orb = ExperienceOrb {
-                    attachment_lifetime: Default::default(),
-                    fall_distance: 0.0,
-                    rotation: [0.0, 0.0],
-                    join: Default::default(),
-                    no_gravity: false,
-                    id: 1,
-                    position: Vec3::ZERO,
-                    previous: Vec3::ZERO,
-                    velocity: Vec3::new(v[0], v[1], v[2]),
-                    value: 1,
-                    age: 0,
-                    on_ground: false,
-                    count: 1,
-                    ticks: 0,
-                    health: 5,
-                    air: 300,
-                    following: None,
-                    fire_ticks: 0,
-                };
-                orb.set_underwater_movement();
-                [
-                    orb.velocity.x.to_bits(),
-                    orb.velocity.y.to_bits(),
-                    orb.velocity.z.to_bits(),
-                ]
-            })
-            .collect();
-        let expected: Vec<_> = cases.into_iter().map(|(_, bits)| bits).collect();
-        assert_eq!(actual, expected);
-    }
-}
+mod orb_underwater_tests;
 
 #[cfg(test)]
 mod render_light_tests {
@@ -4742,6 +4741,7 @@ mod render_light_tests {
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
             join: Default::default(),
+            section_order: 0,
             no_gravity: false,
             id: 1,
             position: Vec3::new(0.5, y, 0.5),
@@ -4912,14 +4912,32 @@ mod dropped_item_light_tests {
         assert_eq!(burning.render_light(light(0, 0)), ((15 * 16) << 8) as u32);
     }
 }
-crate::impl_joined!(
-    ItemEntity,
-    ExperienceOrb,
-    ArmorStand,
-    Painting,
-    Cushion,
-    ItemFrame
-);
+impl crate::join_seq::Joined for ExperienceOrb {
+    fn join_seq(&self) -> crate::join_seq::JoinSeq {
+        self.join
+    }
+
+    fn set_join_seq(&mut self, join: crate::join_seq::JoinSeq) {
+        self.join = join;
+        self.enter_section();
+    }
+}
+
+impl crate::join_seq::Joined for ArmorStand {
+    fn join_seq(&self) -> crate::join_seq::JoinSeq {
+        self.join
+    }
+    fn set_join_seq(&mut self, seq: crate::join_seq::JoinSeq) {
+        self.join = seq;
+    }
+    /// Every `&mut ArmorStand` a list hands out comes through here: what the network was last
+    /// told of this stand may no longer be true.
+    fn touch(&mut self) {
+        self.sync_dirty = true;
+    }
+}
+
+crate::impl_joined!(ItemEntity, Painting, Cushion, ItemFrame);
 horizon_mod_runtime::impl_attachment_lifetime!(
     ItemEntity,
     ExperienceOrb,
@@ -4963,6 +4981,7 @@ mod orb_lava_tests {
             fall_distance: 0.0,
             rotation: [0.0, 0.0],
             join: Default::default(),
+            section_order: 0,
             no_gravity: false,
             id: 1,
             position: at,
@@ -5095,9 +5114,44 @@ mod orb_lava_tests {
         });
     }
 
+    /// An `Invulnerable` orb refuses its burn too (`ExperienceOrb.hurtServer`'s
+    /// `isInvulnerableToBase`): the 20th tick asks the hook for `on_fire`, and a
+    /// refusal keeps the health while the fire burns on.
     #[test]
     #[ignore = "daily"]
-    fn an_invulnerable_orb_keeps_its_health_but_still_emits_lava_sound() {
+    fn an_invulnerable_orb_keeps_its_health_on_fire() {
+        with_fixture(|world, facts, collision, fluids, _| {
+            for refuses in [true, false] {
+                let mut orb = sample_orb(Vec3::new(20.5, 30.0, 20.5), 5);
+                orb.fire_ticks = 20;
+                let mut asked = Vec::new();
+                orb.tick_among_with_hook(
+                    world,
+                    facts,
+                    collision,
+                    None,
+                    true,
+                    &mut || 0.0,
+                    None,
+                    fluids,
+                    crate::test_resources::server_loop_context(),
+                    &mut |_, _| {},
+                    &[],
+                    &mut |_, damage| {
+                        asked.push(damage.to_string());
+                        refuses
+                    },
+                );
+                assert_eq!(asked, ["minecraft:on_fire"]);
+                assert_eq!(orb.health, if refuses { 5 } else { 4 });
+                assert_eq!(orb.fire_ticks, 19);
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn an_invulnerable_orb_keeps_its_health_and_makes_no_lava_sound() {
         with_fixture(|world, facts, collision, fluids, assets| {
             let lava = assets.registry.default_state("minecraft:lava").unwrap();
             world.set(20, 4, 20, lava).unwrap();
@@ -5117,7 +5171,8 @@ mod orb_lava_tests {
                     crate::test_resources::server_loop_context(),
                     &mut |_, _| sounds += 1,
                     &[],
-                    &mut |_| {
+                    &mut |_, damage| {
+                        assert_eq!(damage, "minecraft:lava");
                         calls += 1;
                         true
                     },
@@ -5126,7 +5181,9 @@ mod orb_lava_tests {
             );
             assert_eq!(orb.health, 5);
             assert_eq!(calls, 1);
-            assert_eq!(sounds, 1);
+            // Entity.lavaHurt plays the burn (and draws its pitch) only for a
+            // hurt hurtServer took.
+            assert_eq!(sounds, 0);
         });
     }
 
@@ -5251,23 +5308,54 @@ mod orb_lava_tests {
             );
             assert_eq!(client_orb.health, 5);
 
-            // Dead orb (health <= 0) takes no contact damage and emits no sound
-            let mut dead_orb = sample_orb(Vec3::new(20.5, 4.1, 20.5), 0);
+            // A loaded zero-health orb survives in air until lava actually damages it (vanilla
+            // checks health only inside `ExperienceOrb.hurtServer`).
+            let mut zero_health_air = sample_orb(Vec3::new(22.5, 4.1, 22.5), 0);
             sounds.clear();
-            let mut dead_draws = 0;
-            let discarded = dead_orb.apply_lava_contact_damage(
+            let mut air_draws = 0;
+            let discarded_in_air = zero_health_air.apply_lava_contact_damage(
                 world,
                 fluids,
                 Vec3::ZERO,
                 &mut || {
-                    dead_draws += 1;
+                    air_draws += 1;
                     0.5
                 },
                 &mut |pos, pitch| sounds.push((pos, pitch)),
             );
-            assert!(discarded, "dead orb remains discarded");
-            assert!(sounds.is_empty(), "dead orb must not play burn sound");
-            assert_eq!(dead_draws, 0, "dead orb must not consume random float");
+            assert!(
+                !discarded_in_air,
+                "zero-health orb in air survives until damaged"
+            );
+            assert!(
+                sounds.is_empty(),
+                "zero-health orb in air must not play burn sound"
+            );
+            assert_eq!(
+                air_draws, 0,
+                "zero-health orb in air must not consume random float"
+            );
+
+            // Once lava contacts a zero-health orb, hurt() discards it and plays the burn sound.
+            let mut zero_health_lava = sample_orb(Vec3::new(20.5, 4.1, 20.5), 0);
+            sounds.clear();
+            let mut lava_draws = 0;
+            let discarded_in_lava = zero_health_lava.apply_lava_contact_damage(
+                world,
+                fluids,
+                Vec3::ZERO,
+                &mut || {
+                    lava_draws += 1;
+                    0.5
+                },
+                &mut |pos, pitch| sounds.push((pos, pitch)),
+            );
+            assert!(
+                discarded_in_lava,
+                "zero-health orb in lava is discarded on contact damage"
+            );
+            assert_eq!(sounds.len(), 1, "lava contact plays burn sound");
+            assert_eq!(lava_draws, 1, "lava contact consumes one random float");
         });
     }
 

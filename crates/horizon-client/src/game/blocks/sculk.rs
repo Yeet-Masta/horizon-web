@@ -99,7 +99,8 @@ pub(super) struct SculkState {
     falling_items: HashSet<u32>,
     /// The vehicle each rider had last tick and where it stood.
     mounts: FxHashMap<Who, (u32, [f64; 3])>,
-    damaged: FxHashMap<u32, i64>,
+    /// How many health-taking hits were already posted for each mob.
+    damaged: FxHashMap<u32, u64>,
     /// Set while the mobs' events are posted (`tick_mob_sculk_events`).
     mob_slots: Option<MobSlots>,
     last_health: Option<f32>,
@@ -886,14 +887,14 @@ impl Game<'_> {
         self.post_game_event(event, center((pos[0], pos[1], pos[2])), ctx);
     }
     /// `LivingEntity.actuallyHurt`'s damage vibration, heard as the hit lands;
-    /// the end-of-tick scan then knows this damage.
+    /// the end-of-tick scan then knows this hit was posted.
     pub(super) fn mob_damage_event(&mut self, id: u32) {
-        if let Some(t) = self
+        if let Some(count) = self
             .mob_index
             .get(&self.mobs, id)
-            .and_then(|m| m.last_damage.map(|(_, t)| t))
+            .map(|m| m.combat.damage_count())
         {
-            self.sculk.damaged.insert(id, t);
+            self.sculk.damaged.insert(id, count);
         }
         self.post_entity_event("minecraft:entity_damage", Who::Mob(id));
     }
@@ -1039,6 +1040,16 @@ impl Game<'_> {
 
     /// `Warden.VibrationUser`: accept a vibration for the warden at `index`.
     fn warden_listen(&mut self, index: usize, event: &'static str, pos: [f64; 3], ctx: &Context) {
+        // Warden.VibrationUser.canReceiveVibration: ignore a vibration whose
+        // source block is outside the world border.
+        let src = [pos[0].floor() as i32, pos[2].floor() as i32];
+        if !self
+            .border
+            .geometry()
+            .is_within_bounds(f64::from(src[0]), f64::from(src[1]), 0.0)
+        {
+            return;
+        }
         let now = self.world.game_time;
         let ctx = warden::heard_by(*ctx, &self.mob_teams(), self.mobs[index].id);
         let (occludes, world) = (&self.sculk.tables.occludes, &self.world);
@@ -1142,6 +1153,14 @@ impl Game<'_> {
         Ok(())
     }
     fn tick_sculk_block(&mut self, key: (i32, i32, i32), adjacent: bool) -> Result<()> {
+        // A mod block's sculk template (a catalyst spreading, a sensor's vibrations) is the
+        // template's own: it waits while the block's mod is off.
+        let state = self.world.block(key.0, key.1, key.2);
+        if self.native_authoritative()
+            && crate::game::code_block_owners::suppressed(self.pack.assets.registry, state)
+        {
+            return Ok(());
+        }
         let time = self.world.game_time;
         let Some(entity) = self.sculk_entity(key) else {
             self.sculk.index.remove(&key);
@@ -1294,6 +1313,9 @@ impl Game<'_> {
     /// `SculkSensorBlock.stepOn` and `SculkShriekerBlock.stepOn`: standing on
     /// them is heard (or seen) every tick.
     fn sculk_step_on(&mut self) {
+        if self.sculk.index.set.is_empty() {
+            return;
+        }
         self.sculk_step_on_player();
         let mut standing: Vec<(Who, [f64; 3])> = Vec::new();
         for m in &self.mobs {
@@ -1301,20 +1323,23 @@ impl Game<'_> {
                 standing.push((Who::Mob(m.id), [m.position.x, m.position.y, m.position.z]));
             }
         }
-        self.sculk_stand_on(standing);
+        self.sculk_stand_on(&standing);
     }
     /// `stepOn` for the player in place: the host, or a guest swapped in
     /// (`guest_server_tick`), as a server has no player of its own.
     pub(super) fn sculk_step_on_player(&mut self) {
+        if self.sculk.index.set.is_empty() {
+            return;
+        }
         if let Some(p) = self.player.as_ref()
             && p.ground.on_ground
         {
             let at = [p.position.x, p.position.y, p.position.z];
-            self.sculk_stand_on(vec![(Who::Player, at)]);
+            self.sculk_stand_on(&[(Who::Player, at)]);
         }
     }
-    fn sculk_stand_on(&mut self, standing: Vec<(Who, [f64; 3])>) {
-        for (who, at) in standing {
+    fn sculk_stand_on(&mut self, standing: &[(Who, [f64; 3])]) {
+        for &(who, at) in standing {
             // getOnPosLegacy: 0.2 below the feet.
             let key = (
                 at[0].floor() as i32,
@@ -1873,7 +1898,7 @@ impl Game<'_> {
         }
         self.lan_send_particles(super::lan_particles::QueuedParticle {
             dimension: self.dim.id(),
-            options,
+            options: options.into(),
             state: None,
             at: from,
             spread: [0.0; 3],
@@ -2225,14 +2250,14 @@ impl Game<'_> {
         }))
     }
 
-    fn tick_mob_sculk_events(&mut self) {
+    pub(super) fn tick_mob_sculk_events(&mut self) {
         let snapshot: Vec<(
             u32,
             [f64; 3],
             bool,
             bool,
             Species,
-            Option<i64>,
+            u64,
             Option<u32>,
             u32,
             bool,
@@ -2247,7 +2272,7 @@ impl Game<'_> {
                     m.on_ground,
                     m.fluids.in_water,
                     m.species(),
-                    m.last_damage.map(|(_, t)| t),
+                    m.combat.damage_count(),
                     m.extra.mount,
                     m.age,
                     m.species() == Species::Bat && horizon_client::mobs::bat::resting(m),
@@ -2326,11 +2351,19 @@ impl Game<'_> {
                     }
                 }
             }
-            if let Some(t) = damaged
-                && self.sculk.damaged.get(&id) != Some(&t)
-            {
-                self.sculk.damaged.insert(id, t);
-                self.post_entity_event("minecraft:entity_damage", Who::Mob(id));
+            let seen = self.sculk.damaged.get(&id).copied().unwrap_or(0);
+            // A fresh tracker under a reused id starts from zero: all of its
+            // hits are new.
+            let fresh = if damaged >= seen {
+                damaged - seen
+            } else {
+                damaged
+            };
+            if fresh > 0 {
+                self.sculk.damaged.insert(id, damaged);
+                for _ in 0..fresh {
+                    self.post_entity_event("minecraft:entity_damage", Who::Mob(id));
+                }
             }
         }
         self.sculk.mob_slots = None;
@@ -2750,15 +2783,63 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn sculk_step_on_skips_empty_index_and_detects_sensor_steps() {
+        use crate::game::native_entity_refs::tests::with_game;
+        use horizon_client::{chunk::Chunk, mobs::Mob, motion::PlayerMotion};
+        use horizon_core::geometry::Vec3;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.sculk_prepare();
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let mut player = PlayerMotion::new(game.motion, Vec3::new(1.5, 65.0, 1.5)).unwrap();
+            player.ground.on_ground = true;
+            game.player = Some(player);
+            let pig_kind = game.res.mob_types().get("minecraft:pig").unwrap().clone();
+            let mut mob = Mob::new(1, pig_kind, Vec3::new(2.5, 65.0, 2.5), 0.0);
+            mob.on_ground = true;
+            game.mobs.push(mob);
+            assert!(game.sculk.index.set.is_empty());
+            game.sculk_step_on();
+
+            let sensor = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:sculk_sensor")
+                .unwrap();
+            game.world.set(1, 64, 1, sensor).unwrap();
+            game.sculk_sync_index();
+            assert!(!game.sculk.index.set.is_empty());
+
+            game.sculk_step_on_player();
+            let (info, _) = game
+                .sculk_entity((1, 64, 1))
+                .unwrap()
+                .vibration
+                .selector
+                .current
+                .unwrap();
+            assert_eq!(info.event, "minecraft:step");
+            assert_eq!(info.source, Some(Who::Player.into()));
+        });
+    }
+
     /// `vanilla_game_event` hears `GameEvent.Context.affectedState`: the state a context
     /// was made with reaches the listener, and a context made with none reads as None.
     #[test]
     #[ignore = "daily"]
     fn vanilla_game_event_carries_the_affected_state() {
         use crate::game::native_entity_refs::tests::with_game;
+        use horizon_std::sync::Mutex;
         use mod_api::{Hooks, ModEntry, VanillaGameEventEvent};
         use mod_platform::testing::with_mods;
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
         struct Heard(Arc<Mutex<Vec<Option<BlockStateId>>>>);
         #[mod_api::__subscriptions]
@@ -3062,10 +3143,7 @@ mod command_damage_listener_tests {
                     Some(horizon_client_core::who::EventSource::Mob(id))
                 );
                 assert_eq!(tick, before);
-                assert_eq!(
-                    game.sculk.damaged.get(&id).copied(),
-                    mob.last_damage.map(|(_, tick)| tick)
-                );
+                assert_eq!(game.sculk.damaged.get(&id).copied(), Some(1));
             } else {
                 assert!(selected(&game, origin).is_none());
                 assert!(!game.sculk.damaged.contains_key(&id));

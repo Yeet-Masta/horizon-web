@@ -174,7 +174,12 @@ mod tests {
             },
         )
         .unwrap();
-        native_worldgen_parts::publish(parts.as_ref(), &block_state::current().unwrap(), registry);
+        native_worldgen_parts::publish(
+            parts.as_ref(),
+            &block_state::current().unwrap(),
+            registry,
+            Arc::default(),
+        );
         let root = horizon_std::env::temp_dir().join("horizon-tree-grow-no-settings");
         let load = LoadContext::new(
             DataLoadOrigin::ServerDataLoad,

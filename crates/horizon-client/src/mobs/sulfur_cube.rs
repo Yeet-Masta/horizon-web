@@ -663,6 +663,22 @@ mod burning_arrow_tests {
         m
     }
 
+    /// `#sulfur_cube_with_block_immune_to` holds `trident` as well as `arrow`:
+    /// a cube with a block is only knocked about by it.
+    #[test]
+    fn a_trident_only_knocks_a_cube_with_a_block() {
+        let mut m = cube(Some("minecraft:tnt"));
+        let health = m.health;
+        let mut level = crate::health::TestLevel::new(0);
+        assert!(!accepts_damage(
+            &mut m,
+            &mut level.level(),
+            &Damage::of(DamageKind::Trident),
+            4.0
+        ));
+        assert_eq!(m.health, health);
+    }
+
     #[test]
     fn a_burning_arrow_lights_the_long_fuse() {
         let mut m = cube(Some("minecraft:tnt"));
@@ -962,32 +978,7 @@ pub fn prime_with_fuse(m: &mut Mob, imminent: bool, fuse: i32) -> bool {
 /// `#sulfur_cube_with_block_immune_to`: the damage a cube with a block shrugs off and is only
 /// knocked by.
 pub fn immune_to(source: &Damage) -> bool {
-    matches!(
-        source.kind,
-        DamageKind::PlayerAttack
-            | DamageKind::MaceSmash
-            | DamageKind::Spear
-            | DamageKind::MobAttack
-            | DamageKind::MobAttackNoAggro
-            | DamageKind::Arrow
-            | DamageKind::Thrown
-            | DamageKind::Explosion
-            | DamageKind::Fireworks
-            | DamageKind::Fall
-            | DamageKind::Sting
-            | DamageKind::Cactus
-            | DamageKind::Freeze
-            | DamageKind::SweetBerryBush
-            | DamageKind::HotFloor
-            | DamageKind::FallingAnvil
-            | DamageKind::FallingBlock
-            | DamageKind::FallingStalactite
-            | DamageKind::DryOut
-            | DamageKind::Spit
-            | DamageKind::Stalagmite
-            | DamageKind::SulfurCubeHot
-            | DamageKind::WindCharge
-    )
+    source.sulfur_cube_with_block_immune_to()
 }
 /// `hurtServer`: fire or `#is_explosion` (a firework rocket's burst too)
 /// light an explosive cube; with a block it shrugs off blows, falls and
@@ -1407,9 +1398,9 @@ pub fn body(m: &Mob) -> (String, String) {
         )
     }
 }
-/// `SulfurCubeInnerLayer`: the inner cube when no block is held.
+/// `SulfurCubeInnerLayer.submit`: the inner cube when no block is held and the cube is visible.
 pub fn inner(m: &Mob) -> Option<(&'static str, &'static str)> {
-    if has_body(m) {
+    if has_body(m) || m.is_invisible() {
         return None;
     }
     Some(if m.is_baby() {
@@ -1954,5 +1945,49 @@ mod mob_contact_tests {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod inner_tests {
+    use super::*;
+
+    #[test]
+    fn inner_core_skips_when_invisible_or_carrying_block() {
+        let mut kind = crate::mobs::sensor_scan_tests::kind();
+        let data = std::sync::Arc::make_mut(&mut kind);
+        data.id = "minecraft:sulfur_cube".into();
+        data.species = crate::mobs::Species::SulfurCube;
+
+        for baby in [false, true] {
+            for body in [None, Some("minecraft:tnt")] {
+                for invisible in [false, true] {
+                    let mut m = Mob::new(1, kind.clone(), Vec3::ZERO, 0.0);
+                    if baby {
+                        m.extra.age = -24000;
+                    }
+                    m.extra.set_body(body.map(Into::into));
+                    m.invisible = invisible;
+
+                    let expected = if body.is_none() && !invisible {
+                        Some(if baby {
+                            (
+                                "sulfur_cube_small#inner",
+                                "entity/sulfur_cube/sulfur_cube_inner_small",
+                            )
+                        } else {
+                            ("sulfur_cube#inner", "entity/sulfur_cube/sulfur_cube_inner")
+                        })
+                    } else {
+                        None
+                    };
+                    assert_eq!(
+                        inner(&m),
+                        expected,
+                        "baby={baby}, body={body:?}, invisible={invisible}"
+                    );
+                }
+            }
+        }
     }
 }

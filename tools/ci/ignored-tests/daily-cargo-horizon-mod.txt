@@ -6,7 +6,6 @@ cargo-horizon-mod bounded_manifest_commands test:bounded_reads daily child-proce
 cargo-horizon-mod bounded_special_manifests test:bounded_reads daily child-process
 cargo-horizon-mod compiler_wrapper_preserves_diagnostics_exit_code_and_signal test:wasm_rustc_status daily child-process
 cargo-horizon-mod git_project_build_checks_only_the_files_it_packages test:content_project daily child-process
-cargo-horizon-mod inject_add_head_uses_launcher_module_catalog_hash test:module_discovery daily child-process
 cargo-horizon-mod internals_add_refuses_missing_gated_and_shape_only_paths_without_partial_edits test:internals daily child-process
 cargo-horizon-mod internals_add_requires_kind_for_ambiguous_paths_and_update_keeps_it test:internals daily child-process
 cargo-horizon-mod internals_add_uses_launcher_module_catalog_hash test:module_discovery daily child-process
@@ -20,4 +19,5 @@ cargo-horizon-mod run_refuses_code_mods_without_building test:run daily child-pr
 cargo-horizon-mod table_declarations_keep_their_format_when_adding_and_refreshing test:internals daily child-process
 cargo-horizon-mod unreadable_new_catalog_does_not_move_either_pin_or_hashes test:internals daily child-process
 cargo-horizon-mod update_diffs_signatures_refreshes_present_hashes_and_keeps_missing_declarations test:internals daily child-process
-cargo-horizon-mod use_jar_records_exact_metadata_hash_and_order_without_copying_the_jar test:use_jar daily child-process
+cargo-horizon-mod use_jar_records_exact_metadata_hash_order_and_stages_jar test:use_jar daily child-process
+cargo-horizon-mod use_jar_take_records_checked_prefixes_and_refuses_one_matching_nothing test:use_jar daily child-process

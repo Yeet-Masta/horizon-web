@@ -65,6 +65,40 @@ fn thunder_strike_column(ticks: &mut Ticks, cx: i32, cz: i32) -> (i32, i32) {
     (r.x, r.z)
 }
 
+/// The block an entity's feet are in (`Entity.blockPosition`).
+fn block_position(p: Vec3) -> [i32; 3] {
+    [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]
+}
+
+/// `findLightningTargetAround`'s search box:
+/// `AABB.encapsulatingFullBlocks(center, center.atY(level.getMaxY() + 1)).inflate(3)`,
+/// with `center` the column's motion-blocking top and `max_y` the level's
+/// highest block Y (`Level.getMaxY`). It spans `[x - 3, x + 4)`, `[top - 3,
+/// max_y + 5)` and `[z - 3, z + 4)`.
+fn lightning_search_box([x, top, z]: [i32; 3], max_y: i32) -> Aabb {
+    Aabb::new(
+        Vec3::new(f64::from(x - 3), f64::from(top - 3), f64::from(z - 3)),
+        Vec3::new(f64::from(x + 4), f64::from(max_y + 5), f64::from(z + 4)),
+    )
+}
+
+/// The players `findLightningTargetAround` may strike: each of `players` that
+/// is alive (`isAlive`: spectators too), whose box meets `search`, under open
+/// sky at its block position (`sees_sky`). `players` are the level's
+/// (`level_players_iter`): a server has none of its own.
+fn players_to_strike(
+    players: impl IntoIterator<Item = super::natural_spawning::LevelPlayer>,
+    search: Aabb,
+    sees_sky: impl Fn([i32; 3]) -> bool,
+) -> Vec<[i32; 3]> {
+    players
+        .into_iter()
+        .filter(|p| p.alive && search.intersects(p.bounds))
+        .map(|p| block_position(p.position))
+        .filter(|p| sees_sky(*p))
+        .collect()
+}
+
 #[cfg(test)]
 impl Bolt {
     /// A spent bolt at `at`, for tests that call `thunder_hit` directly.
@@ -228,38 +262,28 @@ impl Game<'_> {
             return Some(rod);
         }
         let sees_sky = |g: &Self, p: [i32; 3]| g.world.light(p[0], p[1], p[2]) >> 4 == 15;
+        let search = lightning_search_box([x, top.y, z], self.world.top_y() - 1);
         let mut candidates: Vec<[i32; 3]> = self
             .mobs
             .iter()
-            .filter(|m| m.alive())
-            .map(|m| {
-                [
-                    m.position.x.floor() as i32,
-                    m.position.y.floor() as i32,
-                    m.position.z.floor() as i32,
-                ]
-            })
-            .filter(|p| (p[0] - x).abs() <= 3 && (p[2] - z).abs() <= 3 && p[1] >= top.y - 3)
+            .filter(|m| m.alive() && search.intersects(m.bounds()))
+            .map(|m| block_position(m.position))
             .filter(|p| sees_sky(self, *p))
             .collect();
-        if let Some(p) = self
-            .player
-            .as_ref()
-            .filter(|p| !p.health.dead_or_dying())
-            .map(|p| {
-                [
-                    p.position.x.floor() as i32,
-                    p.position.y.floor() as i32,
-                    p.position.z.floor() as i32,
-                ]
-            })
-            && (p[0] - x).abs() <= 3
-            && (p[2] - z).abs() <= 3
-            && p[1] >= top.y - 3
-            && sees_sky(self, p)
-        {
-            candidates.push(p);
-        }
+        // The players are living entities too: every one in the level, as a
+        // server has no player of its own, only the ones it serves.
+        candidates.extend(players_to_strike(self.level_players_iter(), search, |p| {
+            sees_sky(self, p)
+        }));
+        // `ArmorStand extends LivingEntity`: `getEntitiesOfClass` includes a
+        // stand in the box like any other living entity.
+        candidates.extend(
+            self.armor_stands
+                .iter()
+                .filter(|s| s.health > 0.0 && search.intersects(s.bounds()))
+                .map(|s| block_position(s.position))
+                .filter(|p| sees_sky(self, *p)),
+        );
         if !candidates.is_empty() {
             let i = self
                 .world
@@ -271,10 +295,10 @@ impl Game<'_> {
         Some([x, top.y, z])
     }
     pub(super) fn spawn_bolt(&mut self, at: [f64; 3], visual_only: bool) {
-        if !visual_only {
-            let ctx = horizon_client::sculk::Context::default();
-            self.post_game_event("minecraft:lightning_strike", at, ctx);
-        }
+        // LightningBolt.tick: the LIGHTNING_STRIKE game event is posted for
+        // every server bolt; visualOnly only suppresses the fire it spawns.
+        let ctx = horizon_client::sculk::Context::default();
+        self.post_game_event("minecraft:lightning_strike", at, ctx);
         // The LightningBolt constructor: `seed`, then `flashes`.
         let mut random = EntityRandom::own(random_source::entity());
         let seed = random.next_long();
@@ -874,10 +898,11 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horizon_client::entities::ArmorStand;
     use horizon_client::mobs::{Anim, Brain, Mob, MobType, Part, Species};
     use horizon_core::geometry::Vec3;
-    use mod_api::{self, ServerHost};
     use horizon_core::random::LegacyRandom;
+    use mod_api::{self, ServerHost};
     use std::sync::Arc;
 
     /// `LightningBolt.spawnFire` places nothing, and draws no extra sources,
@@ -984,18 +1009,90 @@ mod tests {
         assert!(!in_viewer_box(bolt, [15.5, 64.0, 0.0]));
     }
 
+    /// `findLightningTargetAround` picks among the living entities whose box
+    /// meets its search box, players included. A server has no player of its
+    /// own, so a player it serves, standing in the open beside the column,
+    /// must be a target, or natural lightning never strikes a player there.
+    /// A dead one, one under a roof, one whose box stays 4 blocks off and one
+    /// whose box stays more than 3 below the column's top are not; one whose
+    /// centre is outside but whose box reaches into the search box is.
+    #[test]
+    fn lightning_can_strike_the_players_a_server_serves() {
+        use super::super::natural_spawning::LevelPlayer;
+        let served = |x: f64, y: f64, alive: bool| {
+            let position = Vec3::new(x, y, 0.5);
+            LevelPlayer {
+                uuid: 1,
+                position,
+                // A player's 0.6 x 1.8 box, so the test can tell a box from
+                // its centre.
+                bounds: Aabb::new(Vec3::new(x - 0.3, y, 0.2), Vec3::new(x + 0.3, y + 1.8, 0.8)),
+                alive,
+                creative: false,
+                spectator: false,
+            }
+        };
+        // The column at (0, 0) tops out at 64; a roof covers (1, 64, 0).
+        let open = |p: [i32; 3]| p != [1, 64, 0];
+        let search = lightning_search_box([0, 64, 0], 319);
+        assert_eq!(
+            players_to_strike([served(2.5, 64.0, true)], search, open),
+            vec![[2, 64, 0]]
+        );
+        // 4.2 is more than 3 blocks from the column, but the player's box
+        // starts at 3.9, inside `[x - 3, x + 4)`.
+        assert_eq!(
+            players_to_strike([served(4.2, 64.0, true)], search, open),
+            vec![[4, 64, 0]]
+        );
+        let players = [
+            served(2.5, 64.0, false),
+            served(1.5, 64.0, true),
+            served(4.5, 64.0, true),
+            served(0.5, 58.0, true),
+            served(-2.5, 61.0, true),
+            // Feet below `top - 3`, but the box reaches up to 61.8, into
+            // the search box.
+            served(0.5, 60.0, true),
+        ];
+        assert_eq!(
+            players_to_strike(players, search, open),
+            vec![[-3, 61, 0], [0, 60, 0]]
+        );
+    }
+
+    /// A stand is a `LivingEntity`: `findLightningTargetAround` includes it,
+    /// and its box decides, not its centre. Place one whose centre is 3.7
+    /// blocks from the column but whose box still reaches into the search
+    /// box; the bolt must land on the stand's block, not the column top.
+    #[test]
+    #[ignore = "daily"]
+    fn lightning_targets_an_armor_stand_by_its_box() {
+        let mut resources = None;
+        let mut game = crate::game::game_tests::tests::server_game(&mut resources);
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        // A one-block column at (8, 8) tops out at 64.
+        game.world.set(8, 63, 8, stone).unwrap();
+        game.armor_stands
+            .push(ArmorStand::new(1, Vec3::new(11.7, 64.0, 8.5), 0.0));
+        assert_eq!(game.lightning_target(8, 8), Some([11, 64, 8]));
+    }
+
     #[test]
     #[ignore = "daily"]
     fn conversion_post_reads_original_and_lightning_outcome() {
+        use horizon_std::sync::Mutex;
         use mod_api::{
             EntityJoinLevelEvent, EquipmentSlot, Flow, Hooks, LivingConversionPostEvent,
             LivingConversionPreEvent,
         };
         use mod_platform::__private::install;
-        use std::sync::{
-            Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
         #[derive(Debug)]
         struct SeenConversion {
@@ -1327,7 +1424,7 @@ mod tests {
     }
 
     /// Spares the entity whose id it holds, and logs each (entity, bolt) asked.
-    struct Spare(u32, Arc<std::sync::Mutex<Vec<(u32, u32)>>>);
+    struct Spare(u32, Arc<horizon_std::sync::Mutex<Vec<(u32, u32)>>>);
     #[mod_api::__subscriptions]
     impl mod_api::Hooks for Spare {
         fn entity_struck_by_lightning(

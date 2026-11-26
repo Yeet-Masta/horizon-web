@@ -18,10 +18,16 @@ use horizon_hooks::players::{
 use std::sync::Arc;
 
 /// Registers the hooks of the Horizon parts still in this crate (cosmetics: spec #14091 step 5
-/// moves them out). Before the hooks are sealed.
+/// moves them out), and the key mappings those parts bind. Before the hooks are sealed.
 pub(crate) fn register() {
     if let Err(e) = super::cosmetics::register() {
         log::error!("Cosmetics: their hooks came too late: {e}");
+    }
+    // Fullbright key mapping (#18700): always registered, as the emote key is.
+    static FULLBRIGHT: &horizon_hooks::actions::Mappings =
+        &[("key.fullbright", "key.keyboard.unknown", "misc")];
+    if let Err(e) = horizon_hooks::actions::register(FULLBRIGHT) {
+        log::error!("Fullbright key: its mapping came too late: {e}");
     }
 }
 
@@ -228,6 +234,8 @@ struct DrawPlayer<'a, 'g> {
     /// The body as it is drawn, posed on the first `bone`.
     body: Option<PooledPoses>,
     poses: PooledPoses,
+    /// What the caller adds to every submitted vertex afterwards: `Light::AtPlace` reads there.
+    offset: glam::Vec3,
 }
 
 impl DrawPlayer<'_, '_> {
@@ -241,7 +249,7 @@ impl DrawPlayer<'_, '_> {
         match light {
             Light::Full => FULL,
             Light::AtPlace => {
-                let p = (self.camera + at.as_dvec3()).floor();
+                let p = (self.camera + (at + self.offset).as_dvec3()).floor();
                 let l = self.game.world.light(p.x as i32, p.y as i32, p.z as i32);
                 (u32::from(l >> 4) * 16) | ((u32::from(l & 15) * 16) << 8)
             }
@@ -430,19 +438,21 @@ impl Game<'_> {
             bounds: None,
             body: None,
             poses: Poses::pooled(),
+            offset: glam::Vec3::ZERO,
         };
         engine::player_layers(&model, &mut draw);
         draw.bounds
     }
 
-    /// What crates draw on the window's own model `m` (its vertices to `out`): in the world in
-    /// third person (`Pass::World`), or in the inventory's picture of it (`Pass::Picture`).
-    /// `camera`: the world view's camera, or the picture's.
+    /// What crates draw on the window's own model `m`: the world body (`Pass::World`) or
+    /// its inventory picture (`Pass::Picture`). `offset` translates all submitted vertices.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn own_layers_geometry(
         &self,
         m: &Mob,
         pass: Pass,
         camera: glam::DVec3,
+        offset: glam::Vec3,
         alpha: f32,
         light: u32,
         out: &mut Vec<Vertex>,
@@ -455,6 +465,9 @@ impl Game<'_> {
             return;
         }
         let model = model(m, Kind::Own, self.remote.as_ref().map(|r| r.profile()));
+        let start = out.len();
+        let see_through_start =
+            (offset != glam::Vec3::ZERO).then(|| SEE_THROUGH.with_borrow(Vec::len));
         let mut draw = DrawPlayer {
             game: self,
             m,
@@ -468,8 +481,20 @@ impl Game<'_> {
             bounds: None,
             body: None,
             poses: Poses::pooled(),
+            offset,
         };
         engine::player_layers(&model, &mut draw);
+        if let Some(see_through_start) = see_through_start {
+            // A layer can submit camera-relative particles or its own model matrix, not
+            // just draw on one of the player's bones. Translate both output streams.
+            let translate = |vertices: &mut [Vertex]| {
+                for v in vertices {
+                    v.pos = (glam::Vec3::from_array(v.pos) + offset).to_array();
+                }
+            };
+            translate(&mut out[start..]);
+            SEE_THROUGH.with_borrow_mut(|vertices| translate(&mut vertices[see_through_start..]));
+        }
     }
 
     /// After every player (`game.rs`): what crates draw around the window's own model in first
@@ -500,6 +525,7 @@ impl Game<'_> {
                 bounds: None,
                 body: None,
                 poses: Poses::pooled(),
+                offset: glam::Vec3::ZERO,
             };
             engine::first_person(&own, &mut draw);
         }

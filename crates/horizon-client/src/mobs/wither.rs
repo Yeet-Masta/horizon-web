@@ -1,7 +1,7 @@
 //! The wither (`WitherBoss`): eleven seconds of invulnerable charging that
 //! end in a blast, then flying after its target while three heads fire
-//! skulls, breaking blocks around it when hurt, immune to arrows and a
-//! player's wind charges below half health.
+//! skulls, breaking blocks around it when hurt, immune to arrows (tridents
+//! too) and a player's wind charges below half health.
 use super::{
     Mob, MobEvent, MobWorld, Species, Who,
     anim::{Poses, State},
@@ -411,8 +411,15 @@ pub fn custom_server_ai_step(m: &mut Mob, w: &MobWorld, events: &mut Vec<MobEven
         } else {
             // A random living thing within 20 (8 up or down), no undead.
             let p = m.position;
+            // WitherBoss.TARGETING_CONDITIONS.forCombat().range(20):
+            // the bounding box is only a broad phase; the target must also
+            // be within a 20-block sphere (distanceToSqr <= 400).
             let near = |q: Vec3| {
-                (q.x - p.x).abs() <= 20.0 && (q.y - p.y).abs() <= 8.0 && (q.z - p.z).abs() <= 20.0
+                let (dx, dy, dz) = (q.x - p.x, q.y - p.y, q.z - p.z);
+                dx * dx + dy * dy + dz * dz <= 400.0
+                    && dx.abs() <= 20.0
+                    && dy.abs() <= 8.0
+                    && dz.abs() <= 20.0
             };
             let mut found: Vec<i32> = w
                 .others
@@ -800,19 +807,22 @@ mod upstream_sync_tests {
         let mut m = mob(Species::Wither, 150.0);
         assert!(m.damage(&mut test_level.level(), 1.0, Damage::of(DamageKind::Thrown)));
         assert!(m.health < 150.0);
-        // ...and arrows stay refused by the damage filter.
-        let mut m = mob(Species::Wither, 150.0);
+        // ...and arrows stay refused by the damage filter, a thrown trident
+        // too (`AbstractArrow`).
         let attack = crate::health::Attack {
             projectile: Some(2),
             projectile_is_arrow: true,
             ..Default::default()
         };
-        assert!(!m.damage(
-            &mut test_level.level().attacked_by(&attack),
-            1.0,
-            Damage::of(DamageKind::Arrow),
-        ));
-        assert_eq!(m.health, 150.0);
+        for kind in [DamageKind::Arrow, DamageKind::Trident] {
+            let mut m = mob(Species::Wither, 150.0);
+            assert!(!m.damage(
+                &mut test_level.level().attacked_by(&attack),
+                1.0,
+                Damage::of(kind),
+            ));
+            assert_eq!(m.health, 150.0);
+        }
     }
     /// A spawning wither rolled the three particles of `aiStep`'s
     /// `getInvulnerableTicks() > 0` block and dropped them on the floor: the

@@ -4,7 +4,9 @@ use super::{
     hub::Hub,
     menu::{self, Menu, NativeMenuEvent, Rules, SlotRef, Slots, View},
 };
-use crate::{containers::BlockEntity, items::ItemStack, world::World};
+use crate::{
+    containers::BlockEntity, first_person::SwingAnimation, items::ItemStack, world::World,
+};
 use horizon_core::nbt::Tag;
 use horizon_core::random::RandomSource;
 use horizon_protocol::{
@@ -73,6 +75,14 @@ pub struct PreparedClick {
     /// The sounds the click played at the player (`BundleItem.playInsertSound` and the others,
     /// `Player.playSound`), in order; `run_click` fills them, `finish_click` sends them.
     sounds: Vec<&'static str>,
+}
+
+impl PreparedClick {
+    /// The container's own slots, in the menu's order: as `prepare_click` read them, then as
+    /// `run_click` left them. `None` for a click in the player's own inventory.
+    pub fn container(&self) -> Option<&[Option<ItemStack>]> {
+        self.items.as_deref()
+    }
 }
 
 impl Hub {
@@ -240,7 +250,7 @@ impl Hub {
 
     /// ClientboundBlockEventPacket (`PlayerList.broadcast` within 64 blocks); wrapped, to the
     /// clients that view the level and hold its chunk.
-    pub fn block_event(&self, pos: [i32; 3], b0: i32, b1: i32, state: u32) {
+    pub fn block_event(&self, world: &World, pos: [i32; 3], b0: i32, b1: i32, state: u32) {
         let block = self
             .encoder
             .block_ids
@@ -254,8 +264,26 @@ impl Hub {
             b1: b1 as u8,
             block,
         });
-        self.broadcast_near(at, 64.0, &packet, None);
-        self.send_viewers_of((pos[0] >> 4, pos[2] >> 4), &packet);
+        let key = (pos[0] >> 4, pos[2] >> 4);
+        if !self.has_terrain_views() {
+            self.broadcast_near(at, 64.0, &packet, None);
+            self.send_viewers_of(key, &packet);
+            return;
+        }
+        let body = packet.encode();
+        for g in self
+            .guests
+            .iter()
+            .filter(|g| self.terrain_state(g.conn, world, (pos[0], pos[1], pos[2]), state) == state)
+        {
+            if self.here(g) && within_range(at, g.position, 64.0) {
+                g.sender.send(body.clone());
+            } else if let Some(view) = self.view_here(g).filter(|v| v.sent.contains(&key)) {
+                let mut runs = super::viewed_levels::send::Runs::new(view.level);
+                runs.push(&body);
+                g.sender.send_many(runs.finish());
+            }
+        }
     }
 
     /// `ServerLevel.broadcastEntityEvent`: send to the players tracking the
@@ -304,15 +332,24 @@ impl Hub {
         );
     }
 
-    pub fn swing(&self, id: i32, hand: i32, at: [f64; 3], except: Option<u32>) {
+    /// `ClientboundSwingAnimationPacket`: the hand and the animation the swing
+    /// started with (its base duration; a client applies the swinger's effects).
+    pub fn swing(
+        &self,
+        id: i32,
+        off_hand: bool,
+        animation: SwingAnimation,
+        at: [f64; 3],
+        except: Option<u32>,
+    ) {
         self.broadcast_near(
             at,
             128.0,
             &C::SwingAnimation(play::SwingAnimation {
                 id,
-                hand,
-                kind: 1,
-                duration: 6,
+                hand: i32::from(off_hand),
+                kind: i32::from(animation.kind),
+                duration: animation.duration,
             }),
             except,
         );

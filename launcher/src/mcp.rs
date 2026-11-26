@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// What an agent reads before its first call.
-const INSTRUCTIONS: &str = "Manage Horizon, a Rust reimplementation of Minecraft Java Edition: install versions, prepare them from the player's own Minecraft, start the client or a dedicated server. Every tool is a horizon-launcher CLI command of the same name (mods_search is horizon-launcher mods search). Once play started the game, or the player turned on Agent Control in a game they started, the game_* tools play it: game_state, game_ui (every widget of the open screen), game_click, game_goto, game_screenshot...";
+const INSTRUCTIONS: &str = concat!("Manage Horizon, a Rust reimplementation of Minecraft Java Edition: install versions, prepare them from the player's own Minecraft, start the client or a dedicated server. Every tool is a horizon-launcher CLI command of the same name (mods_search is horizon-launcher mods search). Once play started the game, or the player turned on Agent Control in a game they started, the game_* tools play it: game_state, game_ui (every widget of the open screen), game_click, game_goto, game_screenshot... ", horizon_mcp::untrusted_rule!());
 
 /// The revisions this server advertises: `horizon_mcp` serves them (`2026-07-28` stateless,
 /// `2025-06-18` for the clients that still open with `initialize`).
@@ -45,7 +45,8 @@ fn session_tools() -> Value {
             "join": { "type": "string", "description": "Join a friend's world with its invite code. Only when the player asks." },
             "server": { "type": "string", "description": "Join this server at once: an address, or a server of the instance's list (multiplayer_list) by name or position. Only when the player asks." },
             "offscreen": { "type": "boolean", "description": "Render without showing a window (game_screenshot still works)." },
-            "arg": { "type": "array", "items": { "type": "string" }, "description": "Extra game arguments, passed through as-is (for example \"--server-thread\")." } } } },
+            "arg": { "type": "array", "items": { "type": "string" }, "description": "Extra game arguments, passed through as-is (for example \"--server-thread\"). They decide what the game joins, reads, writes and deletes (--server, --session-file, --smoke-report): needs confirm, only when the player asks." },
+            "confirm": { "type": "boolean", "description": "true once the player agreed to the extra game arguments in arg." } } } },
         { "name": "server", "description": "Start a Horizon dedicated server. It runs until server_stop or the end of this MCP session. Requires agreeing to the Minecraft EULA. CLI: horizon-launcher server",
           "inputSchema": { "type": "object", "properties": { "version": version, "allow_jar_downloads": jar_downloads, "dir": { "type": "string", "description": "The server's folder. Default: the launcher's server folder." }, "accept_eula": { "type": "boolean", "description": "Agree to the Minecraft EULA (https://aka.ms/MinecraftEULA) on the player's behalf. Only with their consent." } } } },
         { "name": "server_command", "description": "Send a console command to the server started with server (for example \"list\" or \"say hello\"), and return the lines it printed in reply.",
@@ -71,6 +72,23 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// `play`'s extra game arguments go to the game as they are: `--server HOST`, `--session-file
+/// PATH` (read, then deleted), `--smoke-report PATH` (written on exit), `--control-socket PATH`.
+/// Like `game-args`, they need the player's yes; `play` without them stays free.
+fn play_needs_confirm(args: &Value) -> Result<(), String> {
+    let extra = args
+        .get("arg")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    if extra && args.get("confirm").and_then(Value::as_bool) != Some(true) {
+        return Err(
+            "play passes arg to the game as it is: ask the player, then call it with confirm: true"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 impl Session {
     fn call(&mut self, name: &str, args: &Value) -> Result<String, String> {
         let allow_jar_downloads = args
@@ -79,13 +97,11 @@ impl Session {
             .unwrap_or(false);
         match name {
             "play" => {
+                play_needs_confirm(args)?;
                 if self.client.as_ref().is_some_and(|c| c.finished().is_none()) {
                     return Err("The client is already running.".into());
                 }
-                let instance = match arg_str(args, "instance") {
-                    Some(name) => instances::find(name)?,
-                    None => instances::selected(),
-                };
+                let instance = instances::for_launch(arg_str(args, "instance"))?;
                 let tag = instance.resolve_version(arg_str(args, "version"))?;
                 let mut cmd = backend::client(&tag)?;
                 instances::apply(&mut cmd, &instance)?;
@@ -331,7 +347,25 @@ impl Session {
                     Ok(text) => (text, false),
                     Err(e) => (e, true),
                 };
-                Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": error }))
+                let mut result =
+                    json!({ "content": [{ "type": "text", "text": text }], "isError": error });
+                // The server's console and its replies hold other people's chat and names; a
+                // launcher error is the launcher's own text.
+                if !error
+                    && matches!(
+                        name,
+                        "server"
+                            | "server_stop"
+                            | "play"
+                            | "server_log"
+                            | "server_command"
+                            | "mods_search"
+                            | "logs"
+                    )
+                {
+                    horizon_mcp::mark_untrusted(&mut result);
+                }
+                Ok(result)
             }
             _ => Err((-32601, format!("Method not found: {method}"))),
         }
@@ -356,6 +390,49 @@ pub fn serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_with_extra_game_arguments_needs_confirm() {
+        let evil = json!({ "arg": ["--server", "evil.example:25565"] });
+        assert!(play_needs_confirm(&evil).unwrap_err().contains("confirm"));
+        let deletes = json!({ "arg": ["--session-file=/home/me/notes.txt"], "confirm": false });
+        assert!(play_needs_confirm(&deletes).is_err());
+        let agreed = json!({ "arg": ["--server", "evil.example:25565"], "confirm": true });
+        assert!(play_needs_confirm(&agreed).is_ok());
+        // Starting the game, and joining what the player asked for, stay one call.
+        for free in [
+            json!({}),
+            json!({ "arg": [] }),
+            json!({ "world": "Agent", "creative": true }),
+            json!({ "server": "play.example.org" }),
+        ] {
+            assert!(play_needs_confirm(&free).is_ok(), "{free}");
+        }
+        let play = &session_tools()[0];
+        assert_eq!(play["name"], "play");
+        assert_eq!(
+            play["inputSchema"]["properties"]["confirm"]["type"],
+            "boolean"
+        );
+    }
+
+    #[test]
+    fn a_launcher_error_carries_no_untrusted_notice() {
+        let mut session = Session {
+            server: None,
+            client: None,
+            sign_in: None,
+            game: None,
+        };
+        // With no server started, the reply is the launcher's own error: no notice.
+        for name in ["server_log", "server_stop"] {
+            let reply = session
+                .handle("tools/call", &json!({ "name": name, "arguments": {} }))
+                .unwrap();
+            assert_eq!(reply["isError"], true, "{name}");
+            assert_eq!(reply["content"].as_array().unwrap().len(), 1, "{name}");
+        }
+    }
 
     #[test]
     fn the_server_advertises_what_it_serves() {

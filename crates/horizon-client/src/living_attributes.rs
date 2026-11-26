@@ -12,7 +12,11 @@ use horizon_items::{
     equipment::Equipment,
     items::{ItemStack, Items},
 };
-use std::{cell::OnceCell, convert::Infallible, fmt, io, sync::Arc};
+use std::{
+    convert::Infallible,
+    fmt, io,
+    sync::{Arc, OnceLock},
+};
 use {
     horizon_core::nbt::Tag,
     horizon_world::{
@@ -249,7 +253,7 @@ impl Default for ClampLog {
 /// map stays until `invalidate` drops it.
 #[derive(Clone, Default)]
 pub struct LivingAttributes {
-    map: OnceCell<Box<Live>>,
+    map: OnceLock<Box<Live>>,
     /// The items whose modifiers the map holds, by `EquipmentSlot` ordinal
     /// (`LivingEntity.lastEquipmentItems`).
     worn: Option<Box<[Option<ItemStack>; 8]>>,
@@ -420,7 +424,7 @@ impl LivingAttributes {
         seed: impl FnOnce() -> Vec<Tag>,
     ) -> Option<f64> {
         let map = self.built_or_build(catalog, entity, seed)?;
-        map.value(Some(map.key(name)?), kind).ok()
+        map.value_of(name, kind).ok()
     }
 
     /// `AttributeInstance.getModifiers` of `name`, in the order they were

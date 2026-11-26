@@ -210,6 +210,10 @@ rule and its current value by namespaced id. Both native and wasm mods can use
 these reads. Saved values and a new world's create-screen choices are installed
 before the first server hook, without firing `game_rule_changed` for loading.
 Level reads use the same store once the requested level exists.
+`ServerHost::game_rule_default(id)` returns the rule's default (what Bukkit calls
+`GameRule#getDefault`) as `Option<GameRuleValue>`, `None` for an unknown id. It ignores
+the current value, so a mod can tell whether a rule was changed. It is not per level:
+there is one server-wide rule store.
 
 `mod_api::GameRuleValue` owns the `Bool(bool)` and `Int(i32)` cases, in that order.
 `level.game_rule(host, id)` returns `Result<Option<GameRuleValue>, LevelReadError>`:
@@ -337,6 +341,11 @@ authoritative tags are applied or if the relevant registry mapping is unavailabl
 refused if the runtime cannot allocate a name slot. No lookup stringifies a retained key.
 Block enumeration returns `BlockKey` values, including blocks no mod requested. An unresolved
 member returns `None` for the entire list, not a partial result.
+The other direction, the tags a member is in (`Holder.tags()`), is `tags.item_tags(item_key)`,
+`tags.block_tags(block_key)` and `tags.fluid_tags(fluid_key)`: the tags whose merged members hold
+it, sorted by tag name (`tags.name(tag_key)` gives a key's name back), an empty list for a member of none, and `None` as for the member reads.
+Each call walks that registry's tags, so a mod that asks often (a filter matching `c:ingots/*`)
+caches the answer until the next `tags_updated`.
 The engine `TagRegistry`, `StackData`, `StackView` and `DisplayContext` are not API types.
 
 ## Scoped Parts
@@ -377,3 +386,16 @@ unknown items and empty tags return `Ok(None)`. Result objects retain their
 
 `KeyConflictContext`, `FireworkShape` and `JarInputsError` are API-owned values.
 `JarInputsError` carries owned diagnostics and the original-jar identity.
+
+## Checking an entity type id
+
+`host.entity_type_exists(id)` answers whether `id` is a registered entity type (`EntityType.byString`), with its
+namespace as written: `minecraft:zombie` is in, `zombie` and an unknown id are not. It reads the entity-type registry
+the world loads, so it answers `false` before a world has loaded it. Use it to check configured ids (for example
+whitelist or blacklist entries, which the game drops when unknown) before a mod acts on them.
+
+`host.entity_type_is_enemy(id)` and `host.entity_type_is_animal(id)` answer `instanceof Enemy` and
+`instanceof Animal` for the type's entities, which the type's class decides, not its category: the hoglin is both, the
+zombie horse is in the monster category and only an `Animal`, the shulker and the slime are enemies, the ender dragon is
+one too, fish, dolphins, villagers and golems are neither. A spawn-control mod counts and matches its hostile and
+passive mobs by them. Both read the world's mob types and answer `false` for any other id.

@@ -316,7 +316,7 @@ impl Game<'_> {
         for handle in self.entity_handles() {
             with_entity_mut!(self, handle, entity => {
                 if entity.id() == id {
-                    *entity.position_mut() = at;
+                    entity.set_position(at);
                     *entity.velocity_mut() = horizon_core::geometry::Vec3::ZERO;
                 }
             });
@@ -464,6 +464,9 @@ impl Game<'_> {
         let id = entity_nbt::uuid(tag)
             .and_then(|u| self.target_with_uuid(u))
             .and_then(target_id);
-        id.is_none_or(|id| self.passenger_vehicle(id).is_none())
+        // An entity a mod kept out of the saves (`entity_set_saved`) is not written.
+        id.is_none_or(|id| {
+            !self.persist.unsaved.contains(&id) && self.passenger_vehicle(id).is_none()
+        })
     }
 }

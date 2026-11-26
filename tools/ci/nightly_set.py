@@ -48,7 +48,11 @@ COUNCIL = ".github/council.txt"
 CODEOWNERS = ".github/CODEOWNERS"
 # What CODEOWNERS guards today, refused even if the file moved: what builds, signs and checks releases.
 ALWAYS_GUARDED = ["/.github/", "/tools/ci/", "/crates/horizon-release-sign/", "/crates/horizon-server/src/update.rs",
-                  "/launcher/src/backend.rs", "/launcher/links.json"]
+                  "/launcher/src/backend.rs", "/launcher/links.json", "/launcher/src/backend/release_selection.rs",
+                  "/launcher/src/update_handoff.rs", "/launcher/src/native_mods/sdk_cache.rs",
+                  "/crates/cargo-horizon-mod/src/sdk_fetch.rs", "/xtask/", "/.cargo/"]
+# `pulls/N/files` stops here however many files the pull request changes.
+LISTING_CAP = 3000
 STATE_BRANCH = "nightly-state"
 BUILD_PREFIX = "nightly/build-"
 MAX_PRS = 30
@@ -262,6 +266,7 @@ class PullRequest:
     author: str
     base: str
     files: list[str]
+    complete: bool = True  # False when GitHub's file listing is cut short, so a guarded file may be missing
 
 
 def check(pr: PullRequest | None, number: int, patterns: list[str]) -> str | None:
@@ -274,6 +279,8 @@ def check(pr: PullRequest | None, number: int, patterns: list[str]) -> str | Non
         return f"#{number} is {pr.state}"
     if pr.base != "main":
         return f"#{number} targets `{safe(pr.base)}`, not main"
+    if not pr.complete:
+        return f"#{number}: GitHub listed only part of its changed files, so the guarded paths can't be checked"
     bad = [f for f in pr.files if guarded(f, patterns)]
     if bad:
         more = f" and {len(bad) - 1} more" if len(bad) > 1 else ""
@@ -584,15 +591,27 @@ def lookup(repo: str) -> Callable[[int], PullRequest | None]:
             return None
         p = json.loads(raw)
         pages = json.loads(gh("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{n}/files"))
-        files = [path for page in pages for item in page
-                 for path in (item["filename"], item.get("previous_filename")) if path is not None]
+        items = [item for page in pages for item in page]
+        files = [path for item in items for path in (item["filename"], item.get("previous_filename"))
+                 if path is not None]
+        # The listing is capped; a missing count counts as unknown, never as complete.
+        changed = p.get("changed_files")
+        complete = isinstance(changed, int) and changed <= len(items) < LISTING_CAP
         state = "merged" if p.get("merged_at") else p["state"]
-        return PullRequest(n, state, p["head"]["sha"], p["title"], p["user"]["login"], p["base"]["ref"], files)
+        return PullRequest(n, state, p["head"]["sha"], p["title"], p["user"]["login"], p["base"]["ref"], files,
+                           complete)
     return get
 
 
 def answer(repo: str, issue: str, text: str) -> None:
     gh("api", f"repos/{repo}/issues/{issue}/comments", "-f", f"body=🤖 Nightly: {text}")
+
+
+def title_request(title: str) -> str:
+    """The request id in a `nightly build` run's name, or ''. It sits right after the mode (nightly-build.yml's
+    run-name), before the free-form base, so a base that mentions another request's id is never taken for it."""
+    match = re.match(r"nightly build \((?:dry run|real)\) \(request ([^)\s]+)\)", title)
+    return match.group(1) if match else ""
 
 
 def dispatch(repo: str, issue: str, request: str, dry_run: list[dict] | None) -> str:
@@ -607,7 +626,7 @@ def dispatch(repo: str, issue: str, request: str, dry_run: list[dict] | None) ->
         runs = json.loads(gh("run", "list", "--repo", repo, "--workflow", "nightly-build.yml", "--event",
                              "workflow_dispatch", "--limit", "20", "--json", "displayTitle,url", check=False) or "[]")
         for r in runs:
-            if request in r["displayTitle"]:
+            if title_request(r["displayTitle"]) == request:
                 return r["url"]
     return f"https://github.com/{repo}/actions/workflows/nightly-build.yml"
 

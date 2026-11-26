@@ -87,12 +87,18 @@ pub struct Boat {
     pub paddling: [bool; 2],
     /// Whether this boat has a player controlling its paddles.
     pub paddle_controller: bool,
+    /// `getPassengers` in the order a server's last `SetPassengers` listed
+    /// them (a server's client); empty where this game seats them itself.
+    pub listed_passengers: Vec<u32>,
     /// left, right, up, down
     pub input: [bool; 4],
     pub on_ground: bool,
     /// `Entity.fallDistance`: counted by `AbstractBoat.checkFallDamage`, saved
     /// and loaded (`fall_distance`).
     pub fall_distance: f64,
+    /// `AbstractBoat.lastYd`: the vertical velocity `checkFallDamage` saw,
+    /// before the move's collisions zeroed it; `getWaterLevelAbove` scans with it.
+    pub last_yd: f64,
     /// `Entity.stuckSpeedMultiplier`: set where the boat sits in powder snow
     /// (`PowderSnowBlock.entityInside`) or a cobweb (`WebBlock.entityInside`),
     /// spent by the next move.
@@ -193,9 +199,11 @@ impl Boat {
             paddles: [0.0; 2],
             paddling: [false; 2],
             paddle_controller: false,
+            listed_passengers: Vec::new(),
             input: [false; 4],
             on_ground: false,
             fall_distance: 0.0,
+            last_yd: 0.0,
             stuck: Vec3::ZERO,
             chest: false,
             items: Vec::new(),

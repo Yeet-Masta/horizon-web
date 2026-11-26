@@ -139,10 +139,11 @@ pub(super) fn parse_mod(m: &Value) -> Option<Project> {
             .unwrap_or_default()
             .to_owned(),
         downloads: m["downloadCount"].as_f64().unwrap_or(0.) as u64,
+        // The page is opened by the OS: only an https link is kept.
         page: m["links"]["websiteUrl"]
             .as_str()
-            .unwrap_or_default()
-            .to_owned(),
+            .and_then(super::details::https)
+            .unwrap_or_default(),
         icon: m["logo"]["thumbnailUrl"].as_str().map(str::to_owned),
         // CurseForge's API doesn't say; the project page does.
         license: String::new(),
@@ -184,6 +185,7 @@ pub(super) fn parse_file(f: &Value) -> Option<Version> {
         game_versions,
         loaders,
         files,
+        optional: Vec::new(),
         required: f["dependencies"]
             .as_array()
             .into_iter()

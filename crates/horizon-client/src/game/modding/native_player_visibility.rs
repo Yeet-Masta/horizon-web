@@ -11,6 +11,49 @@ const HORIZONTAL: std::ops::Range<i32> = -(1 << 25)..(1 << 25);
 const VERTICAL: std::ops::Range<i32> = -(1 << 11)..(1 << 11);
 
 impl Game<'_> {
+    pub(super) fn server_define_terrain_view(
+        &mut self,
+        id: u32,
+        rules: &mod_api::TerrainView,
+    ) -> Result<(), mod_api::TerrainViewError> {
+        use mod_api::{TerrainViewError, content::crash::current_native_mod};
+        let owner = current_native_mod().ok_or(TerrainViewError::Unavailable)?;
+        if !self.is_logical_server() {
+            return Err(TerrainViewError::Unavailable);
+        }
+        let index =
+            super::api_values::block_state::current().map_err(|_| TerrainViewError::Unavailable)?;
+        let host = self.lan.as_mut().ok_or(TerrainViewError::Unavailable)?;
+        host.hub.define_terrain_view(owner, id, rules, |state| {
+            index.to_engine(state).ok().map(|s| s.0)
+        })
+    }
+
+    pub(super) fn player_set_terrain_view(
+        &mut self,
+        player: u128,
+        dimension: &str,
+        view: Option<u32>,
+    ) -> Result<(), mod_api::TerrainViewError> {
+        use mod_api::{TerrainViewError, content::crash::current_native_mod};
+        let owner = current_native_mod().ok_or(TerrainViewError::Unavailable)?;
+        if !self.is_logical_server() {
+            return Err(TerrainViewError::Unavailable);
+        }
+        if dimension.len() > 256 || mod_api::Identifier::parse_namespaced(dimension).is_none() {
+            return Err(TerrainViewError::UnknownView);
+        }
+        let host = self.lan.as_mut().ok_or(TerrainViewError::Unavailable)?;
+        let conn = host
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.uuid == player && g.participates_online())
+            .ok_or(TerrainViewError::Unavailable)?
+            .conn;
+        host.hub.set_terrain_view(conn, dimension, owner, view)
+    }
+
     /// The server's record of a player in its list, by handle.
     fn listed_guest(&self, player: PlayerRef) -> Result<&Guest, Refusal> {
         if self.native_lifecycle.epoch() != Some(player.entity().epoch()) {
@@ -100,10 +143,16 @@ impl Game<'_> {
         if v.uuid == t.uuid {
             return Ok(true);
         }
+        // The tracker's own level (`Hub::tracker_hidden`): also everyone's while the target is being sent
+        // again, as the player list (`Hub::sees`) hides it then.
         let hidden = self
             .lan
             .as_ref()
-            .and_then(|lan| lan.hub.hidden.get(&t.uuid).copied());
+            .and_then(|lan| lan.hub.tracker_hidden(t.uuid));
+        // `entity_set_visible_to` hid the target from this viewer alone.
+        if v.tracker.entity_hidden(t.uuid) {
+            return Ok(false);
+        }
         Ok(player_shown(
             v.spectator(),
             v.permission,

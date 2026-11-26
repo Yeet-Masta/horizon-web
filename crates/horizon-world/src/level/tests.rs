@@ -55,6 +55,10 @@ pub(crate) struct TestLevel {
     pub block_events_ready: bool,
     /// Positions that refuse fluids, fire and piston moves, as a land claim would.
     pub guarded: HashSet<BlockPos>,
+    /// The states `template_suppressed` names: blocks of a mod that is off.
+    pub suppressed: HashSet<BlockStateId>,
+    /// How many times `allow_fluid_tick` was asked.
+    pub fluid_asks: std::cell::Cell<u32>,
     /// What `adjust_signal` answers at a position: the weak and direct signal,
     /// and the only direction they go in, if any.
     pub signals: HashMap<BlockPos, (i32, i32, Option<Direction>)>,
@@ -103,6 +107,7 @@ pub(crate) struct TestLevel {
     /// `ShulkerBoxBlockEntity.isClosed` at a position: `true` for a shut lid,
     /// `false` for an open box. Positions not listed have no block entity.
     pub shulker_closed: HashMap<BlockPos, bool>,
+    pub shulker_progress: HashMap<BlockPos, f32>,
     /// The containers `container_open` reports as open.
     pub opened: HashSet<BlockPos>,
     /// `Level.getWorldBorder`, for `within_world_border`: centred on the
@@ -134,6 +139,8 @@ impl TestLevel {
             tick_ready: true,
             block_events_ready: true,
             guarded: HashSet::new(),
+            suppressed: HashSet::new(),
+            fluid_asks: Default::default(),
             fire_asks: Default::default(),
             source_asks: Default::default(),
             lava_asks: Default::default(),
@@ -150,6 +157,7 @@ impl TestLevel {
             note_players: std::cell::RefCell::new(Vec::new()),
             refuse_portals: false,
             shulker_closed: HashMap::new(),
+            shulker_progress: HashMap::new(),
             opened: HashSet::new(),
             border: horizon_core::geometry::border::BorderGeometry::new(
                 [0.0, 0.0],
@@ -185,6 +193,9 @@ impl LevelAccess for TestLevel {
     }
     fn shulker_is_closed(&self, pos: BlockPos) -> Option<bool> {
         self.shulker_closed.get(&pos).copied()
+    }
+    fn shulker_lid_progress(&self, pos: BlockPos) -> Option<f32> {
+        self.shulker_progress.get(&pos).copied()
     }
     fn adjust_has_analog_output(&self, state: BlockStateId, vanilla: bool) -> bool {
         vanilla || self.analog_states.contains(&state)
@@ -293,7 +304,11 @@ impl LevelAccess for TestLevel {
         self.events.push(event);
     }
     fn allow_fluid_tick(&self, pos: BlockPos, _fluid: &'static str) -> bool {
+        self.fluid_asks.set(self.fluid_asks.get() + 1);
         !self.guarded.contains(&pos)
+    }
+    fn template_suppressed(&self, state: BlockStateId) -> bool {
+        self.suppressed.contains(&state)
     }
     fn allow_spread(&self, _kind: Spread, _from: BlockPos, to: BlockPos) -> bool {
         !self.guarded.contains(&to)
@@ -892,36 +907,17 @@ fn max_chained_neighbor_updates_limits_a_chain_and_a_negative_value_lifts_it() {
 /// the ones after it are dropped without a line.
 #[test]
 fn passing_max_chained_neighbor_updates_logs_one_error_with_the_first_skipped_position() {
-    struct Lines(horizon_std::sync::Mutex<Vec<(horizon_std::thread::ThreadId, String)>>);
-    impl log::Log for Lines {
-        fn enabled(&self, metadata: &log::Metadata) -> bool {
-            metadata.level() == log::Level::Error
-        }
-        fn log(&self, record: &log::Record) {
-            if self.enabled(record.metadata()) {
-                self.0.lock().unwrap().push((
-                    horizon_std::thread::current().id(),
-                    record.args().to_string(),
-                ));
-            }
-        }
-        fn flush(&self) {}
-    }
-    static LINES: Lines = Lines(horizon_std::sync::Mutex::new(Vec::new()));
     let Some(f) = fixture() else { return };
-    log::set_logger(&LINES).expect("no other test installs a logger");
-    log::set_max_level(log::LevelFilter::Error);
+    // The crate's one test logger: this thread's errors only, as the tests run side by side.
+    crate::test_log::capture();
     wires_broken_by_updates(f, Some(1));
-    // Only this test's thread: the tests of the crate run side by side.
-    let me = horizon_std::thread::current().id();
-    let mine: Vec<String> = LINES
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|(thread, _)| *thread == me)
-        .map(|(_, line)| line.clone())
-        .collect();
+    let mine: Vec<String> = crate::test_log::with_records(|records| {
+        records
+            .iter()
+            .filter(|(level, _)| *level == log::Level::Error)
+            .map(|(_, line)| line.clone())
+            .collect()
+    });
     assert_eq!(
         mine,
         ["Too many chained neighbor updates. Skipping the rest. First skipped position: 1, 63, 0"]
@@ -3572,6 +3568,40 @@ fn open_shulker_box_supports_only_through_its_base_plate() {
             !sim.can_support_center(pos, facing),
             "open box facing {facing:?} lid side"
         );
+    }
+}
+
+#[test]
+fn a_shulker_box_stops_conducting_redstone_when_its_lid_moves() {
+    let mut w = world!();
+    let box_pos = BlockPos::new(0, 1, 0);
+    let stone_pos = BlockPos::new(2, 1, 0);
+    w.put(box_pos, w.id("shulker_box", &[("facing", "up")]));
+    w.put(stone_pos, w.id("stone", &[]));
+    w.level.shulker_closed.remove(&box_pos);
+    let box_state = w.get(box_pos);
+    let stone_state = w.get(stone_pos);
+    {
+        let sim = w.b().sim(&mut w.level, &mut w.ticks);
+        assert!(
+            sim.is_redstone_conductor(box_state, box_pos),
+            "a closed box is a full cube"
+        );
+        assert!(
+            sim.is_redstone_conductor(stone_state, stone_pos),
+            "a full block still conducts"
+        );
+    }
+    w.level.shulker_closed.insert(box_pos, false);
+    for (progress, conducts) in [(0.0, true), (0.1, false), (1.0, false)] {
+        w.level.shulker_progress.insert(box_pos, progress);
+        let sim = w.b().sim(&mut w.level, &mut w.ticks);
+        assert_eq!(
+            sim.is_redstone_conductor(box_state, box_pos),
+            conducts,
+            "shulker lid progress {progress}"
+        );
+        assert!(sim.is_redstone_conductor(stone_state, stone_pos));
     }
 }
 

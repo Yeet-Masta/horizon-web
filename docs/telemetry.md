@@ -54,6 +54,8 @@ Every item has `day` (days since 1970, UTC: no finer time), `source` (`launcher`
 
 The launcher's own items (bug reports sent from it) have no GPU or screen: only the game knows them. The memory given to the game is not a setting in Horizon (no Java heap): `peak_ram_mb` is what it used. Benchmark reports carry the same facts in their `hardware` (`docs/benchmark-report.md`).
 
+`power` is the machine as it was when the game started, and it stays that for the whole session: a laptop that unplugs keeps `ac`, because the field says what the session started on, not what it runs on now. The live state is the game's own channel (`horizon_system::power`), which reads the OS at 1 Hz on a thread of its own and never in the frame loop: the client's log line for each change and the graphics page's warning ([graphics.md](graphics.md)) read it, and nothing is collected or sent from it.
+
 No serial number, host name, user name, MAC address or path is read. Settings → Data collection → "View what would be sent" and `horizon-launcher data show` print every field as it would leave this machine.
 
 A summary (`frames`, `ticks`) is the count, the 50th, 95th and 99th percentile and the maximum in milliseconds (to the tenth), and 14 bucket counts: under 4 ms, 4–6, 6–8, 8–10, 10–12, 12–14, 14–16.7, 16.7–20, 20–25, 25–33.3, 33.3–50, 50–100, 100–250, and 250 ms and more. Raw frame times never leave: `Timings` records them in tenths of a millisecond (20 KB however long the session) and only its summary is kept. A perf item is under 1 KiB.
@@ -67,7 +69,7 @@ Never sent: account names or UUIDs, world names, server or LAN addresses, chat, 
 - `telemetry/outbox/` holds one JSON file per item, `<day>-<kind>-<random>.json`. It never holds more than 200 items or 2 MiB, and the oldest go first. `kept.json` counts today's items per kind against the caps above.
 - The launcher sends the outbox when it starts and when it closes. Items go as one JSON batch (`{"schema":1,"install_id":…,"items":[…]}`, up to 64 items and 1 MiB), compressed with zstd: `POST /v1/batch` with `Content-Encoding: zstd`. A day's perf summaries are under 2 KB on the wire.
 - After a failure the launcher waits a minute, doubling up to a day, and sends at most 8 batches a day. A batch the server refuses with a 4xx (not 429) is dropped.
-- The server is `https://telemetry.playhorizon.dev` (`DEFAULT_ENDPOINT`), on Railway in the EU (`europe-west4`, Amsterdam). `HORIZON_TELEMETRY_URL` names another one (a local server); `HORIZON_TELEMETRY_URL=off` sends nothing at all, no ping either. Tests, CI and the benchmark and test harnesses set `off`.
+- The server is `https://telemetry.playhorizon.dev` (`DEFAULT_ENDPOINT`), on Ludovic's home server in Switzerland, behind Cloudflare. `HORIZON_TELEMETRY_URL` names another one (a local server); `HORIZON_TELEMETRY_URL=off` sends nothing at all, no ping either. Tests, CI and the benchmark and test harnesses set `off`.
 - What is sent still depends on the switches: with every switch off nothing but the ping leaves, and the outbox stays empty.
 - `SCHEMA` versions the format. New optional fields keep it. A field that changes meaning or goes bumps it, and the server keeps reading the older ones.
 
@@ -167,4 +169,4 @@ Public output never holds a raw hardware value, only these classes (`src/classes
 
 The driver, OS version, clocks, screen and power are kept raw for the 180 days of retention, to explain a slow group, and never published.
 
-`crates/horizon-telemetry-server` is the server, at `https://telemetry.playhorizon.dev` on Railway (one SQLite file on a volume, region `europe-west4`). Its [README](../crates/horizon-telemetry-server/README.md) covers storage (about 190 bytes per play session), retention (180 days of raw rows, anonymous daily totals kept), rate limits and hosting.
+`crates/horizon-telemetry-server` is the server, at `https://telemetry.playhorizon.dev` on Ludovic's home server (one SQLite file on its disk, in Switzerland). Its [README](../crates/horizon-telemetry-server/README.md) covers storage (about 190 bytes per play session), retention (180 days of raw rows, anonymous daily totals kept), rate limits and hosting.

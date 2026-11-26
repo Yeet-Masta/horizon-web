@@ -1,6 +1,8 @@
 //! The mouse in play: the look it turns, the pointer grab (`MouseHandler.grabMouse` /
 //! `releaseMouse`), the cursor icon, and pausing a world whose window loses focus.
 use super::*;
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::WindowExtWayland;
 
 fn studio_suppresses_focus_pause(replay_active: bool, freecam_active: bool) -> bool {
     replay_active || freecam_active
@@ -15,6 +17,18 @@ impl Game<'_> {
             scoping: self.camera_type.is_first_person() && self.scoping(),
             invert_x: self.settings.invert_x,
             invert_y: self.settings.invert_y,
+            // Horizon's polar spyglass look: the option's own policy lives in
+            // `spyglass_polar_look`, its own module of the Horizon layer, and is read here, at
+            // the call, so the engine's mouse only gets the plain scale. `cfg!` is the house
+            // gate for Horizon code (`docs/forking.md`), read beside the option it wraps. A
+            // studio freecam turns its own camera before the scale means anything, and the
+            // pitch here is the player's, not the freecam's.
+            yaw_scale: crate::spyglass_polar_look::yaw_scale(
+                self.pitch,
+                cfg!(feature = "horizon-extras")
+                    && self.settings.extras.spyglass_polar_look
+                    && !self.studio.flying(),
+            ),
         }
     }
     /// `MouseHandler.handleAccumulatedMovement` and `Entity.turn`, once per frame.
@@ -87,13 +101,17 @@ impl Game<'_> {
     }
     /// `Minecraft.pauseIfInactive`: a window without focus for more than 500 ms
     /// pauses the game. An open screen (books, signs, the pack prompt, a server
-    /// dialog) stays instead of pausing (`Gui.setPauseScreen`).
+    /// dialog) stays instead of pausing (`Gui.setPauseScreen`). So does the
+    /// level loading screen, drawn over `Screen::Playing` while a world's
+    /// terrain comes in: vanilla's `screen` is the `LevelLoadingScreen` then,
+    /// not null (#19952).
     pub(super) fn pause_if_inactive(&mut self) {
         if self
             .focus_lost
             .is_some_and(|t| t.elapsed() > Duration::from_millis(500))
             && self.control.is_none()
             && self.screen == Screen::Playing
+            && !self.remote_screen_up()
             && !studio_suppresses_focus_pause(self.replay.playing(), self.studio.flying())
             && self.player.is_some()
             && !self.options.no_pause
@@ -364,11 +382,20 @@ impl Game<'_> {
             && !self.internal_grab()
             && let (Some(window), Some(mode)) = (&self.window, self.capture_mode)
         {
+            // The forced release/regrab workaround is specific to X11. Keep
+            // Wayland's pointer constraints on the existing path until that
+            // backend has equivalent validation.
+            if window.xdg_toplevel().is_some() {
+                return;
+            }
             let other = match mode {
                 CursorGrabMode::Locked => CursorGrabMode::Confined,
                 CursorGrabMode::Confined => CursorGrabMode::Locked,
                 CursorGrabMode::None => return,
             };
+            // winit skips an identical grab request on X11. Clear its recorded mode first so a
+            // compositor-released grab is actually requested again.
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
             self.capture_mode = if window.set_cursor_grab(mode).is_ok() {
                 Some(mode)
             } else if window.set_cursor_grab(other).is_ok() {

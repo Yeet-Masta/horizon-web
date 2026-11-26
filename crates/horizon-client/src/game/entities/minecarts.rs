@@ -33,6 +33,8 @@ use horizon_core::{
     random::RandomSource,
 };
 use horizon_world::registry::BlockStateId;
+#[path = "minecarts/fire.rs"]
+mod fire;
 #[cfg(test)]
 use std::sync::Arc;
 #[path = "minecarts/block_effects.rs"]
@@ -41,6 +43,9 @@ mod block_effects;
 mod cells;
 #[path = "minecarts/hit.rs"]
 mod hit;
+#[cfg(test)]
+#[path = "minecarts/near_carts.rs"]
+mod near_carts;
 pub(super) use hit::CartHit;
 // The cart state and its pure rules live in horizon-gameplay; the old paths keep working.
 pub(in crate::game) use horizon_gameplay::minecarts::*;
@@ -131,12 +136,24 @@ impl Game<'_> {
         // Every moving cart asks each tick, and the box turns nearly every entity of
         // the level away: it is tested first, and only the mobs near it are read.
         let close = |b: &Aabb| b.intersects(near);
-        let mut boxes: Vec<Aabb> = self
-            .carts
-            .iter()
-            .filter(|o| o.id != c.id)
-            .map(Minecart::bounds)
-            .filter(close)
+        // The carts near it were taken when its tick began; a move past them asks the list.
+        let carts: Vec<Aabb> = match c.near_carts.as_ref().and_then(|n| n.meeting(near)) {
+            Some(boxes) => {
+                #[cfg(test)]
+                near_carts::tests_support::NEAR_CARTS_ANSWERS
+                    .set(near_carts::tests_support::NEAR_CARTS_ANSWERS.get() + 1);
+                boxes
+            }
+            None => self
+                .carts
+                .iter()
+                .filter(|o| o.id != c.id)
+                .map(Minecart::bounds)
+                .filter(close)
+                .collect(),
+        };
+        let mut boxes: Vec<Aabb> = carts
+            .into_iter()
             .chain(
                 self.boats
                     .iter()
@@ -310,6 +327,8 @@ impl Game<'_> {
         // 🤖 Agent: `AbstractMinecart.move` runs applyEffectsFromBlocks at
         // once, the cart still at the rail's top height (below it is lowered).
         let here = c.position;
+        // Where the fire pass applies the move's block effects.
+        c.fire_move_at = Some(here);
         self.cart_inside_blocks(c, slot, here, here);
         let at = |e: [i32; 3], c: &Minecart| {
             c.position.x.floor() as i32 - pos[0] == e[0]
@@ -846,6 +865,16 @@ impl Game<'_> {
         slot: usize,
         index: &mut CartIndex,
     ) -> bool {
+        #[cfg(not(test))]
+        let cache_enabled = true;
+        #[cfg(test)]
+        let cache_enabled = !near_carts::tests_support::NEAR_CARTS_OFF.get();
+        if cache_enabled {
+            let reach = NEAR_CARTS_REACH;
+            let area = c.bounds().inflate(Vec3::new(reach, reach, reach));
+            c.near_carts = index.near_snapshot(&self.carts, slot, area).map(Box::new);
+        }
+
         c.tick_count += 1;
         c.previous = c.position;
         c.previous_yaw = c.yaw;
@@ -873,14 +902,19 @@ impl Game<'_> {
         if self.minecart_improvements() {
             self.move_along_track_new(c, intent);
         } else if let Some(rail) = self.rail(Some(c.id), pos[0], pos[1], pos[2]) {
+            c.on_rails = true;
             self.move_along_track(c, pos, &rail, intent, slot);
             self.note_cart_pass(c, pos);
             if &*rail.name == "minecraft:activator_rail" {
                 self.activate_cart(c, rail.powered);
             }
         } else {
+            c.on_rails = false;
             self.come_off_track(c);
+            c.fire_move_at = Some(c.position);
         }
+        // Only the movement above uses the snapshot. Drop it before storing the cart.
+        c.near_carts = None;
         c.first_tick = false;
         // The old behavior derives yaw once per tick; the experiment has
         // already recorded each step's yaw and pitch.
@@ -1419,7 +1453,10 @@ impl Game<'_> {
         let ridden = self.guest_vehicles();
         // By id: an exploding cart can destroy or prime others mid-loop.
         let ids: Vec<u32> = self.carts.iter().map(|c| c.id).collect();
-        let mut index = CartIndex::default();
+        let mut index = CartIndex {
+            pass: true,
+            ..Default::default()
+        };
         let mut hint = 0;
         for &id in &ids {
             let Some(i) = cart_at(&self.carts, id, hint) else {
@@ -1466,6 +1503,7 @@ impl Game<'_> {
                 hint = i + 1;
                 let p = self.carts[i].position;
                 if ticking(p.x.floor() as i32, p.z.floor() as i32) {
+                    self.cart_fire_tick(id, i);
                     self.cart_cactus_tick(id, i);
                     self.cart_lava_tick(id, i);
                 }
@@ -2066,6 +2104,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.carts.is_empty() {
+            return;
+        }
         let a = alpha as f32;
         let Some(uv) = self
             .gui
@@ -2076,6 +2117,7 @@ impl Game<'_> {
         else {
             return;
         };
+        let mut poses = Poses::pooled();
         // Entity.shouldRenderAtSqrDistance: 64 times the bounding box's mean
         // edge, scaled by the view scale.
         let range = (WIDTH + HEIGHT + WIDTH) / 3.0 * 64.0 * self.view_scale();
@@ -2232,7 +2274,7 @@ impl Game<'_> {
                 }
             }
             let m = base * glam::Mat4::from_scale(glam::Vec3::new(-1.0, -1.0, 1.0));
-            let poses = Poses::new(model);
+            poses.reset(model);
             horizon_client::mobs::render::draw(model, m, &poses, uv, 0xFFFF_FFFF, packed, 0, out);
             self.finish_lit_entity(culling, c, out, entity_start);
         }
@@ -2250,7 +2292,7 @@ impl Game<'_> {
             camera: glam::DVec3::ZERO,
             spyglass_outline: self.camera_type.is_first_person() && self.scoping(),
             orientation: glam::Quat::IDENTITY,
-            anim: &|_| horizon_client::block_entity_render::BlockAnim::default(),
+            anim: &|_, _| horizon_client::block_entity_render::BlockAnim::default(),
             texts: None,
             partial: 0.0,
             game_time: self.world.game_time,
@@ -2263,7 +2305,8 @@ impl Game<'_> {
             nether: self.nether_lighting(),
             lid: &|_: [i32; 3]| 0.0,
             sign: &|_| None,
-            banner: &|_| Vec::new(),
+            sign_revision: None,
+            banner: &|_, _| {},
             skull: &|_| None,
             glyph: &|c| self.gui.atlas.glyph_cell(c),
             glyphs: self.gui.atlas.font.epoch(),
@@ -2912,6 +2955,98 @@ mod container_drop_tests {
             });
         }
     }
+
+    /// `BaseFireBlock.entityInside`: a cart in a fire block takes `inFire`
+    /// damage every tick (1 damage is 10 on the cart's counter, which decays
+    /// by 1 a tick) and breaks past 40.
+    #[test]
+    #[ignore = "daily"]
+    fn a_cart_in_fire_takes_fire_damage_and_breaks() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            game.carts.push(Minecart::new(
+                1,
+                CartKind::Rideable,
+                Vec3::new(8.5, 64.0, 8.5),
+            ));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 10.0);
+            for _ in 0..3 {
+                game.cart_fire_tick(1, 0);
+            }
+            assert_eq!(game.carts[0].damage, 40.0);
+            game.cart_fire_tick(1, 0);
+            assert!(game.carts.is_empty());
+        });
+    }
+
+    /// `BaseFireBlock.fireIgnite` lights a cart for 8 seconds (160 ticks) and
+    /// `Entity.isInvulnerable` only stops the `inFire` hurt, not the ignition.
+    #[test]
+    #[ignore = "daily"]
+    fn an_invulnerable_cart_in_fire_is_lit_but_not_hurt() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            game.carts.push(Minecart::new(
+                1,
+                CartKind::Rideable,
+                Vec3::new(8.5, 64.0, 8.5),
+            ));
+            let mut tag = horizon_core::nbt::Compound::new();
+            tag.insert("Invulnerable".into(), horizon_core::nbt::Tag::Byte(1));
+            game.persist
+                .raw
+                .insert(1, horizon_core::nbt::Tag::Compound(tag));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 0.0);
+            let fire_ticks = game.persist.raw[&1]
+                .get("Fire")
+                .and_then(horizon_client::nbt_path::int_value);
+            assert_eq!(fire_ticks, Some(160));
+        });
+    }
+
+    /// `AbstractMinecart.move` and `OldMinecartBehavior.tick` apply block
+    /// effects at the position the cart has then: a cart that started in fire
+    /// and ended clear of it is hurt only by the application right after its
+    /// move (once), and one that never touched fire is not hurt at all.
+    #[test]
+    #[ignore = "daily"]
+    fn a_cart_is_hurt_by_fire_at_the_positions_the_effects_apply_at() {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            let fire = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:fire")
+                .unwrap();
+            game.world.set(8, 64, 8, fire).unwrap();
+            // Started overlapping the fire, ended a block away: no hurt.
+            let mut cart = Minecart::new(1, CartKind::Rideable, Vec3::new(10.5, 64.0, 8.5));
+            cart.previous = Vec3::new(8.9, 64.0, 8.5);
+            game.carts.push(cart);
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 0.0);
+            // In the fire only right after the move: one application hurts.
+            game.carts
+                .update(0, |c| c.fire_move_at = Some(Vec3::new(8.5, 64.0, 8.5)));
+            game.cart_fire_tick(1, 0);
+            assert_eq!(game.carts[0].damage, 10.0);
+            assert!(game.carts[0].fire_move_at.is_none());
+        });
+    }
 }
 
 #[cfg(test)]
@@ -3035,7 +3170,8 @@ mod rejected_passenger_tests {
 mod hook_mutation_regressions {
     use super::*;
     use horizon_client::mobs::Mob;
-    use std::sync::{Arc, Mutex};
+    use horizon_std::sync::Mutex;
+    use std::sync::Arc;
 
     struct MutateRider {
         discard: bool,
@@ -3243,136 +3379,64 @@ mod tnt_cart_power_tests {
 }
 
 #[cfg(test)]
-mod cart_cost_bench {
-    use super::{CartKind, Minecart};
-    use crate::game::game_tests::tests::server_game;
-    use horizon_core::geometry::Vec3;
+mod default_on_rails_tests {
+    use super::*;
 
-    /// Times `tick_carts` with many parked carts and some moving ones:
-    /// `CARTS_PARKED` (default 600) carts each on its own rail piece, and
-    /// `CARTS_MOVING` (default 100) on powered tracks. Prints the ms per tick.
     #[test]
-    #[ignore = "a timing, needs prepared resources in HORIZON_TEST_RESOURCES"]
-    fn tick_carts_with_many_parked_carts() {
-        let n = |key: &str, default: usize| {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(default)
-        };
-        let (parked, moving) = (n("CARTS_PARKED", 600), n("CARTS_MOVING", 100));
-        let mut resources = None;
-        let mut game = server_game(&mut resources);
-        game.settings.simulation_distance = 6;
-        game.settings.render_distance = 12;
-        game.player = Some(
-            horizon_client::motion::PlayerMotion::new(game.motion, Vec3::new(8.5, 80.0, 12.5))
-                .unwrap(),
-        );
-        for cx in -3..=3 {
-            for cz in -3..=3 {
-                if (cx, cz) != (0, 0) {
-                    let mut chunk = horizon_client::chunk::Chunk::empty(cx, cz);
-                    chunk.lit = true;
-                    game.world
-                        .chunks
-                        .insert((cx, cz), std::sync::Arc::new(chunk));
-                    game.block_ticks
-                        .add_empty_chunk(horizon_core::position::ChunkPos::new(cx, cz))
-                        .unwrap();
-                }
-            }
-        }
-        game.update_chunk_tickets();
-        let registry = game.pack.assets.registry;
-        let stone = registry.default_state("minecraft:stone").unwrap();
-        let rail = registry.default_state("minecraft:rail").unwrap();
-        let powered = registry.default_state("minecraft:powered_rail").unwrap();
-        let with = |base: horizon_world::registry::BlockStateId, shape: &str, on: bool| {
-            let mut s = registry.state(base).unwrap().clone();
-            s.properties.insert("shape".into(), shape.into());
-            if on {
-                s.properties.insert("powered".into(), "true".into());
-            }
-            registry.id(&s).unwrap()
-        };
-        let (rail_ns, rail_ew) = (
-            with(rail, "north_south", false),
-            with(powered, "east_west", true),
-        );
-        for x in -30..46 {
-            for z in -30..46 {
-                game.world.set(x, 63, z, stone).unwrap();
-                game.world.set(x, 69, z, stone).unwrap();
-            }
-        }
-        let mut id = 1;
-        'park: for x in (-28..44).step_by(2) {
-            for z in (-28..44).step_by(2) {
-                if id as usize > parked {
-                    break 'park;
-                }
-                game.world.set(x, 64, z, rail_ns).unwrap();
-                let at = Vec3::new(f64::from(x) + 0.5, 64.0, f64::from(z) + 0.5);
-                game.carts.push(Minecart::new(id, CartKind::Rideable, at));
-                id += 1;
-            }
-        }
-        for lane in 0..10 {
-            let z = -28 + lane * 6;
-            for x in -30..46 {
-                game.world.set(x, 70, z, rail_ew).unwrap();
-            }
-            for k in 0..moving.div_ceil(10) {
-                if id as usize > parked + moving {
-                    break;
-                }
-                let at = Vec3::new(-29.5 + f64::from(k as i32) * 3.0, 70.0, f64::from(z) + 0.5);
-                let mut c = Minecart::new(id, CartKind::Rideable, at);
-                c.velocity = Vec3::new(0.3, 0.0, 0.0);
-                game.carts.push(c);
-                id += 1;
-            }
-        }
-        let chicken = game
-            .res
-            .mob_types()
-            .get("minecraft:chicken")
-            .unwrap()
-            .clone();
-        for k in 0..n("MOBS", 3000) {
-            let (x, z) = (
-                -30.0 + (k % 76) as f64 + 0.5,
-                -30.0 + ((k / 76) % 76) as f64 + 0.5,
-            );
-            game.mobs.push(horizon_client::mobs::Mob::new(
-                1000 + k as u32,
-                chicken.clone(),
-                Vec3::new(x, 75.0, z),
-                0.0,
+    #[ignore = "daily"]
+    fn default_behaviour_updates_on_rails_every_tick() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            assert!(!game.minecart_improvements());
+            let mut chunk = horizon_client::chunk::Chunk::empty(0, 0);
+            chunk.lit = true;
+            game.world.chunks.insert((0, 0), std::sync::Arc::new(chunk));
+            let rail = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:rail")
+                .expect("minecraft:rail state");
+            let stone = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:stone")
+                .expect("minecraft:stone state");
+            game.world.set(4, 63, 4, stone).unwrap();
+            game.world.set(4, 64, 4, rail).unwrap();
+            game.world.set(10, 63, 10, stone).unwrap();
+            game.carts.push(Minecart::new(
+                81,
+                CartKind::Rideable,
+                Vec3::new(4.5, 64.0, 4.5),
             ));
-        }
-        let total = game.carts.len();
-        let (warm, ticks) = (5, n("TICKS", 40));
-        let mut spent = std::time::Duration::ZERO;
-        for t in 0..warm + ticks {
-            game.world.game_time += 1;
-            // Mobs move every tick on a live server: the list is written.
-            if !game.mobs.is_empty() {
-                let _ = &mut game.mobs[0];
-            }
-            let start = std::time::Instant::now();
+            assert!(!game.carts[0].on_rails);
+
             game.tick_carts();
-            if t >= warm {
-                spent += start.elapsed();
-            }
-        }
-        eprintln!(
-            "tick_carts: {total} carts ({parked} parked, {moving} moving): {:.3} ms/tick",
-            spent.as_secs_f64() * 1e3 / ticks as f64
-        );
+            assert!(
+                game.carts[0].on_rails,
+                "default minecart behaviour should mark a cart on a rail as on_rails"
+            );
+
+            let air = game
+                .pack
+                .assets
+                .registry
+                .default_state("minecraft:air")
+                .expect("minecraft:air state");
+            game.world.set(4, 64, 4, air).unwrap();
+            game.tick_carts();
+            assert!(
+                !game.carts[0].on_rails,
+                "default minecart behaviour should clear on_rails when off track"
+            );
+        });
     }
 }
+
+#[cfg(test)]
+#[path = "minecarts/cart_cost_bench.rs"]
+mod cart_cost_bench;
 
 #[cfg(test)]
 #[path = "minecarts/minecart_riders_tests.rs"]

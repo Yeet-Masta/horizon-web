@@ -97,6 +97,7 @@ fn ids(events: &[MobEvent]) -> Vec<String> {
             sound.volume,
             sound.pitch,
             42,
+            Some(sound.source),
         );
     }
     let ids: Vec<_> = captured.into_iter().map(|sound| sound.event).collect();

@@ -147,6 +147,12 @@ pub(super) struct Parked {
     level_events: Vec<LevelEvent>,
     /// Entity portal processes and cooldowns belong to this level's entities.
     pub(super) portal_states: HashMap<u32, horizon_client::nether_portal::PortalState>,
+    /// End gateway travellers and the chunks their exits keep loaded belong to
+    /// this level's entities too (`Game::swap_level`).
+    end_gateways: HashMap<u32, horizon_client::end_gateway::Traveller>,
+    end_arrivals: Vec<super::end::GatewayArrival>,
+    end_areas: Vec<(i32, i32)>,
+    end_tickets: Vec<((i32, i32), u32)>,
     /// Which of this level's chunks may hold a portal (`Game::find_portals`), kept per level:
     /// one cache asked by two levels in turn read every palette of both again each tick.
     pub(super) portal_sections: horizon_client::portal_sections::PortalSections,
@@ -200,6 +206,9 @@ pub(super) struct Parked {
     spawn_scratch: super::natural_spawning::SpawnScratch,
     /// Server ticks since a player was last in the level.
     idle: u32,
+    /// Its save is queued, and its `SaveDir` is held until the level leaves memory: dropping
+    /// that folder joins the writer thread (`close_idle_levels`).
+    closing: bool,
     /// The level's own world border (`ServerLevel.getWorldBorder`), and what its players were
     /// last told of it (`LanHost::border_sent`).
     border: horizon_client::worldborder::WorldBorder,
@@ -214,6 +223,24 @@ impl Parked {
         knots,
         general.rows
     );
+
+    pub(super) fn resident_chunk_ticket_sources(
+        &self,
+        chunk: (i32, i32),
+    ) -> Option<(&ChunkTickets, &Streaming)> {
+        self.world
+            .chunks
+            .contains_key(&chunk)
+            .then_some((&self.tickets, &self.streaming))
+    }
+
+    /// A write reached this level: it is not on its way out, and the idle count starts again
+    /// (`close_idle_levels`). What the write left must not be dropped with a close already
+    /// queued, and a level a mod keeps writing to is not closed every tick.
+    fn not_closing(&mut self) {
+        self.closing = false;
+        self.idle = 0;
+    }
 }
 
 impl Game<'_> {
@@ -452,6 +479,10 @@ pub(super) struct Levels {
     /// `max-chained-neighbor-updates` of a dedicated server, for the levels it opens;
     /// `None` is the default every other server runs with.
     max_chained_neighbor_updates: Option<i32>,
+    /// The dedicated server's `max-world-size` (`DedicatedServer.getAbsoluteMaxWorldSize`); none
+    /// for the integrated server, whose borders keep the default. Kept by `clear`: it is the
+    /// server's setting, not the world's.
+    absolute_max_size: Option<i32>,
     /// The levels a mod asked to have saved (`level_request_save`), each once, saved at the start
     /// of the next server tick.
     requested_saves: Vec<Dim>,
@@ -463,6 +494,24 @@ impl Levels {
     /// Sets the neighbour update chain limit of the levels made from now on.
     pub(super) fn set_max_chained_neighbor_updates(&mut self, max: i32) {
         self.max_chained_neighbor_updates = Some(max);
+    }
+
+    /// Set `max-world-size`, before the levels' borders are loaded.
+    pub(super) fn set_absolute_max_size(&mut self, limit: i32) {
+        self.absolute_max_size = Some(limit);
+    }
+
+    /// `MinecraftServer.createLevels`: each level's border, once its saved settings are read,
+    /// gets `setAbsoluteMaxSize(getAbsoluteMaxWorldSize())`. Its size is kept; its bounds are
+    /// clamped to the limit.
+    pub(super) fn limit_border(
+        &self,
+        mut border: horizon_client::worldborder::WorldBorder,
+    ) -> horizon_client::worldborder::WorldBorder {
+        if let Some(limit) = self.absolute_max_size {
+            border.set_absolute_max_size(limit);
+        }
+        border
     }
 
     /// The block ticks of a new level, with the server's neighbour update chain limit.
@@ -494,6 +543,13 @@ impl Levels {
         self.requested_saves.retain(|saved| *saved != dim);
     }
 
+    /// Every stand of every parked level forgets its rest key (see `Game::forget_stand_rests`).
+    pub(in crate::game) fn forget_stand_rests(&mut self) {
+        for level in self.parked.values_mut() {
+            level.armor_stands.for_each_quiet(|s| s.rest = None);
+        }
+    }
+
     /// Clear every parked level and dimensions recorded as heard open.
     pub(super) fn clear(&mut self) {
         self.parked.clear();
@@ -517,12 +573,16 @@ impl Levels {
     }
 
     /// The world of the level not in place whose dimension is `dimension`, to
-    /// change.
+    /// change. A change reaching a level whose close is queued cancels that close: otherwise it
+    /// would be dropped with the level (`close_idle_levels`).
     pub(super) fn parked_world_mut_of(&mut self, dimension: &str) -> Option<&mut World> {
         self.parked
             .iter_mut()
             .find(|(dim, _)| dim.id() == dimension)
-            .map(|(_, level)| &mut level.world)
+            .map(|(_, level)| {
+                level.not_closing();
+                &mut level.world
+            })
     }
 
     /// The streaming of the level not in place whose dimension is `dimension`.
@@ -538,12 +598,16 @@ impl Levels {
         self.parked_of(dimension)?.locator.clone()
     }
 
-    /// The streaming of the level not in place whose dimension is `dimension`, to change.
+    /// The streaming of the level not in place whose dimension is `dimension`, to change: a
+    /// ticket it holds cancels a queued close, as a world change does (`close_idle_levels`).
     pub(super) fn parked_streaming_of_mut(&mut self, dimension: &str) -> Option<&mut Streaming> {
         self.parked
             .iter_mut()
             .find(|(dim, _)| dim.id() == dimension)
-            .map(|(_, level)| &mut level.streaming)
+            .map(|(_, level)| {
+                level.not_closing();
+                &mut level.streaming
+            })
     }
 
     /// `ServerLevel.setChunkForced`: force a column in an already open level without changing the acting
@@ -607,9 +671,12 @@ impl Levels {
         self.parked.values().map(|level| &level.streaming)
     }
 
-    /// The level not in place, in `dim`.
+    /// The level not in place, in `dim`; a change through it cancels a queued close
+    /// (`close_idle_levels`).
     pub(super) fn parked_mut(&mut self, dim: Dim) -> Option<&mut Parked> {
-        self.parked.get_mut(&dim)
+        let level = self.parked.get_mut(&dim)?;
+        level.not_closing();
+        Some(level)
     }
 
     /// A parked level by its exact dimension identity, without swapping it in.
@@ -623,7 +690,10 @@ impl Levels {
         self.parked
             .iter_mut()
             .find(|(dim, _)| dim.id() == dimension)
-            .map(|(_, level)| level)
+            .map(|(_, level)| {
+                level.not_closing();
+                level
+            })
     }
 
     /// Whether a parked level's general rows hold any of these UUIDs (arismoko/horizon#792's
@@ -731,6 +801,7 @@ impl Game<'_> {
                 .unwrap_or_else(|| self.res.biomes())
                 .clone(),
             generate.as_ref(),
+            Some(&self.save),
         )?;
         save.install_profession_snapshot(self.stations().professions.clone());
         if let Some(terrain) = &locator {
@@ -753,6 +824,10 @@ impl Game<'_> {
             random_tick_sections: Default::default(),
             level_events: Vec::new(),
             portal_states: HashMap::new(),
+            end_gateways: HashMap::new(),
+            end_arrivals: Vec::new(),
+            end_areas: Vec::new(),
+            end_tickets: Vec::new(),
             portal_sections: Default::default(),
             falling: Default::default(),
             paintings: Default::default(),
@@ -795,6 +870,7 @@ impl Game<'_> {
             creaking: Default::default(),
             spawn_scratch: Default::default(),
             idle: 0,
+            closing: false,
             border: self.load_border(dim),
             border_sent: None,
         })
@@ -909,6 +985,10 @@ impl Game<'_> {
         swap(&mut self.random_tick_sections, &mut p.random_tick_sections);
         swap(&mut self.level_events, &mut p.level_events);
         swap(&mut self.portals.entities, &mut p.portal_states);
+        swap(&mut self.end.gateways, &mut p.end_gateways);
+        swap(&mut self.end.arrivals, &mut p.end_arrivals);
+        swap(&mut self.end.areas, &mut p.end_areas);
+        swap(&mut self.end.tickets, &mut p.end_tickets);
         swap(&mut self.portals.sections, &mut p.portal_sections);
         swap(&mut self.falling, &mut p.falling);
         swap(&mut self.paintings, &mut p.paintings);
@@ -974,7 +1054,12 @@ impl Game<'_> {
         }
         if target != self.dim {
             let (mut p, opened) = match self.levels.parked.remove(&target) {
-                Some(p) => (p, false),
+                // A level in use is not on its way out: a close it had started is abandoned,
+                // and only the writes it queued before still land.
+                Some(mut p) => {
+                    p.closing = false;
+                    (p, false)
+                }
                 None => (self.open_level(target)?, true),
             };
             p.world.game_time = self.world.game_time;
@@ -1263,6 +1348,13 @@ impl Game<'_> {
                 self.update_dedicated_streaming();
             });
             horizon_client::spans::time("update_world", || self.update_world());
+            if dim == Dim::Overworld
+                && self.world_spawn_pending
+                && let Err(e) = self.find_pending_world_spawn()
+            {
+                result = Err(e);
+                break;
+            }
             let tick_span = horizon_client::spans::guard("level_tick");
             result = horizon_client::block_contact::in_level(
                 (self.serving.is_some() || self.options.dedicated.is_some()).then_some(dim.id()),
@@ -1544,6 +1636,8 @@ impl Game<'_> {
                     || !self.portal_tickets_in(*d).is_empty()
                     // So does a viewed `Ticking` area (arismoko/horizon#3716), for its chunks only.
                     || self.viewed_level(*d) == Some(true)
+                    // A reset's spawn search runs in the Overworld's turn, whoever else is playing.
+                    || (self.world_spawn_pending && *d == Dim::Overworld)
             })
             .collect();
         if dims.is_empty() {
@@ -1580,6 +1674,11 @@ impl Game<'_> {
 
     /// Count the parked levels' empty ticks, and save and close the ones
     /// (other than the Overworld) nobody has been in for a while.
+    ///
+    /// A close takes two ticks. The first queues the level's save and does not wait for the
+    /// disk (`save_level_queued`): waiting for it here made every idle close a p99 spike in
+    /// the tick (`SaveDir::flush`). The level leaves memory on a later tick, once
+    /// `SaveDir::writes_finished` says the writer has done everything that save queued.
     pub(super) fn close_idle_levels(&mut self) -> Result<()> {
         let mut occupied = self.levels_to_tick();
         // A level a viewed area names, ticked or not, or one a client still holds chunks of.
@@ -1592,38 +1691,105 @@ impl Game<'_> {
             .copied()
             .filter(|d| self.vehicle_waits_in(*d))
             .collect();
-        let mut closing = Vec::new();
+        // A level at its idle limit, and one whose queued save may be on disk.
+        let (mut to_save, mut to_finish) = (Vec::new(), Vec::new());
         for (dim, p) in &mut self.levels.parked {
             if occupied.contains(dim) || waiting.contains(dim) {
-                p.idle = 0;
+                p.not_closing();
+                continue;
+            }
+            if p.closing {
+                to_finish.push(*dim);
                 continue;
             }
             p.idle += 1;
             if *dim != Dim::Overworld && p.idle >= IDLE_TICKS {
-                closing.push(*dim);
+                to_save.push(*dim);
             }
         }
-        if closing.is_empty() {
-            return Ok(());
+        for dim in to_save {
+            self.begin_closing_parked_level(dim)?;
         }
-        for dim in closing {
-            self.close_parked_level(dim)?;
+        for dim in to_finish {
+            self.finish_closing_parked_level(dim)?;
         }
         Ok(())
     }
 
-    /// Save the parked level `dim` and drop it: the mods hear its chunks and the level unload. A
-    /// level a mod opened at run time stays known, and opens again when entered, as any other.
-    pub(super) fn close_parked_level(&mut self, dim: Dim) -> Result<()> {
+    /// The first half of a close: queue the level's save without waiting for the disk, and mark
+    /// the level `closing`. It stays parked, with its `SaveDir`, until the second half.
+    fn begin_closing_parked_level(&mut self, dim: Dim) -> Result<()> {
         let back = self.dim;
         self.enter_level(dim)?;
-        // Vanilla saves the level's chunks before their unload hooks.
+        // Vanilla saves the level's chunks before their unload hooks, and before the entities
+        // `save_entities` brings back hear their load.
         self.native_chunks_loaded();
-        if let Err(why) = self.save_level(true) {
-            // Not saved: the level stays parked, and the level in place is the one before.
-            self.enter_level(back)?;
-            return Err(why);
+        let saved = self.save_level_queued();
+        // Whatever the save did, the level in place is the one before.
+        self.enter_level(back)?;
+        saved?;
+        if let Some(p) = self.levels.parked.get_mut(&dim) {
+            p.closing = true;
         }
+        Ok(())
+    }
+
+    /// The second half of a close: the pass that finds the level's queued save done ends the
+    /// close and its chunks and entities leave memory. A level that came back into use keeps
+    /// open, and the writes it queued land on their own; so does a level whose close a write
+    /// cancelled after the pass listed it.
+    fn finish_closing_parked_level(&mut self, dim: Dim) -> Result<()> {
+        let written = match self.levels.parked.get(&dim) {
+            None => return Ok(()),
+            Some(p) => p.save.writes_finished(),
+        };
+        match written {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(why) => {
+                // Not saved, as a save that fails: the level stays parked. The error stays on
+                // its folder, so it is not asked for again on every tick.
+                if let Some(p) = self.levels.parked.get_mut(&dim) {
+                    p.not_closing();
+                }
+                log::warn!("Horizon: closing {} was not saved: {why}", dim.id());
+                return Err(why);
+            }
+        }
+        // Back in use while its save was queued: a ticket or a viewed area came with it, or a
+        // vehicle waits there. It stays open, and the writes it queued land on their own.
+        if self.level_in_use(dim) {
+            if let Some(p) = self.levels.parked.get_mut(&dim) {
+                p.not_closing();
+            }
+            return Ok(());
+        }
+        // The pass listed this level for the drop on its `closing` flag, but the two happen
+        // apart in the pass: another level's save hooks run between them
+        // (`begin_closing_parked_level`), and a write they make through a parked accessor
+        // cancels this close. What such a write left must not go with the save already on
+        // disk: the level stays parked, and is saved again on its next close.
+        if !self.levels.parked.get(&dim).is_some_and(|p| p.closing) {
+            return Ok(());
+        }
+        let back = self.dim;
+        self.drop_parked_level(dim, back)
+    }
+
+    /// Whether `dim`'s level is in use now: ticked, named by a viewed area, or holding a vehicle
+    /// that waits for its rider (`close_idle_levels`). A level in use is not closed.
+    fn level_in_use(&self, dim: Dim) -> bool {
+        self.levels_to_tick().contains(&dim)
+            || self.needs_view_pass(dim)
+            || self.vehicle_waits_in(dim)
+    }
+
+    /// Take `dim` out of memory and put `back` in place: the tail of a close, once the level's
+    /// save is queued or on disk. The mods hear its chunks unload, then the level.
+    fn drop_parked_level(&mut self, dim: Dim, back: Dim) -> Result<()> {
+        self.enter_level(dim)?;
+        // A chunk that loaded while the level was parked hears its load here, before its unload.
+        self.native_chunks_loaded();
         let chunks: Vec<_> = self.world.chunks.values().cloned().collect();
         self.native_chunks_unloaded(&chunks);
         // Its entities' attachments are saved with them; they leave memory too.
@@ -1634,6 +1800,24 @@ impl Game<'_> {
         self.levels.parked.remove(&dim);
         self.native_level_closed(dim);
         Ok(())
+    }
+
+    /// Save the parked level `dim` and drop it: the mods hear its chunks and the level unload. A
+    /// level a mod opened at run time stays known, and opens again when entered, as any other.
+    pub(super) fn close_parked_level(&mut self, dim: Dim) -> Result<()> {
+        // A level whose close is waiting for its queued save is saved again here: whatever
+        // reached it since that save (a mod's raid, a forced chunk) must not go with the level.
+        // Entering it clears `closing`, so the close this finishes is the save made below.
+        let back = self.dim;
+        self.enter_level(dim)?;
+        // Vanilla saves the level's chunks before their unload hooks.
+        self.native_chunks_loaded();
+        if let Err(why) = self.save_level(true) {
+            // Not saved: the level stays parked, and the level in place is the one before.
+            self.enter_level(back)?;
+            return Err(why);
+        }
+        self.drop_parked_level(dim, back)
     }
 
     /// A server's world opened: level.dat is read and no chunk is loaded. The
@@ -1665,7 +1849,7 @@ impl Game<'_> {
 
     /// The mods hear `dim`'s level close (`LevelEvent.Unload`), once for
     /// each open they heard.
-    fn native_level_closed(&mut self, dim: Dim) {
+    pub(super) fn native_level_closed(&mut self, dim: Dim) {
         self.remove_level_fake_players(dim.id());
         if let Some(i) = self.levels.heard_open.iter().position(|d| *d == dim) {
             self.levels.heard_open.remove(i);
@@ -1724,6 +1908,10 @@ impl Game<'_> {
         let back = self.dim;
         let dims: Vec<Dim> = self.levels.parked.keys().copied().collect();
         for dim in dims {
+            // A level whose close is queued is saved here like any other, and the close goes
+            // with `enter_level`: this path cannot tell whether the level came back into use
+            // (a ticket from another level's save hook, a viewed area), so the drop stays with
+            // `close_idle_levels`, which checks. It re-saves and re-closes at its next pass.
             self.enter_level(dim)?;
             self.save_level(wait)?;
         }
@@ -1849,6 +2037,92 @@ mod tests {
         assert_eq!(game.border.remaining_ticks(), 40);
     }
 
+    /// `MinecraftServer.createLevels`: `max-world-size` clamps the bounds of a border read from
+    /// the save, whatever its size, and keeps its size. Without a limit (the integrated server)
+    /// the border is as it was read.
+    #[test]
+    fn max_world_size_clamps_the_bounds_of_a_loaded_border() {
+        use horizon_client::worldborder::WorldBorder;
+        let mut levels = Levels::default();
+        let wide = |size: f64, center: [f64; 2]| {
+            let mut border = WorldBorder::default();
+            border.set_center(center);
+            border.set_size(size);
+            WorldBorder::unpack(&border.pack())
+        };
+        let saved = wide(5000.0, [0.0, 0.0]);
+        let unlimited = levels.limit_border(saved.clone());
+        assert_eq!(unlimited, saved);
+        assert_eq!(unlimited.bounds(), [-2500.0, -2500.0, 2500.0, 2500.0]);
+
+        levels.set_absolute_max_size(1000);
+        let limited = levels.limit_border(saved);
+        assert_eq!(limited.absolute_max_size(), 1000);
+        assert_eq!(limited.size(), 5000.0);
+        assert_eq!(limited.bounds(), [-1000.0, -1000.0, 1000.0, 1000.0]);
+        assert!(limited.contains(999.0, -999.0));
+        assert!(!limited.contains(1000.0, 0.0));
+        // The default border (a new level's) is as wide as the world: the limit is its edge.
+        let default = levels.limit_border(WorldBorder::default());
+        assert_eq!(default.bounds(), [-1000.0, -1000.0, 1000.0, 1000.0]);
+        // Each side is clamped alone: centre 900, size 400 reaches 700..1100 in x and -200..200 in z.
+        let off_centre = levels.limit_border(wide(400.0, [900.0, 0.0]));
+        assert_eq!(off_centre.bounds(), [700.0, -200.0, 1000.0, 200.0]);
+        // Clearing the levels (a world loads) keeps the server's setting.
+        levels.clear();
+        assert_eq!(
+            levels
+                .limit_border(WorldBorder::default())
+                .absolute_max_size(),
+            1000
+        );
+    }
+
+    /// `max-world-size`, set before `load_world` as the dedicated start does: the border in place
+    /// and the parked ones are limited, and the limit alone writes no `world_border.dat` (vanilla
+    /// does not save it), while a changed border still does.
+    #[test]
+    #[ignore = "daily"]
+    fn max_world_size_limits_every_levels_border_and_is_not_saved() {
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("h4-02");
+        let world = home.join("saves/h4-02");
+        // A new world each run: a border saved by the last one would already be in the End.
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let saved = |dim: Dim| {
+            horizon_client::save::dimension_dir(&world, dim.id())
+                .join("data/minecraft/world_border.dat")
+                .exists()
+        };
+        {
+            let mut resources = None;
+            let mut game = open_game_limited(&mut resources, &root, &home, &world, Some(1000));
+            game.tick_world(true).unwrap();
+            // A level is made when a command first runs in it; only the End's border changes.
+            assert!(game.run_command("execute in minecraft:the_nether run worldborder get"));
+            assert!(game.run_command("execute in minecraft:the_end run worldborder set 100"));
+            assert_eq!(game.dim, Dim::Overworld);
+            let limits = (
+                game.border.absolute_max_size(),
+                game.levels
+                    .parked_border(Dim::Nether)
+                    .map(|b| b.absolute_max_size()),
+                game.levels
+                    .parked_border(Dim::End)
+                    .map(|b| b.absolute_max_size()),
+            );
+            assert_eq!(limits, (1000, Some(1000), Some(1000)));
+            assert_eq!(game.border.bounds(), [-1000.0, -1000.0, 1000.0, 1000.0]);
+            game.save_game().unwrap();
+        }
+        assert_eq!(
+            (saved(Dim::Overworld), saved(Dim::Nether), saved(Dim::End)),
+            (false, false, true)
+        );
+    }
+
     /// `ServerLevel.getWorldBorder`: `/worldborder` in one level leaves the others' alone.
     #[test]
     #[ignore = "daily"]
@@ -1897,6 +2171,342 @@ mod tests {
             reads(&mut game),
             0,
             "the Overworld's palettes were read again"
+        );
+    }
+
+    /// A reload changes the tags and block data a resting stand's phases read, which its key
+    /// does not cover: the stands of the levels not in place forget the key too.
+    #[test]
+    #[ignore = "daily"]
+    fn a_reload_clears_the_rest_keys_of_stands_in_a_parked_level() {
+        use horizon_client::entities::{ArmorStand, StandRestKey};
+        let mut game = prepared_game();
+        game.enter_level(Dim::Nether).unwrap();
+        let mut stand = ArmorStand::new(1, horizon_core::geometry::Vec3::ZERO, 0.0);
+        stand.rest = Some(StandRestKey {
+            position: [0; 3],
+            velocity: [0; 3],
+            on_ground: true,
+            fire_ticks: 0,
+            health: 0,
+            fall_distance: 0,
+            support: stand.support,
+            flags: [false; 7],
+            blocks: game.world.region_stamp([0; 3], [1; 3]).unwrap(),
+            border: [0; 4],
+        });
+        game.armor_stands.push(stand);
+        game.enter_level(Dim::Overworld).unwrap();
+        let rest = |game: &Game| {
+            game.levels.parked[&Dim::Nether]
+                .armor_stands
+                .iter()
+                .map(|s| s.rest.is_some())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rest(&game), [true]);
+        game.forget_stand_rests();
+        assert_eq!(rest(&game), [false]);
+    }
+
+    /// An idle close takes two passes: the one that reaches the idle limit only queues the
+    /// level's save and does not wait for the disk, and the level leaves memory once that save
+    /// is on it.
+    #[test]
+    #[ignore = "daily"]
+    fn an_idle_close_keeps_the_level_until_its_save_is_on_disk() {
+        use horizon_client::{
+            chunk::Chunk,
+            save::{LevelShape, dimension_dir},
+        };
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("idle-level-close");
+        // A new world each run: nothing is in its region files yet.
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let world = home.join("saves/idle-level-close");
+        let mut resources = None;
+        let mut game = open_game(&mut resources, &root, &home, &world);
+        // A chunk of the Nether that only this level holds, and that nothing has written.
+        game.enter_level(Dim::Nether).unwrap();
+        // The tables a save writes the heightmaps and block ticks with: nothing has decoded a
+        // chunk of this level yet, so the save would write the chunk without them and the read
+        // below would not find the block it holds.
+        let _ = game
+            .save
+            .tables
+            .get_or_init(|| Arc::new(horizon_client::save::SaveTables::new(&game.pack.assets)));
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        let mut chunk = Chunk::with_layout(0, 0, game.world.shape.column());
+        chunk.set(1, 70, 2, stone.0);
+        game.world.chunks.insert((0, 0), Arc::new(chunk));
+        game.world.modified.insert((0, 0));
+        game.enter_level(Dim::Overworld).unwrap();
+        // Nobody is in it, and its idle count is one pass short of the limit.
+        game.levels.parked_mut(Dim::Nether).unwrap().idle = IDLE_TICKS - 1;
+        game.close_idle_levels().unwrap();
+        let parked = game
+            .levels
+            .parked
+            .get(&Dim::Nether)
+            .expect("the level left memory on the pass that reached its idle limit");
+        assert!(parked.closing, "the level is not on its way out");
+        assert!(
+            parked.world.chunks.contains_key(&(0, 0)),
+            "the level's chunk left memory before its save"
+        );
+        // With its save on disk, the next pass ends the close.
+        game.levels
+            .parked
+            .get(&Dim::Nether)
+            .unwrap()
+            .save
+            .flush()
+            .unwrap();
+        game.close_idle_levels().unwrap();
+        assert!(
+            !game.levels.parked.contains_key(&Dim::Nether),
+            "the level whose save was on disk stayed in memory"
+        );
+        let save = SaveDir::new(dimension_dir(&world, Dim::Nether.id()), LevelShape::NETHER);
+        let read_back = save
+            .load(0, 0, game.pack.assets.registry, world_biomes!(game))
+            .expect("the closed level's chunk is not in the region file");
+        assert_eq!(
+            read_back.block(1, 70, 2),
+            stone,
+            "the chunk on disk is not the one the level held"
+        );
+    }
+
+    /// A level whose close is queued is saved and closed in two passes, and something can still
+    /// reach it in between: a mod's raid, a forced chunk, another level's save hook. Such a
+    /// write cancels the close, so the level is not dropped with the save of the first pass, and
+    /// the write is saved when the level is saved again.
+    #[test]
+    #[ignore = "daily"]
+    fn a_write_while_an_idle_close_waits_keeps_the_level_for_its_save() {
+        use horizon_client::{
+            chunk::Chunk,
+            save::{LevelShape, dimension_dir},
+        };
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("idle-close-write");
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let world = home.join("saves/idle-close-write");
+        let mut resources = None;
+        let mut game = open_game(&mut resources, &root, &home, &world);
+        game.enter_level(Dim::Nether).unwrap();
+        let _ = game
+            .save
+            .tables
+            .get_or_init(|| Arc::new(horizon_client::save::SaveTables::new(&game.pack.assets)));
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        let gold = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:gold_block")
+            .unwrap();
+        let mut chunk = Chunk::with_layout(0, 0, game.world.shape.column());
+        chunk.set(1, 70, 2, stone.0);
+        game.world.chunks.insert((0, 0), Arc::new(chunk));
+        game.world.modified.insert((0, 0));
+        game.enter_level(Dim::Overworld).unwrap();
+        game.levels.parked_mut(Dim::Nether).unwrap().idle = IDLE_TICKS - 1;
+        game.close_idle_levels().unwrap();
+        assert!(
+            game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "the level is not on its way out"
+        );
+        // What a mod's handle does: a change through the level's world, without entering it.
+        let changed = game
+            .levels
+            .parked_world_mut_of(Dim::Nether.id())
+            .expect("the parked level");
+        let layout = changed.shape.column();
+        let mut chunk = Chunk::with_layout(0, 0, layout);
+        chunk.set(1, 70, 2, gold.0);
+        changed.chunks.insert((0, 0), Arc::new(chunk));
+        changed.modified.insert((0, 0));
+        assert!(
+            !game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "a write did not cancel the queued close"
+        );
+        // The pass that finds the first save done must not drop the level it was changed in.
+        game.levels
+            .parked
+            .get(&Dim::Nether)
+            .unwrap()
+            .save
+            .flush()
+            .unwrap();
+        game.close_idle_levels().unwrap();
+        assert!(
+            game.levels.parked.contains_key(&Dim::Nether),
+            "the level was dropped with a write of its own unsaved"
+        );
+        // Saved again, and closed with it: the write is in the region file.
+        game.close_parked_level(Dim::Nether).unwrap();
+        let save = SaveDir::new(dimension_dir(&world, Dim::Nether.id()), LevelShape::NETHER);
+        let read_back = save
+            .load(0, 0, game.pack.assets.registry, world_biomes!(game))
+            .expect("the closed level's chunk is not in the region file");
+        assert_eq!(
+            read_back.block(1, 70, 2),
+            gold,
+            "the write that cancelled the close was not saved"
+        );
+    }
+
+    /// The same write can arrive inside the closing pass itself: the pass lists the levels to
+    /// drop before it saves the others (`close_idle_levels`), and a save hook of one of those
+    /// others can still write to a listed level through a parked accessor. The finish the pass
+    /// then runs for the level must see the cancelled close and leave the level parked, and
+    /// the write goes with the level's next save, not with the one already on disk.
+    #[test]
+    #[ignore = "daily"]
+    fn a_write_after_a_close_is_listed_keeps_the_level() {
+        use horizon_client::{
+            chunk::Chunk,
+            save::{LevelShape, dimension_dir},
+        };
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("idle-close-listed");
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let world = home.join("saves/idle-close-listed");
+        let mut resources = None;
+        let mut game = open_game(&mut resources, &root, &home, &world);
+        game.enter_level(Dim::Nether).unwrap();
+        let _ = game
+            .save
+            .tables
+            .get_or_init(|| Arc::new(horizon_client::save::SaveTables::new(&game.pack.assets)));
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap();
+        let gold = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:gold_block")
+            .unwrap();
+        let mut chunk = Chunk::with_layout(0, 0, game.world.shape.column());
+        chunk.set(1, 70, 2, stone.0);
+        game.world.chunks.insert((0, 0), Arc::new(chunk));
+        game.world.modified.insert((0, 0));
+        game.enter_level(Dim::Overworld).unwrap();
+        game.levels.parked_mut(Dim::Nether).unwrap().idle = IDLE_TICKS - 1;
+        game.close_idle_levels().unwrap();
+        assert!(
+            game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "the level is not on its way out"
+        );
+        game.levels
+            .parked
+            .get(&Dim::Nether)
+            .unwrap()
+            .save
+            .flush()
+            .unwrap();
+        // The pass has the level in its drop list now, and another level's save hook writes to
+        // it through its parked world before the pass reaches the drop.
+        let changed = game
+            .levels
+            .parked_world_mut_of(Dim::Nether.id())
+            .expect("the parked level");
+        let layout = changed.shape.column();
+        let mut chunk = Chunk::with_layout(0, 0, layout);
+        chunk.set(1, 70, 2, gold.0);
+        changed.chunks.insert((0, 0), Arc::new(chunk));
+        changed.modified.insert((0, 0));
+        assert!(
+            !game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "a write did not cancel the queued close"
+        );
+        // What the pass does with its listing, made by hand: the finish must not drop the
+        // level whose close the write cancelled.
+        game.finish_closing_parked_level(Dim::Nether).unwrap();
+        assert!(
+            game.levels.parked.contains_key(&Dim::Nether),
+            "the level was dropped with a write of its own unsaved"
+        );
+        // Closed for good, the write is in the region file.
+        game.close_parked_level(Dim::Nether).unwrap();
+        let save = SaveDir::new(dimension_dir(&world, Dim::Nether.id()), LevelShape::NETHER);
+        let read_back = save
+            .load(0, 0, game.pack.assets.registry, world_biomes!(game))
+            .expect("the closed level's chunk is not in the region file");
+        assert_eq!(
+            read_back.block(1, 70, 2),
+            gold,
+            "the write that cancelled the close was not saved"
+        );
+    }
+
+    /// The same, for a ticket rather than a chunk: a level a ticket came to is in use, and the
+    /// pass that would drop it after its queued save must leave it open.
+    #[test]
+    #[ignore = "daily"]
+    fn a_ticket_while_an_idle_close_waits_keeps_the_level() {
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("idle-close-ticket");
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let world = home.join("saves/idle-close-ticket");
+        let mut resources = None;
+        let mut game = open_game(&mut resources, &root, &home, &world);
+        game.enter_level(Dim::Nether).unwrap();
+        game.enter_level(Dim::Overworld).unwrap();
+        game.levels.parked_mut(Dim::Nether).unwrap().idle = IDLE_TICKS - 1;
+        game.close_idle_levels().unwrap();
+        assert!(
+            game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "the level is not on its way out"
+        );
+        // A forced chunk, as another level's save hook leaves one (the ticket alone: the load is
+        // left to the streaming that owns it).
+        assert!(
+            game.levels
+                .parked_streaming_of_mut(Dim::Nether.id())
+                .expect("the parked level's streaming")
+                .set_forced(0, 0, true),
+            "the level's chunk is not forced"
+        );
+        game.levels
+            .parked
+            .get(&Dim::Nether)
+            .unwrap()
+            .save
+            .flush()
+            .unwrap();
+        game.close_idle_levels().unwrap();
+        assert!(
+            game.levels.parked.contains_key(&Dim::Nether),
+            "the level holding a ticket was dropped"
+        );
+        assert!(
+            !game.levels.parked.get(&Dim::Nether).unwrap().closing,
+            "the close is still queued for a level in use"
         );
     }
 
@@ -1992,6 +2602,17 @@ mod tests {
         home: &std::path::Path,
         world: &std::path::Path,
     ) -> Game<'a> {
+        open_game_limited(resources, root, home, world, None)
+    }
+
+    /// `open_game` with the dedicated server's `max-world-size` set before the world loads.
+    fn open_game_limited<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+        root: &std::path::Path,
+        home: &std::path::Path,
+        world: &std::path::Path,
+        max_world_size: Option<i32>,
+    ) -> Game<'a> {
         use crate::game::{Audio, Options, Progress, Settings, load_resources};
         let settings = Settings::default();
         let loaded = load_resources(
@@ -2029,6 +2650,9 @@ mod tests {
         .unwrap();
         game.build_registries();
         game.set_allow_commands(true);
+        if let Some(limit) = max_world_size {
+            game.levels.set_absolute_max_size(limit);
+        }
         let folder = world.to_string_lossy().into_owned();
         game.load_world(
             crate::game::world_loading::WorldRequest::new(
@@ -2043,6 +2667,273 @@ mod tests {
         )
         .unwrap();
         game
+    }
+
+    /// `RedstoneTorchBlock`'s `lit` at `p` in `world`.
+    fn torch_lit(game: &Game<'_>, world: &World, p: [i32; 3]) -> bool {
+        let behaviours = game.res.behaviours();
+        behaviours
+            .table
+            .bool(world.block(p[0], p[1], p[2]), behaviours.props.lit)
+    }
+
+    /// `LevelChunkTicks.schedule` for the tick that turns the torch at `p` off,
+    /// due at `trigger_tick` (`RedstoneTorchBlock`'s own is two ticks off, so
+    /// the deadline is given before the torch is placed: a block keeps the
+    /// first tick it holds).
+    fn schedule_torch_tick(
+        game: &mut Game<'_>,
+        p: [i32; 3],
+        trigger_tick: i64,
+    ) -> horizon_core::ticks::ScheduleResult {
+        use horizon_core::{position::BlockPos, ticks::TickPriority};
+        let state = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:redstone_torch")
+            .expect("a redstone torch");
+        let block = game.res.behaviours().block(state);
+        let now = game.world.game_time;
+        game.block_ticks.schedule_block(
+            now,
+            BlockPos::new(p[0], p[1], p[2]),
+            block,
+            (trigger_tick - now) as i32,
+            TickPriority::Normal,
+        )
+    }
+
+    /// The game time the block tick at `p` in chunk `key` waits for.
+    fn queued_deadline(game: &Game<'_>, key: (i32, i32), p: [i32; 3]) -> Option<i64> {
+        let at = horizon_core::position::BlockPos::new(p[0], p[1], p[2]);
+        game.block_ticks
+            .blocks
+            .chunk(horizon_core::position::ChunkPos::new(key.0, key.1))
+            .and_then(|ticks| {
+                ticks
+                    .queued()
+                    .iter()
+                    .find(|t| t.pos == at)
+                    .map(|t| t.trigger_tick)
+            })
+    }
+
+    /// A chunk as the level's own folder holds it, read the way its workers read one (the tables
+    /// that name `block_ticks` go in first, as `save::Persistent::load` does).
+    fn load_saved_chunk(
+        game: &Game<'_>,
+        save: &horizon_client::save::SaveDir,
+        key: (i32, i32),
+    ) -> Option<horizon_client::chunk::Chunk> {
+        let _ = save
+            .tables
+            .get_or_init(|| Arc::new(horizon_client::save::SaveTables::new(&game.pack.assets)));
+        save.load(key.0, key.1, game.pack.assets.registry, world_biomes!(game))
+    }
+
+    /// The block ticks a saved chunk holds, with the delays it was written with.
+    fn saved_block_ticks(
+        game: &Game<'_>,
+        save: &horizon_client::save::SaveDir,
+        key: (i32, i32),
+    ) -> Vec<(horizon_core::position::BlockPos, i32)> {
+        load_saved_chunk(game, save, key)
+            .and_then(|chunk| {
+                chunk
+                    .saved
+                    .as_deref()
+                    .map(|saved| saved.block_ticks.iter().map(|t| (t.pos, t.delay)).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// A level closed for being idle (300 ticks of `close_idle_levels`) comes
+    /// back with the scheduled block ticks its chunks were saved with, each at
+    /// its own deadline: the tick already due when the level was saved runs on
+    /// the first tick after the reopen, and the one still ahead runs at its own
+    /// game time, not one shifted by the ticks the level spent closed.
+    ///
+    /// The chunk saves a tick as `triggerTick - gameTime`
+    /// (`LevelChunk.getTicksForSerialization`) and `startTickingChunk` unpacks
+    /// it at `gameTime + delay`, so the clock the level comes back at is what
+    /// the deadlines are read against - every level shares the server's
+    /// (`enter_level`).
+    #[test]
+    #[ignore = "daily"]
+    fn a_closed_idle_levels_scheduled_ticks_come_back_at_their_deadlines() {
+        use horizon_core::{position::ChunkPos, ticks::ScheduleResult};
+        // Two standing torches on the power that turns them off: one tick is
+        // already past when the level is saved, one is 400 ticks out.
+        const DUE: [i32; 3] = [2, 64, 2];
+        const AHEAD: [i32; 3] = [6, 64, 6];
+        const TORCHES: [[i32; 3]; 2] = [DUE, AHEAD];
+        let root =
+            std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let home = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_HOME").unwrap())
+            .join("h18238");
+        let world = home.join("saves/h18238");
+        // A new world each run: the last run's levels are long closed.
+        let _ = horizon_std::fs::remove_dir_all(&home);
+        let mut resources = None;
+        let mut game = open_game(&mut resources, &root, &home, &world);
+        game.enter_level(Dim::Nether).unwrap();
+        // The tables a save writes `block_ticks` and the heightmaps with are the
+        // streaming's: its chunk source (`save::Persistent::load`) installs them
+        // on the first saved chunk it decodes, which the hand-made chunk below
+        // stands in for.
+        let _ = game
+            .save
+            .tables
+            .get_or_init(|| Arc::new(horizon_client::save::SaveTables::new(&game.pack.assets)));
+        // Its chunk (0, 0), made resident by hand as the streaming does, with
+        // the tick container the scheduler needs before it takes a tick.
+        let key = (0, 0);
+        let mut chunk = horizon_client::chunk::Chunk::empty(key.0, key.1);
+        chunk.lit = true;
+        game.world.chunks.insert(key, Arc::new(chunk));
+        let _ = game
+            .block_ticks
+            .add_empty_chunk(ChunkPos::new(key.0, key.1));
+        for torch in TORCHES {
+            // A redstone block under a standing torch is the signal that makes
+            // its tick turn it off.
+            assert!(game.run_command(&format!(
+                "setblock {} {} {} minecraft:redstone_block",
+                torch[0],
+                torch[1] - 1,
+                torch[2]
+            )));
+        }
+        // The deadlines go in first: placing a lit torch on a signal schedules
+        // the torch's own tick two ticks out, and a block keeps the first tick
+        // it is given.
+        let due = game.world.game_time + 40;
+        let ahead = due + 360;
+        assert_eq!(
+            schedule_torch_tick(&mut game, DUE, due),
+            ScheduleResult::Added
+        );
+        assert_eq!(
+            schedule_torch_tick(&mut game, AHEAD, ahead),
+            ScheduleResult::Added
+        );
+        for torch in TORCHES {
+            assert!(game.run_command(&format!(
+                "setblock {} {} {} minecraft:redstone_torch",
+                torch[0], torch[1], torch[2]
+            )));
+            assert!(torch_lit(&game, &game.world, torch), "lit when placed");
+        }
+        assert_eq!(
+            queued_deadline(&game, key, DUE),
+            Some(due),
+            "the torch kept the deadline it was given"
+        );
+        assert_eq!(queued_deadline(&game, key, AHEAD), Some(ahead));
+        // The save writes a chunk it was told changed: these are unsaved.
+        assert!(game.world.modified.contains(&key), "the chunk is unsaved");
+        // Back in the Overworld: the Nether is parked with both ticks.
+        let left = game.world.game_time;
+        game.enter_level(Dim::Overworld).unwrap();
+        // `close_idle_levels` closes a level left alone for 300 ticks
+        // (`IDLE_TICKS`): the count is written out here, as the expectation it
+        // is for the test.
+        const LEFT_ALONE: i64 = 300;
+        for tick in 0..LEFT_ALONE {
+            game.tick_server(false).unwrap();
+            if tick == LEFT_ALONE / 2 {
+                let nether = game
+                    .levels
+                    .parked
+                    .get(&Dim::Nether)
+                    .expect("parked until it is idle");
+                assert!(
+                    torch_lit(&game, &nether.world, DUE),
+                    "a parked level is not ticked: the due tick waits"
+                );
+            }
+        }
+        let closed_at = game.world.game_time;
+        assert_eq!(closed_at, left + LEFT_ALONE, "a tick per idle tick");
+        assert!(
+            !game.levels.parked.contains_key(&Dim::Nether),
+            "closed for being idle"
+        );
+        // What the close wrote, read from the level's own folder before the
+        // level is opened again: the levels' deadlines are these.
+        let nether_save = horizon_client::save::SaveDir::new(
+            horizon_client::save::dimension_dir(&game.world_root, Dim::Nether.id()),
+            game.level_shapes.get(Dim::Nether.id()),
+        );
+        let written = saved_block_ticks(&game, &nether_save, key);
+        // The reopen: the level is built again from its save, and its chunk is
+        // read back the way the level's workers read one.
+        game.enter_level(Dim::Nether).unwrap();
+        let reopened_at = game.world.game_time;
+        let mut chunk = load_saved_chunk(&game, &game.save, key).expect("the closed level's chunk");
+        let saved = saved_block_ticks(&game, &game.save, key);
+        let delay_of = |p: [i32; 3]| {
+            let at = horizon_core::position::BlockPos::new(p[0], p[1], p[2]);
+            saved.iter().find(|(pos, _)| *pos == at).map(|(_, d)| *d)
+        };
+        assert!(
+            delay_of(DUE).is_some() && delay_of(AHEAD).is_some(),
+            "the closed level kept both ticks: written {written:?}, read back {saved:?}, \
+             closed at {closed_at}, reopened at {reopened_at}"
+        );
+        // Resident again, with the neighbours a ticking chunk needs, and the
+        // ticket that makes the level tick it.
+        chunk.lit = true;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if (dx, dz) != (0, 0) {
+                    let at = (key.0 + dx, key.1 + dz);
+                    game.world.chunks.insert(
+                        at,
+                        Arc::new(horizon_client::chunk::Chunk::empty(at.0, at.1)),
+                    );
+                }
+            }
+        }
+        game.world.chunks.insert(key, Arc::new(chunk));
+        assert!(
+            game.streaming.set_forced(key.0, key.1, true),
+            "the level's chunk loads again"
+        );
+        // The first tick back: the due tick's deadline is behind the clock the
+        // level came back at, so it runs here and not on a later tick.
+        game.tick_server(false).unwrap();
+        assert!(
+            !torch_lit(&game, &game.world, DUE),
+            "the due tick ran on the first tick back: clock {}, its deadline {due}, closed at \
+             {closed_at}, reopened at {reopened_at}, written {written:?}, read back {saved:?}",
+            game.world.game_time
+        );
+        assert!(
+            torch_lit(&game, &game.world, AHEAD),
+            "the tick ahead waits for its own game time: clock {}, its deadline {ahead}, closed \
+             at {closed_at}, reopened at {reopened_at}, written {written:?}, read back {saved:?}",
+            game.world.game_time
+        );
+        // It runs at the game time it was due at, however many ticks the level
+        // spent closed.
+        while game.world.game_time < ahead {
+            game.tick_server(false).unwrap();
+            if game.world.game_time < ahead {
+                assert!(
+                    torch_lit(&game, &game.world, AHEAD),
+                    "not before its deadline: {} < {ahead}, reopened at {reopened_at}, written \
+                     {written:?}, read back {saved:?}",
+                    game.world.game_time
+                );
+            }
+        }
+        assert_eq!(game.world.game_time, ahead, "the deadline's own game time");
+        assert!(
+            !torch_lit(&game, &game.world, AHEAD),
+            "the tick ahead ran at its deadline: written {written:?}, read back {saved:?}"
+        );
     }
 
     /// Expected values from the official 26.3 dedicated server restarted on the

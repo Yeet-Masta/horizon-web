@@ -1,21 +1,30 @@
 //! Crossbows (`CrossbowItem`): charging with the start/middle/end sounds
-//! (Quick Charge), loading arrows or a held firework rocket into
-//! `charged_projectiles` (Multishot loads three), and shooting critical
+//! from enchantment data, loading arrows or a held firework rocket into
+//! `charged_projectiles`, and shooting critical
 //! arrows at power 3.15, or rockets at 1.6 for three durability, with the
 //! fanned Multishot angles and their shot pitches. `Player.getProjectile`
 //! finds the ammo for bows and crossbows.
 use super::{Game, shield::OFFHAND_SLOT, view_vector};
 use horizon_client::{
-    enchant::EffectContext,
+    enchant::{EffectContext, Enchantments},
     items::{ItemStack, Items},
     mobs::Who,
     projectiles::{Projectile, ProjectileKind},
 };
-use horizon_core::{geometry::Vec3, random::RandomSource};
+use horizon_core::{
+    geometry::Vec3,
+    random::{EntityRandom, RandomSource},
+};
 
 const CROSSBOW: &str = "minecraft:crossbow";
 const FIREWORK_ROCKET: &str = "minecraft:firework_rocket";
 const ARROW: &str = "minecraft:arrow";
+
+const DEFAULT_CROSSBOW_CHARGE_SECONDS: f32 = 1.25;
+pub(super) const DEFAULT_CROSSBOW_CHARGE_TICKS: i32 = (DEFAULT_CROSSBOW_CHARGE_SECONDS * 20.0) as i32;
+
+/// `ChargedProjectiles.ofNonEmpty` caps the stored volley before it is shot.
+const MAX_CHARGED_PROJECTILES: i32 = 1024;
 
 /// What `getProjectile` returned: the ammunition and, while it is still the
 /// stack found in the inventory, the slot it is taken from.
@@ -61,49 +70,68 @@ pub(super) fn projectile_slot(
 fn charge_sounds(
     charge: f32,
     played: [bool; 2],
-    sounds: [&'static str; 3],
-) -> ([bool; 2], Option<&'static str>, Option<&'static str>) {
+    sounds: [Option<&str>; 3],
+) -> ([bool; 2], Option<&str>, Option<&str>) {
     let mut played = if charge < 0.2 { [false; 2] } else { played };
     let mut play = [None; 2];
     for (i, point) in [0.2, 0.5].into_iter().enumerate() {
-        if charge >= point && !played[i] && !sounds[i].is_empty() {
+        if charge >= point && !played[i] {
             played[i] = true;
-            play[i] = Some(sounds[i]);
+            play[i] = sounds[i];
         }
     }
     (played, play[0], play[1])
 }
 
 impl Game<'_> {
-    pub(super) fn charge_ticks(stack: &ItemStack) -> u32 {
-        // crossbow_charge_time: 1.25 s, minus 0.25 s per Quick Charge level.
-        let seconds = 1.25 - 0.25 * stack.enchantment_level("minecraft:quick_charge") as f32;
-        (seconds.max(0.0) * 20.0).floor() as u32
+    /// `CrossbowItem.getChargeDuration` and `EnchantmentHelper.modifyCrossbowChargingTime`.
+    fn charge_ticks(enchantments: &Enchantments, stack: &ItemStack, random: &mut EntityRandom) -> i32 {
+        let seconds = enchantments.modify_unfiltered_value(
+            stack,
+            "minecraft:crossbow_charge_time",
+            random,
+            DEFAULT_CROSSBOW_CHARGE_SECONDS,
+        );
+        (seconds.max(0.0) * 20.0).floor() as i32
     }
-    fn charging_sounds(stack: &ItemStack) -> [&'static str; 3] {
-        match stack.enchantment_level("minecraft:quick_charge") {
-            0 => [
-                "minecraft:item.crossbow.loading_start",
-                "minecraft:item.crossbow.loading_middle",
-                "minecraft:item.crossbow.loading_end",
-            ],
-            1 => [
-                "minecraft:item.crossbow.quick_charge_1",
-                "",
-                "minecraft:item.crossbow.loading_end",
-            ],
-            2 => [
-                "minecraft:item.crossbow.quick_charge_2",
-                "",
-                "minecraft:item.crossbow.loading_end",
-            ],
-            _ => [
-                "minecraft:item.crossbow.quick_charge_3",
-                "",
-                "minecraft:item.crossbow.loading_end",
-            ],
+
+    /// `CrossbowItem.getChargingSounds`: a selected set can omit individual sounds.
+    fn charging_sounds<'a>(enchantments: &'a Enchantments, stack: &ItemStack) -> [Option<&'a str>; 3] {
+        enchantments
+            .pick_highest_level(stack, "minecraft:crossbow_charging_sounds")
+            .map_or(
+                [
+                    Some("minecraft:item.crossbow.loading_start"),
+                    Some("minecraft:item.crossbow.loading_middle"),
+                    Some("minecraft:item.crossbow.loading_end"),
+                ],
+                |entry| {
+                    ["start", "mid", "end"].map(|phase| {
+                        let sound = &entry[phase];
+                        sound.as_str().or_else(|| sound["sound_id"].as_str())
+                    })
+                },
+            )
+    }
+
+    /// Pose, model and controller reads sample the holder's random without
+    /// advancing it. Vanilla advances the client entity's random on render reads.
+    pub(super) fn crossbow_charge_preview(&self, stack: &ItemStack, random: &EntityRandom) -> i32 {
+        Self::charge_ticks(self.item_enchantments(), stack, &mut random.clone())
+    }
+
+    /// `CrossbowItem.releaseUsing` checks the duration again before applying use side effects.
+    pub(super) fn release_crossbow(&mut self, stack: &ItemStack, held: u32) {
+        let enchantments = self.item_enchantments().clone();
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let charge = Self::charge_ticks(&enchantments, stack, &mut player.random);
+        if held as f32 / charge as f32 >= 1.0 && stack.data().is_some_and(|d| !d.charged.is_empty()) {
+            self.apply_use_cooldown(stack);
         }
     }
+
     /// `Player.getProjectile` for `weapon` (`projectile_slot`).
     pub(super) fn projectile_slot(&self, weapon: &str) -> Option<usize> {
         let hands = [OFFHAND_SLOT, self.selected].map(|slot| (slot, self.stack_in(slot)));
@@ -250,13 +278,14 @@ impl Game<'_> {
         // getUseDuration - the ticks left, as a mod's Start or Tick left them.
         let held = self.ticks_held(stack, ticks);
         self.using = Some((slot, ticks + 1));
-        let charge = Self::charge_ticks(stack).max(1) as f32;
-        let now = (held + 1) as f32 / charge;
-        let sounds = Self::charging_sounds(stack);
-        let at = self
-            .player
-            .as_ref()
-            .map(|p| [p.position.x, p.position.y, p.position.z]);
+        let enchantments = self.item_enchantments().clone();
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let sounds = Self::charging_sounds(&enchantments, stack);
+        let charge = Self::charge_ticks(&enchantments, stack, &mut player.random);
+        let now = held as f32 / charge as f32;
+        let at = Some([player.position.x, player.position.y, player.position.z]);
         let (played, start, middle) = charge_sounds(now, self.crossbow_sounds, sounds);
         self.crossbow_sounds = played;
         if let Some(sound) = start {
@@ -268,14 +297,28 @@ impl Game<'_> {
         let charged = stack.data().is_some_and(|d| !d.charged.is_empty());
         if now >= 1.0 && !charged {
             // tryLoadProjectiles / ProjectileWeaponItem.draw.
-            let shots = if stack.enchantment_level("minecraft:multishot") > 0 {
-                3
-            } else {
-                1
-            };
             let Some(ammo) = self.get_projectile(stack) else {
                 return;
             };
+            let Some(player) = self.player.as_mut() else {
+                return;
+            };
+            let ctx = EffectContext {
+                this: Some("minecraft:player"),
+                ..Default::default()
+            };
+            let shots = enchantments.modify_entity_value(
+                stack,
+                "minecraft:projectile_count",
+                &ctx,
+                &mut self.world.random,
+                &mut player.random,
+                1.0,
+            ) as i32;
+            let shots = shots.min(MAX_CHARGED_PROJECTILES);
+            if shots <= 0 {
+                return;
+            }
             if !self.creative
                 && let Some(i) = ammo.slot
             {
@@ -295,8 +338,10 @@ impl Game<'_> {
             if let Some(bow) = self.stack_in_mut(slot).as_mut() {
                 bow.data_mut().charged = drawn;
             }
-            let pitch = 1.0 / (self.world.random.next_float() * 0.5 + 1.0) + 0.2;
-            self.audio.play(sounds[2], at, 1.0, pitch);
+            if let Some(end) = sounds[2] {
+                let pitch = 1.0 / (self.world.random.next_float() * 0.5 + 1.0) + 0.2;
+                self.audio.play(end, at, 1.0, pitch);
+            }
         }
     }
     /// `CrossbowItem.performShooting`.
@@ -310,19 +355,24 @@ impl Game<'_> {
         let charged = std::mem::take(&mut bow.data_mut().charged);
         bow.tidy();
         let weapon = bow.clone();
-        // AbstractArrow's constructor: `getPiercingCount` of the weapon.
-        let pierce = self
-            .res
-            .stations()
-            .enchantments
-            .modify_value(
-                Some(&weapon),
-                "minecraft:projectile_piercing",
-                &EffectContext::default(),
+        let enchantments = self.item_enchantments().clone();
+        let Some(player) = self.player.as_mut() else {
+            return;
+        };
+        let ctx = EffectContext {
+            this: Some("minecraft:player"),
+            ..Default::default()
+        };
+        let spread = enchantments
+            .modify_entity_value(
+                &weapon,
+                "minecraft:projectile_spread",
+                &ctx,
                 &mut self.world.random,
+                &mut player.random,
                 0.0,
             )
-            .clamp(0.0, 127.0) as u8;
+            .max(0.0);
         let count = charged.len();
         // getShootingPower: a rocket among them slows every shot.
         let power = if charged.iter().any(|s| &*s.item == FIREWORK_ROCKET) {
@@ -330,23 +380,23 @@ impl Game<'_> {
         } else {
             3.15
         };
-        // ProjectileWeaponItem.shoot: angles fanned 10 degrees apart.
-        let spread = if count > 1 { 10.0 } else { 0.0 };
+        // ProjectileWeaponItem.shoot: alternate across the centre, with a
+        // half-step offset for an even number of projectiles.
+        let step = if count > 1 {
+            2.0 * spread / (count - 1) as f32
+        } else {
+            0.0
+        };
+        let offset = (count.saturating_sub(1) % 2) as f32 * step / 2.0;
+        let mut direction = 1.0;
         let view = glam::DVec3::from_array(view_vector(self.yaw, self.pitch));
         let up = glam::DVec3::from_array(view_vector(self.yaw, self.pitch - 90.0));
         for (index, ammo) in charged.iter().enumerate() {
-            let angle = if count > 1 {
-                -spread + 2.0 * spread * index as f64 / (count - 1) as f64
-            } else {
-                0.0
-            };
-            let angle = if count == 3 {
-                [0.0, -spread, spread][index]
-            } else {
-                angle
-            };
+            let angle = offset + direction * index.div_ceil(2) as f32 * step;
+            direction = -direction;
             let dir =
-                glam::DQuat::from_axis_angle(up.normalize_or_zero(), angle.to_radians()) * view;
+                glam::DQuat::from_axis_angle(up.normalize_or_zero(), f64::from(angle.to_radians()))
+                    * view;
             // createProjectile: a rocket shot at an angle from 0.15 under the
             // eyes, spread by its own random; three durability.
             let rocket = &*ammo.item == FIREWORK_ROCKET;
@@ -360,6 +410,16 @@ impl Game<'_> {
                 });
             }
             if !rocket {
+                // AbstractArrow's constructor evaluates piercing for this arrow.
+                let pierce = enchantments
+                    .modify_value(
+                        Some(&weapon),
+                        "minecraft:projectile_piercing",
+                        &EffectContext::default(),
+                        &mut self.world.random,
+                        0.0,
+                    )
+                    .clamp(0.0, 127.0) as u8;
                 let effect = super::dispenser::tipped_effect(ammo).or_else(|| {
                     (&*ammo.item == "minecraft:spectral_arrow")
                         .then_some(("minecraft:glowing", 200))
@@ -397,7 +457,8 @@ impl Game<'_> {
                 1.0
             } else {
                 let high = index & 1 == 1;
-                1.0 / (self.world.random.next_float() * 0.5 + 1.8) + if high { 0.63 } else { 0.43 }
+                let draw = self.player.as_mut().map_or(0.0, |p| p.random.next_float());
+                1.0 / (draw * 0.5 + 1.8) + if high { 0.63 } else { 0.43 }
             };
             // CrossbowItem.performShooting: at the shooter's getX/Y/Z (feet).
             let feet = self
@@ -406,7 +467,13 @@ impl Game<'_> {
                 .map_or(eye, |pl| [pl.position.x, pl.position.y, pl.position.z]);
             self.audio
                 .play("minecraft:item.crossbow.shoot", Some(feet), 1.0, pitch);
+            // ProjectileWeaponItem.shoot: stop the volley when durability
+            // breaks the held crossbow, as release_bow already does.
+            let was_held = self.held().is_some();
             self.damage_held(if rocket { 3 } else { 1 });
+            if was_held && self.held().is_none() {
+                break;
+            }
         }
         // CrossbowItem.performShooting: SHOT_CROSSBOW with the crossbow, which
         // is an empty stack (no match) when the shots broke it.
@@ -420,6 +487,41 @@ impl Game<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crossbow_charge_and_sounds_use_a_custom_enchantment() {
+        let id = "test:crossbow_charge";
+        let definition = serde_json::json!({"effects": {
+            "minecraft:crossbow_charge_time": {
+                "type": "minecraft:set",
+                "value": {"type": "minecraft:lookup", "values": [0.125, 0.025], "fallback": 0.025}
+            },
+            "minecraft:crossbow_charging_sounds": [
+                {"start": "minecraft:item.crossbow.quick_charge_1"},
+                {"end": "minecraft:item.crossbow.loading_end"}
+            ]
+        }});
+        let enchantments = Enchantments::default()
+            .with_entries([(id, &definition)])
+            .unwrap()
+            .unwrap();
+        let mut stack = ItemStack::new(CROSSBOW, 1);
+        let mut random = EntityRandom::own(horizon_core::random::LegacyRandom::new(17));
+
+        stack.data_mut().enchantments.push((id.into(), 1));
+        assert_eq!(Game::charge_ticks(&enchantments, &stack, &mut random), 2);
+        assert_eq!(
+            Game::charging_sounds(&enchantments, &stack),
+            [Some("minecraft:item.crossbow.quick_charge_1"), None, None]
+        );
+
+        stack.data_mut().enchantments[0].1 = 2;
+        assert_eq!(Game::charge_ticks(&enchantments, &stack, &mut random), 0);
+        assert_eq!(
+            Game::charging_sounds(&enchantments, &stack),
+            [None, None, Some("minecraft:item.crossbow.loading_end")]
+        );
+    }
 
     /// A game on the prepared resources with a creative player.
     fn game_with_player<'a>(
@@ -550,9 +652,9 @@ mod tests {
     #[test]
     fn a_jumped_charge_still_plays_the_loading_sounds_it_passed() {
         let sounds = [
-            "minecraft:item.crossbow.loading_start",
-            "minecraft:item.crossbow.loading_middle",
-            "minecraft:item.crossbow.loading_end",
+            Some("minecraft:item.crossbow.loading_start"),
+            Some("minecraft:item.crossbow.loading_middle"),
+            Some("minecraft:item.crossbow.loading_end"),
         ];
         // Each step: the charge and the sounds it plays, from the flags the
         // step before left.
@@ -563,21 +665,21 @@ mod tests {
             [start, middle]
         };
         assert_eq!(step(0.1), [None, None]);
-        assert_eq!(step(0.25), [Some(sounds[0]), None]);
+        assert_eq!(step(0.25), [sounds[0], None]);
         assert_eq!(step(0.25), [None, None]);
-        assert_eq!(step(0.55), [None, Some(sounds[1])]);
+        assert_eq!(step(0.55), [None, sounds[1]]);
         assert_eq!(step(1.0), [None, None]);
         // A charge below the first point is a new charge: both sound again.
         assert_eq!(step(0.1), [None, None]);
-        assert_eq!(step(0.6), [Some(sounds[0]), Some(sounds[1])]);
+        assert_eq!(step(0.6), [sounds[0], sounds[1]]);
         // One tick from the start past every point, as a mod's tick makes it.
         assert_eq!(step(0.1), [None, None]);
-        assert_eq!(step(0.9), [Some(sounds[0]), Some(sounds[1])]);
+        assert_eq!(step(0.9), [sounds[0], sounds[1]]);
         // Quick Charge 1 and up have no middle sound.
-        let quick = [sounds[0], "", sounds[2]];
+        let quick = [sounds[0], None, sounds[2]];
         assert_eq!(
             charge_sounds(0.9, [false; 2], quick),
-            ([true, false], Some(sounds[0]), None)
+            ([true, true], sounds[0], None)
         );
     }
 

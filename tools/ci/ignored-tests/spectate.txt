@@ -1,0 +1,1 @@
+horizon-client game::commands::extra::spectate_tests::spectate_checks_named_player_mode_not_source lib daily resources

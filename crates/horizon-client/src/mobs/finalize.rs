@@ -1165,6 +1165,13 @@ pub fn spawn_egg_offspring(child: &mut Mob, species: Species, variant: u8, color
         sulfur_size(child, 1);
     }
 }
+/// `Zombie.onOffspringSpawnedFromEgg`: a baby from a zombie's own egg rolls
+/// `CanPickUpLoot` from the parent's random against the difficulty at it.
+pub fn zombie_egg_pick_up_loot(child: &mut Mob, special: f32, random: &mut impl RandomSource) {
+    if zombie(child.species()) {
+        child.extra.pick_up_loot = random.next_float() < 0.55 * special;
+    }
+}
 /// `setBaby`: AgeableMob through its age, zombies, piglins and zoglins.
 pub fn set_baby(m: &mut Mob, baby: bool) {
     let s = m.species();
@@ -1972,8 +1979,11 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             + self.random.next_double() * 0.2
     }
     fn villager_type(&mut self, m: &mut Mob) {
-        let at = block(m);
-        m.extra.variant = self.level.mob_maps().villager_type(&self.level.biome(at));
+        if !super::villager::ext(m).is_some_and(|e| e.data_finalized) {
+            let at = block(m);
+            m.extra.variant = self.level.mob_maps().villager_type(&self.level.biome(at));
+            super::villager::ext_mut(m).data_finalized = true;
+        }
     }
     /// `VariantUtils.selectVariantToSpawn` into `variant`, by registry name.
     fn variant(&mut self, m: &mut Mob, registry: fn(&SpawnRegistries) -> &VariantRegistry) {
@@ -2141,7 +2151,7 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             S::Camel | S::CamelHusk => {
                 let now = self.level.game_time();
                 m.extra.pose_change_tick = (now - 52 - 1).max(0);
-                super::camel::stand_up_instantly(m);
+                super::camel::reset_pose_to_full_stand(m);
                 self.horse(m, g)
             }
             S::Goat => {
@@ -2446,6 +2456,20 @@ pub fn variant_index(s: Species, name: &str) -> u8 {
     let i = match s {
         Species::Cat => super::tame::CAT_VARIANTS.iter().position(|v| *v == name),
         Species::Wolf => super::tame::WOLF_VARIANTS.iter().position(|v| v.0 == name),
+        // Rabbit.Variant and Parrot.Variant, in their registry order.
+        Species::Rabbit => match name {
+            "brown" => Some(0),
+            "white" => Some(1),
+            "black" => Some(2),
+            "white_splotched" => Some(3),
+            "gold" => Some(4),
+            "salt" => Some(5),
+            "evil" => Some(99),
+            _ => None,
+        },
+        Species::Parrot => ["red", "blue", "green", "cyan", "yellow"]
+            .iter()
+            .position(|v| *v == name),
         Species::ZombieNautilus => super::nautilus::VARIANTS.iter().position(|v| *v == name),
         // MushroomCow.Variant: red is the codec's default, brown the other.
         Species::Mooshroom => ["red", "brown"].iter().position(|v| *v == name),

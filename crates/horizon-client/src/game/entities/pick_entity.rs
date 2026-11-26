@@ -1,7 +1,7 @@
 //! Pick Block on an entity (`Minecraft.pickBlockOrEntity`'s entity case and
 //! `ServerGamePacketListenerImpl.handlePickItemFromEntity`): the client aims,
 //! the server answers with `Entity.getPickResult`.
-use super::Game;
+use super::{Game, lan_actions::guest_within_entity_range};
 use horizon_client::{items::ItemStack, save::uuid_text};
 use mod_api::{BlockPos, CrosshairTarget, EntityRef};
 
@@ -149,12 +149,9 @@ impl Game<'_> {
         } else if let Some(c) = self.cushions.iter().find(|c| c.id == id) {
             c.item()
         } else if let Some(f) = self.item_frames.iter().find(|f| f.id == id) {
-            // ItemFrame.getPickResult: what it frames, else the frame itself.
-            return Some(
-                f.item
-                    .clone()
-                    .unwrap_or_else(|| ItemStack::new(f.kind(), 1)),
-            );
+            // ItemFrame.getPickResult: what it frames, else the frame with
+            // its data (getFrameItemStackWithData copies CUSTOM_NAME).
+            return Some(f.item.clone().unwrap_or_else(|| f.item_stack_with_data()));
         } else if self.paintings.iter().any(|p| p.id == id) {
             "minecraft:painting".to_owned()
         } else if self.crystals.iter().any(|c| c.id == id) {
@@ -163,6 +160,43 @@ impl Game<'_> {
             return None;
         };
         Some(ItemStack::new(&item, 1))
+    }
+
+    /// `handlePickItemFromEntity`'s `include_data`: a game master who picks
+    /// an avatar prints its profile (`FetchProfileCommand.printForAvatar`).
+    pub(super) fn guest_pick_avatar_profile(
+        &mut self,
+        conn: u32,
+        id: i32,
+        include_data: bool,
+    ) {
+        if !include_data {
+            return;
+        }
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
+            return;
+        };
+        let Some((uuid, name, properties, bounds)) = host
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.entity_id == id && host.hub.here(g))
+            .map(|g| (g.uuid, g.name.clone(), g.properties.clone(), g.bounds()))
+        else {
+            return;
+        };
+        // `Player.isWithinEntityInteractionRange(entity, 3.0)`, from the acting guest.
+        if !guest_within_entity_range(&host.hub.guests[gi], &bounds, 3.0) {
+            return;
+        }
+        self.as_guest_messaged(conn, |g| {
+            if g.can_use_game_master_blocks() {
+                g.report_avatar_profile(uuid, &name, &properties);
+            }
+        });
     }
 
     /// `Player.isWithinEntityInteractionRange(entity, 3.0)`: the entity's box
@@ -253,5 +287,42 @@ mod tests {
             ),
             Some(object)
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_pick_tests {
+    use horizon_client::entities::ItemFrame;
+    use horizon_client::items::ItemStack;
+    use horizon_core::nbt::Tag;
+
+    /// `ItemFrame.getPickResult` on an empty frame uses
+    /// `getFrameItemStackWithData`, which copies `DataComponents.CUSTOM_NAME`.
+    #[test]
+    fn picking_a_named_empty_frame_keeps_its_name() {
+        let mut f = ItemFrame {
+            attachment_lifetime: Default::default(),
+            join: Default::default(),
+            id: 1,
+            pos: [0, 64, 0],
+            facing: 3,
+            glow: false,
+            item: None,
+            rotation: 0,
+            drop_chance: 1.0,
+            fixed: false,
+            invisible: false,
+            check_interval: 0,
+            custom_name: Some(Tag::String("Gallery".into())),
+            random: horizon_core::random::EntityRandom::own(
+                horizon_core::random::LegacyRandom::new(0),
+            ),
+        };
+        let picked = f.item.clone().unwrap_or_else(|| f.item_stack_with_data());
+        assert_eq!(&*picked.item, "minecraft:item_frame");
+        assert_eq!(picked.custom_name().as_deref(), Some("Gallery"));
+        // The framed item still wins over the frame itself.
+        f.item = Some(ItemStack::new("minecraft:diamond", 1));
+        assert_eq!(&*f.item.clone().unwrap_or_else(|| f.item_stack_with_data()).item, "minecraft:diamond");
     }
 }

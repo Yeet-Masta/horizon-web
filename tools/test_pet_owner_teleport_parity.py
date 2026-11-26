@@ -13,6 +13,7 @@ can be 6 to 12 blocks from her a few seconds later, in vanilla as in Horizon; a 
 """
 import re
 import sys
+import time
 
 try:
     from . import test_locator_bar_parity as locator
@@ -30,7 +31,10 @@ SCRIPT = [
                f'cmd Alice summon minecraft:wolf -3.5 -60 6.5 {{{WOLF},Tags:["free"]}}',
                f'cmd Alice summon minecraft:pig 4.5 -60 6.5 {{UUID:{HOLDER},NoAI:1b,PersistenceRequired:1b}}',
                f'cmd Alice summon minecraft:wolf 2.5 -60 6.5 {{{WOLF},Tags:["leashed"],leash:{{UUID:{HOLDER}}}}}',
-               f'cmd Alice summon minecraft:oak_boat 0.5 -60 10.5 '
+               # The boat stands 21 blocks from the free wolf, past one stroll: a boat takes in a mob that touches
+               # it (AbstractBoat.tick), and a free wolf that strolled into it 6 blocks away stayed behind as a
+               # passenger: 3 of 40 vanilla runs, which `one_player` re-runs; Horizon's run never is (#18133).
+               f'cmd Alice summon minecraft:oak_boat 0.5 -60 -14.5 '
                f'{{Passengers:[{{id:"minecraft:wolf",{WOLF},Tags:["boat"]}}]}}']),
     ('away', ['cmd Alice tp @s 0.5 -60 40.5']),
     *[(f'{pet}-near', [f'cmd Alice data get entity @e[type=minecraft:wolf,tag={pet},limit=1] Pos']) for pet in PETS],
@@ -65,10 +69,39 @@ def check(vanilla, vanilla_all):
     return None
 
 
+POSITION = re.compile(r'has the following entity data: (\[[^\]]*\])\s*$')
+CLOCK = re.compile(r'The (?:game )?time is \d+')
+
+
+def facts(server, timeout=10.0):
+    """Where each wolf and Alice are and what the free wolf rides, asked from the console after the script, a step
+    later than the positions compared: printed with a mismatch, to tell a wolf that never came from one that came and
+    wandered off (#18133). Only the entity-data replies are kept: `none` when there was none, `no reply` past the
+    overall `timeout`."""
+    deadline = time.time() + timeout
+
+    def ask(command):
+        start = len(server.lines)
+        server.console(command)
+        server.console('time query gametime')  # answered after `command`: its replies are in
+        while time.time() < deadline:
+            replies = server.lines[start:]
+            end = next((i for i, line in enumerate(replies) if CLOCK.search(line)), None)
+            if end is not None:
+                return next((m.group(1) for line in replies[:end] if (m := POSITION.search(line))), 'none')
+            time.sleep(0.05)
+        return 'no reply'
+    found = [f'{pet} wolf: {ask(f"data get entity @e[type=minecraft:wolf,tag={pet},limit=1] Pos")}' for pet in PETS]
+    found.append(f'Alice: {ask("data get entity Alice Pos")}')
+    found.append('free wolf vehicle: ' + ask('execute as @e[type=minecraft:wolf,tag=free,limit=1] on vehicle '
+                                             'run data get entity @s Pos'))
+    return 'sampled after the compared reads: ' + ' | '.join(found)
+
+
 def main():
     lines = locator.one_player(NAME, SCRIPT, shown, check, 'Tame wolves (free, leashed, in a boat) left 40 blocks '
                                'behind by their owner on a dedicated server: which ones teleport to her.',
-                               step_seconds=5.0)
+                               step_seconds=5.0, facts=facts)
     print(f'pet owner teleport: {len(lines)} lines identical')
 
 

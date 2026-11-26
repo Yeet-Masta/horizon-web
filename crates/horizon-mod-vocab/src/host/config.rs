@@ -88,6 +88,12 @@ pub trait ConfigServerHost {
     #[access(Metadata)]
     fn game_tests_enabled(&self) -> bool;
     /// Side: server.
+    /// The entity broadcast range the server hosts with, in percent of vanilla's range
+    /// (`entity-broadcast-range-percentage` of server.properties, `/serversettings`). 100 when
+    /// no server is hosting a world, as vanilla's default is.
+    #[access(WorldOnly)]
+    fn entity_range_percent(&self) -> i32;
+    /// Side: server.
     /// The server's tick rate (20 unless `/tick rate` changed it) and the
     /// milliseconds its ticks took on average lately, as `/tick query`
     /// reports them. The ticks a second it keeps up is the rate, or
@@ -101,6 +107,25 @@ pub trait ConfigServerHost {
     /// has the average.
     #[access(WorldOnly)]
     fn tick_times(&self) -> Vec<u64>;
+    /// Side: server.
+    /// Times every mob's own tick (its riders inside it) from now on, or no longer, summed by
+    /// level and mob type for `take_mob_costs`, as a profiler samples them: while on, two
+    /// clock reads and a map update a mob; off, one thread-local read. Apart from the server's
+    /// own performance report, so both can run. Off drops what was sampled. False on a client.
+    #[access(WorldOnly)]
+    fn mob_cost_sampling(&mut self, on: bool) -> bool;
+    /// Side: server.
+    /// The mob tick costs sampled since the last call (`mob_cost_sampling`), costliest first;
+    /// clears them. Empty while nothing was sampled and on a client.
+    #[access(WorldOnly)]
+    fn take_mob_costs(&mut self) -> Vec<MobTickCost>;
+    /// Side: server.
+    /// Counts every player's play packets by id and direction from now on, or no longer, for
+    /// `player_take_packet_counts`. While on, each packet costs its connection a lock and a
+    /// map update; off, one atomic read. One switch for the whole server, shared by every
+    /// mod. False on a client.
+    #[access(WorldOnly)]
+    fn count_packets(&mut self, on: bool) -> bool;
     /// Side: server.
     /// The server's view distance in chunks (`PlayerList.getViewDistance`, `view-distance`):
     /// how far players are sent chunks at most. None off a server open to players.
@@ -147,6 +172,14 @@ pub trait ConfigServerHost {
     /// keeps world data in level attachments.
     #[access(WorldOnly)]
     fn world_dir(&self) -> Option<PathBuf>;
+    /// Side: server.
+    /// The path of the server log being written now (`logs/latest.log` under the game's home).
+    /// Paper has no such call; a plugin builds the path by convention. Whether the file exists
+    /// yet is not checked: it is the place to read, not a promise that it is there.
+    ///
+    /// Not on wasm: a path in the game's file system, which a wasm mod has none of.
+    #[access(WorldOnly)]
+    fn log_file(&self) -> PathBuf;
     /// Side: server. The calling mod's bulk files in the current save's
     /// `horizon-mod-data/<mod id>/`, copied, backed up and deleted with that
     /// save. Paths omit the mod id. Calls refuse with `NoWorld` before a
@@ -164,6 +197,12 @@ pub trait ConfigServerHost {
     /// Returns `UnknownRule` for an unknown id; level reads use the same store.
     #[access(WorldOnly)]
     fn game_rule(&self, id: &str) -> Result<GameRuleValue, GameRuleReadError>;
+    /// Side: server.
+    /// The default value of rule `id` in the server-wide store (`GameRule.getDefault`), the value
+    /// the rule has before `/gamerule` or a mod changes it. None for an unknown id, so a rule
+    /// that was never registered reads as absent, not as a default.
+    #[access(WorldOnly)]
+    fn game_rule_default(&self, id: &str) -> Option<GameRuleValue>;
     /// Side: server.
     /// The retained server reload listeners of the last successful reload.
     #[access(WorldOnly)]
@@ -197,4 +236,16 @@ pub trait ConfigClientHost {
     /// when the mod registered no colour by that key.
     #[access(WorldOnly)]
     fn setting_color(&self, key: &str) -> Option<u32>;
+    /// Side: client.
+    /// The calling mod's old settings from `horizon-extras.txt`, when it is the official mod
+    /// that took over a built-in extra (`fps_overlay`, `keystrokes`, `minimap`, `zoom`): each
+    /// of that extra's keys the file has a line for, with the value the extra used, as it wrote
+    /// it (`("fpsCorner", "top_left")`). A written key doesn't mean the player changed it: the
+    /// game writes every key once any extra differs from its default, so a line can hold the
+    /// extra's default. Empty for any other mod (the file isn't read), outside a mod's call,
+    /// for a player who never changed the extras, and for a file that isn't a regular UTF-8
+    /// file of at most 1 MiB. Read-only and read from disk on each call: a port reads it once,
+    /// keeps what it takes in its own settings, and remembers that it did.
+    #[access(ClientSetup)]
+    fn official_extra_settings(&self) -> Vec<(String, String)>;
 }

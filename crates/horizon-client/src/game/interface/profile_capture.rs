@@ -1,5 +1,4 @@
 //! Captures (docs/perf-platform.md §4.1): `horizon-ctl profile`, `/profiler` and `HORIZON_PROFILE`. The window writes its own side; in single player the server thread writes its side into the same file.
-use horizon_std::fs::PathExt as _;
 use super::Game;
 use super::integrated::{
     NO_ANSWER,
@@ -24,6 +23,7 @@ use horizon_perf_format::{
     files,
     v1::{BenchResult, StopReason, Trigger},
 };
+use horizon_std::fs::PathExt as _;
 use horizon_std::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -925,6 +925,9 @@ impl Game<'_> {
             self.profile.memory_due = None;
             return;
         }
+        if self.export_server_calls_blocked() {
+            return;
+        }
         let now = self.profile.perf.now();
         match self.profile.memory_due {
             None => {
@@ -1140,13 +1143,15 @@ mod tests {
 
     #[test]
     fn a_capture_under_the_home_is_shown_with_slashes() {
-        let home = std::env::temp_dir().join("horizon-home");
+        let home = horizon_std::env::temp_dir().join("horizon-home");
         let inside = home.join("reports").join("profile-20261113-190003Z.hzperf");
         assert_eq!(
             shown_in(&inside, &home),
             "reports/profile-20261113-190003Z.hzperf"
         );
-        let elsewhere = std::env::temp_dir().join("captures").join("a.hzperf");
+        let elsewhere = horizon_std::env::temp_dir()
+            .join("captures")
+            .join("a.hzperf");
         assert_eq!(shown_in(&elsewhere, &home), elsewhere.display().to_string());
     }
 

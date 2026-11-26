@@ -3,8 +3,8 @@
 A mixin changes one game function. You name the function and the place in it (its start, its return value,
 one call inside it, or its whole body), and write your code there as a small Rust function, the **helper**.
 
-Use a mixin when you need private fields, a change in the middle of a function, or a new body. To run code at
-the start or end of a function with `mod_api` values, an [`[[inject]]` listener](../injections.md) is enough.
+Use a mixin when no hook fits: you need private fields, code at the start or end of a game function, a change in
+the middle of it, or a new body.
 
 ## Example
 
@@ -123,6 +123,12 @@ So `src/game/world/autosave.rs` is `horizon_client::game::autosave` (`world/` is
 Any function of the game crate can take a mixin. A function in a crate below it, such as `horizon_world`, needs
 the marker `#[horizon_mod_api_macros::replaceable]` in its source. Otherwise, target a replaceable caller or callee.
 
+For a marked trait method below the game crate, put the marker on the method in the `impl` block and use
+the same `module::<Type as Trait>::method` target. The trait must be a game trait written by its declared
+name, and the implementation's crate must own the type. The target's trait name is its final path
+segment, so two implementations with the same type, trait name and method in one module share a
+target. Staging reports the conflict if either is marked.
+
 These functions are refused:
 
 - generic over types or consts, or inside an `impl` block that is;
@@ -139,8 +145,7 @@ The one generic function you can target is a [published loop's body](3-loops.md#
 ## With other mods
 
 Several mods' rows on one function all apply. An `OVERWRITE` must be the only mixin on its function,
-from any mod including its own. An `[[inject]]` listener may share a function with mixins: head listeners run first, then the
-mixed-in function, then return listeners.
+from any mod including its own.
 
 ## Errors
 

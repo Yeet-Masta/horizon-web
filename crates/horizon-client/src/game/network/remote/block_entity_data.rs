@@ -37,18 +37,31 @@ impl Game<'_> {
             }
             return;
         }
+        let block = self.world.block(pos[0], pos[1], pos[2]);
+        let block_name = &self.res.facts().get(block).name;
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        if block_name.as_ref() == WATER_CAULDRON
+            && type_for(WATER_CAULDRON) == Some(name)
+            && matches!(tag, Tag::Compound(_) | Tag::End)
+            && self.world.is_loaded_at(pos[0], pos[1], pos[2])
+            && !self.world.block_entities.contains_key(&key)
+        {
+            self.world.block_entities.insert(
+                key,
+                BlockEntity::Mod(Box::new(horizon_client::containers::ModBlockEntity::new(
+                    name.to_owned(),
+                    Default::default(),
+                ))),
+            );
+        }
         let Tag::Compound(fields) = tag else {
             return;
         };
         // Only the declared type on one of its valid blocks accepts an update tag.
         // Nothing is drawn from it yet, so its section stays as it is.
-        let block = self.world.block(pos[0], pos[1], pos[2]);
         if let Some(BlockEntity::Mod(m)) = self.world.block_entities.get_mut(&key) {
             if m.id() == name
-                && horizon_client::block_entity_types::valid(
-                    &self.res.facts().get(block).name,
-                    name,
-                ) == Some(true)
+                && horizon_client::block_entity_types::valid(block_name, name) == Some(true)
             {
                 m.merge_update_tag(fields);
                 if source == BlockEntityDataSource::UpdatePacket || !fields.is_empty() {

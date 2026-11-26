@@ -85,14 +85,17 @@ original classes, game shaders, textures or prepared resources are distributed h
 developers, with upstream fixes applied
 ([gfx-rs/wgpu#10124](https://github.com/gfx-rs/wgpu/pull/10124),
 [gfx-rs/wgpu#10714](https://github.com/gfx-rs/wgpu/pull/10714)). On NVIDIA with a Wayland surface
-its Vulkan backend also waits for each swapchain image on the CPU (an acquire fence), so no frame
-waits on the GPU for an image the compositor still holds. Its GL backend also reports
+its Vulkan backend also waits for each swapchain image on the CPU (an acquire fence), by default in
+every present mode but Immediate, so no frame waits on the GPU for an image the compositor still
+holds (`HORIZON_ACQUIRE_FENCE=0` or `=1` turns it off or on in any mode).
+Its GL backend also reports
 the context's sampled textures and samplers per shader stage (usually 32 on desktop GL,
 where WebGL2's minimum 16 was reported before), so a pipeline layout the driver accepts is
 not refused. Its GL backend copies depth and stencil textures with a framebuffer blit, where
 `glCopyTexSubImage` read only colour and left the copy empty. Its DirectX 12 backend leaves out
 an adapter that offers neither `IDXGIAdapter4` nor `IDXGIAdapter3`, where an `unwrap` ended the
-program. It is licensed under MIT or
+program, and gives an intermediate texture-copy buffer's allocation back when its command
+encoder is reset, where only the resource was dropped and the allocation leaked. It is licensed under MIT or
 Apache-2.0; both licenses are in that folder
 (`LICENSE.MIT`, `LICENSE.APACHE`).
 
@@ -114,12 +117,17 @@ The GLSL frontend also resets the common type for each comma-separated declarato
 variable's array specifier does not change later variables.
 It also reads a struct member outside a constant expression through a pointer to the member,
 not out of a loaded copy of the whole struct, so a member an atomic function uses can be read.
+It limits recursive parsing and lowering of GLSL after preprocessing and reports a source diagnostic
+when the nesting limit is exceeded.
 The HLSL backend writes an ordinary level-zero texture sample as `SampleLevel(..., 0.0)`, while
 comparison textures keep `SampleCmpLevelZero`; HLSL has no ordinary `SampleLevelZero` method.
 The shared interpolation defaults also compile with `glsl-in` alone, without needing the
 SPIR-V or WGSL frontend to enable them.
 The HLSL backend's texture-sampling offset cast preserves the offset's scalar or vector width,
 including `int` for 1D and `int3` for 3D textures instead of always using `int2`.
+The SPIR-V backend leaves out the counter and exit it adds to every loop (`force_loop_bounding`) where
+`back/bounded_loop.rs`, a module of Horizon's, proves that the loop ends by itself: a local integer
+counter that only the loop's own step changes, compared with a bound it cannot wrap past.
 
 ## DirectX Shader Compiler
 
@@ -128,9 +136,10 @@ The Windows x64 game folder holds `dxcompiler.dll`, Microsoft's DirectX Shader C
 `bin/x64/dxcompiler.dll` of `dxc_2026_09_29.zip` (zip SHA-256
 `ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1`, DLL SHA-256
 `0689e2fee0a1c9df8662a59680469f24e2a3ad7ce6bbbcc9284f7a83172bfc59`, 22,274,872 bytes). The release build downloads
-it and checks both checksums (`tools/ci/fetch_dxc.py`); it is not in this repository. DirectX 12 loads it only on
-integrated GPUs (`crates/horizon-client-render/src/gfx/dx12_compiler.rs`,
-[#8513](https://github.com/horizon-rust/horizon/issues/8513)); every other GPU compiles with FXC, part of Windows.
+it and checks both checksums (`tools/ci/fetch_dxc.py`); it is not in this repository. DirectX 12 loads it on
+integrated GPUs, and on a discrete GPU only when ray tracing or mesh shaders ask for Shader Model 6.5
+(`crates/horizon-client-render/src/gfx/dx12_compiler.rs`,
+[#8513](https://github.com/horizon-rust/horizon/issues/8513)); otherwise the GPU compiles with FXC, part of Windows.
 
 Copyright (c) Microsoft Corporation. It is not covered by Horizon's MIT license. It is distributed under the
 "Microsoft Software License Terms, Microsoft DirectX Shader Compiler" (`LICENSE-MS.txt` of that release). Its
@@ -298,38 +307,6 @@ licensed under the MIT license:
 > DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 > OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-## BlueMap
-
-`crates/horizon-client-render/src/bluemap.rs` reads the lowres tiles of a server's
-[BlueMap](https://github.com/BlueMap-Minecraft/BlueMap) web map. It follows three of BlueMap's files:
-`core/src/main/java/de/bluecolored/bluemap/core/map/lowres/LowresLayer.java` (`saveTile`) for the
-tiles' pixel layout, `common/webapp/src/js/util/Utils.js` (`pathFromCoords`) for their paths, and
-`core/src/main/java/de/bluecolored/bluemap/core/map/MapSettingsSerializer.java` for a map's
-`settings.json`, at commit
-[96ae320d1d39](https://github.com/BlueMap-Minecraft/BlueMap/tree/96ae320d1d39581c10058d8222f2290f2fcb5333).
-BlueMap is licensed under the MIT license:
-
-> Copyright (c) Blue (Lukas Rieger) <https://bluecolored.de>
-> Copyright (c) contributors
->
-> Permission is hereby granted, free of charge, to any person obtaining a copy
-> of this software and associated documentation files (the "Software"), to deal
-> in the Software without restriction, including without limitation the rights
-> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-> copies of the Software, and to permit persons to whom the Software is
-> furnished to do so, subject to the following conditions:
->
-> The above copyright notice and this permission notice shall be included in
-> all copies or substantial portions of the Software.
->
-> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-> THE SOFTWARE.
-
 ## JOML
 
 `crates/horizon-client-render/src/camera.rs` (`joml::Mat4::rotation`, `invert_orthonormal`) and
@@ -458,6 +435,9 @@ Horizon (Copyright (c) 2026 Ludovic Marie and the Horizon contributors).
 
 `crates/horizon-client-render/src/touch.rs` and `touch/tests/` are adapted from the touch input
 state of Starling's `crates/horizon-client-render/src/touch.rs` at the same commit.
+
+`crates/horizon-client-render/src/touch/custom.rs` is adapted from the custom buttons of Starling's
+`crates/horizon-client-render/src/touch.rs` at the same commit.
 
 `crates/horizon-client-render/src/touch/draw.rs` is adapted from the touch control drawing in
 Starling's `crates/horizon-client-render/src/touch.rs` at the same commit.

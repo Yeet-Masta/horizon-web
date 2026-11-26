@@ -321,12 +321,15 @@ impl GraphicsApi {
             .into_iter()
             .find(|api| api.name().eq_ignore_ascii_case(s.trim()))
     }
-    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else the setting.
-    pub fn with_env(self) -> Self {
+    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else `None`.
+    pub fn from_env() -> Option<Self> {
         horizon_std::env::var("HORIZON_GRAPHICS_API")
             .ok()
             .and_then(|v| Self::from_name(&v))
-            .unwrap_or(self)
+    }
+    /// `HORIZON_GRAPHICS_API` (auto, vulkan, dx12 or opengl) if set, else the setting.
+    pub fn with_env(self) -> Self {
+        Self::from_env().unwrap_or(self)
     }
 }
 
@@ -534,16 +537,6 @@ impl Upscaling {
     }
 }
 
-static REDUCED_SUGGESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-/// Whether the settings suggest Reduced far detail: set when the renderer
-/// starts, on the GPUs `lod_capped` names (far terrain slows them most).
-pub fn suggest_reduced_far_detail(on: bool) {
-    REDUCED_SUGGESTED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-pub fn reduced_far_detail_suggested() -> bool {
-    REDUCED_SUGGESTED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// The Screenshot Quality choices, times the game's resolution.
 pub const SCREENSHOT_QUALITIES: [u32; 4] = [1, 2, 4, 8];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -599,6 +592,42 @@ impl HdrLook {
     }
     fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|look| look.name() == value)
+    }
+}
+
+/// When hardware ray queries (`EXPERIMENTAL_RAY_QUERY`) and the ray-tracing acceleration scene
+/// are requested and built (`horizon-graphics.txt` `rayTracing`; `auto` by default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum RayTracingMode {
+    /// Follows the picked shader pack: enabled when its manifest declares `[ray_tracing]`.
+    #[default]
+    Auto,
+    /// Always requests ray queries at startup and keeps the ray scene ready.
+    On,
+    /// Disables hardware ray queries and the ray scene even if a pack declares `[ray_tracing]`.
+    Off,
+}
+impl RayTracingMode {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::On, Self::Off];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+    fn parse(value: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.name() == value)
+            .unwrap_or_default()
     }
 }
 
@@ -763,29 +792,7 @@ pub fn gpu_culling_lost() -> bool {
     GPU_CULLING_LOST.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The farthest LOD Distance, in chunks, on integrated GPUs other than
-/// Apple's: they share the CPU's memory bandwidth, and past it far terrain
-/// costs them more frame time than it is worth.
-pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
-/// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
-/// are integrated too, with memory and bandwidth enough for every distance.
-pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
-    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
-}
-/// A LOD distance as far terrain uses it on this adapter.
-pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
-    let distance = distance.min(crate::lod::MAX_CHUNKS);
-    if lod_capped(info) {
-        distance.min(INTEGRATED_LOD_DISTANCE)
-    } else {
-        distance
-    }
-}
 impl Graphics {
-    /// `lod_distance` as far terrain uses it on this adapter.
-    pub fn lod_distance_on(&self, info: &wgpu::AdapterInfo) -> u32 {
-        lod_distance_capped(self.lod_distance, info)
-    }
     /// Whether the selected packs leave vanilla's block models in place.
     /// Horizon's occlusion assumptions (entity and leaf culling) hold only
     /// for those: a pack can replace an opaque cube's model or a leaf's.
@@ -834,9 +841,6 @@ pub struct Graphics {
     pub lod_distance: u32,
     /// How finely far terrain is drawn; Full unless the player picks Reduced.
     pub far_detail: FarDetail,
-    /// Far terrain from servers' BlueMap web maps; no server has one unless
-    /// the player names it (`blueMap:` lines) or turns on auto-detect.
-    pub blue_map: crate::bluemap::Settings,
     /// Skip sections hidden behind closed ones (vanilla's occlusion graph).
     pub cave_culling: bool,
     /// Near solid terrain culled, and its draws listed, on the GPU (`gfx::gpu_culling`), where it
@@ -878,6 +882,9 @@ pub struct Graphics {
     /// The block textures' video memory (their top mip level), in MiB; 0 leaves it to
     /// Horizon (`sprites::DEFAULT_TEXTURE_BUDGET`). Applies when resources next load.
     pub texture_budget_mib: u32,
+    /// The LabPBR maps' video memory (their top mip level), in MiB; 0 leaves it to Horizon:
+    /// a quarter of the block textures' budget. Applies when resources next load.
+    pub pbr_budget_mib: u32,
     pub sky: bool,
     pub fog: bool,
     pub weather: bool,
@@ -940,6 +947,9 @@ pub struct Graphics {
     /// mode is changed or the window starts on another driver ([`Graphics::hdr_held`]).
     /// Empty for a marker that named no driver: the first one seen holds it.
     pub hdr_failed_start: Option<String>,
+    /// The graphics driver whose last start lost the graphics device with HDR output on
+    /// (`gfx::safe_start`): HDR output is held back on it like [`Graphics::hdr_failed_start`].
+    pub safe_start: Option<String>,
     /// Battery mode: at most 60 frames per second in a world and 30 in menus
     /// or behind other windows, and half the automatic size of the pools the
     /// client starts — chunk building, the tick's helpers, chunk decoding, saves,
@@ -951,8 +961,17 @@ pub struct Graphics {
     /// pack uniforms still match. Off by default: vanilla loaders redraw every frame
     /// (or every `shadowInterval`), and a hit with a stale key shows old shadows.
     pub shadow_cache: bool,
+    /// Whether hardware ray tracing (`EXPERIMENTAL_RAY_QUERY` and `RayScene`) follows the pack
+    /// (`auto`), is always requested (`on`), or stays disabled (`off`).
+    pub ray_tracing: RayTracingMode,
     /// The graphics API (Windows only; see `GraphicsApi`).
     pub api: GraphicsApi,
+    /// Backend hold after a GPU search watchdog timeout (`gfx::safe_start`): applied in memory
+    /// without overwriting [`Graphics::api`] (`graphicsApi`) in `horizon-graphics.txt`, and
+    /// dropped when the graphics driver changes (`watchdog_driver`) or `api` is changed.
+    pub watchdog_api: Option<GraphicsApi>,
+    /// Graphics driver on which [`Graphics::watchdog_api`] settled (`watchdogDriver`).
+    pub watchdog_driver: Option<String>,
     /// Translucent quads in vertex buffers of their own (`gfx`'s translucent arena), so their
     /// back-to-front draws go out in a few calls, for a little more video memory. On by
     /// default (Translucent Batching, Advanced graphics); read when a renderer is made (start,
@@ -971,7 +990,6 @@ impl Default for Graphics {
             preset: Preset::Custom,
             lod_distance: 0,
             far_detail: FarDetail::Full,
-            blue_map: crate::bluemap::Settings::default(),
             cave_culling: true,
             gpu_culling: GpuCullingMode::Off,
             entity_culling: EntityCullingMode::Off,
@@ -992,6 +1010,7 @@ impl Default for Graphics {
             // a native driver: a burst of new sections spreads over frames.
             upload_budget_kib: if horizon_std::WEB { 4096 } else { 0 },
             texture_budget_mib: 0,
+            pbr_budget_mib: 0,
             sky: true,
             fog: true,
             weather: true,
@@ -1020,9 +1039,13 @@ impl Default for Graphics {
             hdr_color_boost: 0,
             hdr_look: HdrLook::Horizon,
             hdr_failed_start: None,
+            safe_start: None,
             battery: false,
             shadow_cache: false,
+            ray_tracing: RayTracingMode::Auto,
             api: GraphicsApi::Auto,
+            watchdog_api: None,
+            watchdog_driver: None,
             translucent_batching: true,
             shader_pack: String::new(),
         }
@@ -1036,14 +1059,6 @@ impl Graphics {
         let mut g: Self = fs::read_to_string(dir.join(FILE))
             .map(|t| Self::parse(&t))
             .unwrap_or_default();
-        g.blue_map.servers = match fs::read_to_string(dir.join(crate::bluemap::SERVERS_FILE)) {
-            Ok(text) => crate::bluemap::Settings::parse_servers(&text),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                log::warn!("{}: {e}; no BlueMap is named", crate::bluemap::SERVERS_FILE);
-                Vec::new()
-            }
-        };
         let marker = dir.join(HDR_MARKER);
         if let Ok(text) = fs::read_to_string(&marker)
             && fs::remove_file(&marker).is_ok()
@@ -1059,22 +1074,31 @@ impl Graphics {
     }
     /// Whether HDR output is held back on a window whose graphics driver is `driver`
     /// (`gfx::output::window_driver`): the last start on it ended before HDR output
-    /// showed a frame ([`Graphics::hdr_failed_start`]).
+    /// showed a frame ([`Graphics::hdr_failed_start`]), or lost the graphics device
+    /// ([`Graphics::safe_start`]).
     pub fn hdr_held(&self, driver: &str) -> bool {
         self.hdr_failed_start
             .as_deref()
             .is_some_and(|failed| failed.is_empty() || failed == driver)
+            || self.safe_start_holds_hdr(driver)
     }
     /// The window's renderer runs on `driver`: a failed start that named no driver is this
     /// one's now, and another driver's (a driver update, another GPU) is dropped, so HDR output
-    /// is tried again. True when it changed.
+    /// is tried again; the device-loss hold settles too (`settle_safe_start`). True when it
+    /// changed.
     pub fn settle_failed_start(&mut self, driver: &str) -> bool {
+        let lost = self.settle_safe_start(driver);
         match self.hdr_failed_start.as_deref() {
             Some("") => self.hdr_failed_start = Some(driver.to_owned()),
             Some(failed) if failed != driver => self.hdr_failed_start = None,
-            _ => return false,
+            _ => return lost,
         }
         true
+    }
+    /// The graphics API to start the renderer with: any active watchdog step-down hold
+    /// ([`Graphics::watchdog_api`]), else the player's configured [`Graphics::api`].
+    pub fn effective_api(&self) -> GraphicsApi {
+        self.watchdog_api.unwrap_or(self.api)
     }
     /// `before`, as Undo brings it back, but never the hold on a driver HDR output failed to
     /// start on: that stays as it is now, and goes when Undo changes the mode, as any change of
@@ -1085,6 +1109,12 @@ impl Graphics {
                 .hdr_failed_start
                 .clone()
                 .filter(|_| self.hdr == before.hdr),
+            safe_start: self.safe_start.clone().filter(|_| self.hdr == before.hdr),
+            watchdog_api: self.watchdog_api.filter(|_| self.api == before.api),
+            watchdog_driver: self
+                .watchdog_driver
+                .clone()
+                .filter(|_| self.api == before.api),
             ..before.clone()
         }
     }
@@ -1111,12 +1141,6 @@ impl Graphics {
                     g.lod_distance = number(g.lod_distance).min(crate::lod::MAX_CHUNKS)
                 }
                 "farDetail" => g.far_detail = FarDetail::parse(value),
-                "blueMapRadius" => {
-                    if let Some(radius) = crate::bluemap::Settings::parse_radius(value) {
-                        g.blue_map.radius = radius;
-                    }
-                }
-                "blueMapAutoDetect" => g.blue_map.auto_detect = flag(g.blue_map.auto_detect),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "gpuCulling" => g.gpu_culling = GpuCullingMode::parse(value, g.gpu_culling),
                 "entityCulling" => g.entity_culling = EntityCullingMode::parse(value),
@@ -1154,6 +1178,9 @@ impl Graphics {
                 "uploadBudgetKiB" => g.upload_budget_kib = number(g.upload_budget_kib).min(65536),
                 "textureBudgetMiB" => {
                     g.texture_budget_mib = number(g.texture_budget_mib).min(16384);
+                }
+                "pbrBudgetMiB" => {
+                    g.pbr_budget_mib = number(g.pbr_budget_mib).min(16384);
                 }
                 "sky" => g.sky = flag(g.sky),
                 "fog" => g.fog = flag(g.fog),
@@ -1200,10 +1227,14 @@ impl Graphics {
                 "hdrBlackLevel" => g.hdr_black_level = number(g.hdr_black_level).min(100),
                 "hdrColorBoost" => g.hdr_color_boost = number(g.hdr_color_boost).min(100),
                 "hdrFailedStart" => g.hdr_failed_start = Some(value.to_owned()),
+                "safeStart" => g.safe_start = Some(value.to_owned()),
                 "batteryMode" => g.battery = flag(g.battery),
                 "shadowCache" => g.shadow_cache = flag(g.shadow_cache),
+                "rayTracing" => g.ray_tracing = RayTracingMode::parse(value),
                 "batchTranslucent" => g.translucent_batching = flag(g.translucent_batching),
                 "graphicsApi" => g.api = GraphicsApi::from_name(value).unwrap_or_default(),
+                "watchdogApi" => g.watchdog_api = GraphicsApi::from_name(value),
+                "watchdogDriver" => g.watchdog_driver = Some(value.to_owned()),
                 "pickedShaderPack" => g.shader_pack = value.to_owned(),
                 "overlay" => {
                     g.overlay = match value {
@@ -1237,7 +1268,7 @@ impl Graphics {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!(
-            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrColorBoost:{}\nhdrLook:{}\nbatteryMode:{}\nshadowCache:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ngpuCulling:{}\nparallelTick:{}\n",
+            "preset:{}\nlodDistance:{}\nfarDetail:{}\ncaveCulling:{}\nentityCulling:{}\nentityCullingPrecheck:{}\nparticleCulling:{}\nleafCulling:{}\nopaqueIce:{}\nblockEntityCacheShulkerBoxes:{}\nblockEntityCacheSigns:{}\nblockEntityCacheDecoratedPots:{}\nblockEntityCacheBells:{}\nblockEntityCacheChests:{}\nblockEntityCacheBanners:{}\nblockEntityCacheCopperGolemStatues:{}\nchunkUpdates:{}\nuploadBudgetKiB:{}\ntextureBudgetMiB:{}\npbrBudgetMiB:{}\nsky:{}\nfog:{}\nweather:{}\nanimatedTextures:{}\nditherCutoutMips:{}\npresentMode:{}\nframePacing:{}\nworkers:{}\noverlay:{}\nresolutionScale:{}\ndynamicResolution:{}\ntargetFps:{}\nfxaa:{}\ntaa:{}\nupscaling:{}\nupscalingSharpness:{}\nscreenshotQuality:{}\nframeGeneration:{}\nhdr:{}\nhdrPaperWhite:{}\nhdrPeak:{}\nhdrBlackLevel:{}\nhdrUiNits:{}\nhdrColorBoost:{}\nhdrLook:{}\nbatteryMode:{}\nshadowCache:{}\nrayTracing:{}\ngraphicsApi:{}\npickedShaderPack:{}\nbatchTranslucent:{}\ngpuCulling:{}\nparallelTick:{}\n",
             self.preset.name(),
             self.lod_distance,
             self.far_detail.name(),
@@ -1257,6 +1288,7 @@ impl Graphics {
             self.chunk_updates,
             self.upload_budget_kib,
             self.texture_budget_mib,
+            self.pbr_budget_mib,
             bool_text(self.sky),
             bool_text(self.fog),
             bool_text(self.weather),
@@ -1291,6 +1323,7 @@ impl Graphics {
             self.hdr_look.name(),
             bool_text(self.battery),
             bool_text(self.shadow_cache),
+            self.ray_tracing.name(),
             self.api.name(),
             self.shader_pack,
             bool_text(self.translucent_batching),
@@ -1300,12 +1333,23 @@ impl Graphics {
         if let Some(driver) = &self.hdr_failed_start {
             text += &format!("hdrFailedStart:{driver}\n");
         }
+        if let Some(driver) = &self.safe_start {
+            text += &format!("safeStart:{driver}\n");
+        }
+        if let Some(api) = self.watchdog_api {
+            text += &format!("watchdogApi:{}\n", api.name());
+        }
+        if let Some(driver) = &self.watchdog_driver {
+            text += &format!("watchdogDriver:{driver}\n");
+        }
         text += &format!("msaa4x:{}\n", bool_text(self.msaa4x));
-        text += &self.blue_map.serialize();
         text
     }
     pub fn save(&self, dir: &Path) {
-        let _ = fs::write(dir.join(FILE), self.serialize());
+        let _ = self.try_save(dir);
+    }
+    pub fn try_save(&self, dir: &Path) -> std::io::Result<()> {
+        fs::write(dir.join(FILE), self.serialize())
     }
     /// Paper white, in nits: the player's, or on Auto the desktop's SDR white as the
     /// system `reported` it for the renderer's display, else 203 (BT.2408's reference white).
@@ -1639,12 +1683,6 @@ mod tests {
             preset: Preset::Balanced,
             lod_distance: 256,
             far_detail: FarDetail::Reduced,
-            blue_map: crate::bluemap::Settings {
-                radius: 40,
-                auto_detect: true,
-                // In their own file (`bluemap::SERVERS_FILE`).
-                servers: Vec::new(),
-            },
             cave_culling: false,
             gpu_culling: GpuCullingMode::On,
             entity_culling: EntityCullingMode::Synchronous,
@@ -1662,6 +1700,7 @@ mod tests {
             chunk_updates: 12,
             upload_budget_kib: 4096,
             texture_budget_mib: 1536,
+            pbr_budget_mib: 384,
             sky: false,
             fog: false,
             weather: false,
@@ -1692,9 +1731,13 @@ mod tests {
             hdr_failed_start: Some(
                 "Vulkan 10de:2684 NVIDIA GeForce RTX 4090; NVIDIA; 581.57".into(),
             ),
+            safe_start: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
             battery: true,
             shadow_cache: true,
+            ray_tracing: RayTracingMode::On,
             api: GraphicsApi::Dx12,
+            watchdog_api: Some(GraphicsApi::OpenGl),
+            watchdog_driver: Some("Dx12 10de:25a9 NVIDIA GeForce RTX 2050; ; 32.0.16.2124".into()),
             translucent_batching: false,
             shader_pack: "Golden Hour".into(),
         };
@@ -1738,13 +1781,6 @@ mod tests {
         assert_eq!(
             Graphics::parse("entityCulling:false\n").entity_culling,
             EntityCullingMode::Off
-        );
-        // A map named here (a shared instance's, a pack's) is no map.
-        assert!(
-            Graphics::parse("blueMap:play.example.net https://map.example.net\n")
-                .blue_map
-                .servers
-                .is_empty()
         );
         assert_eq!(Graphics::parse(""), Graphics::default());
         // Translucent Batching is on, in files from before it too; only false turns it off,
@@ -1856,6 +1892,20 @@ mod tests {
     }
 
     #[test]
+    fn the_pbr_budget_round_trips_and_clamps_like_the_texture_budget() {
+        let g = Graphics::parse("textureBudgetMiB:256\npbrBudgetMiB:8\n");
+        assert_eq!(g.texture_budget_mib, 256);
+        assert_eq!(g.pbr_budget_mib, 8);
+        assert_eq!(Graphics::parse(&g.serialize()), g);
+        // 0 leaves the maps to Horizon, off the scale it clamps.
+        assert_eq!(Graphics::parse("pbrBudgetMiB:0\n").pbr_budget_mib, 0);
+        assert_eq!(
+            Graphics::parse("pbrBudgetMiB:16385\n").pbr_budget_mib,
+            16384
+        );
+    }
+
+    #[test]
     fn peak_scale_steps_by_50_to_2000_then_by_500_to_10000() {
         let scale: Vec<u32> = (0..=PEAK_STEPS).map(peak_nits_at).collect();
         let fine: Vec<u32> = (200..=2000).step_by(50).collect();
@@ -1952,48 +2002,6 @@ mod tests {
             "removing the server pack restores the selected local mode"
         );
         assert!(g.vanilla_models_with_server_packs(selected, []));
-    }
-
-    #[test]
-    fn integrated_gpus_other_than_apple_cap_the_lod_distance() {
-        let adapter = |name: &str, device_type| wgpu::AdapterInfo {
-            name: name.into(),
-            vendor: 0,
-            device: 0,
-            device_type,
-            device_pci_bus_id: String::new(),
-            driver: String::new(),
-            driver_info: String::new(),
-            backend: wgpu::Backend::Vulkan,
-            subgroup_min_size: 0,
-            subgroup_max_size: 0,
-            transient_saves_memory: None,
-            limit_bucket: None,
-        };
-        let hd620 = adapter(
-            "Intel(R) HD Graphics 620 (KBL GT2)",
-            wgpu::DeviceType::IntegratedGpu,
-        );
-        let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
-        let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
-        for (distance, capped) in [(0, 0), (64, 64), (128, 128), (256, 128), (1024, 128)] {
-            let g = Graphics {
-                lod_distance: distance,
-                ..Graphics::default()
-            };
-            assert_eq!(g.lod_distance_on(&hd620), capped);
-            assert_eq!(g.lod_distance_on(&m4), distance);
-            assert_eq!(g.lod_distance_on(&discrete), distance);
-        }
-        assert!(
-            crate::graphics_ui::rows()
-                .into_iter()
-                .flat_map(|(_, groups)| groups.into_iter().flat_map(|(_, rows)| rows))
-                .any(|r| r
-                    .text
-                    .contains(&format!("{INTEGRATED_LOD_DISTANCE} chunks"))),
-            "the LOD Distance description names the cap"
-        );
     }
 
     #[test]

@@ -35,26 +35,29 @@ is a pull request by hand.
 
 ## Owner updates
 
-Only for projects with no `repo` (a project listed by its repository has no update to send). A reviewer's approval is not needed for an *owner update*: the submitter's login is in the entry's `owners` on the
-registry's `main`, and the only change to the entry is one new version (key, owners, icon, kind, id, name, summary,
-description, authors, licence and source as they were; a signature when the entry has a key). Then, and only when
-`REGISTRY_UPDATE_KEY` is set, the pull request's body ends with a trailer and it gets the label `owner-update`:
+Only for projects with no `repo` (a project listed by its repository has no update to send). An *owner update*: the
+submitter's GitHub ID is in the entry's `owner_ids` on the registry's `main`, and the only change to the entry is one
+new version (key, owners, icon, kind, id, name, summary, description, authors, licence and source as they were; a
+signature when the entry has a key). Then, and only when `REGISTRY_UPDATE_KEY` is set, the pull request's body ends
+with a trailer and it gets the label `owner-update`:
 
 ```
 <!-- owner-update
+format: v2
 id: coords_hud
 version: 0.1.0
 sha256: <hex>
 file: coords_hud-0.1.0.hmod
 submitter: alice
-hmac: <hex HMAC-SHA256 with REGISTRY_UPDATE_KEY of "owner-update-v1\n<id>\n<version>\n<sha256>\n<file>\n<submitter>">
+submitter_id: 7
+hmac: <hex HMAC-SHA256 with REGISTRY_UPDATE_KEY of "owner-update-v2\n<id>\n<version>\n<sha256>\n<file>\n<submitter>\n<submitter_id>">
 -->
 ```
 
-Everything else (a new project, a changed page or key, no secret) opens the pull request as before, for a reviewer.
-The trailer is the only thing that marks an update as the form's own: the horizon-mods repository's `owner-update`
-workflow verifies it with the same secret, re-checks the diff, waits for the checks and merges with `REGISTRY_MERGE_TOKEN`
-(its README says how). Without the secret on both sides, nothing is merged by itself.
+horizon-mods' `owner-update` workflow doesn't read the trailer: it merges an owner's update without a reviewer only
+when the pull request was opened by an account in the entry's `owner_ids` (its README says which kinds). The form's
+pull requests are opened by the bot, so every one of them, owner update or not, waits for a reviewer; the trailer and
+the label tell the reviewer what the form checked.
 
 A refused submission is always `{error}` JSON, sent once the upload is over (a browser still sending when the answer
 comes reports a network error instead): 413 for a file over 64 MiB, 504 when GitHub doesn't answer in time (30 s a
@@ -66,6 +69,7 @@ call, 5 minutes for the file's upload), 502 for GitHub's other failures.
 cargo test                     # against a mock GitHub (tests/submit.rs)
 REGISTRY_PUBLIC_URL=http://localhost:4173 REGISTRY_SESSION_KEY=... GITHUB_CLIENT_ID=... GITHUB_CLIENT_SECRET=... \
   GITHUB_BOT_TOKEN=... REGISTRY_REPO=you/horizon-mods-test REGISTRY_DB=/tmp/registry.sqlite3 cargo run
+# tests/app-key.pem is a throwaway key made for tests/app_auth.rs, nobody's App.
 ```
 
 | Variable | |
@@ -73,17 +77,53 @@ REGISTRY_PUBLIC_URL=http://localhost:4173 REGISTRY_SESSION_KEY=... GITHUB_CLIENT
 | `REGISTRY_PUBLIC_URL` | The site, `https://playhorizon.dev`: the OAuth callback is `<it>/api/mods/auth/callback` |
 | `REGISTRY_SESSION_KEY` | 32 characters or more, random: signs sessions |
 | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | The OAuth app |
-| `GITHUB_BOT_TOKEN` | Fine-grained, the registry repository only: Contents and Pull requests read and write |
+| `GITHUB_BOT_TOKEN` | Fine-grained, the registry repository only: the permissions below. Not needed while the App is set |
+| `REGISTRY_APP_ID`, `REGISTRY_APP_INSTALLATION_ID`, `REGISTRY_APP_KEY_FILE` | The service's GitHub App (below): its App ID or client ID, its installation's number, and the path of its private key (`.pem`). All three or none: only some of them stops the service at start |
 | `REGISTRY_UPDATE_KEY` | Optional, random, 32 characters or more: signs owner updates' trailers (below). Unset: every update waits for a reviewer. The same value is the secret `REGISTRY_UPDATE_KEY` of horizon-mods |
 | `REGISTRY_REPO` | Default `horizon-rust/horizon-mods` |
 | `REGISTRY_DB` | The ratings' SQLite file: default `/data/registry.sqlite3`, the volume |
 | `PORT` | Default 8080 |
+| `HOST` | Default `0.0.0.0` |
+| `REGISTRY_TRUST_PROXY` | `1` behind a proxy that overwrites `CF-Connecting-IP` (the Cloudflare Tunnel): the per-address limits then count that header (else the last `X-Forwarded-For` hop). Unset, the TCP peer counts and the headers are ignored, so a service reachable directly can't have its limits dodged. Behind a proxy without it, every client shares the proxy's address |
 
-On Railway it is the service `horizon-mod-registry` of the project `horizon-site`, next to the website: built from
-`main` with this `Dockerfile` from the repository root (it copies all of `crates/`, `tools/layering/mod_vocab_state.json` and
-`tools/mixins/narrow-reference-rule.patch`: `horizon-mod-vocab`'s build script reads the game's hook sources and that
-inventory, and `horizon-mod-package` includes that patch; the `mod-registry` workflow builds the image), health check `/healthz`, no public
-domain, and the volume `registry-data` at `/data` for the ratings. The
-website's Caddy sends `/api/mods/*` to it over Railway's private network (`REGISTRY_UPSTREAM` on the website service:
-`http://horizon-mod-registry.railway.internal:8080`). `railway.json` lists the same settings; Railway reads them from
-the service, not from the file.
+### The bot: a GitHub App or a token
+
+The service writes to horizon-mods as its bot: with `GITHUB_BOT_TOKEN` its pull requests are opened by the token's
+owner, and as a GitHub App by `<app-slug>[bot]`. The App is the horizon-rust organization's, installed on
+horizon-mods only, and is not the App horizon-mods' `owner-update` workflow merges with (`vars.REGISTRY_APP_ID`
+there): that one may merge past the review rule, and the website's service needs no such right. Both, App and
+token, need these repository permissions:
+
+| Permission | For |
+| --- | --- |
+| Contents: read and write | the entry and `revoked.toml` on `main`, a submission's branch (refs, compare) and its commits, the `staging` release and its uploads, native-build releases |
+| Pull requests: read and write | finding a branch's open pull request, opening it, its `owner-update` or `owner-edit` label |
+| Actions: read and write | starting `native-build.yml` for a prebuilt request |
+| Metadata: read | every App has it |
+
+With all three `REGISTRY_APP_*` set, the service signs a JWT with the key (ten minutes), exchanges it for an
+installation token (an hour) and replaces that token ten minutes before it ends, or right away when GitHub refuses
+it (one retry a call). The log at start names the bot (`as the GitHub App <id>` or `as GITHUB_BOT_TOKEN`), never a secret. To switch,
+put the key file where the service user can read it (mode 0400), add the three variables to the environment file and
+restart: `GITHUB_BOT_TOKEN` may stay. To switch back, remove the three variables and restart. A pull request opened
+before the switch keeps its author.
+
+Native build dispatches also need to read commit comparisons in `horizon-rust/horizon` as the
+bot, token or App. The game repository is public, and GitHub lets both a fine-grained token and an
+App installation token read a public repository outside the ones they were given, so neither needs
+access to it, nor the App an installation there. If the comparison cannot be read, the registry
+does not dispatch the build.
+
+Production runs on Ludovic's home server **ludothinkpad** (NixOS) since 2026-11-22, next to the website, declared in
+`nixos/ludothinkpad/horizon.nix` of ludovic111/LifeOS: the system service `horizon-registry` (user `horizon`, a
+low-priority slice with capped CPU and memory) on `127.0.0.1:8183`, no public domain; the website sends `/api/mods/*`
+to it locally (`REGISTRY_UPSTREAM=http://127.0.0.1:8183` on the website). The ratings are in
+`/var/lib/horizon/registry/registry.sqlite3`, copied nightly to the Mac mini by `horizon-backup`. **A push to `main`
+goes live** when it changes a path in `deploy.json` (`watchPatterns`): the host's `horizon-deploy` timer builds
+`cargo build --release --locked --manifest-path crates/horizon-mod-registry/Cargo.toml` (the build reads all of
+`crates/`, `tools/layering/mod_vocab_state.json` and `tools/mixins/narrow-reference-rule.patch`: `horizon-mod-vocab`'s
+build script reads the game's hook sources and that inventory, and `horizon-mod-package` includes that patch),
+restarts the service, checks `/healthz` and rolls back if it fails. The `Dockerfile` builds the same thing as an image
+(the `mod-registry` workflow checks it). Secrets are one environment file in 1Password (Agents, `Horizon host env
+registry`), written to the host by `horizon-secrets registry`. The service sets `REGISTRY_TRUST_PROXY=1`, so the client
+address for limits is Cloudflare's `CF-Connecting-IP`.

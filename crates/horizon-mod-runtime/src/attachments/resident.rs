@@ -4,6 +4,7 @@ use super::{
     AttachmentAccess, AttachmentError, AttachmentHost, AttachmentLifetime, AttachmentRegistration,
     Attachments, Holder, index::AttachmentIndex,
 };
+// The index's lock is std's, as `Attachments::bind_index` takes it.
 use std::{
     hash::Hash,
     ops::{Deref, DerefMut},
@@ -36,6 +37,11 @@ impl ResidentAttachments {
     /// Copy the current registration without owning its lifetime.
     pub fn registration(&self) -> Option<AttachmentRegistration> {
         self.lifetime.registration()
+    }
+
+    /// Borrow the current registration without cloning its `Arc`.
+    pub fn registration_ref(&self) -> Option<&AttachmentRegistration> {
+        self.lifetime.registration_ref()
     }
 
     /// Retire before a removed owner is returned or retained across callbacks.

@@ -7,8 +7,12 @@
 //! padding; this gives the `atlasSize` and spans our probes read in Iris 1.11.7. Other draws get
 //! a grid of array-sized cells ([`PackAtlas::new`]).
 
+#[path = "pack_atlas/atlases.rs"]
+mod atlases;
 #[path = "pack_atlas/stitch.rs"]
 mod stitch;
+
+pub(super) use atlases::{Atlases, Sprites};
 
 pub(super) struct PackAtlas {
     texture: wgpu::Texture,
@@ -591,21 +595,52 @@ uvec2 hz_record_rest(uvec3 hz_lo, uvec3 hz_hi, uint hz_k) {\n    \
     uint hz_c = (hz_g * ((hz_t >> 16u) & 255u) / 255u) | ((hz_g * ((hz_t >> 8u) & 255u) / 255u) << 8u)\n        \
         | ((hz_g * (hz_t & 255u) / 255u) << 16u) | hz_alpha;\n    \
     return uvec2((hz_hi.x & 0xffffu) | (hz_pl << 16u), hz_c);\n\
+}\n\
+void hz_far_corner(uvec3 hz_lo, uvec3 hz_hi, uint hz_k, out uvec3 hz_p, out uint hz_uv) {\n    \
+    uint hz_axis = hz_hi.z & 3u;\n    \
+    uint hz_rev = (hz_hi.z >> 2u) & 1u;\n    \
+    float hz_plane = float(int(hz_lo.z));\n    \
+    float hz_u0 = float(int(hz_hi.x));\n    \
+    float hz_v0 = float(int(hz_hi.y));\n    \
+    float hz_u1 = hz_u0 + float((hz_hi.z >> 3u) & 0x7ffu);\n    \
+    float hz_v1 = hz_v0 + float((hz_hi.z >> 14u) & 0x7ffu);\n    \
+    uint hz_c = hz_rev == 1u ? (3u - hz_k) : hz_k;\n    \
+    float hz_fv = hz_c <= 1u ? hz_v1 : hz_v0;\n    \
+    bool hz_first = hz_c == 0u || hz_c == 3u;\n    \
+    float hz_fu = hz_axis == 2u ? (hz_first ? hz_u1 : hz_u0) : (hz_first ? hz_u0 : hz_u1);\n    \
+    vec3 hz_pos = vec3(hz_fu, hz_plane, hz_fv);\n    \
+    if (hz_axis == 1u) {\n        \
+        hz_pos = vec3(hz_fu, hz_fv, hz_plane);\n    \
+    } else if (hz_axis == 2u) {\n        \
+        hz_pos = vec3(hz_plane, hz_fv, hz_fu);\n    \
+    }\n    \
+    uvec2 hz_fuv = uvec2(vec2(hz_fu - hz_u0, hz_v1 - hz_fv) * 32.0);\n    \
+    hz_p = floatBitsToUint(hz_pos);\n    \
+    hz_uv = hz_fuv.x | (hz_fuv.y << 16u);\n\
 }\n";
 
 /// GLSL: a flat-drawn vertex's inputs, and its quad's four corners' positions (`hz_cp0`..) and
 /// UV words (`hz_uv0`..), pulled from the arena page as terrain.wgsl's `vs_section_flat` pulls
 /// them (`CORNER_FN`): a record is read once for all four, and only the vertex's own light and
-/// colour are worked out. `hz_slot`: the slot its block is found by (`hz_block_slots`, 256 a
+/// colour are worked out. `hz_slot`: the slot its block is found by (`hz_block_slots`, 64 a
 /// block). The colour as the vertex fetch converts a Unorm8x4 (terrain.wgsl's `unorm8x4`).
 const PULL_FLAT: &str = "    uint hz_qv = uint(gl_VertexIndex);\n    \
     uint hz_own = hz_qv & 3u;\n    \
     uint hz_av = hz_qv & ~3u;\n    \
     uint hz_slot = hz_qv;\n    \
+    bool hz_far = false;\n    \
     bool hz_rec = false;\n    \
     uvec3 hz_lo = uvec3(0u);\n    \
     uvec3 hz_hi = uvec3(0u);\n    \
-    if (hz_av >= 0x10000000u) {\n        \
+    if (hz_av >= 0x20000000u) {\n        \
+        hz_far = true;\n        \
+        hz_slot = (hz_av - 0x20000000u) >> 2u;\n        \
+        uint hz_rw = hz_slot * 6u;\n        \
+        hz_lo = uvec3(hz_vertices[hz_rw], hz_vertices[hz_rw + 1u], hz_vertices[hz_rw + 2u]);\n        \
+        hz_hi = uvec3(hz_vertices[hz_rw + 3u], hz_vertices[hz_rw + 4u], hz_vertices[hz_rw + 5u]);\n        \
+        hz_rec = (hz_hi.z & 0x80000000u) == 0u;\n        \
+        hz_av = hz_slot + hz_lo.x;\n    \
+    } else if (hz_av >= 0x10000000u) {\n        \
         hz_slot = (hz_av - 0x10000000u) >> 2u;\n        \
         uint hz_rw = hz_slot * 6u;\n        \
         hz_lo = uvec3(hz_vertices[hz_rw], hz_vertices[hz_rw + 1u], hz_vertices[hz_rw + 2u]);\n        \
@@ -616,7 +651,13 @@ const PULL_FLAT: &str = "    uint hz_qv = uint(gl_VertexIndex);\n    \
     uvec3 hz_cp0; uvec3 hz_cp1; uvec3 hz_cp2; uvec3 hz_cp3;\n    \
     uint hz_uv0; uint hz_uv1; uint hz_uv2; uint hz_uv3;\n    \
     uvec2 hz_rest;\n    \
-    if (hz_rec) {\n        \
+    if (hz_rec && hz_far) {\n        \
+        hz_far_corner(hz_lo, hz_hi, 0u, hz_cp0, hz_uv0);\n        \
+        hz_far_corner(hz_lo, hz_hi, 1u, hz_cp1, hz_uv1);\n        \
+        hz_far_corner(hz_lo, hz_hi, 2u, hz_cp2, hz_uv2);\n        \
+        hz_far_corner(hz_lo, hz_hi, 3u, hz_cp3, hz_uv3);\n        \
+        hz_rest = uvec2(hz_lo.y, hz_lo.x);\n    \
+    } else if (hz_rec) {\n        \
         hz_record_corner(hz_lo, hz_hi, 0u, hz_cp0, hz_uv0);\n        \
         hz_record_corner(hz_lo, hz_hi, 1u, hz_cp1, hz_uv1);\n        \
         hz_record_corner(hz_lo, hz_hi, 2u, hz_cp2, hz_uv2);\n        \
@@ -669,18 +710,26 @@ const FACE: &str = "    vec3 hz_p0 = uintBitsToFloat(hz_cp0);\n    \
 /// GLSL: whether a terrain vertex's quad is solid terrain rather than cutout. Solid: the quads
 /// over opaque texels and opaque leaves (`mesher::OPAQUE_LAYER`), as vanilla picks
 /// `ChunkSectionLayer.SOLID` per quad (`FaceBakery.computeMaterialTransparency`,
-/// `SectionCompiler.compile`), and lava's faces (sprite layers `lava`, its still and flowing
-/// sprites), which Iris 1.11.7 drew with `gbuffers_terrain_solid` in our probes, with and
-/// without `separateAo`.
+/// `SectionCompiler.compile`). Default shader-pack lava also carries this flag; an explicit
+/// block-state layer override can replace it without affecting other users of the sprite.
 ///
-/// The test reads only the vertex's sprite layer, which all four vertices of a quad share: a
+/// The layer flag picks regular sections; distant tiles keep the lava sprite default. A
 /// quad lands whole in one part. The colour's alpha can't decide it, as with `separateAo` it
 /// holds each vertex's own ambient occlusion.
-fn solid(lava: &[u16]) -> String {
+fn solid(lava: &[u16], state_layers: bool) -> String {
     let opaque = crate::mesher::OPAQUE_LAYER;
+    // Regular sections encode the default before state overrides. Distant tiles do not carry
+    // state metadata, so they keep the sprite fallback. The instance's UV step tells them
+    // apart, whole or fading: a section's is 1/`UV_STEPS`, a tile's 1/`TILED_UV_STEPS`.
+    // The sign of `hz_origin.w` cannot: a whole section and a whole tile are both positive.
+    let condition = if state_layers {
+        "hz_uv_scale > 0.0009765625"
+    } else {
+        "true"
+    };
     let lava: String = lava
         .iter()
-        .map(|l| format!(" || hz_v_layer == {l}u"))
+        .map(|layer| format!(" || (({condition}) && hz_v_layer == {layer}u)"))
         .collect();
     format!("(hz_v_layer & {opaque}u) != 0u{lava}")
 }
@@ -688,11 +737,14 @@ fn solid(lava: &[u16]) -> String {
 /// The game's `terrain` inputs (`PackAtlas::terrain_inputs`) for a pack: whole; drawing only
 /// solid terrain, then only cutout terrain (`solid`), each leaving the other part's quads outside
 /// the clip volume; and drawing both in one pass, each quad with its part's alpha test.
+/// `state_layers` uses the regular mesher's layer flags and the inputs' `hz_uv_scale` for
+/// distant defaults; custom inputs without that contract keep the legacy sprite fallback.
 pub fn game_terrain(
     terrain: Option<horizon_shaders::GbuffersInputs>,
     lava: &[u16],
+    state_layers: bool,
 ) -> horizon_shaders::GameInputs {
-    let solid = solid(lava);
+    let solid = solid(lava, state_layers);
     let part = |terrain: &horizon_shaders::GbuffersInputs, part: bool| {
         let mut inputs = terrain.clone();
         inputs.after.push_str(&format!(
@@ -744,7 +796,7 @@ impl PackAtlas {
                  layout(set = 3, binding = 2) readonly buffer HzTerrainTables { int hz_tables[]; };\n",
             );
             declarations.push_str(CORNER_FN);
-            "hz_slot_origins[hz_block_slots[hz_slot >> 8u]]"
+            "hz_slot_origins[hz_block_slots[hz_slot >> 6u]]"
         } else {
             declarations.push_str("layout(location = 5) in vec4 hz_v_origin;\n");
             "hz_v_origin"
@@ -810,7 +862,7 @@ impl PackAtlas {
             body.insert_str(0, PULL_FLAT);
             body.push_str(FACE);
             body.push_str(
-                "    uint hz_quad = uint(gl_VertexIndex) / 4u;\n    \
+                "    uint hz_quad = hz_rec ? hz_slot : hz_av;\n    \
                  uvec2 hz_source = uvec2(0u);\n    \
                  if (hz_quad < uint(hz_sources.length())) hz_source = hz_sources[hz_quad];\n    \
                  bool hz_known_source = (hz_source.y & 8192u) != 0u;\n    \

@@ -485,7 +485,6 @@ impl<'a> Split<'a> {
             .iter()
             .map(|w| (w.number, w.placement.clone()))
             .collect();
-        let before = self.surfaces.len();
         for s in &self.surfaces {
             // A free window's place only: a monitor's would open a later free one monitor-sized.
             if s.key != 1
@@ -500,10 +499,9 @@ impl<'a> Split<'a> {
                     .insert(s.key, (at.to_logical(scale), size));
             }
         }
-        self.surfaces.retain(|s| {
+        let mut changed = self.close_surfaces(|s| {
             s.key == 1 || (wanted.contains(&s.key) && placements.get(&s.key) == Some(&s.placement))
         });
-        let mut changed = self.surfaces.len() != before;
         // macOS would join new windows to the game's as tabs (when the system prefers tabs).
         #[cfg(target_os = "macos")]
         {
@@ -629,6 +627,19 @@ impl<'a> Split<'a> {
             }
         }
         changed
+    }
+
+    /// The windows `keep` turns down close: whether any did. A surface releases its swapchain
+    /// as it is dropped, and that waits for the device to come idle, which Vulkan forbids
+    /// while another thread submits to the device's queue (the driver crashed, #20927): the
+    /// frames on the submit threads are submitted first, and only when a window does close.
+    pub(super) fn close_surfaces(&mut self, keep: impl Fn(&Surface) -> bool) -> bool {
+        if self.surfaces.iter().all(&keep) {
+            return false;
+        }
+        self.wait_queues();
+        self.surfaces.retain(keep);
+        true
     }
 
     /// A window other than Window 1 was closed: its players leave, P1 goes back to Window 1.

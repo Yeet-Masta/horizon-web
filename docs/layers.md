@@ -117,7 +117,7 @@ Vanilla has none of these, and the engine stays 1:1 vanilla, so they are platfor
 exposes. Ports to consoles and handhelds need them, and other projects can build on them.
 
 - **Controllers:** the pad backend (gilrs), bindings, deadzones and the look curve, button glyphs, the pad's menu
-  navigation and cursor, the controller settings, DualSense and Xbox One output. Today in
+  navigation and cursor, the controller settings, DualSense, Xbox One and DualShock 4 output. Today in
   `horizon-client-input/src/gamepad.rs`, `game/pad.rs`, `game/pad_*.rs` and `game/pad/`, `pad_cursor.rs`,
   `pad_glyph.rs`, `controller_ui.rs`, and `horizon-dualsense`. The engine's hooks:
   - **Actions.** Every input the game reads is an `Action`, vanilla's key mappings (`horizon-client-input/src/actions.rs`),
@@ -192,9 +192,9 @@ A feature often splits along this rule: the part others build on is platform, an
 is Horizon (PvP & HUD and replays, [above](#controllers-splitscreen-replays-and-ui-pages)).
 
 The mod interface follows that split too: `horizon-mod-vocab` is an engine crate, while
-`horizon-mod-api` preserves the mod-facing paths through re-exports. The build-time generator,
-procedural macros and point-shape parser are engine dependencies of that interface. Horizon's launcher
-reaches the generator and point-shape parser through `horizon-platform`'s optional `mod-build` feature.
+`horizon-mod-api` preserves the mod-facing paths through re-exports. The build-time generator and
+procedural macros are engine dependencies of that interface. Horizon's launcher reaches the generator
+through `horizon-platform`'s optional `mod-build` feature.
 The launcher and registry also reach the engine's shared mod package formats through
 `horizon_platform::mod_package`. The optional `mod-index`, `mod-prebuilt` and `mod-runtime-process`
 features enable registry validation, SDK archives and native process leases respectively; native
@@ -317,11 +317,12 @@ that belongs to one subsystem (an input source, the compositor) lives in the eng
 same shape: registered before the game runs, read-only after.
 
 **What players get.** The release builds (`game-build.yml`, so the nightly and the release; `tools/ci/build-musl.sh`)
-build `horizon-official` and ship it as `horizon-client`, the name the launcher and players know. The launcher's
-native-mod builds of the game do the same, and its generated executable for trait mods calls
-`horizon_official::register()` (`launcher/src/native_mods/api.rs`). The dedicated server build (`horizon-engine`)
-stays horizon-client's, with no Horizon part. horizon-client's own executable, the one `cargo run -p
-horizon-client`, the harnesses and horizon-plain build, has none either. The first part that moved this way is the
+build `horizon-official` and ship it as `horizon-client`, the name the launcher and players know. A game with
+native mods runs the client SDK's fixed executable, which calls `horizon_official::register()` too: the SDK build
+links the official parts into it from the game library's own build (`tools/prebuilt_game.py`, `api_route`), and its
+start check fails a client executable without them or a server one with them. The dedicated server build
+(`horizon-engine`) stays horizon-client's, with no Horizon part. horizon-client's own executable, the one
+`cargo run -p horizon-client`, the harnesses and horizon-plain build, has none either. The first part that moved this way is the
 "I'm playing" ping (`horizon-heartbeat`).
 
 ## Platform registries
@@ -363,6 +364,8 @@ pub trait Store: Sync {
     fn file(&self) -> &'static str;
     /// Whether a `key:value` line of that file is this store's (a fixed list, or a `<name>.` prefix).
     fn owns(&self, key: &str) -> bool;
+    /// Back to the defaults, for the player whose turn it is, before each load. Nothing by default.
+    fn defaults(&self) {}
     /// One of its lines, as the game loads its settings. Unknown values keep the default.
     fn load(&self, key: &str, value: &str);
     /// Its lines, as the game saves its settings.
@@ -374,7 +377,8 @@ pub trait Store: Sync {
 
 - The engine routes lines in `Settings::load` and `Settings::save`: once per load or save, never per frame.
   Each file is read once. A store's lines come after the engine's own in a shared file. A line nobody owns
-  is kept as it was.
+  is kept as it was. Every store's `defaults` runs first, so a key the file lacks (a splitscreen player's
+  other profile, an older file, no file) loads as its default, as the engine's own extras do.
 - A setting that moves out of `extras.rs` keeps its key and file, so players keep their choice. The engine's
   `Extras` stops reading and writing the key in the same PR.
 - A page that changes a store's setting (below) needs nothing else: the options screen saves on close, as
@@ -599,36 +603,47 @@ left.
 `python3 tools/check_addresses.py` (horizon-rust/horizon#12990) checks the built-in addresses
 ([below](#built-in-addresses)); it runs in CI's verify job and in `tools/pr_ready.py` too.
 
-### Mod points stay put
+### The mod API stays put
 
-Every function under `horizon_client::game::` that the point generator admits is a mod injection point: the `&self` and
-`&mut self` methods of `Game`, its free functions and the methods of its other types. So is each function marked
-`#[horizon_mod_api_macros::replaceable]` in a lower crate. A point's name, module path and signature are part of the
-mod API ([agent rules](mod-api/agent-rules.md), rule 7), and a mod's `[[inject]]` row names it by that path and a hash
-of its signature.
+What the game publishes to mods is part of the mod API ([agent rules](mod-api/agent-rules.md), rule 7): the loops a mod
+can join, the game internals a native mod may declare (`internals.json`), the hook catalog and the guest's generated
+hook dispatch. A change keeps them, or only adds to them.
 
-When you move code out of `impl Game` into a lower crate, a `Game` method keeps its name, module path and signature,
-and only its body changes to call the new function. No wrapper is needed for the other functions: moving one out of
-`game/` removes its point, and callers inside the new crate would skip a wrapper anyway, so its hooks would stop firing
-without a sign. List each removed point in `tools/mod_points_removed.txt` (`name | #PR | reason`). A mod that needs a
-moved function asks for `#[replaceable]` on it in the lower crate, which keeps its point.
+`python3 tools/check_mod_api_unchanged.py` checks this. It runs the `hook_snapshot` example of `horizon-mod-api-gen` on
+the base (the merge base with `origin/main`, in a temporary worktree) and on your tree, and compares what it wrote. It
+fails when:
 
-`python3 tools/check_mod_points_unchanged.py` checks this. It runs the `hook_snapshot` example of
-`horizon-mod-api-gen` on the base (the merge base with `origin/main`, in a temporary worktree) and on your tree, and
-prints how many points were added, removed (accepted and failing) and changed. It fails when:
+- `loops.json` differs at all;
+- `internals.json` loses an entry `tools/mod_api_removed_internals.txt` does not list, or that file lists an entry the
+  tree still has. Becoming `shape_only`, or losing a `cfg` variant, counts as a removal;
+- a path a native mod could declare without a kind gains a second kind (a method beside a field of the same name): its
+  kind-less declarations stop resolving (`E_INTERNAL_AMBIGUOUS`), with or without `--allow-added`. Without
+  `--allow-added`, any other difference fails too; with it, added and changed entries are listed and pass:
+  `cargo horizon-mod update` already reports signature-hash changes for declared internals;
+- any other generated file differs. With `--allow-added`, a new catalog hook may add its own guest dispatch and update
+  the catalog and its own new hook-notes sections; existing guest dispatch must match after accounting for the new
+  hook and generated helper numbering. A new host call may add its own guest forwarder: a wasm guest links a call
+  by its name and signature hash, so the import positions after it may move, as may the record numbers of the types
+  after one it brings in, as long as they keep their order. Every other forwarder stays as it was.
 
-- a point is removed and is not listed in `tools/mod_points_removed.txt`, is a `Game` method or a published loop, or is
-  named by a fixture (`tools/ci/fn-replace-check`, the wasm host's), a doc or a mod manifest;
-- a point changes (same name, new target or signature hash) and is not listed in that file;
-- the generated API differs with no accepted point change behind it, or `loops.json` differs at all;
-- `internals.json` loses an entry, or, without `--allow-added`, differs at all. With the flag, added and changed entries
-  are listed and pass: `cargo horizon-mod update` already reports signature-hash changes for declared internals.
-  Becoming `shape_only`, or losing a `cfg` variant, counts as a removal.
+An additive API change may correct existing generated prose if `tools/mod_api_hook_notes_updates.txt` names the
+exact revision: `OLD_SHA256 NEW_SHA256 #ISSUE ## Heading`. Hash each section's UTF-8 text as returned by the
+checker's `note_sections` (include its heading but not trailing newline characters). The preamble, heading and
+order still have to match; new sections still require a new hook. The list does not exempt any catalog or guest
+dispatch changes.
 
-CI runs it, with `--allow-added`, on a pull request that can reach the points: a change to `crates/horizon-client/src/game/`
-or `game.rs`, to the generator's crates (`crates/horizon-mod-*`), to the check itself, to a `Cargo.toml` or `Cargo.lock`,
-or to a Rust file under `crates/` that mentions `replaceable` before or after (`needs_mod_points` in
-`tools/ci/rust_changes.py`). A new hook on purpose adds points and passes with that flag.
+The removal list is the only way an internal may go: one line per path, as `internals.json` writes it, then the issue
+(`horizon_mod_package::manifest::inject::Inject  #19576`). To retire some of a path's entries, name their kind, their
+`cfg` or both: `horizon_x::S::x  kind=field  #1`, `horizon_x::f  cfg=unix  #1` (`cfg=` alone: the unconditional ones).
+Remove the line when the internal comes back. The
+injection points (`[[inject]]`, #19576) are not compared; the mod API's types and calls are the surface report's
+([SDK surface](modding/src/reference/sdk/02-surface.md)), which runs beside this check.
+
+CI runs it, with `--allow-added`, in `verify (mod API)` on a pull request that can reach the mod API: a change to
+`crates/horizon-client/src/game/`, `game.rs` or `entry.rs`, to the generator's crates (`crates/horizon-mod-*`), to the
+check or its review lists, to a `Cargo.toml`, `Cargo.lock` or the toolchain's config, to a Rust file that may hold a
+lower-crate internal `crates/horizon-mod-api-gen/internals.txt` declares, or to a Rust file under `crates/` that mentions
+`replaceable` before or after (`needs_mod_api` in `tools/ci/rust_changes.py`).
 
 ### Today's exceptions
 
@@ -667,7 +682,7 @@ Vanilla's endpoints (engine, the same as Java Edition):
 | `discovery.minecraftservices.com`, `api.minecraftservices.com` | services discovery, profile keys, player certificates | `auth.rs`, `horizon-server-files/src/profiles.rs` |
 | `textures.minecraft.net` | skins and capes | `skins.rs` |
 | `pc.realms.minecraft.net`, `java.frontend.realms.minecraft-services.net` | Realms | `realms/client.rs` |
-| `aka.ms/…` | vanilla's help links (accessibility, moderation, EULA, Realms terms), opened only on a click | `game/options.rs`, `game/screens.rs`, `ban_notice.rs`, `realms.rs`, `eula.rs` |
+| `aka.ms/…`, `bugs.mojang.com/…` | vanilla's help links (accessibility, moderation, EULA, Realms terms) and the `bad_respawn_point` death message's bug tracker link, opened only on a click | `game/options.rs`, `game/screens.rs`, `game/combat.rs`, `ban_notice.rs`, `realms.rs`, `eula.rs` |
 | `libraries.minecraft.net`, `piston-meta.mojang.com`, `resources.download.minecraft.net` | the vanilla jars, libraries and assets | `horizon-prepare`, launcher |
 
 Horizon's own and third-party addresses (Horizon layer):
@@ -690,7 +705,6 @@ Horizon's own and third-party addresses (Horizon layer):
 
 These are not addresses:
 
-- `bluemap_detect.rs` lists dynamic-DNS suffixes, to guess a server's own map host;
 - `horizon-server/src/discord.rs` lists the hosts a webhook URL may have;
 - the Windows, Apple and SOAP schema URLs in manifests and requests, and the UPnP multicast group.
 
@@ -735,14 +749,11 @@ The mod API is part of the platform. The API owns its types,
 `horizon-mod-runtime` gets no game dependency, and its CI property check stays as a stricter check inside the
 platform.
 
-The portable engine crate `horizon-engine-slots` owns the final registration seal socket
-and the generated point records, their copy-in constructors, typed dispatchers and activity table.
-The host installs its seal provider before engine startup and registers native API listeners
-after dependency ordering and installation. At sealing, `horizon-mod-points` installs the
-set-once dispatch provider before publishing activity flags. Ordering, owner guards,
-replacement authority and listener dispatch remain in the platform registry. Staged point
-sites name only engine-owned paths; staging does not inject point dependencies into engine manifests.
-The seal refuses repeat or re-entrant sealing and late provider installation.
+The portable engine crate `horizon-engine-slots` owns the final registration seal socket and the
+platform socket the host installs before engine startup. The seal refuses repeat or re-entrant
+sealing. Its generated point records and dispatchers went with the injection points (#19576):
+`horizon-mod-points` is an empty crate the SDK keeps shipping because launchers released before
+then link it into every native mod, and staging still writes an empty `points.json` for them.
 
 Engine crates import `horizon-mod-vocab` as `mod_api`. Their test-only
 `mod_platform` dependency reaches `horizon-mod-api`; dev-dependencies are exempt

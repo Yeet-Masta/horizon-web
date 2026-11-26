@@ -9,7 +9,7 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | --- | --- | --- | --- |
 | `launch [--world NAME] [--seed N] [--creative] [--version TAG] [--game PATH] [--wait] [GAME ARGS...]` | `launch` | Start Horizon with the control socket and wait until it answers | `--world` (string): world folder to open or create<br>`--seed` (string): seed for a new world<br>`--creative` (boolean): creative mode for a new world<br>`--version` (string): an installed launcher version tag such as v2026.10.13<br>`--game` (string): path to a horizon-client binary<br>`--wait` (boolean): also wait until the world is ready (default in MCP)<br>`--offscreen` (boolean): render without showing a window, splitscreen's too (screenshots still work): locked or headless sessions<br>`--headless` (boolean): no display, window or GPU: a player that plays through these commands only (no screenshots) |
 | `wait-for screen NAME\|widget ID\|loaded\|chat TEXT\|event KIND [--timeout S] [--since SEQ]` | `wait_for` | Wait until the game reaches a state, then reply | `--timeout` (number): seconds (default 30)<br>`--since` (integer): chat and event: count from this event seq<br>`condition` (screen, widget, loaded, chat, event, required): what to wait for<br>`value` (text): the screen name, widget id, chat text or event kind |
-| `wait-ready [SECONDS]` | `wait_ready` | Wait until the player has spawned and no chunks are pending | `seconds` (number): how long to wait (default 120) |
+| `wait-ready [SECONDS]` | `wait_ready` | Wait until the player has spawned and the world has loaded | `seconds` (number): how long to wait (default 120) |
 | `logs [--lines N] [--crash]` | `logs` | The end of the game's log, or its newest crash report | `--lines` (integer): how many lines of latest.log (default 100)<br>`--crash` (boolean): the newest crash report instead |
 | `status` | `status` | Game, renderer and streaming state (the scripting socket's original summary) | none |
 | `hello` | `hello` | The control protocol's version, the game's release and the command groups it serves | none |
@@ -135,6 +135,11 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `render-distance N` | CLI only | Chunks, 2..128 | `chunks` (integer, required): render distance |
 | `wait TICKS` | `wait` | Wait until TICKS game ticks have passed (20 per second) | `ticks` (integer, required): game ticks |
 
+`tp`, `give`, `xp`, `enchant`, `potion`, `effect`, `time`, `summon`, and a writing
+`container` require the world's host. To ask a multiplayer server to act, use `command`
+with the corresponding server command; the server checks the player's permissions.
+Reading `container` as a guest returns the items the client currently knows.
+
 ## Scripting and benchmarks
 
 | Command | MCP tool | What it does | Arguments |
@@ -147,6 +152,7 @@ Every command `horizon-ctl` takes, its MCP tool in `horizon-ctl mcp` (the launch
 | `gpu-passes [on\|off\|detail]` | CLI only | Time Horizon's own render passes and the shader pack's on the GPU, shown in F3 and in stats and bench; detail adds dispatch times and, on Vulkan, fragment and vertex counts per world pass | `mode` (on, off, detail): on, off or detail; without it, only reports |
 | `trace [FILE [SECONDS] \| stop]` | CLI only | Write every thread's timed spans to FILE as a .hzperf capture holding a timeline, for SECONDS or until stop | none |
 | `profile [client\|server] start [--seconds S] [--hz N] [--over MS] [--threads main\|all] [--wall] [--gpu[=detail]] [--no-samples] [--timeline] \| stop [--bench REPORT] \| status \| mark NAME \| open FILE \| share FILE` | `profile` | Capture the game's performance to a .hzperf file in reports/ in the game home | `action` (start, stop, status, mark, open, share, required): what to do<br>`name` (text): mark: the label; open and share: the file<br>`--side` (client, server): client or server, for the window or the server (the single-player server thread, or the server joined); both when omitted<br>`--seconds` (integer): start: stop after this many seconds, 1 to 600<br>`--hz` (integer): start: samples per second, 10 to 1000 (default 250)<br>`--over` (number): start: sample only frames slower than this many milliseconds<br>`--threads` (main, all): start: the render thread (default) or every thread that opted in<br>`--wall` (boolean): start: also sample on the wall clock, to find waits<br>`--gpu` (passes, detail): start: also record each render pass's GPU time (detail: its parts and counters too)<br>`--no-samples` (boolean): start: record frame times and health only<br>`--timeline` (boolean): start: also record every thread's spans, for 60 seconds at most<br>`--bench` (string): stop: the path of a benchmark report to embed in the capture |
+| `export start NAME --size WxH --fps N[/D] [--frames N\|--seconds S] [--format png\|encoder] [--hud] [--hold] [--no-settle] \| export step N \| export stop \| export status` | `export` | Capture exact-size offscreen frames on a fixed clock in a private single-player world or replay | `action` (start, step, stop, status, required): export operation<br>`name_or_count` (string): folder name for start or positive frame count for step<br>`--size` (string): start: dimensions in pixels, WxH<br>`--fps` (string): start: frames per second as N or N/D<br>`--frames` (integer): start: frame limit<br>`--seconds` (number): start: duration limit in seconds, rounded up to a whole frame<br>`--format` (png, encoder): start: PNG sequence (default) or external encoder<br>`--hud` (boolean): start: keep the HUD<br>`--hold` (boolean): start: wait for explicit steps<br>`--no-settle` (boolean): start: capture before pending terrain work has finished |
 | `screenshot-sequence FRAMES STEP_MS PATH\|cancel` | CLI only | Draw a shader pack's first FRAMES frames on a set clock and write the last as a PNG | `frames` (string, required): frames to draw, 1 to 10000, or cancel<br>`step_ms` (number): milliseconds between frames on the pack's clock, more than 0 (16.666667 for 60 fps)<br>`path` (text): the PNG to write |
 | `render-capture on\|off\|DIR` | CLI only | Keep CPU copies of the meshes the renderer draws (on), or write the next frame's scene to DIR for the scene_replay example | none |
 | `fly X1 Y1 Z1 X2 Y2 Z2 SECONDS [PITCH [raw]]` | CLI only | Fly the camera along a line, then reply with the frame summary | none |
@@ -179,6 +185,7 @@ The reply fields of the commands described so far (more follow, a group at a tim
 | `keys` | array | the keys the game holds down, each a string |
 | `fps` | number | frames per second |
 | `frames` | integer | frames drawn so far |
+| `not_drawn` | string, null | why the last frame was not drawn (suspended, acquire_timeout, occluded, outdated, lost, screenshot_only, ...); null when it was |
 | `ticks` | integer | game ticks so far |
 | `day_time` | integer | the world's time of day, ticks |
 | `uptime_seconds` | number | seconds since the game started |
@@ -186,12 +193,13 @@ The reply fields of the commands described so far (more follow, a group at a tim
 | `chunks` | integer | chunks loaded |
 | `mobs` | integer | mobs this side knows |
 | `block_entities` | integer | block entities loaded |
-| `pending_chunks` | integer | chunks still being generated, meshed, uploaded or received |
+| `pending_chunks` | integer | chunks this client is still generating, meshing or uploading; columns a server has not sent yet are not counted (see terrain_loading) |
+| `terrain_loading` | boolean | near terrain still coming in: the view's outermost columns, generation, meshes, uploads or the server's backlog |
 | `streaming` | object | chunk streaming stages and their counts |
 | `lod` | object | far terrain: distances, tiles, quads and sampling progress |
 | `renderer` | object, null | GPU, driver, backend, size, draw counts and GPU memory; null without a renderer |
 | `display` | object, null | the monitor: width, height, scale, refresh_hz; null without a window |
-| `server` | object, null | the connected server's address, name and state; null when not connected |
+| `server` | object, null | the connected server's address, name and state (status is connection or terrain-loading text, empty once the client has sent its loaded packet); null when not connected |
 
 ### `hello`
 

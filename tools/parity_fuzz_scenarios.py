@@ -8,10 +8,12 @@ import json
 import re
 
 try:
-    from . import lab
+    from . import lab, parity_fuzz_commands, parity_fuzz_data
     from .parity_fuzz import read_data
 except ImportError:
     import lab
+    import parity_fuzz_commands
+    import parity_fuzz_data
     from parity_fuzz import read_data
 
 # Not summonable alone (a player, a bobber without its owner), gone at once (lightning), or whole fights that
@@ -130,6 +132,64 @@ def persist(rng, seed):
     return {'family': 'persist', 'seed': seed, 'steps': steps}
 
 
+# What a field's reader must settle when the tag is not the one vanilla saves: the type's limits, a value past
+# them in a wider type, a fraction, a negative.
+LIMITS = {'b': ['127b', '-128b', '2b', '200', '-1'], 's': ['32767s', '-32768s', '40000', '-1'],
+          '': ['2147483647', '-2147483648', '3000000000L', '-1', '1.9f'], 'L': ['9223372036854775807L', '-1L', '5'],
+          'f': ['-1.0f', '3.4E38f', '7', '0.1d'], 'd': ['-1.0d', '1.7E308d', '7', '0.1f']}
+SUFFIXES = ['', 'b', 's', 'L', 'f', 'd']
+
+
+def retyped(rng, value):
+    """A saved scalar given back as another tag: the same number in another type, a limit, or a string for a number
+    and a number or an unknown name for a string. None for what is no scalar."""
+    if not isinstance(value, str):
+        return None
+    if value.startswith(('"', "'")):
+        return rng.choice(['7', '"minecraft:fz_missing"', '""'])
+    match = re.fullmatch(r'(-?[0-9.]+)(?:E-?[0-9]+)?([bsLfd]?)', value)
+    if not match:
+        return None
+    if rng.random() < 0.5:
+        return rng.choice(LIMITS[match.group(2)])
+    whole = match.group(1).split('.')[0] or '0'
+    other = rng.choice([s for s in SUFFIXES if s != match.group(2)] + ['"'])
+    return f'"{whole}"' if other == '"' else whole + ('.5' if other in 'fd' and other else '') + other
+
+
+def retype(rng, seed):
+    """One or two fields of what vanilla saves for an entity or a block entity, each given back as another NBT tag
+    (also one level down, as a compound with that one key); read, unload and reload, read."""
+    kind = rng.choice(['entity', 'entity', 'block'])
+    name = rng.choice(sorted(KNOWN[kind]))
+    saved = KNOWN[kind][name]
+    options = {}
+    for key, value in sorted(saved.items()):  # vanilla's own key order changes run to run; the draws must not
+        if key in FIXED:
+            continue
+        if isinstance(value, dict):
+            inner = {k: retyped(rng, v) for k, v in sorted(value.items())}
+            inner = {k: v for k, v in inner.items() if v is not None}
+            if inner:
+                pick = rng.choice(sorted(inner))
+                options[key] = f'{{{pick}:{inner[pick]}}}'
+        else:
+            options[key] = retyped(rng, value)
+    options = {k: v for k, v in options.items() if v is not None}
+    nbt = {k: options[k] for k in sorted(rng.sample(sorted(options), min(len(options), rng.randint(1, 2))))}
+    if kind == 'entity':
+        if 'PersistenceRequired' in saved:  # as persist: no AI drift, and no despawn far from the player
+            nbt.setdefault('NoAI', '1b')
+            nbt.setdefault('PersistenceRequired', '1b')
+        steps = [{'k': 'summon', 'type': name, 'at': [7.5, 0, 7.5], 'n': 0, 'nbt': nbt, 'setup': True}]
+        read = {'k': 'read_entity', 'n': 0}
+    else:
+        steps = [{'k': 'block', 'block': name, 'at': [7, 0, 7], 'nbt': nbt, 'setup': True}]
+        read = {'k': 'read_block', 'at': [7, 0, 7]}
+    steps += [read, {'k': 'tick', 'n': 1}, read, {'k': 'reload'}, read]
+    return {'family': 'retype', 'seed': seed, 'steps': steps}
+
+
 # Dispensed item -> the entity it makes (an item entity when the dispenser just drops it).
 DISPENSED = {'arrow': 'arrow', 'spectral_arrow': 'spectral_arrow', 'tnt': 'tnt', 'fire_charge': 'small_fireball',
              'egg': 'egg', 'snowball': 'snowball', 'splash_potion': 'splash_potion', 'wind_charge': 'wind_charge',
@@ -201,5 +261,82 @@ def spawn(rng, seed):
     return {'family': 'spawn', 'seed': seed, 'steps': steps}
 
 
-FAMILIES = {'persist': persist, 'spawn': spawn}
+def shulker(rng, seed):
+    """Shulkers duplicating (a bullet hits one) or shooting (a player stands in reach), read tick by tick.
+
+    `clone`: shulkers of mixed lid, colour, face and health stand close together; a shulker bullet is summoned and `/damage ... mob_projectile by <bullet> from <another shulker>`
+    reaches `Shulker.hurtServer`'s `hitByShulkerBullet`: the teleport, the count of shulkers within 8 blocks, the
+    level's random draw, the baby left behind. `shoot`: one shulker with its AI, the player teleported beside it:
+    the target goal, the attack goal's lid and timer, each bullet's start and flight, read every few ticks.
+    """
+    if rng.random() < 0.6:
+        count = rng.randint(2, 6)
+        steps = []
+        for i in range(count):
+            # Shulker 0 is the one hit: open, so `hitByShulkerBullet` clones it when it can.
+            peek = rng.choice(['30b', '100b']) if i == 0 or rng.random() < 0.5 else '0b'
+            # With its AI: `teleportSomewhere` does nothing for a NoAI shulker, so none would ever clone.
+            nbt = {'PersistenceRequired': '1b', 'Peek': peek,
+                   'AttachFace': '0b' if rng.random() < 0.8 else rng.choice(['1b', '2b', '3b', '4b', '5b'])}
+            if rng.random() < 0.5:
+                nbt['Color'] = f'{rng.randint(0, 15)}b'
+            if i == 0 and rng.random() < 0.2:
+                nbt['Health'] = rng.choice(['3.0f', '14.0f', '29.0f'])
+            at = [6.5 + rng.randint(0, 3), 0, 6.5 + rng.randint(0, 3)] if i else [7.5, 0, 7.5]
+            steps.append({'k': 'summon', 'type': 'shulker', 'at': at, 'n': i, 'nbt': nbt})
+        owner = rng.randint(1, count - 1)
+        live_bullet = rng.random() >= 0.7
+        if not live_bullet:  # the damage of a bullet that never flew, from another shulker
+            steps.append({'k': 'summon', 'type': 'shulker_bullet', 'at': [9.5, 2, 9.5], 'n': 20,
+                          'nbt': {'NoGravity': '1b'}})
+            steps.append({'k': 'cmd', 'at': [], 'uuids': True,
+                          'cmd': f'/damage {uuid_arg(0)} 1 minecraft:mob_projectile by {uuid_arg(20)} from {uuid_arg(owner)}'})
+        else:
+            # Keep the victim attached to the floor and its starting health known. Give the bullet a
+            # downward flight close enough to reach the victim during the observation.
+            steps[0]['nbt'].update(AttachFace='0b', Health='30.0f')
+            for step in steps[1:]:
+                if step['at'] == steps[0]['at']:
+                    step['at'] = [6.5, 0, 6.5]
+            steps.append({'k': 'summon', 'type': 'shulker_bullet', 'at': [7.5, 1.6, 7.5], 'n': 20,
+                          'nbt': {'Owner': '{iu%d}' % owner, 'Target': '{iu0}', 'Steps': '10', 'Dir': '0',
+                                  'Motion': '[0.0d,-0.8d,0.0d]', 'TYD': '-1.0d'}})
+        for _ in range(rng.choice([2, 3, 4])):
+            steps += [{'k': 'tick', 'n': 1},
+                      {'k': 'cmd', 'at': [[7, 0, 7]], 'cmd': '/execute positioned {0} if entity @e[type=shulker,distance=..40]'},
+                      {'k': 'read_near', 'type': 'shulker', 'at': [7, 0, 7]}]
+        if live_bullet:
+            steps.append({'k': 'cmd', 'at': [], 'uuids': True, 'cmd': '/data get entity {u0} Health',
+                          'guard': 'shulker_hit'})
+        steps += [{'k': 'read_entity', 'n': i} for i in range(count)]
+        return {'family': 'shulker', 'seed': seed, 'steps': steps}
+    nbt = {'PersistenceRequired': '1b', 'AttachFace': rng.choice(['0b', '0b', '1b', '2b', '3b', '4b', '5b'])}
+    if rng.random() < 0.3:
+        nbt['Peek'] = rng.choice(['30b', '100b'])
+    dx, dz = rng.choice([(4, 0), (-4, 0), (0, 4), (0, -4), (3, 3), (6, 0), (0, 8)])
+    steps = [{'k': 'summon', 'type': 'shulker', 'at': [7.5, 0, 7.5], 'n': 0, 'nbt': nbt}]
+    for _ in range(rng.choice([4, 5, 6])):
+        steps += [{'k': 'tick', 'n': rng.choice([5, 10, 12])}, {'k': 'read_near', 'type': 'shulker_bullet', 'at': [7, 0, 7]},
+                  {'k': 'read_entity', 'n': 0}]
+    return {'family': 'shulker', 'seed': seed, 'player_at': [7 + dx, 0, 7 + dz], 'steps': steps}
+
+
+def uuid_arg(n):
+    """A fuzz entity's UUID in a command, from the placeholder the renderer fills with the slot (`uuid_text`)."""
+    return '{u%d}' % n
+
+
+FAMILIES = {'persist': persist, 'spawn': spawn, 'shulker': shulker, 'retype': retype,
+            'items': parity_fuzz_data.items, 'blockdata': parity_fuzz_data.blockdata,
+            'commands': parity_fuzz_commands.commands}
+
+
+def prepare(family, runner, work):
+    """What a family reads from vanilla before it generates: the saved fields, or the items' prototypes."""
+    if family in ('persist', 'retype'):
+        discover(runner, work)
+    elif family == 'items':
+        parity_fuzz_data.load_prototypes()
+    elif family == 'commands':
+        parity_fuzz_commands.load_tree()
 

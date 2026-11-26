@@ -79,6 +79,35 @@ impl TryIntoEngine<()> for mod_api::ShapeEntityKind {
         })
     }
 }
+impl TryIntoEngine<()> for mod_api::VanillaShape {
+    type Engine = engine::VanillaShape;
+    type Error = String;
+    fn try_into_engine(&self, _: &()) -> Result<Self::Engine, Self::Error> {
+        Ok(match self {
+            Self::Clip(bounds) => engine::VanillaShape::Clip(*bounds),
+            Self::Table(table) => engine::VanillaShape::Table(table.try_into_engine(&())?),
+        })
+    }
+}
+impl TryIntoEngine<()> for mod_api::VanillaBlockShapes {
+    type Engine = engine::VanillaBlockShapes;
+    type Error = String;
+    fn try_into_engine(&self, _: &()) -> Result<Self::Engine, Self::Error> {
+        let channel = |shapes: &std::collections::BTreeMap<_, mod_api::VanillaShape>| {
+            shapes
+                .iter()
+                .map(|(kind, shape): (&mod_api::ShapeEntityKind, _)| {
+                    Ok((kind.try_into_engine(&())?, shape.try_into_engine(&())?))
+                })
+                .collect::<Result<_, String>>()
+        };
+        Ok(engine::VanillaBlockShapes {
+            blocks: self.blocks.clone(),
+            outline_context_shapes: channel(&self.outline_context_shapes)?,
+            collision_context_shapes: channel(&self.collision_context_shapes)?,
+        })
+    }
+}
 impl TryIntoEngine<()> for mod_api::Block {
     type Engine = engine::Block;
     type Error = String;
@@ -92,6 +121,7 @@ impl TryIntoEngine<()> for mod_api::Block {
             }),
             id: self.id.clone(),
             template: self.template.clone(),
+            growing_plant: None,
             pick_item: self.pick_item.clone(),
             properties: self.properties.try_into_engine(&())?,
             shapes: self
@@ -146,6 +176,7 @@ impl TryIntoEngine<()> for mod_api::Block {
             thickness: self.thickness,
             wood_type: self.wood_type.clone(),
             wall_block: self.wall_block.clone(),
+            attachment_direction: self.attachment_direction.clone(),
             sign_text_color: self.sign_text_color.clone(),
             sign_text_glow: self.sign_text_glow,
             base_block: self.base_block.clone(),

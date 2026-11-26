@@ -143,6 +143,30 @@ fn serializer_refusal_skips_known_recipe_and_unknown_refuses_load() {
     });
 }
 
+/// `datapack_sync` selects by recipe type: a vanilla serializer's name selects nothing, so
+/// it is named with the type to ask for. Types and names nothing reads are not.
+#[test]
+fn serializers_asked_for_sync_are_named_with_their_type() {
+    let requested = [
+        "minecraft:crafting_shaped",
+        "minecraft:smelting",
+        "minecraft:crafting",
+        "minecraft:smithing_transform",
+        "othermod:grinding",
+    ]
+    .map(str::to_owned);
+    assert_eq!(
+        serializers_asked_as_types(&requested),
+        [
+            ("minecraft:crafting_shaped", "minecraft:crafting".to_owned()),
+            (
+                "minecraft:smithing_transform",
+                "minecraft:smithing".to_owned()
+            ),
+        ]
+    );
+}
+
 #[test]
 fn registered_kind_written_value_syncs_only_to_horizon_clients() {
     with_recipe(2, |recipes, _| {
@@ -224,7 +248,7 @@ fn registered_kind_receives_the_full_empty_grid_at_every_match_entry() {
             assert!(recipes.recipe_matches(context, "test:empty", &grid, 2));
             assert_eq!(
                 recipes
-                    .find_with_dimensions(context, &grid, 2, 2, 2, &|_| None)
+                    .find_with_dimensions(context, Crafter::NOBODY, &grid, 2, 2, 2, &|_| None)
                     .unwrap()
                     .1,
                 ItemStack::new("test:output", 3)

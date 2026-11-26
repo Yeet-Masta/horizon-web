@@ -9,7 +9,7 @@ use horizon_client::{
     lang,
     mod_list::{self, Installed},
 };
-use horizon_mod_package::manifest::{MissingJar, collect_jar_requirements, missing_jars};
+use horizon_mod_package::manifest::{MissingJar, jar_requirements_for, missing_jars};
 use horizon_std::sync::Mutex;
 use horizon_world::{
     item_defaults::ItemData,
@@ -75,8 +75,10 @@ pub(super) struct CodeSwitches {
 
 #[derive(Clone, Default)]
 pub(super) struct ModsState {
-    pub(super) active_condition_root: Option<Arc<()>>,
+    pub(super) active_condition_root: Option<Arc<horizon_client::mod_content::RootHold>>,
     pub(super) load_condition_candidate: Option<horizon_world::conditions::LoadConditions>,
+    /// Flags under which the currently installed content root was prepared.
+    pub(super) root_feature_flags: Option<Arc<[String]>>,
     pub(super) load_conditions:
         Arc<std::sync::OnceLock<Result<crate::game::load_conditions::ConditionTable, String>>>,
     pub(super) profession_declarations:
@@ -92,6 +94,9 @@ pub(super) struct ModsState {
     pub(super) dev: Vec<PathBuf>,
     pub(super) native: std::sync::Arc<horizon_mod_package::runtime::Runtime>,
     pub(super) installation_side: horizon_mod_package::manifest::Side,
+    /// Which original jars this run layers: a dedicated server and a headless run leave out
+    /// a jar whose `take` names no `data/` (`LaunchArguments::jar_side`).
+    pub(super) jar_side: horizon_mod_package::manifest::Side,
     pub(super) overrides_dir: PathBuf,
     pub(super) load_notices: Arc<Mutex<Vec<horizon_mod_package::dependencies::Notice>>>,
     pub(super) selected: std::sync::Arc<[horizon_mod_package::selection::SelectedPackage]>,
@@ -297,6 +302,11 @@ struct NativeDeclared {
     items: Vec<horizon_mod_package::content::Item>,
     types: Vec<horizon_mod_package::content::BlockEntityType>,
     fluids: Vec<horizon_mod_package::content::FluidLook>,
+    /// Vanilla block shapes from code, each with the mod that declared it.
+    vanilla_shapes: Vec<(
+        &'static str,
+        horizon_mod_package::content::VanillaBlockShapes,
+    )>,
 }
 
 /// The same native declarations serve startup and every pack reload.
@@ -306,6 +316,8 @@ fn native_declared() -> std::borrow::Cow<'static, NativeDeclared> {
         let context = RegistrationContext::new();
         Game::native_blocks(&context, &mut blocks);
         Game::native_items(&context, &mut items);
+        let mut shapes = Vec::new();
+        Game::native_vanilla_block_shapes(&context, &mut shapes);
         let mut errors = mod_api::__private::take_declaration_refusals(&context);
         let types = super::api_values::block_entity_declarations();
         use super::api_values::TryIntoEngine;
@@ -335,6 +347,19 @@ fn native_declared() -> std::borrow::Cow<'static, NativeDeclared> {
                     .ok()
             })
             .collect();
+        let vanilla_shapes = shapes
+            .iter()
+            .filter_map(|answered| {
+                answered
+                    .answer
+                    .try_into_engine(&())
+                    .map(|shapes| (answered.mod_id, shapes))
+                    .map_err(|e| {
+                        errors.push(format!("vanilla block shapes of {}: {e}", answered.mod_id))
+                    })
+                    .ok()
+            })
+            .collect();
         let fluids: Vec<_> = mod_api::__private::declared_world_fluids()
             .iter()
             .map(|draft| draft.try_into_engine(&()).unwrap())
@@ -347,6 +372,7 @@ fn native_declared() -> std::borrow::Cow<'static, NativeDeclared> {
             items,
             types,
             fluids,
+            vanilla_shapes,
         }
     };
     // Production freezes one loaded mod set for startup and reload. Tests replace
@@ -701,7 +727,8 @@ pub(super) fn content_overlay(
     let here = horizon_std::env::current_dir().unwrap_or_default();
     let original_base = root.to_owned();
 
-    let requirements = collect_jar_requirements(
+    let requirements = jar_requirements_for(
+        sources.jar_side,
         sources
             .native
             .packages()
@@ -811,7 +838,10 @@ pub(super) fn content_overlay(
         let candidate = ContentMod {
             id: m.id.clone(),
             content,
-            jars: m.jar.clone(),
+            jars: (m.jar.iter())
+                .filter(|jar| jar.needed_on(sources.jar_side))
+                .cloned()
+                .collect(),
         };
         match mod_content::accept_mod(&mut mods, candidate, known) {
             Ok(_) if source.content_only => {
@@ -833,6 +863,7 @@ pub(super) fn content_overlay(
         items,
         types,
         fluids,
+        vanilla_shapes,
     } = &*native_declared();
     if !errors.is_empty() {
         return Err(errors.join("\n").into());
@@ -844,6 +875,15 @@ pub(super) fn content_overlay(
     for m in packages.iter().map(|s| s.manifest) {
         if let Some(e) = m.server_only_declaration(declared_ids.clone()) {
             return Err(e.into());
+        }
+        if m.side == horizon_mod_package::manifest::Side::Server
+            && vanilla_shapes.iter().any(|(id, _)| *id == m.id)
+        {
+            return Err(format!(
+                "{}: a side = \"server\" mod declares vanilla block shapes, which every client                  must have; declare side = \"both\"",
+                m.id
+            )
+            .into());
         }
         if m.side == horizon_mod_package::manifest::Side::Server
             && let Some(requirement) = mod_api::__private::client_requirement(&m.id)
@@ -869,6 +909,12 @@ pub(super) fn content_overlay(
         // alone is left out, not every content mod through the overlay's check.
         for e in mod_content::drop_dangling_remainders(&mut mods) {
             log::warn!("Horizon: {e}");
+        }
+    }
+    if !vanilla_shapes.is_empty() {
+        let errors = mod_content::accept_vanilla_shapes(&mut mods, vanilla_shapes);
+        if !errors.is_empty() {
+            return Err(errors.join("\n").into());
         }
     }
     // Content validation may refuse a package. Revalidate against what really
@@ -1027,6 +1073,13 @@ pub(super) fn content_root(
             .flat_map(|m| m.content.namespaces.iter().cloned())
             .collect(),
     );
+    super::code_block_owners::stage(
+        overlay.root.prepared(),
+        overlay
+            .mods
+            .iter()
+            .map(|m| (m.id.as_str(), &m.content.namespaces[..])),
+    );
     register_mob_effects(&overlay.mods);
     resolve_particle_providers(overlay.root.source())?;
     mod_api::__private::resolve_effects(
@@ -1035,6 +1088,13 @@ pub(super) fn content_root(
         |id| horizon_client_core::potions::effect(id).map(|def| def.index),
     )
     .map_err(|errors| errors.join("\n"))?;
+    for def in horizon_client_core::potions::mod_effects() {
+        if let Some(owner) = def.owner
+            && let Some(key) = mod_api::__private::effect_key_by_index(def.index)
+        {
+            mod_api::__private::set_effect_owner(key, owner);
+        }
+    }
     let behavior: serde_json::Value =
         horizon_world::json_file::read(&overlay.root.prepared().join("block-behaviours.json"))?;
     let fluids = behavior["fluids"]
@@ -1200,6 +1260,12 @@ fn register_block_entity_types(
         if blocks.id(block).is_none() {
             return Err(format!("unknown block {block}").into());
         }
+        if block == block_entity_types::WATER_CAULDRON
+            && let Some(owner) = types.type_for(block)
+            && owner != kind
+        {
+            return Err(format!("block {block} is already owned by block entity type {owner}").into());
+        }
         if let Some(base) = bases.get(kind)
             && !classes
                 .get(block)
@@ -1241,18 +1307,18 @@ fn announced_entry(
 fn register_mob_effects(mods: &[horizon_client::mod_content::ContentMod]) {
     use horizon_client::brewing::{self, Category};
     use horizon_mod_package::content::EffectCategory;
-    let effects = horizon_client::mod_content::mob_effects(mods);
+    let effects = horizon_client::mod_content::mob_effects_with_owners(mods);
     if effects.is_empty() {
         return;
     }
-    let ids: Vec<String> = effects.iter().map(|e| e.id.clone()).collect();
-    let set = brewing::register_mod_effects(effects.into_iter().map(|e| {
+    let ids: Vec<String> = effects.iter().map(|(_, e)| e.id.clone()).collect();
+    let set = brewing::register_mod_effects_owned(effects.into_iter().map(|(owner, e)| {
         let category = match e.category {
             EffectCategory::Beneficial => Category::Beneficial,
             EffectCategory::Harmful => Category::Harmful,
             EffectCategory::Neutral => Category::Neutral,
         };
-        (e.id.clone(), e.color, category, e.sort_order)
+        (owner.to_owned(), e.id.clone(), e.color, category, e.sort_order)
     }));
     if !set
         && brewing::mod_effects()
@@ -1705,6 +1771,7 @@ impl Game<'_> {
             return;
         }
         let root = self.options.resources.clone();
+        let root_feature_flags = self.mods.root_feature_flags.clone();
         let data_source = self.pack.data_source.clone();
         let data_changes = self.pack.data_changes.clone();
         let additional_data = self.pack.additional_data.clone();
@@ -1714,6 +1781,7 @@ impl Game<'_> {
         let reload = move |g: &mut Game<'_>| {
             let at = horizon_std::time::Instant::now();
             g.options.resources = root;
+            g.mods.root_feature_flags = root_feature_flags;
             g.pack.data_source = data_source;
             g.pack.data_changes = data_changes;
             g.pack.additional_data = additional_data;

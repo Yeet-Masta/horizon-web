@@ -5,6 +5,7 @@
 //! (`ItemEnv`) and the special renderers' registries to the game.
 use super::api_values::TryIntoApi;
 use super::{Dim, Game, entity_culling::EntityCullDecision};
+use crate::game::crossbow::DEFAULT_CROSSBOW_CHARGE_TICKS;
 use horizon_assets::item_model::{
     Components, ComponentsView, DisplayContext, FluidAppearance, GlobalPos, ItemEnv, LevelState,
     OwnerState, StackView,
@@ -255,14 +256,17 @@ impl ItemEnv for Env<'_, '_> {
         local_time(pattern)
     }
     fn random_float(&self) -> f32 {
-        if self.game.clock.still() {
+        let seed = match &self.game.export {
+            Some(export) => export.elapsed().as_nanos() as u64,
             // The same draw for a frame of the same world tick.
-            let mixed =
-                (self.game.visual_ticks() ^ 0x9e37_79b9).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-            return (mixed >> 40) as f32 / (1u64 << 24) as f32;
-        }
-        let nanos = self.game.started.elapsed().subsec_nanos();
-        (nanos % 1_000_000) as f32 / 1_000_000.0
+            None if self.game.clock.still() => self.game.visual_ticks(),
+            None => {
+                let nanos = self.game.started.elapsed().subsec_nanos();
+                return (nanos % 1_000_000) as f32 / 1_000_000.0;
+            }
+        };
+        let mixed = (seed ^ 0x9e37_79b9).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        (mixed >> 40) as f32 / (1u64 << 24) as f32
     }
 }
 /// The fluid a mod's `contained_fluid` answer `key` draws in a stack of `item`: none (the stack
@@ -280,7 +284,8 @@ fn drawn_contained_fluid(item: &str, key: mod_api::FluidKey) -> Option<&'static 
 /// Whether `item` answers an unregistered fluid key for the first time: only that path reads the
 /// list, so a stack that draws pays nothing for it.
 fn first_unregistered_answer(item: &str) -> bool {
-    static REPORTED: std::sync::Mutex<Vec<Box<str>>> = std::sync::Mutex::new(Vec::new());
+    static REPORTED: horizon_std::sync::Mutex<Vec<Box<str>>> =
+        horizon_std::sync::Mutex::new(Vec::new());
     let mut reported = REPORTED.lock().unwrap_or_else(|poison| poison.into_inner());
     if reported.iter().any(|seen| &**seen == item) {
         return false;
@@ -424,9 +429,8 @@ impl Game<'_> {
             profiles: &self.skin_profiles,
         }
     }
-    /// The client level as item models read it: worked out once a frame (a
-    /// screen of items read the same level, its sky sampled once).
-    pub(super) fn item_level(&self) -> LevelState {
+    /// Borrow the cached [`LevelState`] for this frame without cloning its `String` fields.
+    fn with_item_level<R>(&self, f: impl FnOnce(&LevelState) -> R) -> R {
         let dimension = self.dim.id();
         let key = (
             self.frames,
@@ -434,15 +438,34 @@ impl Game<'_> {
             self.world.day_time,
             dimension,
         );
-        let mut cached = self.item_level_cache.borrow_mut();
-        if let Some((at, level)) = cached.as_ref()
+        if let Ok(cached) = self.item_level_cache.try_borrow()
+            && let Some((at, level)) = cached.as_ref()
             && *at == key
         {
-            return level.clone();
+            return f(level);
         }
         let level = self.level_state_now(dimension);
-        *cached = Some((key, level.clone()));
-        level
+        match self.item_level_cache.try_borrow_mut() {
+            Ok(mut cached) => {
+                *cached = Some((key, level));
+                drop(cached);
+                let cached = self.item_level_cache.borrow();
+                let (_, level) = cached.as_ref().expect("item_level_cache populated");
+                f(level)
+            }
+            Err(_) => f(&level),
+        }
+    }
+    /// HDR `(tier, light)` pair for `item` when `hdr_on` reflects whether HDR output is active.
+    pub(super) fn item_hdr(&self, item: &str, hdr_on: bool) -> (u8, u8) {
+        let lum = self.luminance();
+        let level = lum.of(item);
+        if level == 0 {
+            return (0, 0);
+        }
+        let tier = lum.hdr_tier(item);
+        let hdr_light = if tier > 0 && hdr_on { level } else { 0 };
+        (tier, hdr_light)
     }
     fn level_state_now(&self, dimension: &'static str) -> LevelState {
         let sky = self
@@ -490,7 +513,12 @@ impl Game<'_> {
             // getUseItemRemainingTicks: the duration the use started with,
             // as LivingEntityUseItemEvent.Start and .Tick left it (`game/items/item_use.rs`).
             owner.use_item_remaining_ticks = self.use_duration - ticks as i32;
-            owner.crossbow_charge_duration = Self::charge_ticks(stack).max(1) as i32;
+            owner.crossbow_charge_duration = self
+                .player
+                .as_ref()
+                .map_or(DEFAULT_CROSSBOW_CHARGE_TICKS, |p| {
+                    self.crossbow_charge_preview(stack, &p.random)
+                });
         }
         owner.fishing_cast_with_this_item = stack
             .zip(self.cast_rod())
@@ -531,7 +559,28 @@ impl Game<'_> {
         seed: i32,
         hand: CitHand,
     ) -> ItemRenderState {
-        let level = self.item_level();
+        let renderer = &self.pack.item_renderer;
+        if let Some(cached) = renderer.resolve_static_stack(stack, display) {
+            let mut state = cached.state.clone();
+            let hdr_on = self.renderer.as_ref().is_some_and(|r| r.hdr_on());
+            let (hdr_tier, hdr_light) = self.item_hdr(&stack.item, hdr_on);
+            state.hdr_tier = hdr_tier;
+            state.hdr_light = hdr_light;
+            return state;
+        }
+        self.resolve_item_uncached_into(stack, display, owner, seed, hand, Vec::new())
+    }
+    /// Full uncached item resolution (never touches `static_cache`, safe to call while holding a
+    /// [`item_render::StaticDisplayCache`] guard), reusing the allocation of `layers`.
+    pub(super) fn resolve_item_uncached_into(
+        &self,
+        stack: &ItemStack,
+        display: DisplayContext,
+        owner: Option<&OwnerState>,
+        seed: i32,
+        hand: CitHand,
+        layers: Vec<item_render::LayerRender>,
+    ) -> ItemRenderState {
         let renderer = &self.pack.item_renderer;
         let (rule, glint) = renderer.cit.as_ref().map_or((None, None), |cit| {
             let item_max = self
@@ -546,15 +595,20 @@ impl Game<'_> {
                     .glint(stack, hand, max_damage, self.has_foil(stack)),
             )
         });
-        let mut state = renderer.resolve_with_rule(
-            &item_render::stack_view(stack),
-            display,
-            owner,
-            Some(&level),
-            seed,
-            &self.item_env(),
-            rule,
-        );
+        let stack_view = item_render::stack_view(stack);
+        let env = self.item_env();
+        let mut state = self.with_item_level(|level| {
+            renderer.resolve_with_rule_into(
+                &stack_view,
+                display,
+                owner,
+                Some(level),
+                seed,
+                &env,
+                rule,
+                layers,
+            )
+        });
         if let Some(glint) = glint {
             // The pack's enchantment rules replace vanilla's glint unless one keeps it, so far
             // only in the GUI, where their own layers draw: held, dropped and framed items keep
@@ -573,19 +627,45 @@ impl Game<'_> {
                 state.cit_glint = Some(glint);
             }
         }
-        state.hdr_tier = self.luminance().hdr_tier(&stack.item);
-        if state.hdr_tier > 0 && self.renderer.as_ref().is_some_and(|r| r.hdr_on()) {
-            state.hdr_light = self.luminance().of(&stack.item);
-        }
+        let hdr_on = self.renderer.as_ref().is_some_and(|r| r.hdr_on());
+        let (hdr_tier, hdr_light) = self.item_hdr(&stack.item, hdr_on);
+        state.hdr_tier = hdr_tier;
+        state.hdr_light = hdr_light;
         state
     }
     /// `GuiGraphicsExtractor.item(player, level, stack, x, y, 0)`.
     pub(super) fn draw_item_model(&self, batch: &mut HudBatch, stack: &ItemStack, x: f32, y: f32) {
+        if stack.count == 0 || &*stack.item == "minecraft:air" {
+            return;
+        }
+        let renderer = &self.pack.item_renderer;
+        if let Some(cached) = renderer.resolve_static_stack(stack, DisplayContext::Gui) {
+            item_render::gui::draw(
+                &cached.state,
+                renderer,
+                &self.gui.atlas.sprites,
+                &self.item_host(),
+                batch,
+                x,
+                y,
+                self.glint_frame.millis / 1000.0,
+                self.glint_frame.speed,
+                self.glint_frame.alpha,
+            );
+            return;
+        }
         let owner = self.player_owner(Some(stack));
-        let state = self.resolve_item(stack, DisplayContext::Gui, Some(&owner), 0);
+        let state = self.resolve_item_uncached_into(
+            stack,
+            DisplayContext::Gui,
+            Some(&owner),
+            0,
+            CitHand::Main,
+            Vec::new(),
+        );
         item_render::gui::draw(
             &state,
-            &self.pack.item_renderer,
+            renderer,
             &self.gui.atlas.sprites,
             &self.item_host(),
             batch,
@@ -600,7 +680,9 @@ impl Game<'_> {
     /// frame, not per item (`GameRenderer.extractOptions`).
     pub(super) fn capture_glint_frame(&self) -> item_render::GlintFrame {
         item_render::GlintFrame {
-            millis: if self.clock.still() {
+            millis: if let Some(export) = &self.export {
+                export.elapsed().as_secs_f32() * 1000.0
+            } else if self.clock.still() {
                 self.visual_millis() as f32
             } else {
                 self.started.elapsed().as_secs_f32() * 1000.0
@@ -627,8 +709,18 @@ impl Game<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
+        self.submit_item_world_hdr(state, (state.hdr_tier, state.hdr_light), pose, light, out);
+    }
+    pub(super) fn submit_item_world_hdr(
+        &self,
+        state: &ItemRenderState,
+        hdr: (u8, u8),
+        pose: glam::Mat4,
+        light: u32,
+        out: &mut Vec<Vertex>,
+    ) {
         let lights = diffuse_lights(self.nether_lighting());
-        self.submit_item_lit(state, pose, light, lights, out);
+        self.submit_item_lit_hdr(state, hdr, pose, light, lights, out);
     }
     /// [`Self::submit_item_world`] shaded by other diffuse lights (a
     /// `Lighting.Entry` other than the level's), in the pose's output space.
@@ -640,12 +732,30 @@ impl Game<'_> {
         lights: (glam::Vec3, glam::Vec3),
         out: &mut Vec<Vertex>,
     ) {
+        self.submit_item_lit_hdr(
+            state,
+            (state.hdr_tier, state.hdr_light),
+            pose,
+            light,
+            lights,
+            out,
+        );
+    }
+    pub(super) fn submit_item_lit_hdr(
+        &self,
+        state: &ItemRenderState,
+        (hdr_tier, hdr_light): (u8, u8),
+        pose: glam::Mat4,
+        light: u32,
+        lights: (glam::Vec3, glam::Vec3),
+        out: &mut Vec<Vertex>,
+    ) {
         let mut sink = WorldSink {
             out,
-            light: item_hdr_light(state, light),
-            lights: (state.hdr_light == 0).then_some(lights),
+            light: item_hdr_light_level(hdr_light, light),
+            lights: (hdr_light == 0).then_some(lights),
             glint: self.glint(),
-            tier: state.hdr_tier,
+            tier: hdr_tier,
         };
         state.submit(
             &self.pack.item_renderer,
@@ -688,15 +798,39 @@ impl Game<'_> {
         light: u32,
         lights: (glam::Vec3, glam::Vec3),
     ) -> Option<((usize, usize, u32), Option<(glam::Vec3, glam::Vec3)>)> {
+        self.submit_item_skinned_hdr(
+            state,
+            (state.hdr_tier, state.hdr_light),
+            poses,
+            light,
+            lights,
+        )
+    }
+    pub(super) fn submit_item_skinned_hdr(
+        &self,
+        state: &ItemRenderState,
+        (hdr_tier, hdr_light): (u8, u8),
+        poses: &[glam::Mat4],
+        light: u32,
+        lights: (glam::Vec3, glam::Vec3),
+    ) -> Option<((usize, usize, u32), Option<(glam::Vec3, glam::Vec3)>)> {
         let mut models = self.skin_models.borrow_mut();
         let mut frame = self.skin_frame.borrow_mut();
         let mark = frame.mark();
         let mut skin = horizon_client::mobs::skin::Skin::new(&mut models, &mut frame);
-        for &pose in poses {
-            if !self.skin_item(state, pose, light, lights, &mut skin) {
-                // Decided before any draw, the same for every pose.
-                return None;
-            }
+        let sink = (
+            item_hdr_light_level(hdr_light, light),
+            (hdr_light == 0).then_some(lights),
+            hdr_tier,
+        );
+        if !state.submit_skinned_poses(
+            &self.pack.item_renderer,
+            &self.gui.atlas.sprites,
+            poses,
+            sink,
+            &mut skin,
+        ) {
+            return None;
         }
         Some((mark, skin.bounds))
     }
@@ -752,6 +886,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.dropped.is_empty() {
+            return;
+        }
         let live = self.dropped.iter().map(|item| {
             let (p, q) = (item.previous, item.position);
             let at = [
@@ -775,6 +912,9 @@ impl Game<'_> {
         alpha: f64,
         out: &mut Vec<Vertex>,
     ) {
+        if self.pickups.live.is_empty() {
+            return;
+        }
         // ItemPickupParticle: the render state extracted at partial tick 1.
         let taken = self.pickups.live.iter().filter_map(|p| match &p.taken {
             super::pickups::Taken::Item(item) => Some(ItemEntityDraw {
@@ -794,6 +934,10 @@ impl Game<'_> {
         items: impl Iterator<Item = ItemEntityDraw<'a>>,
         out: &mut Vec<Vertex>,
     ) {
+        let mut items = items.peekable();
+        if items.peek().is_none() {
+            return;
+        }
         // Entity.shouldRenderAtSqrDistance for the item's 0.25 box: 16 blocks
         // times the view scale (32 at render distance 16), from its current
         // position. A pickup particle is not an entity and keeps 64 blocks.
@@ -801,6 +945,12 @@ impl Game<'_> {
             super::entity_culling::default_range(glam::DVec3::splat(0.25), self.view_scale());
         let skinning = self.skinning();
         let lights = diffuse_lights(self.dim == Dim::Nether);
+        let hdr_on = self.renderer.as_ref().is_some_and(|r| r.hdr_on());
+        let mut static_cache = self
+            .pack
+            .item_renderer
+            .static_cache_for(DisplayContext::Ground);
+        let mut scratch_layers: Vec<item_render::LayerRender> = Vec::new();
         for ItemEntityDraw {
             item,
             at,
@@ -828,19 +978,45 @@ impl Game<'_> {
                     continue;
                 }
             }
-            // `extractItemGroupRenderState`: GROUND, seeded by the entity id.
-            let owner = owner_at([q.x, q.y, q.z], 0.0, "minecraft:item");
-            let state = self.resolve_item(
-                &item.stack,
-                DisplayContext::Ground,
-                Some(&owner),
-                item.id as i32,
-            );
-            if state.is_empty() {
-                continue;
-            }
+            // Fast path: plain stack with a statically classified item model — avoids `owner_at`,
+            // `LevelState`, `StackView`, `Vec<LayerRender>`, per-item locks, and `bounding_box()`.
+            let plain =
+                item.stack.count > 0 && item.stack.damage == 0 && item.stack.data().is_none();
+            let mut dynamic_state: Option<ItemRenderState> = None;
+            let (state, (lo, hi), hdr) = if plain
+                && let Some(cached) = static_cache
+                    .as_mut()
+                    .and_then(|cache| cache.get(&item.stack.item))
+            {
+                if cached.state.is_empty() {
+                    continue;
+                }
+                (
+                    &cached.state,
+                    cached.bounding_box,
+                    self.item_hdr(&item.stack.item, hdr_on),
+                )
+            } else {
+                // `extractItemGroupRenderState`: GROUND, seeded by the entity id.
+                let owner = owner_at([q.x, q.y, q.z], 0.0, "minecraft:item");
+                let resolved = self.resolve_item_uncached_into(
+                    &item.stack,
+                    DisplayContext::Ground,
+                    Some(&owner),
+                    item.id as i32,
+                    CitHand::Main,
+                    std::mem::take(&mut scratch_layers),
+                );
+                if resolved.is_empty() {
+                    scratch_layers = resolved.layers;
+                    continue;
+                }
+                let bbox = resolved.bounding_box();
+                let hdr = (resolved.hdr_tier, resolved.hdr_light);
+                let state_ref = dynamic_state.insert(resolved);
+                (&*state_ref, bbox, hdr)
+            };
             let age = item.age as f32 + partial;
-            let (lo, hi) = state.bounding_box();
             let min_offset_y = -lo.y + 0.0625;
             let bob = (age / 10.0 + item.bob_offset).sin() * 0.1 + 0.1;
             let spin = item_render::item_spin(age, item.bob_offset);
@@ -872,23 +1048,24 @@ impl Game<'_> {
             };
             let seed = i64::from(self.pack.item_renderer.item_id(&item.stack.item))
                 + i64::from(item.stack.damage);
-            let copies = item_render::cluster_poses_with_depth(
+            let (copy_buf, copy_len) = item_render::cluster_poses_stack(
                 pose,
                 item_render::rendered_amount(item.stack.count),
                 seed,
                 hi.z - lo.z,
             );
+            let copies = &copy_buf[..copy_len];
             // Use the same animated, spun, clustered transforms as the draw.
             // ItemEntity's collision box is only 0.25 blocks and cannot prove
             // that this larger rendered model stays behind an occluder.
             let culling = entity.then(|| {
                 // The posed envelope walks every model point in every copy;
                 // with culling off the decision is `Bypass` whatever it holds.
-                if self.settings.horizon.entity_culling == EntityCullingMode::Off {
+                if self.entity_culling_mode() == EntityCullingMode::Off {
                     return EntityCullDecision::Bypass;
                 }
                 state
-                    .posed_bounds(&copies)
+                    .posed_bounds(copies)
                     .map(|(lo, hi)| {
                         self.entity_cull_decision_in_bounds(
                             item,
@@ -909,16 +1086,19 @@ impl Game<'_> {
                     .unwrap_or_else(|| self.entity_cull_decision(item, f64::from(partial)))
             });
             if culling.is_some_and(|decision| decision.hides_entity()) {
+                if let Some(owned) = dynamic_state {
+                    scratch_layers = owned.layers;
+                }
                 continue;
             }
             let outline = self.thing_outline(item.id, "minecraft:item");
             // Posed on the GPU when every layer can be, its silhouette too when it glows.
             let skinned = skinning
-                .then(|| self.submit_item_skinned(&state, &copies, packed, lights))
+                .then(|| self.submit_item_skinned_hdr(state, hdr, copies, packed, lights))
                 .flatten();
             if skinned.is_none() {
-                for &copy in &copies {
-                    self.submit_item_world(&state, copy, packed, out);
+                for &copy in copies {
+                    self.submit_item_world_hdr(state, hdr, copy, packed, out);
                 }
             }
             if let Some(rgb) = outline {
@@ -931,6 +1111,9 @@ impl Game<'_> {
                 self.finish_entity_occlusion(culling, item, out, entity_start);
             } else {
                 self.cull_skinned(out, entity_start, skinned);
+            }
+            if let Some(owned) = dynamic_state {
+                scratch_layers = owned.layers;
             }
         }
     }
@@ -954,7 +1137,11 @@ fn dropped_item_cull_box(position: glam::DVec3, camera: glam::DVec3) -> (glam::V
 /// The packed light of an item (sky low, block above it: `vertex_light`, entity.wgsl), its block
 /// light raised to what it glows with in HDR output.
 fn item_hdr_light(state: &ItemRenderState, light: u32) -> u32 {
-    let block = ((light >> 8) & 0xff).max(u32::from(state.hdr_light) * 16);
+    item_hdr_light_level(state.hdr_light, light)
+}
+
+fn item_hdr_light_level(hdr_light: u8, light: u32) -> u32 {
+    let block = ((light >> 8) & 0xff).max(u32::from(hdr_light) * 16);
     (light & !0xff00) | block << 8
 }
 

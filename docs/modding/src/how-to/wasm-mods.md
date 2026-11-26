@@ -18,6 +18,54 @@ calls wait without this bound. Same-thread reentry shares the enclosing call's
 remaining deadline. A contended prepared release invalidates the token
 immediately and runs the guest cleanup on the next call into that mod.
 
+## Smoke-test a local first-person body
+
+In a client-side mod scaffold, replace `src/lib.rs` with this nonblocking listener.
+Use the SDK for the game under test. The same source registers natively or in Wasm.
+
+```rust,ignore
+use mod_api::{ClientHost, FirstPersonBodyLayer, Hooks, HumanoidPart, RenderFirstPersonBodyEvent};
+
+#[derive(Default)]
+pub struct Mod;
+
+#[mod_api::horizon_mod]
+impl Hooks for Mod {
+    fn render_first_person_body(&self, _: &dyn ClientHost, event: &mut RenderFirstPersonBodyEvent<'_>) {
+        let (sin, cos) = event.player.yaw.to_radians().sin_cos();
+        event.body.show = true;
+        // World axes: east, up, south. Move back from the view without moving the camera.
+        event.body.offset = [0.22 * sin, 0.0, -0.22 * cos];
+        for part in [HumanoidPart::Head, HumanoidPart::LeftArm, HumanoidPart::RightArm] {
+            event.body.hidden.hide(part);
+        }
+        for layer in [
+            FirstPersonBodyLayer::Helmet,
+            FirstPersonBodyLayer::HeadItem,
+            FirstPersonBodyLayer::Ears,
+            FirstPersonBodyLayer::Cosmetics,
+            FirstPersonBodyLayer::HeldItems,
+            FirstPersonBodyLayer::StuckItems,
+            FirstPersonBodyLayer::Elytra,
+            FirstPersonBodyLayer::CustomLayers,
+        ] {
+            event.body.hide_layer(layer);
+        }
+    }
+}
+```
+
+Build and install with `cargo horizon-mod build --wasm` as below. In a disposable
+creative world, wear brightly dyed leggings and a helmet. Empty your main hand,
+stand still and look steeply down. The local legs and leggings should appear in
+first person, with neither head nor helmet clipping into the view. Crouch, then
+look down while seated in a boat: the body keeps the normal crouch and seat poses.
+The callback can use `event.player.living` and `event.riding` to change its offset
+in those poses. Test with an item in hand: only the separate hand pass draws it.
+Cycle F5 to both third-person views and compare against a run without the mod:
+the full model and helmet should be unchanged there, and the legs should be
+absent in plain first person without the mod.
+
 ## Owned values and `Wire`
 
 Native and wasm use the same owned-value encoding. Choose which of your own
@@ -77,11 +125,25 @@ cargo install --locked --git https://github.com/horizon-rust/horizon --rev <sdk 
 
 A mod carries native code or wasm code, not both. A wasm mod has no `[native]` table.
 
-A mod with `[[inject]]` listeners builds against the game's staged point catalog. Pass
-`--catalog path/to/points.json`, or set `HORIZON_WASM_STD` to the toolchain's std member
-with `points.json` beside it. Mods without listeners need no catalog. When packaging the
-wasm toolchain, `cargo horizon-mod wasm-std <out.wasm> --catalog <staged-points.json>`
-copies that catalog beside the std member.
+The game checks a `mod.wasm` when it loads it; the build promises no range of games. It refuses
+the mod when:
+
+- its core transport layout differs from the game's ("built for another version of the mod API's
+  transport");
+- a call it imports is missing from the game, or has another signature or layout there;
+- a hook it answers (an export row in its call table) is missing from the game or changed. A hook
+  the game added after the mod's build is fine: the mod just doesn't answer it.
+
+A newer SDK can bring calls an older game lacks, so build for the oldest Nightly you support and
+test the build on each Nightly you support. As reported for the November 2026 Nightlies, the
+transport changed between the 2026-11-18 Nightly (`dd67b76`) and the 2026-11-19 Nightly
+(`5ef7734`): a mod built for `dd67b76` was refused on later games, one built for `5ef7734` loaded
+on the 2026-11-20 game, and players of the 18 November Nightly needed a build of their own.
+
+`mod.wasm` is a build output and stays out of Git, so in the
+[horizon-mods](https://github.com/horizon-rust/horizon-mods) registry a wasm mod's source sits under
+`native/` beside the native mods. Its `horizon-mod.toml` has a `[wasm]` table and no `[native]` one,
+and its registry entry's kind is `mod`, not `native-mod`.
 
 A dependency group shares its handler table and cache budget. A handler registered by one
 member is usable by other members of that group.
@@ -129,17 +191,7 @@ the Mods page. An optional dependency is built in with the Cargo feature of its 
 entry in `Cargo.toml` is `optional = true` under that id; an absent one is left out of the group at
 load, and `if_installed!` keeps the mod from calling it.
 
-## Injection points
-
-API-typed `[[inject]]` listeners use the same generated `mod_points` records and constructors as
-native listeners. When injections are declared, the wasm build requires the pinned game's staged
-`points.json`, supplied via `--catalog` or beside the configured std member.
-Listeners register in the host's ordinary point list, with the same priority, dependency order,
-owner enable flag and stop behavior as native listeners. Mixins are native-only.
-
-A point's record is a copy of every parameter as an API value, `&mut` parameters copied back
-after the listener, exactly as for a native listener; a point with a parameter that has no API type
-refuses the listener at registration, naming the parameter. The `access` key on `[[inject]]` is refused by name on both targets. Native code needing game internals uses `[[native.mixin]]`; wasm cannot declare `[[internals]]` or native transformations.
+Mixins are native-only: wasm cannot declare `[[internals]]` or native transformations.
 
 ## ABI reference
 
@@ -177,8 +229,6 @@ Each guest exports:
 
 - `horizon_layout() -> u64`: the hash of what every call shares: the reserved IDs, group state,
   the prepared ABI and the hand-written codecs. A mismatch is refused.
-- `horizon_layout_ext() -> u64`, when `mod_points` is linked: the point protocol's hash. Each
-  point is checked by name when the mod subscribes to it.
 - `horizon_in(len) -> ptr`: the buffer into which the game writes the next call's input.
 - `horizon_hook(id) -> u64`: runs export `id` after the input is written. An export's ID is a hash
   of its name (`Owner::method`), the same in every build. The high 32 bits are the reply pointer
@@ -195,14 +245,6 @@ reaches. The game asks for it first and compares each call the mod imports and e
 have with its own; one that differs, or an export the game no longer has, refuses the mod, naming
 the call. A hook reply contains its return value followed by writable arguments in
 field order.
-
-Points use that same hook export, call arena and execution budget. Place IDs are
-`0x8000_0000 + place`, `place` being the guest's own index. The subscription query
-`0xBFFF_FFFF` returns `(place, point name, point hash, injection_id)`: the game finds each point
-by name and refuses one it doesn't have or has with another hash (its host and record
-layout). Point call input starts with the `u32` subscription index. A `HostSide` point then carries
-a server/client boolean, followed by its listener record. Calls reply with unit and the record,
-which the host decodes completely before writing any field back.
 
 Wire values use little-endian numbers; lengths and collection counts are `u32`, strings are a
 byte length followed by UTF-8 bytes, options have a byte tag (`0` or `1`), enums have a `u32`
@@ -257,9 +299,10 @@ refuses the module with an actionable compiler/cache diagnostic: the game never
 retries without the applied budget. A timeout names the exceeded limit (not a
 crash), kills and reaps the child, and removes its private input and unfinished
 writer files. It never records a permanent failure: restarting with a larger
-limit can compile the same module. This child path is Unix-only; Windows continues
-to compile in process with persistent caching disabled. An unavailable or untrusted
-Unix cache refuses compilation until its private writable directory is restored.
+limit can compile the same module. The compiler child is Unix-only. Windows compiles
+cache misses in the game process, saves the result to a trusted cache, and verifies
+each entry before reuse. An unavailable or untrusted Unix cache refuses compilation
+until its private writable directory is restored.
 
 ### Compilation time setting
 
@@ -288,9 +331,13 @@ N threads, and the setting to increase.
 On Unix, the game creates the cache folder with mode 0700 and entries with mode 0600. It checks
 folder ownership and permissions, then checks each opened entry is a regular file owned by the
 current user, not writable by group or others, and has only one hard link. Symlink entries are
-refused. On Windows, persistent caching is disabled until owner, DACL and inheritance trust
-can be verified for the cache folder and opened entries. Modules compile from wasm instead,
-with one warning explaining the fallback. The player's account is the trust boundary.
+refused. On Windows, the cache requires a local volume that enforces Windows ACLs. The game
+checks the owner and discretionary access control list on the opened folder and on every entry.
+It keeps the verified folder open and uses that handle for cache lookups, writes and cleanup.
+Only the current user, SYSTEM and Administrators may have write access. New artifacts have
+protected access lists. The game refuses reparse points and entries with multiple hard links
+or open writers. If the folder check fails on Windows, the game logs a warning and compiles
+modules from Wasm in memory.
 
 At startup, the game removes regular `.cwasm` files from other engine configurations or
 Wasmtime versions, along with malformed and old-format cache names. It never follows symlinks
@@ -302,9 +349,10 @@ measured compiled module (34,039,320 bytes) plus headroom; the 30-module allowan
 maintainer confirmation and does not represent a measured pack.
 
 A failed entry check logs the reason once per launch. Missing, corrupt or incompatible
-entries trigger a budgeted compiler child on Unix, provided the cache directory is
-trusted and writable. Writes replace entries atomically without changing files that
-running modules have mapped. Deleting the cache is always safe: the next launch rebuilds it.
+entries trigger a budgeted compiler child on Unix, provided the cache directory is trusted
+and writable. On Windows, compilation runs in the game process. Cache writes publish by
+atomic rename so live mappings keep their original contents. Deleting the cache is always
+safe: the next launch rebuilds it.
 
 ## Guest stack
 

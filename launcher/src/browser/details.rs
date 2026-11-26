@@ -90,6 +90,24 @@ pub struct Filters {
 }
 
 impl Filters {
+    /// The choices shown as removable filter chips.
+    pub fn picked(&self) -> usize {
+        self.categories.len()
+            + self.tags.len()
+            + usize::from(self.loader.is_some())
+            + usize::from(self.game_version.is_some())
+            + usize::from(self.environment.is_some())
+    }
+
+    /// Clears the choices shown as chips, keeping the sort and instance constraint.
+    pub fn clear_picked(&mut self) {
+        *self = Self {
+            sort: self.sort,
+            works_on: self.works_on,
+            ..Self::default()
+        };
+    }
+
     /// The sort a search uses.
     pub fn sort(&self, text: &str) -> Sort {
         self.sort.unwrap_or(if text.is_empty() {
@@ -201,7 +219,7 @@ fn text(v: &Value) -> String {
 }
 
 /// Only `https://` links are kept: a page never opens another scheme.
-fn https(url: &str) -> Option<String> {
+pub(crate) fn https(url: &str) -> Option<String> {
     url.starts_with("https://").then(|| url.to_owned())
 }
 
@@ -305,7 +323,26 @@ pub fn modrinth_tags(
             })
         })
         .collect();
-    categories.sort_by(|a, b| (&a.header, &a.name).cmp(&(&b.header, &b.name)));
+    categories.sort_by(|a, b| {
+        a.header.cmp(&b.header).then_with(|| {
+            let resolution = |name: &str| {
+                let (size, suffix) = name.split_once('x')?;
+                if matches!(suffix, "" | "+" | "-") {
+                    size.parse::<u32>().ok()
+                } else {
+                    None
+                }
+            };
+            if a.header == "resolutions" {
+                resolution(&a.name)
+                    .map_or((true, 0), |size| (false, size))
+                    .cmp(&resolution(&b.name).map_or((true, 0), |size| (false, size)))
+                    .then_with(|| a.name.cmp(&b.name))
+            } else {
+                a.name.cmp(&b.name)
+            }
+        })
+    });
     Tags {
         categories,
         tags: Vec::new(),
@@ -320,10 +357,19 @@ pub fn modrinth_tags(
     }
 }
 
-/// The loaders a kind lists by default, when no loader is picked: Java mod loaders for mods.
+pub fn loader_label(slug: &str) -> &str {
+    match slug {
+        "iris" => crate::i18n::tr("Iris"),
+        "optifine" => crate::i18n::tr("OptiFine"),
+        _ => slug,
+    }
+}
+
+/// The loaders a kind lists by default, when no loader is picked.
 pub fn default_loaders(kind: Kind) -> Vec<&'static str> {
     match kind {
         Kind::Mod => super::java::LOADERS.to_vec(),
+        Kind::Shader => super::SHADER_LOADERS.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -332,6 +378,26 @@ pub fn default_loaders(kind: Kind) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn picked_counts_only_removable_filters() {
+        assert_eq!(Filters::default().picked(), 0);
+        let ordering_and_compatibility = Filters {
+            sort: Some(Sort::Newest),
+            works_on: true,
+            ..Filters::default()
+        };
+        assert_eq!(ordering_and_compatibility.picked(), 0);
+        let picked = Filters {
+            categories: vec!["decoration".into(), "utility".into()],
+            tags: vec!["zoom".into(), "pvp".into()],
+            loader: Some("fabric".into()),
+            game_version: Some("1.21.1".into()),
+            environment: Some(Environment::Client),
+            ..ordering_and_compatibility
+        };
+        assert_eq!(picked.picked(), 7);
+    }
 
     #[test]
     fn a_modrinth_page() {
@@ -392,6 +458,31 @@ mod tests {
     }
 
     #[test]
+    fn modrinth_resolutions_are_sorted_by_size_with_unknowns_last() {
+        let categories = Value::Array(
+            ["128x", "future-z", "16x", "512x+", "8x-", "64x", "256x", "32x", "48x", "future-a"]
+                .into_iter()
+                .map(|name| json!({"name": name, "project_type": "resourcepack", "header": "resolutions"}))
+                .collect(),
+        );
+        let tags = modrinth_tags("resourcepack", &categories, &Value::Null, &Value::Null);
+        assert_eq!(
+            tags.categories
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
+            ["8x-", "16x", "32x", "48x", "64x", "128x", "256x", "512x+", "future-a", "future-z"],
+        );
+    }
+
+    #[test]
+    fn shader_loader_slugs_have_display_names() {
+        assert_eq!(loader_label("iris"), "Iris");
+        assert_eq!(loader_label("optifine"), "OptiFine");
+        assert_eq!(loader_label("fabric"), "fabric");
+    }
+
+    #[test]
     fn categories_read_as_the_site_names_them() {
         assert_eq!(category_label("game-mechanics"), "Game mechanics");
         assert_eq!(category_label("kitchen-sink"), "Kitchen sink");
@@ -400,6 +491,31 @@ mod tests {
         assert_eq!(category_label("gui"), "GUI");
         assert_eq!(category_label("16x"), "16x");
         assert_eq!(category_label(""), "");
+    }
+
+    #[test]
+    fn clearing_picked_filters_keeps_sort_and_instance_constraint() {
+        let mut filters = Filters {
+            categories: vec!["decoration".into()],
+            tags: vec!["pvp".into()],
+            loader: Some("fabric".into()),
+            game_version: Some("1.21.1".into()),
+            environment: Some(Environment::Client),
+            sort: Some(Sort::Updated),
+            works_on: true,
+        };
+
+        filters.clear_picked();
+
+        assert_eq!(
+            filters,
+            Filters {
+                sort: Some(Sort::Updated),
+                works_on: true,
+                ..Filters::default()
+            }
+        );
+        assert_eq!(filters.picked(), 0);
     }
 
     #[test]

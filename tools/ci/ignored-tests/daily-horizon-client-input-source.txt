@@ -1,0 +1,6 @@
+# The daily tests of horizon-client's input source (#15393): each is #[ignore = "daily"] in its source and runs once
+# a day in the daily run, where it must pass (README.md). Rows: PACKAGE TEST TARGET daily REASON, sorted.
+horizon-client game::pad::source_tests::a_registered_source_answers_in_the_pads_place lib daily resources
+horizon-client game::pad::source_tests::a_scripted_run_leaves_the_source_unread lib daily resources
+horizon-client game::pad::source_tests::the_keyboard_letting_go_keeps_the_sneak_a_source_holds lib daily resources
+horizon-client game::pad::source_tests::the_pad_acts_on_nothing_while_a_source_drives lib daily resources

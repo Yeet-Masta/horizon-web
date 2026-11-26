@@ -19,6 +19,23 @@ pub trait PayloadsBackendMut {
     ) -> Result<PayloadAccepted, PayloadSendError>;
 }
 
+/// Server group payload sends, used by [`ToClient`]'s group-send helpers and available
+/// directly for raw payloads.
+#[horizon_mod_api_macros::host_area]
+pub trait PayloadsServerHost {
+    /// Side: server.
+    /// Queue exact application bytes to every live player in `players` in one host call,
+    /// returning each player's send outcome in the same order. Publication waits for root
+    /// commit; abort publishes nothing.
+    #[access(WorldOnly)]
+    fn send_payload_to_players(
+        &mut self,
+        players: &[PlayerRef],
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> Vec<Result<PayloadAccepted, PayloadSendError>>;
+}
+
 /// Client connection sends, available during configuration as well as play.
 #[horizon_mod_api_macros::host_area]
 pub trait PayloadsClientHost {
@@ -30,6 +47,20 @@ pub trait PayloadsClientHost {
     #[access(ClientSetup)]
     fn send_payload_to_server(
         &mut self,
+        id: &PayloadId,
+        bytes: PayloadBytes,
+    ) -> Result<PayloadAccepted, PayloadSendError>;
+    /// Side: client.
+    /// The same send from a **shared** host: a screen hook receives `&dyn ClientHost`,
+    /// which cannot call `send_payload_to_server`. The bytes are validated against the
+    /// connection's frozen declaration now and staged in queue order; they are published
+    /// on a later client tick, in the same root commit the mutable helper uses. Called inside
+    /// a transaction, the send belongs to it: an abort drops it. `Queued`
+    /// means staged, not delivered. A disconnected or unnegotiated client returns an error;
+    /// frame refusal and Backpressure write no application bytes.
+    #[access(ClientSetup)]
+    fn queue_payload_to_server(
+        &self,
         id: &PayloadId,
         bytes: PayloadBytes,
     ) -> Result<PayloadAccepted, PayloadSendError>;

@@ -68,6 +68,19 @@ impl Game<'_> {
         self.native_target_body(self.native_entity_target(entity)?)
     }
 
+    /// The body a read of the entity's own movement state answers from: the server's entity,
+    /// or on a client the local player's body, whose sprinting, fluids and pose the client
+    /// keeps itself (`LocalPlayer`). None on a client for any other entity.
+    fn native_own_state_body(&self, entity: EntityRef) -> Option<Body<'_>> {
+        if self.is_logical_server() {
+            return self.native_entity_body(entity);
+        }
+        match self.native_client_entity_target(entity)? {
+            Target::Player => Some(Body::Player(self.player.as_ref()?)),
+            _ => None,
+        }
+    }
+
     fn native_target_body(&self, target: Target) -> Option<Body<'_>> {
         Some(match target {
             Target::Player => Body::Player(self.player.as_ref()?),
@@ -100,7 +113,7 @@ impl Game<'_> {
     /// cat or ocelot dashing after its target (their shared sprinting flag);
     /// false for the other kinds.
     pub(super) fn entity_is_sprinting(&self, entity: EntityRef) -> Option<bool> {
-        Some(match self.native_entity_body(entity)? {
+        Some(match self.native_own_state_body(entity)? {
             Body::Player(p) => p.sprinting,
             Body::Mob(m) => m.extra.sprinting,
             _ => false,
@@ -109,15 +122,66 @@ impl Game<'_> {
     /// Whether the entity touched water at its last fluid update
     /// (`Entity.isInWater`): players and mobs.
     pub(super) fn entity_is_in_water(&self, entity: EntityRef) -> Option<bool> {
-        match self.native_entity_body(entity)? {
+        match self.native_own_state_body(entity)? {
             Body::Player(p) => Some(p.fluids.was_touching_water),
             Body::Mob(m) => Some(m.fluids.in_water),
             Body::Other(_) => None,
         }
     }
+    /// Whether the entity's eyes are submerged in water (`Entity.isUnderWater`:
+    /// `isEyeInFluid(WATER) && isInWater()`): players and mobs.
+    pub(super) fn entity_is_under_water(&self, entity: EntityRef) -> Option<bool> {
+        use horizon_client::motion::WATER;
+        match self.native_target_body(self.native_entity_read_target(entity)?)? {
+            Body::Player(p) => Some(p.is_eye_in_fluid(WATER) && p.fluids.was_touching_water),
+            Body::Mob(m) => Some(m.fluids.eye_in_water && m.fluids.in_water),
+            Body::Other(_) => None,
+        }
+    }
+    /// Whether the entity is on fire (`Entity.isOnFire`): not fire-immune and either
+    /// burning (`fire_ticks > 0`) or carrying the client's synced on-fire flag.
+    /// Players, mobs, armor stands and dropped items on a server; on a remote client,
+    /// only the local player's own fire state is available (`None` for any other entity).
+    pub(super) fn entity_is_on_fire(&self, entity: EntityRef) -> Option<bool> {
+        let target = self.native_entity_read_target(entity)?;
+        if self.remote.is_some() && !matches!(target, Target::Player) {
+            return None;
+        }
+        match self.native_target_body(target)? {
+            Body::Player(p) => Some(
+                p.fire_ticks > 0
+                    || (self.remote.is_some()
+                        && matches!(target, Target::Player)
+                        && self.remote.as_ref().is_some_and(|r| r.own_on_fire)),
+            ),
+            Body::Mob(m) => Some(m.is_on_fire()),
+            Body::Other(Target::Stand(id)) => {
+                Some(self.armor_stands.iter().find(|s| s.id == id)?.fire_ticks > 0)
+            }
+            Body::Other(Target::Item(id)) => {
+                Some(self.dropped.iter().find(|i| i.id == id)?.fire_ticks > 0)
+            }
+            Body::Other(_) => None,
+        }
+    }
+    /// `Entity.isValid`: the entity is in the level and not removed. A stale handle, a mob queued for
+    /// removal and a frame or painting that is gone are not valid.
+    pub(super) fn entity_is_valid(&self, entity: EntityRef) -> bool {
+        match self.native_entity_target(entity) {
+            Some(super::commands::Target::Mob(id)) => {
+                self.mobs.iter().any(|m| m.id == id && !m.removed)
+            }
+            Some(super::commands::Target::Frame(id)) => self.item_frames.iter().any(|f| f.id == id),
+            Some(super::commands::Target::Painting(id)) => {
+                self.paintings.iter().any(|p| p.id == id)
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
     /// Whether the entity is in lava (`Entity.isInLava`): players and mobs.
     pub(super) fn entity_is_in_lava(&self, entity: EntityRef) -> Option<bool> {
-        match self.native_entity_body(entity)? {
+        match self.native_own_state_body(entity)? {
             Body::Player(p) => Some(p.is_in_lava()),
             Body::Mob(m) => Some(m.fluids.in_lava),
             Body::Other(_) => None,
@@ -478,6 +542,52 @@ impl Game<'_> {
             true
         })
     }
+    /// Explodes an entity now, as its own explosion would: primed TNT explodes where it
+    /// stands with its power (`PrimedTnt.explode`), and a creeper is lit and explodes at once
+    /// (`Creeper.explodeCreeper`). The entity is gone after its explosion. False for a stale
+    /// handle, a kind that does not explode, or when the explosion itself fails.
+    pub(super) fn entity_detonate(&mut self, entity: EntityRef) -> bool {
+        match self.native_entity_target(entity) {
+            Some(Target::Tnt(id)) => {
+                let Some(i) = self.tnts.iter().position(|t| t.id == id) else {
+                    return false;
+                };
+                self.explode_primed_tnt(i).is_ok()
+            }
+            Some(Target::Mob(id)) => {
+                let mut events = Vec::new();
+                let Some(mob) = self
+                    .mobs
+                    .iter_mut()
+                    .find(|m| m.id == id && m.species() == Species::Creeper)
+                else {
+                    return false;
+                };
+                // Creeper.ignite: the fuse is lit, and the swell is at its end.
+                mob.swell = mob.max_swell;
+                mob.extra.flag = true;
+                horizon_client::mobs::hostile::creeper_tick(mob, &mut events);
+                self.mobs.retain(|m| m.id != id);
+                self.handle_mob_events(events).is_ok()
+            }
+            _ => false,
+        }
+    }
+
+    /// `PrimedTnt.setFuse` (Paper's `TNTPrimed#setFuseTicks`): the ticks left before this primed TNT
+    /// explodes. False for a negative count, a stale handle or an entity that is not primed TNT.
+    pub(super) fn entity_set_fuse(&mut self, entity: EntityRef, ticks: i32) -> bool {
+        if ticks < 0 {
+            return false;
+        }
+        let Some(Target::Tnt(id)) = self.native_entity_target(entity) else {
+            return false;
+        };
+        self.tnts.iter_mut().find(|t| t.id == id).is_some_and(|t| {
+            t.fuse = ticks;
+            true
+        })
+    }
     /// Sets the mob's no-gravity flag (`Entity.setNoGravity`). Returns false for players and guests.
     pub(super) fn entity_set_no_gravity(&mut self, entity: EntityRef, no_gravity: bool) -> bool {
         let Some(Target::Mob(id)) = self.native_entity_target(entity) else {
@@ -512,7 +622,7 @@ impl Game<'_> {
     /// `crouching`, `swimming`, `sleeping`, a warden's `roaring`... Kinds
     /// with no pose stand.
     pub(super) fn entity_pose(&self, entity: EntityRef) -> Option<&'static str> {
-        Some(match self.native_entity_body(entity)? {
+        Some(match self.native_own_state_body(entity)? {
             Body::Player(p) => player_pose(p.pose),
             Body::Mob(m) => POSES.get(usize::from(sync::pose_id(m))).copied()?,
             Body::Other(_) => POSES[0],
@@ -741,6 +851,7 @@ mod tests {
                 fall_distance: 0.0,
                 rotation: [0.0, 0.0],
                 join: Default::default(),
+                section_order: 0,
                 id: 43,
                 position: Vec3::ZERO,
                 previous: Vec3::ZERO,
@@ -836,6 +947,7 @@ mod tests {
                 fall_distance: 0.0,
                 rotation: [0.0, 0.0],
                 join: Default::default(),
+                section_order: 0,
                 no_gravity: false,
                 id: 41,
                 position: Vec3::ZERO,
@@ -1388,5 +1500,133 @@ mod tests {
         assert_eq!(max_air(Some(Species::Dolphin)), 4800);
         assert_eq!(max_air(Some(Species::Axolotl)), 6000);
         assert_eq!(max_air(Some(Species::Zombie)), 300);
+    }
+}
+
+#[cfg(test)]
+mod detonate_tests {
+    use super::super::native_entity_refs::tests::with_game;
+    use horizon_client::mobs::Mob;
+    use horizon_core::geometry::Vec3;
+
+    #[test]
+    #[ignore = "daily"]
+    fn entity_detonate_explodes_primed_tnt_and_refuses_a_zombie() {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.tnts.push(super::super::tnt::PrimedTnt {
+                attachment_lifetime: Default::default(),
+                rotation: [0.0, 0.0],
+                join: Default::default(),
+                id: 0,
+                position: Vec3::ZERO,
+                previous: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                fuse: 80,
+                on_ground: false,
+                in_water: false,
+                stuck: Vec3::ZERO,
+                fall_distance: 0.0,
+                owner: None,
+                guest: None,
+                no_gravity: false,
+                power: 4.0,
+                used_portal: false,
+                block_state: None,
+            });
+            game.native_joins_flush(false, 0);
+            game.native_joins_flush(false, 0);
+            let id = game.tnts.last().unwrap().id;
+            let entity = game.entity(id).unwrap();
+            assert!(game.entity_detonate(entity));
+            assert!(game.tnts.is_empty());
+            let kind = game
+                .res
+                .mob_types()
+                .get("minecraft:zombie")
+                .unwrap()
+                .clone();
+            game.mobs.push(Mob::new(42, kind, Vec3::ZERO, 0.0));
+            let zombie = game.entity(42).unwrap();
+            assert!(!game.entity_detonate(zombie));
+            assert_eq!(game.mobs.len(), 1);
+        });
+    }
+}
+
+#[cfg(test)]
+mod fuse_tests {
+    use super::super::native_entity_refs::tests::with_game;
+    use horizon_core::geometry::Vec3;
+
+    #[test]
+    #[ignore = "daily"]
+    fn entity_set_fuse_writes_primed_tnt_and_refuses_a_negative_count() {
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.tnts.push(super::super::tnt::PrimedTnt {
+                attachment_lifetime: Default::default(),
+                rotation: [0.0, 0.0],
+                join: Default::default(),
+                id: 0,
+                position: Vec3::ZERO,
+                previous: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                fuse: 80,
+                on_ground: false,
+                in_water: false,
+                stuck: Vec3::ZERO,
+                fall_distance: 0.0,
+                owner: None,
+                guest: None,
+                no_gravity: false,
+                power: 4.0,
+                used_portal: false,
+                block_state: None,
+            });
+            game.native_joins_flush(false, 0);
+            game.native_joins_flush(false, 0);
+            let id = game.tnts.last().unwrap().id;
+            let entity = game.entity(id).unwrap();
+            assert!(game.entity_set_fuse(entity, 37));
+            assert_eq!(game.tnts.last().unwrap().fuse, 37);
+            assert!(!game.entity_set_fuse(entity, -1));
+            assert_eq!(game.tnts.last().unwrap().fuse, 37);
+        });
+    }
+
+    #[test]
+    fn entity_is_on_fire_and_is_under_water_read_entity_state() {
+        if horizon_std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        let mut game = crate::game::native_machines::tests::server_game();
+        let zombie_kind = game
+            .res
+            .mob_types()
+            .get("minecraft:zombie")
+            .unwrap()
+            .clone();
+        let blaze_kind = game.res.mob_types().get("minecraft:blaze").unwrap().clone();
+        let mut zombie =
+            horizon_client::mobs::Mob::new(101, zombie_kind, Vec3::new(0.0, 64.0, 0.0), 0.0);
+        zombie.fire_ticks = 40;
+        zombie.fluids.in_water = true;
+        zombie.fluids.eye_in_water = false;
+        let mut blaze =
+            horizon_client::mobs::Mob::new(102, blaze_kind, Vec3::new(2.0, 64.0, 0.0), 0.0);
+        blaze.fire_ticks = 40;
+        blaze.fluids.in_water = true;
+        blaze.fluids.eye_in_water = true;
+        game.mobs.push(zombie);
+        game.mobs.push(blaze);
+
+        let zombie_ref = game.entity(101).unwrap();
+        let blaze_ref = game.entity(102).unwrap();
+
+        assert_eq!(zombie_ref.is_on_fire(&game), Some(true));
+        assert_eq!(blaze_ref.is_on_fire(&game), Some(false));
+        assert_eq!(zombie_ref.is_under_water(&game), Some(false));
+        assert_eq!(blaze_ref.is_under_water(&game), Some(true));
     }
 }

@@ -10,7 +10,7 @@ use horizon_client::{
     containers::{Banner, BlockEntity},
     furnace::FurnaceCooking,
     item_data,
-    items::{BlockLootRoll, ItemStack},
+    items::{BlockLootRoll, ItemStack, Items},
     save,
 };
 use horizon_core::position::BlockPos;
@@ -186,6 +186,20 @@ impl Pending {
             (stack.damage, stack.extra) = item_data::decode_components(Some(&Tag::Compound(patch)));
         }
     }
+    /// `copy_components` on each loot result of the block at `pos`, then
+    /// `LootTable.createStackSplitter`: what was remembered goes on the first
+    /// result that takes it ([`Self::attach`]) and on every piece of that one.
+    pub(super) fn attach_and_split(
+        &mut self,
+        items: &Items,
+        pos: [i32; 3],
+        mut stacks: Vec<ItemStack>,
+    ) -> Vec<ItemStack> {
+        for stack in &mut stacks {
+            self.attach(pos, stack);
+        }
+        items.split_stacks(stacks)
+    }
     /// Remember a decorated pot's sherds from its saved block entity.
     pub(super) fn record_saved(&mut self, pos: [i32; 3], tag: &horizon_core::nbt::Tag) {
         use horizon_core::nbt::Tag;
@@ -209,17 +223,27 @@ impl Pending {
         );
     }
     /// The block entity's dynamic drops: a decorated pot's sherds, left,
-    /// back, front then right (`DecoratedPotBlock.getDrops`).
-    pub(super) fn dynamic(&self, pos: [i32; 3]) -> Vec<ItemStack> {
-        self.pot
-            .get(&pos)
-            .map_or_else(Vec::new, |[back, left, right, front]| {
-                [left, back, front, right]
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-                    .collect()
-            })
+    /// back, front then right (`DecoratedPotBlock.getDrops`), each taken in
+    /// against the world's item `prototypes` as a dropped stack is
+    /// (`ItemStack.CODEC`'s `applyPatch`). The recorded sherds stay as saved:
+    /// an intact pot's `pot_decorations` keeps them as written.
+    pub(super) fn dynamic(
+        &self,
+        pos: [i32; 3],
+        prototypes: &horizon_client::item_data::ItemPrototypes,
+    ) -> Vec<ItemStack> {
+        let mut sherds: Vec<ItemStack> =
+            self.pot
+                .get(&pos)
+                .map_or_else(Vec::new, |[back, left, right, front]| {
+                    [left, back, front, right]
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .collect()
+                });
+        horizon_client::item_data::clean_stacks(sherds.iter_mut(), prototypes);
+        sherds
     }
     pub(super) fn clear(&mut self, pos: [i32; 3]) {
         self.pot.remove(&pos);
@@ -526,20 +550,21 @@ pub(super) fn put_saved_entity(
     tag: horizon_core::nbt::Tag,
 ) {
     use horizon_core::nbt::Tag;
-    let Some(chunk) = world.chunks.get_mut(&(pos[0] >> 4, pos[2] >> 4)) else {
-        return;
-    };
-    let chunk = std::sync::Arc::make_mut(chunk);
-    let saved = std::sync::Arc::make_mut(chunk.saved.get_or_insert_default());
-    let at = |t: &Tag| {
-        t.get("x") == Some(&Tag::Int(pos[0]))
-            && t.get("y") == Some(&Tag::Int(pos[1]))
-            && t.get("z") == Some(&Tag::Int(pos[2]))
-    };
-    match saved.block_entities.iter_mut().find(|t| at(t)) {
-        Some(old) => *old = tag,
-        None => saved.block_entities.push(tag),
-    }
+    world
+        .chunks
+        .mutate_chunk((pos[0] >> 4, pos[2] >> 4), |chunk| {
+            let chunk = std::sync::Arc::make_mut(chunk);
+            let saved = std::sync::Arc::make_mut(chunk.saved.get_or_insert_default());
+            let at = |t: &Tag| {
+                t.get("x") == Some(&Tag::Int(pos[0]))
+                    && t.get("y") == Some(&Tag::Int(pos[1]))
+                    && t.get("z") == Some(&Tag::Int(pos[2]))
+            };
+            match saved.block_entities.iter_mut().find(|t| at(t)) {
+                Some(old) => *old = tag,
+                None => saved.block_entities.push(tag),
+            }
+        });
 }
 
 impl GameLevel<'_> {
@@ -627,7 +652,7 @@ impl GameLevel<'_> {
         } else if let Some(tag) = saved_entity(self.world, [pos.x, pos.y, pos.z]) {
             self.pending.record_saved(at, &tag);
         }
-        let dynamic = self.pending.dynamic(at);
+        let dynamic = self.pending.dynamic(at, &self.items.component_defaults);
         let machine = self
             .drop_tool
             .as_ref()
@@ -697,7 +722,7 @@ impl GameLevel<'_> {
         } else if let Some(tag) = saved_entity(self.world, at) {
             copied.record_saved(at, &tag);
         }
-        let dynamic = copied.dynamic(at);
+        let dynamic = copied.dynamic(at, &self.items.component_defaults);
         let roll = horizon_client::items::BlockLootRoll {
             held: tool,
             dynamic: &dynamic,
@@ -706,10 +731,7 @@ impl GameLevel<'_> {
         };
         let mut drops = self.roll_block_loot(pos, state, entity, roll);
         drops.retain(|stack| &*stack.item != "minecraft:air" && stack.count > 0);
-        for stack in &mut drops {
-            copied.attach(at, stack);
-        }
-        drops
+        copied.attach_and_split(self.items, at, drops)
     }
     /// What `Block.dropResources` does with the loot it rolled for the block
     /// `state` at `pos`: `Block.popResource` builds an item entity for each
@@ -728,10 +750,16 @@ impl GameLevel<'_> {
         stacks: Vec<ItemStack>,
         exp_to_drop: Option<u32>,
     ) -> BlockDrops {
-        let items = stacks
+        let at = [pos.x, pos.y, pos.z];
+        let stacks = stacks
             .into_iter()
             .filter(|stack| &*stack.item != "minecraft:air" && stack.count > 0)
-            .map(|stack| self.block_drop_item([pos.x, pos.y, pos.z], stack))
+            .collect();
+        let items = self
+            .pending
+            .attach_and_split(self.items, at, stacks)
+            .into_iter()
+            .map(|stack| self.block_drop_item(at, stack))
             .collect();
         // `tryDropExperience` samples before the silk touch effect zeroes the
         // part/vanilla starting amount before the global break_block event; a
@@ -762,9 +790,11 @@ impl GameLevel<'_> {
             },
         )
     }
-    /// Build item entities only after vanilla has finished merging stacks.
-    pub(super) fn block_drop_item(&mut self, at: [i32; 3], mut stack: ItemStack) -> BlockItemDrop {
-        self.pending.attach(at, &mut stack);
+    /// Build item entities only after vanilla has finished merging stacks. `stack`
+    /// already carries what the block entity copies ([`Pending::attach_and_split`] in
+    /// `block_dropped`, the explosion's own pass): attaching again would find the record
+    /// gone, and a pot would lose its decorations.
+    pub(super) fn block_drop_item(&mut self, at: [i32; 3], stack: ItemStack) -> BlockItemDrop {
         let position = pop_position(&mut self.world.random, at);
         let random = prepare_item_random(None);
         BlockItemDrop {
@@ -892,10 +922,14 @@ impl GameLevel<'_> {
         self.world.forget_block_entity_source(key);
         let name = self.facts.get(old).name.clone();
         let kind = match &entity {
-            // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents.
+            // BaseContainerBlockEntity.preRemoveSideEffects: Containers.dropContents, unless the
+            // mod keeps them (a block entity that isn't a `Container`: its drop carries them).
             Some(BlockEntity::Mod(m))
                 if !m.items.is_empty()
-                    && self.world.block_entities.mod_container(old.0).is_some() =>
+                    && self.world.block_entities.mod_container(old.0).is_some()
+                    && !mod_api::__private::parts_installation::block_container_keeps_contents(
+                        &name,
+                    ) =>
             {
                 PreRemove::Contents {
                     slots: m.items.len(),
@@ -1044,20 +1078,27 @@ impl GameLevel<'_> {
             };
             int("x") == Some(pos.x) && int("y") == Some(pos.y) && int("z") == Some(pos.z)
         };
-        let Some(chunk) = self.world.chunks.get_mut(&chunk_key) else {
+        let Some(index) = self
+            .world
+            .chunks
+            .get(&chunk_key)
+            .and_then(|chunk| chunk.saved.as_ref())
+            .and_then(|saved| saved.block_entities.iter().position(at))
+        else {
             return false;
         };
-        let Some(saved) = chunk.saved.as_ref() else {
+        let Some(tag) = self
+            .world
+            .chunks
+            .mutate_chunk(chunk_key, |chunk| {
+                let chunk = std::sync::Arc::make_mut(chunk);
+                let saved = chunk.saved.as_mut()?;
+                Some(std::sync::Arc::make_mut(saved).block_entities.remove(index))
+            })
+            .flatten()
+        else {
             return false;
         };
-        let Some(index) = saved.block_entities.iter().position(at) else {
-            return false;
-        };
-        let chunk = std::sync::Arc::make_mut(chunk);
-        let Some(saved) = chunk.saved.as_mut() else {
-            return false;
-        };
-        let tag = std::sync::Arc::make_mut(saved).block_entities.remove(index);
         if !side_effects {
             return true;
         }
@@ -1085,6 +1126,12 @@ impl GameLevel<'_> {
             PreRemove::Campfire => horizon_client::save::decode_items(tag.get("Items"), 4),
             _ => return true,
         };
+        // Read from the saved tag: taken in against this world's item prototypes.
+        let mut items = items;
+        horizon_client::item_data::clean_stacks(
+            items.iter_mut().flatten(),
+            &self.items.component_defaults,
+        );
         for stack in items {
             self.drop_item_stack(pos, stack);
         }
@@ -1367,6 +1414,72 @@ mod tests {
         });
     }
 
+    /// `block_container_keeps_contents`: removing a kept block's mod container scatters none of
+    /// its stacks (its mod carries them in `block_drops`), while a container on a block the mod
+    /// didn't mark scatters them as `Containers.dropContents` does.
+    #[test]
+    #[ignore = "daily"]
+    fn a_kept_container_keeps_its_stacks_on_removal_and_an_unmarked_one_scatters() {
+        use horizon_client::chunk::Chunk;
+        use horizon_client::containers::{ModBlockEntity, ModBlockEntityFields, ModContainer};
+        use std::sync::Arc;
+        struct Keeper;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Keeper {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                let press = r.block_key("test:press");
+                r.block_container_keeps_contents(&press);
+            }
+        }
+        let Some(root) = crate::game::native_entity_refs::tests::declared_part_root(
+            "game::spill::tests::a_kept_container_keeps_its_stacks_on_removal_and_an_unmarked_one_scatters",
+        ) else {
+            return;
+        };
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new("keeper", Box::new(Keeper))].into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game_at(root, |game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let registry = &game.pack.assets.registry;
+                let press = registry.default_state("test:press").unwrap();
+                let bin = registry.default_state("test:void_bin").unwrap();
+                let container = Arc::new(ModContainer {
+                    slots: 1,
+                    ..Default::default()
+                });
+                game.world.block_entities.set_mod_containers(
+                    [(press.0, container.clone()), (bin.0, container)]
+                        .into_iter()
+                        .collect(),
+                );
+                for (block, scattered) in [(press, 0), (bin, 3)] {
+                    let pos = BlockPos::new(1, 64, 2);
+                    let fields = ModBlockEntityFields {
+                        items: vec![Some(ItemStack::new("minecraft:diamond", 3))],
+                        ..Default::default()
+                    };
+                    game.world.block_entities.insert(
+                        (pos.x, pos.y, pos.z),
+                        BlockEntity::Mod(Box::new(ModBlockEntity::new(
+                            "keeper:box".into(),
+                            fields,
+                        ))),
+                    );
+                    let count: u32 = game.with_level(|_, level, _| {
+                        level.spill.spawns.clear();
+                        level.remove_entity(pos, block, true);
+                        level.spill.spawns.iter().map(|s| s.stack.count).sum()
+                    });
+                    assert_eq!(count, scattered, "{block:?}");
+                }
+            });
+        });
+    }
+
     /// A mod block entity that replaces its own block during its tick is out of the level for
     /// the call, so its removal doesn't reach its part: the part isn't asked, its attachments
     /// go with the block entity, and only its container slots come back out.
@@ -1435,6 +1548,106 @@ mod tests {
             assert_eq!(out, [("minecraft:diamond".to_owned(), 3)]);
         });
     }
+    /// A block entity on a block that keeps its container's stacks replaces its own block during
+    /// its tick: a replacing write, which drops nothing, as for any kept block's removal that
+    /// drops nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_kept_block_replaced_in_its_own_tick_drops_nothing() {
+        use horizon_client::chunk::Chunk;
+        use horizon_client::containers::{ModBlockEntity, ModBlockEntityFields, ModContainer};
+        use mod_api::HostBlockStates;
+        use std::sync::Arc;
+        /// With data `[1]`, it replaces its own block with granite.
+        struct Replacer(mod_api::BlockKey);
+        #[mod_api::horizon_part]
+        impl mod_api::BlockPart for Replacer {}
+        #[mod_api::horizon_part]
+        impl mod_api::BlockEntityPart for Replacer {
+            fn block_entity_tick(
+                &self,
+                host: &mut dyn mod_api::ServerHost,
+                event: &mut mod_api::BlockEntityTickEvent<'_>,
+            ) {
+                if event.entity.data == [1] {
+                    let level = host.level("minecraft:overworld").unwrap();
+                    let state = mod_api::BlockState::of(&host.block_states(), self.0, &[]).unwrap();
+                    let _ = level.set_block(
+                        host,
+                        event.pos,
+                        state,
+                        mod_api::BlockUpdateFlags::KNOWN_SHAPE,
+                    );
+                }
+            }
+        }
+        struct Keeper;
+        #[mod_api::__subscriptions]
+        impl mod_api::Hooks for Keeper {
+            fn register(&self, r: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+                let press = r.block_key("test:press");
+                r.block_container_keeps_contents(&press);
+                let granite = r.block_key("minecraft:granite");
+                let kind = r
+                    .block_entity_type("replacer")
+                    .blocks(&["test:press"])
+                    .build();
+                r.block_entity_part(&kind, Replacer(granite)).unwrap();
+            }
+        }
+        let Some(root) = crate::game::native_entity_refs::tests::declared_part_root(
+            "game::spill::tests::a_kept_block_replaced_in_its_own_tick_drops_nothing",
+        ) else {
+            return;
+        };
+        let mods: mod_api::Mods = vec![mod_api::ModEntry::new("keeper", Box::new(Keeper))].into();
+        crate::game::api_values::install_parts(&mods).unwrap();
+        mod_platform::testing::with_mods(mods, || {
+            crate::game::native_entity_refs::tests::with_game_at(root, |game| {
+                game.options.dedicated = Some(Vec::new());
+                game.world
+                    .chunks
+                    .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+                let registry = &game.pack.assets.registry;
+                let press = registry.default_state("test:press").unwrap();
+                let granite = registry.default_state("minecraft:granite").unwrap();
+                let pos = BlockPos::new(1, 64, 2);
+                let key = (pos.x, pos.y, pos.z);
+                game.world.set(pos.x, pos.y, pos.z, press).unwrap();
+                game.world.block_entities.set_mod_containers(
+                    [(
+                        press.0,
+                        Arc::new(ModContainer {
+                            slots: 1,
+                            ..Default::default()
+                        }),
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+                game.world.block_entities.insert(
+                    key,
+                    BlockEntity::Mod(Box::new(ModBlockEntity::new(
+                        "keeper:replacer".into(),
+                        ModBlockEntityFields {
+                            items: vec![Some(ItemStack::new("minecraft:diamond", 3))],
+                            data: vec![1],
+                            ..Default::default()
+                        },
+                    ))),
+                );
+                let dropped = game.dropped.len();
+                game.tick_mod_block_entity(key);
+                assert_eq!(game.world.block(pos.x, pos.y, pos.z), granite);
+                assert_eq!(
+                    game.dropped.len(),
+                    dropped,
+                    "the kept stacks didn't scatter"
+                );
+            });
+        });
+    }
+
     use horizon_client::{block_entity_item, item_data, mobs::raider, save};
     use horizon_core::nbt::Tag;
 
@@ -1663,5 +1876,160 @@ mod crafter_drop_name_tests {
                 "actual vanilla crafter drop retained source name: {unexpected:?}"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod split_drop_copy_tests {
+    use super::*;
+
+    fn named(name: &str) -> Compound {
+        let mut patch = Compound::new();
+        patch.insert("minecraft:custom_name".into(), Tag::String(name.into()));
+        patch
+    }
+    fn names(stacks: &[ItemStack]) -> Vec<(u32, Option<String>)> {
+        stacks
+            .iter()
+            .map(|s| {
+                let name = s.data().and_then(|d| d.custom_name.as_ref());
+                (s.count, name.map(|t| format!("{t:?}")))
+            })
+            .collect()
+    }
+
+    /// A table giving 65 player heads copies the head's components onto that
+    /// one result before `LootTable.createStackSplitter` cuts it into 64 + 1,
+    /// so both pieces carry them.
+    #[test]
+    fn every_piece_of_a_split_drop_carries_the_copied_components() {
+        let at = [1, 2, 3];
+        let items = Items::empty();
+        let mut pending = Pending::default();
+        pending.copied.insert(
+            at,
+            ("minecraft:player_head".to_owned(), named("Steve's head")),
+        );
+        let raw = vec![ItemStack::new("minecraft:player_head", 65)];
+        let dropped = pending.attach_and_split(&items, at, raw);
+        let got = names(&dropped);
+        assert_eq!(got.iter().map(|(c, _)| *c).collect::<Vec<_>>(), [64, 1]);
+        assert!(got.iter().all(|(_, n)| n.is_some()), "{got:?}");
+    }
+
+    /// `DecoratedPotBlock`'s table copies the pot's decorations onto its one
+    /// result, and only once: a pot with sherds drops with all four.
+    #[test]
+    fn a_broken_pot_drops_with_its_four_decorations() {
+        let at = [1, 2, 3];
+        let items = Items::empty();
+        let mut pending = Pending::default();
+        let sherd = |id: &str| Some(ItemStack::new(id, 1));
+        let sides = [
+            sherd("minecraft:angler_pottery_sherd"),
+            sherd("minecraft:brick"),
+            sherd("minecraft:skull_pottery_sherd"),
+            sherd("minecraft:heart_pottery_sherd"),
+        ];
+        pending.pot.insert(at, sides.clone());
+        let raw = vec![ItemStack::new("minecraft:decorated_pot", 1)];
+        let dropped = pending.attach_and_split(&items, at, raw);
+        assert_eq!(dropped.len(), 1);
+        let kept = dropped[0]
+            .data()
+            .and_then(|d| d.pot_decorations.as_deref())
+            .expect("the pot's decorations");
+        assert_eq!(kept, &sides);
+    }
+
+    /// A shulker box's contents go on the first box of the roll and no other.
+    #[test]
+    fn a_shulker_box_s_contents_arrive_once() {
+        let at = [1, 2, 3];
+        let items = Items::empty();
+        let mut pending = Pending::default();
+        let contents = vec![(0, ItemStack::new("minecraft:diamond", 3))];
+        pending.shulker.insert(at, contents.clone());
+        let raw = vec![
+            ItemStack::new("minecraft:shulker_box", 1),
+            ItemStack::new("minecraft:shulker_box", 1),
+        ];
+        let dropped = pending.attach_and_split(&items, at, raw);
+        let held: Vec<_> = dropped
+            .iter()
+            .map(|s| s.data().map_or(0, |d| d.container.len()))
+            .collect();
+        assert_eq!(held, [1, 0]);
+        assert_eq!(dropped[0].data().unwrap().container, contents);
+    }
+
+    /// Two separate results of the same item in one roll: as on main, the copy
+    /// goes on the first only, and the second keeps its own components.
+    #[test]
+    fn a_second_result_of_the_same_item_keeps_its_own_components() {
+        let at = [1, 2, 3];
+        let items = Items::empty();
+        let mut pending = Pending::default();
+        pending.copied.insert(
+            at,
+            ("minecraft:player_head".to_owned(), named("Steve's head")),
+        );
+        let mut fixed = ItemStack::new("minecraft:player_head", 1);
+        fixed.data_mut().custom_name = Some(Tag::String("Alex's head".into()));
+        let expected_fixed = names(std::slice::from_ref(&fixed));
+        let raw = vec![ItemStack::new("minecraft:player_head", 1), fixed];
+        let dropped = pending.attach_and_split(&items, at, raw);
+        assert_eq!(dropped.len(), 2);
+        assert!(names(&dropped[..1])[0].1.is_some());
+        assert_ne!(names(&dropped[..1]), expected_fixed);
+        assert_eq!(names(&dropped[1..]), expected_fixed);
+    }
+}
+
+#[cfg(test)]
+mod saved_sherd_tests {
+    use super::Pending;
+    use crate::game::game_tests::tests::server_game;
+    use horizon_client::items::ItemStack;
+
+    /// A saved pot's sherd template is taken in against the world's item
+    /// prototypes when it drops as a sherd, so it stacks with the sherds in
+    /// play; the saved block entity and an intact pot's decorations keep the
+    /// template as written.
+    #[test]
+    #[ignore = "daily"]
+    fn a_saved_pots_sherds_drop_as_the_worlds_stacks() {
+        let mut resources = None;
+        let game = server_game(&mut resources);
+        let tag = horizon_core::nbt::parse_snbt(
+            r#"{id:"minecraft:decorated_pot",sherds:{back:"minecraft:brick",front:{id:"minecraft:angler_pottery_sherd",count:1,components:{"minecraft:max_stack_size":64}}}}"#,
+        )
+        .unwrap()
+        .0;
+        let saved = tag.clone();
+        let template = horizon_client::save::item_from_nbt(
+            tag.get("sherds").and_then(|s| s.get("front")).unwrap(),
+        );
+        assert_ne!(
+            template,
+            Some(ItemStack::new("minecraft:angler_pottery_sherd", 1))
+        );
+        let mut pending = Pending::default();
+        pending.record_saved([0, 0, 0], &tag);
+        assert_eq!(
+            pending.dynamic([0, 0, 0], &game.items().component_defaults),
+            vec![
+                ItemStack::new("minecraft:brick", 1),
+                ItemStack::new("minecraft:angler_pottery_sherd", 1),
+            ]
+        );
+        assert!(tag == saved, "the saved template is left as written");
+        let mut pot = ItemStack::new("minecraft:decorated_pot", 1);
+        pending.attach([0, 0, 0], &mut pot);
+        let sides = pot
+            .extra
+            .and_then(|d| d.pot_decorations)
+            .expect("pot decorations");
+        assert_eq!(sides[3], template, "an intact pot keeps the sherd as saved");
     }
 }

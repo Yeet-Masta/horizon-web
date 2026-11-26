@@ -144,6 +144,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     /// `BlockState.triggerEvent`.
     fn trigger_event(&mut self, state: BlockStateId, pos: BlockPos, a: i32, b: i32) -> bool {
+        // A piston template would extend or retract; one already moving still lands.
+        if self.level.template_suppressed(state) {
+            return false;
+        }
         let data = self.b.data(state);
         if data.is(super::classes::Class::PistonBase) {
             self.piston_trigger_event(pos, state, a, b)
@@ -466,10 +470,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         };
         let next = self.state(r.start);
         if !self.is_pushable(next, r.start, r.push_direction, false, r.piston_direction) {
-            if r.extending
-                && self.b.piston_reaction(next) == PushReaction::Popped
-                && self.is_pushable(next, r.start, r.push_direction, true, r.piston_direction)
-            {
+            // PistonStructureResolver.resolve(): a POPPED block is destroyed
+            // even at the build limit, where isPushable fails on the Y bound.
+            if r.extending && self.b.piston_reaction(next) == PushReaction::Popped {
                 r.to_destroy.push(r.start);
                 return Ok(r);
             }

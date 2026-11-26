@@ -138,6 +138,11 @@ const STATUS_REPLY: &[Field] = &[
     ),
     f("fps", "number", "frames per second"),
     f("frames", "integer", "frames drawn so far"),
+    f(
+        "not_drawn",
+        "string|null",
+        "why the last frame was not drawn (suspended, acquire_timeout, occluded, outdated, lost, screenshot_only, ...); null when it was",
+    ),
     f("ticks", "integer", "game ticks so far"),
     f("day_time", "integer", "the world's time of day, ticks"),
     f("uptime_seconds", "number", "seconds since the game started"),
@@ -148,7 +153,12 @@ const STATUS_REPLY: &[Field] = &[
     f(
         "pending_chunks",
         "integer",
-        "chunks still being generated, meshed, uploaded or received",
+        "chunks this client is still generating, meshing or uploading; columns a server has not sent yet are not counted (see terrain_loading)",
+    ),
+    f(
+        "terrain_loading",
+        "boolean",
+        "near terrain still coming in: the view's outermost columns, generation, meshes, uploads or the server's backlog",
     ),
     f(
         "streaming",
@@ -173,7 +183,7 @@ const STATUS_REPLY: &[Field] = &[
     f(
         "server",
         "object|null",
-        "the connected server's address, name and state; null when not connected",
+        "the connected server's address, name and state (status is connection or terrain-loading text, empty once the client has sent its loaded packet); null when not connected",
     ),
 ];
 
@@ -282,6 +292,23 @@ const CONFIRM: Param = Param {
 
 /// MCP tools that delete or overwrite the player's things (`destructiveHint`).
 pub const DESTRUCTIVE: &[&str] = &["world-delete", "fill", "setblock"];
+/// MCP tools whose result can hold text other people wrote (chat, signs, books, names, MOTDs,
+/// log lines, item names and lore): the MCP server labels it untrusted data (docs/security.md).
+pub const UNTRUSTED: &[&str] = &[
+    "events",
+    "messages",
+    "inventory",
+    "container",
+    "screen",
+    "ui",
+    "entities",
+    "wait-for",
+    "logs",
+    "servers",
+    "book",
+    "friends",
+    "lan",
+];
 /// MCP tools that reach other players or the network (`openWorldHint`): only when the player asks.
 pub const OPEN_WORLD: &[&str] = &["connect", "lan", "friends", "chat", "command"];
 
@@ -315,7 +342,7 @@ pub const COMMANDS: &[Cmd] = &[
     // Session
     cmd!("launch", Session, "launch [--world NAME] [--seed N] [--creative] [--version TAG] [--game PATH] [--wait] [GAME ARGS...]",
         "start Horizon with the control socket and wait until it answers",
-        "Finds the game in this order: --game PATH; a horizon-client next to horizon-ctl (a build folder, a release folder or a launcher install); the newest version installed by the Horizon launcher (--version TAG picks one). Launcher installs run with their prepared resources and keep saves in the game home ($HORIZON_HOME, else ~/.local/share/horizon). --wait also waits until the player has spawned and chunks are loaded. Other arguments go to the game (horizon-client --help lists them). The game's output goes to a .log file beside the socket.",
+        "Finds the game in this order: --game PATH; a horizon-client next to horizon-ctl (a build folder, a release folder or a launcher install); the newest version installed by the Horizon launcher (--version TAG picks one). Launcher installs run with their prepared resources and keep saves in the game home ($HORIZON_HOME, else ~/.local/share/horizon). --wait also waits until the player has spawned and the world has loaded. Other arguments go to the game (horizon-client --help lists them). The game's output goes to a .log file beside the socket.",
         ["horizon-ctl launch --world Survival --seed 42 --wait", "horizon-ctl launch --world Flat --creative --render-distance 8"],
         &[flag("world", Ty::Str, "world folder to open or create"), flag("seed", Ty::Str, "seed for a new world"), flag("creative", Ty::Bool, "creative mode for a new world"),
           flag("version", Ty::Str, "an installed launcher version tag such as v2026.10.13"), flag("game", Ty::Str, "path to a horizon-client binary"),
@@ -324,7 +351,7 @@ pub const COMMANDS: &[Cmd] = &[
           flag("headless", Ty::Bool, "no display, window or GPU: a player that plays through these commands only (no screenshots)")],
         mcp: true, local: true),
     cmd!("wait-for", Session, "wait-for screen NAME|widget ID|loaded|chat TEXT|event KIND [--timeout S] [--since SEQ]", "wait until the game reaches a state, then reply",
-        "screen takes the names state shows (playing, inventory, paused, dead, title...); widget an id from ui; loaded means a world is open, the player is in it and no chunk is pending; chat a new line containing TEXT; event a kind from events (death, respawn, item, screen...). chat and event count from --since SEQ (take last from events before acting), else from now. A timeout (default 30 s) is an error with kind timeout.",
+        "screen takes the names state shows (playing, inventory, paused, dead, title...); widget an id from ui; loaded means a world is open, the player is in it, its view's columns are in and no chunk is pending; chat a new line containing TEXT; event a kind from events (death, respawn, item, screen...). chat and event count from --since SEQ (take last from events before acting), else from now. A timeout (default 30 s) is an error with kind timeout.",
         ["horizon-ctl wait-for screen inventory", "horizon-ctl wait-for loaded --timeout 120", "horizon-ctl wait-for chat joined the game", "horizon-ctl wait-for event death --timeout 600"],
         &[flag("timeout", Ty::Num, "seconds (default 30)"), flag("since", Ty::Int, "chat and event: count from this event seq"), p("condition", Ty::Enum(&["screen", "widget", "loaded", "chat", "event"]), "what to wait for"), opt("value", Ty::Rest, "the screen name, widget id, chat text or event kind")], mcp: true, local: false),
     cmd!("events", Observe, "events [--since SEQ] [--limit N]", "what happened since SEQ, oldest first: screens, chat, deaths, respawns, items gained or lost, damage taken (hurt, with its cause), healing, food, dimensions, worlds",
@@ -333,8 +360,8 @@ pub const COMMANDS: &[Cmd] = &[
     cmd!("input-log", Observe, "input-log [--since SEQ] [--limit N] [--origin user|agent|game]", "recent input and who caused it: a person, an agent or the game",
         "Every event has seq, tick and origin. `user` is the window's own keyboard, mouse or pad; `agent` is the control socket (this tool); `game` is input the game made up. A `user-input` event in `events` means a person stepped in while an agent was driving. The game keeps the newest 512.",
         ["horizon-ctl input-log", "horizon-ctl input-log --origin user --limit 20", "horizon-ctl input-log --since 120"], &[flag("since", Ty::Int, "only events after this seq"), flag("limit", Ty::Int, "newest N events"), flag("origin", Ty::Enum(&["user", "agent", "game"]), "user, agent or game")], mcp: true, local: false),
-    cmd!("wait-ready", Session, "wait-ready [SECONDS]", "wait until the player has spawned and no chunks are pending",
-        "Polls status every 250 ms; replies with the status, or an error after SECONDS (default 120).",
+    cmd!("wait-ready", Session, "wait-ready [SECONDS]", "wait until the player has spawned and the world has loaded",
+        "Polls status every 250 ms until the player is in, no chunk work is pending, the view holds the columns its render distance has (view_chunks) and terrain_loading is false; replies with the status, or an error after SECONDS (default 120).",
         ["horizon-ctl wait-ready 300"], &[opt("seconds", Ty::Num, "how long to wait (default 120)")], mcp: true, local: true),
     cmd!("logs", Session, "logs [--lines N] [--crash]", "the end of the game's log, or its newest crash report",
         "Reads the game home ($HORIZON_HOME, else ~/.local/share/horizon): logs/latest.log (the last N lines, default 100) or, with --crash, the newest file in crash-reports. Read-only; works whether the game runs or not.",
@@ -493,7 +520,7 @@ pub const COMMANDS: &[Cmd] = &[
         &[p("slot", Ty::Int, "slot id"), opt("right", Ty::Bool, "right-click"), opt("shift", Ty::Bool, "shift-click")], mcp: true, local: false),
     cmd!("close", Screens, "close", "close the open menu and return to the game", "", ["horizon-ctl close"], &[], mcp: true, local: false),
     cmd!("ui", Screens, "ui", "every widget of the open screen: id, kind, label, bounds, value",
-        "Kinds: button, slider (value 0..1), field, row (worlds, servers, packs, languages), tab (selected), slot (slot-ID, with its stack). Ids come from labels (\"FOV: 70\" is fov, a repeat gets -2) or kind-N without one, and stay put when a value changes. Reflects the last drawn frame (frame counts them).",
+        "Kinds: button, slider (value 0..1), field, row (worlds, servers, packs, languages), tab (selected), slot (slot-ID, with its stack). Registered ids such as singleplayer, options, fov and done stay the same in every language; labels remain translated. Other ids fall back to the drawn label (a repeat gets -2) or kind-N without one. Reflects the last drawn frame (frame counts them).",
         ["horizon-ctl ui"], &[], mcp: true, local: false),
     cmd!("click", Screens, "click ID [right|middle] [shift]", "click a widget of ui by its id, as the mouse would",
         "A field takes focus (then type); slot-ID clicks a slot like click-slot. middle presses the middle button (pick block: a creative player clones the stack).",
@@ -605,6 +632,22 @@ pub const COMMANDS: &[Cmd] = &[
           flag("gpu", Ty::Enum(&["passes", "detail"]), "start: also record each render pass's GPU time (detail: its parts and counters too)"),
           flag("no-samples", Ty::Bool, "start: record frame times and health only"), flag("timeline", Ty::Bool, "start: also record every thread's spans, for 60 seconds at most"),
           flag("bench", Ty::Str, "stop: the path of a benchmark report to embed in the capture")], mcp: true, local: false),
+    cmd!("export", Scripting, "export start NAME --size WxH --fps N[/D] [--frames N|--seconds S] [--format png|encoder] [--hud] [--hold] [--no-settle] | export step N | export stop | export status", "capture exact-size offscreen frames on a fixed clock in a private single-player world or replay",
+        "Start requires an --offscreen client and returns the absolute output folder under the game directory’s exports/. \
+        The default format is PNG. With --hold, step N queues N frames and the camera can be moved between steps. \
+        The settle gate waits for chunks, lighting and uploads before capturing. Live export requires a private single-player world. \
+        The integrated server advances once per client tick and resumes its normal clock when export stops. \
+        Opening to LAN, starting splitscreen or losing the server interrupts the take. While live startup or a tick is pending, \
+        save, save-all and other commands that wait on the server return a busy error. Retry them once a held export is idle. \
+        Replay export works without an integrated server. A standalone replay seeks back up to one second and pre-rolls without capture. \
+        An in-world replay starts at its current position because it cannot seek backwards. Finish, stop and failure emit an export event.",
+        ["horizon-ctl export start take --size 1080x1920 --fps 30000/1001 --frames 90", "horizon-ctl export step 1", "horizon-ctl export status", "horizon-ctl export stop"],
+        &[p("action", Ty::Enum(&["start", "step", "stop", "status"]), "export operation"), opt("name_or_count", Ty::Str, "folder name for start or positive frame count for step"),
+          flag("size", Ty::Str, "start: dimensions in pixels, WxH"), flag("fps", Ty::Str, "start: frames per second as N or N/D"),
+          flag("frames", Ty::Int, "start: frame limit"), flag("seconds", Ty::Num, "start: duration limit in seconds, rounded up to a whole frame"),
+          flag("format", Ty::Enum(&["png", "encoder"]), "start: PNG sequence (default) or external encoder"),
+          flag("hud", Ty::Bool, "start: keep the HUD"), flag("hold", Ty::Bool, "start: wait for explicit steps"),
+          flag("no-settle", Ty::Bool, "start: capture before pending terrain work has finished")], mcp: true, local: false),
     cmd!("screenshot-sequence", Scripting, "screenshot-sequence FRAMES STEP_MS PATH|cancel", "draw a shader pack's first FRAMES frames on a set clock and write the last as a PNG",
         "Needs HORIZON_STILL and a frozen world (docs/agent-control.md). The pack starts over, frame n's clock is n frames and (n - 1) × STEP_MS milliseconds, the PNG is written as screenshot PATH writes it, and the reply comes once it is. Relative paths are taken from horizon-ctl's directory. cancel stops a running sequence.",
         ["horizon-ctl screenshot-sequence 64 50 frame64.png", "horizon-ctl screenshot-sequence 64 16.666667 frame64.png", "horizon-ctl screenshot-sequence cancel"],
@@ -781,6 +824,14 @@ pub fn markdown() -> String {
                     args.join("<br>")
                 }
             ));
+        }
+        if group == Group::World {
+            out.push_str(
+                "\n`tp`, `give`, `xp`, `enchant`, `potion`, `effect`, `time`, `summon`, and a writing\n\
+                 `container` require the world's host. To ask a multiplayer server to act, use `command`\n\
+                 with the corresponding server command; the server checks the player's permissions.\n\
+                 Reading `container` as a guest returns the items the client currently knows.\n",
+            );
         }
     }
     out.push_str(
@@ -969,6 +1020,50 @@ mod tests {
                 !c.summary.is_empty() && !c.examples.is_empty(),
                 "{}",
                 c.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_export_tool_uses_the_same_commands_as_the_cli() {
+        let cmd = find("export").unwrap();
+        assert!(cmd.mcp);
+        assert_eq!(
+            line_for(
+                cmd,
+                &json!({
+                    "action": "start",
+                    "name_or_count": "take",
+                    "size": "1080x1920",
+                    "fps": "30000/1001",
+                    "frames": 90,
+                    "hold": true,
+                    "no-settle": true,
+                })
+            )
+            .unwrap(),
+            [
+                "export",
+                "start",
+                "take",
+                "--size",
+                "1080x1920",
+                "--fps",
+                "30000/1001",
+                "--frames",
+                "90",
+                "--hold",
+                "--no-settle"
+            ],
+        );
+        assert_eq!(
+            line_for(cmd, &json!({"action": "step", "name_or_count": 2})).unwrap(),
+            ["export", "step", "2"],
+        );
+        for action in ["status", "stop"] {
+            assert_eq!(
+                line_for(cmd, &json!({"action": action})).unwrap(),
+                ["export", action]
             );
         }
     }

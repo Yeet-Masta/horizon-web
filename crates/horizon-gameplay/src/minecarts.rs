@@ -98,6 +98,35 @@ impl CartKind {
         }
     }
 }
+/// The boxes of the other carts that meet `area`, taken in list order when a cart's tick began: the
+/// carts do not move while one of them ticks, so the boxes its moves meet inside `area` are in here.
+#[derive(Clone, Debug)]
+pub struct NearCarts {
+    pub area: Aabb,
+    pub boxes: Vec<Aabb>,
+}
+/// How far past a cart's box the boxes are taken when its tick begins (a longer move asks the list).
+pub const NEAR_CARTS_REACH: f64 = 8.0;
+impl NearCarts {
+    /// The boxes that meet `near`, in list order; None when `near` is not inside the area taken.
+    pub fn meeting(&self, near: Aabb) -> Option<Vec<Aabb>> {
+        let inside = [
+            horizon_core::geometry::Axis::X,
+            horizon_core::geometry::Axis::Y,
+            horizon_core::geometry::Axis::Z,
+        ]
+        .into_iter()
+        .all(|a| self.area.min(a) <= near.min(a) && near.max(a) <= self.area.max(a));
+        inside.then(|| {
+            self.boxes
+                .iter()
+                .copied()
+                .filter(|b| b.intersects(near))
+                .collect()
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Minecart {
     pub attachment_lifetime: horizon_mod_runtime::attachments::AttachmentLifetime,
@@ -159,6 +188,10 @@ pub struct Minecart {
     pub loot: Option<horizon_client::save::PendingContainerLoot>,
     /// `Entity.firstTick`: not ticked yet (saved as `HasTicked`).
     pub first_tick: bool,
+    /// Where the cart stood right after the move of this tick (the old
+    /// behavior's `AbstractMinecart.move` runs `applyEffectsFromBlocks` there);
+    /// taken by the fire pass.
+    pub fire_move_at: Option<Vec3>,
     /// `Entity.isInWater` (`wasTouchingWater`): `AbstractMinecart.tick`
     /// updates it after the move (`updateFluidInteraction`), so the move
     /// goes by where the cart was a tick before, and a new cart's first
@@ -189,6 +222,8 @@ pub struct Minecart {
     /// `AbstractMinecart.customDisplayOffset` (`DisplayOffset`), in sixteenths.
     pub custom_offset: Option<i32>,
     pub random: EntityRandom,
+    /// Collision boxes cached during this cart's movement.
+    pub near_carts: Option<Box<NearCarts>>,
 }
 /// `EntityType.MINECART`'s `sized(0.98F, 0.7F)`: float dimensions, widened.
 pub const WIDTH: f64 = 0.98_f32 as f64;
@@ -262,6 +297,8 @@ pub fn forget_unreadable_display(
 /// unseen, so with mods loaded both scans stay.
 #[derive(Default)]
 pub struct CartIndex {
+    /// The tick pass over the carts shares a grid for the movement snapshots.
+    pub pass: bool,
     pub carts: Option<(SeenGrid, Vec<u32>)>,
     /// The grid, and the carts a mob rides.
     pub mobs: Option<(ListStamp, SeenGrid, FxHashSet<u32>)>,
@@ -294,7 +331,12 @@ impl CartIndex {
         if !Self::usable() {
             return false;
         }
-        let fresh = |ids: &[u32]| ids.len() == carts.len() && ids[i] == carts[i].id;
+        // Removing a cart and adding another at the end keeps the length.
+        let fresh = |ids: &[u32]| {
+            ids.len() == carts.len()
+                && ids[i] == carts[i].id
+                && ids.last() == carts.last().map(|c| &c.id)
+        };
         if !self.carts.as_ref().is_some_and(|(_, ids)| fresh(ids)) {
             self.carts = Some((
                 SeenGrid::new(carts.iter().map(Minecart::bounds)),
@@ -314,6 +356,26 @@ impl CartIndex {
             return false;
         }
         true
+    }
+    /// The boxes of the other carts that meet `area`, in list order, for the cart in slot `i`;
+    /// None: the cart asks the list itself.
+    pub fn near_snapshot(&mut self, carts: &[Minecart], i: usize, area: Aabb) -> Option<NearCarts> {
+        if !self.pass {
+            return None;
+        }
+        let mut slots = Vec::new();
+        if !self.carts_near(carts, i, area, &mut slots) {
+            return None;
+        }
+        let id = carts[i].id;
+        let boxes = slots
+            .iter()
+            .map(|&j| &carts[j as usize])
+            .filter(|o| o.id != id)
+            .map(Minecart::bounds)
+            .filter(|b| b.intersects(area))
+            .collect();
+        Some(NearCarts { area, boxes })
     }
     /// The slots of the mobs whose box may meet `area` into `out`, and
     /// whether a mob rides cart `cart`; None: scan them all.
@@ -542,6 +604,7 @@ impl Minecart {
             enabled: true,
             loot: None,
             first_tick: true,
+            fire_move_at: None,
             in_water: false,
             command: horizon_client::command_block::CommandBlock::default(),
             tick_count: 0,
@@ -554,6 +617,7 @@ impl Minecart {
             custom_display: None,
             custom_offset: None,
             random: EntityRandom::own(horizon_client::random_source::entity()),
+            near_carts: None,
         }
     }
     pub fn bounds(&self) -> Aabb {

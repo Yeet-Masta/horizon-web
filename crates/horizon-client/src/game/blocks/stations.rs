@@ -11,6 +11,26 @@ mod draw;
 #[path = "stations/tooltip.rs"]
 mod tooltip;
 use super::smithing_icons::smithing_slot_icons;
+
+thread_local! {
+    /// Nesting depth of tooltip mod callbacks on this thread; re-entrant `ItemResource::tooltip`
+    /// queries fall back to base lines while non-zero.
+    static IN_TOOLTIP_CALLBACK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct TooltipCallbackGuard;
+impl TooltipCallbackGuard {
+    fn enter() -> Self {
+        IN_TOOLTIP_CALLBACK.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+impl Drop for TooltipCallbackGuard {
+    fn drop(&mut self) {
+        IN_TOOLTIP_CALLBACK.with(|depth| depth.set(depth.get() - 1));
+    }
+}
+
 /// Invalid measurements must not reach tooltip positioning or reserve empty space.
 fn tooltip_component_size(size: Option<[f32; 2]>) -> Option<[f32; 2]> {
     size.filter(|size| size.iter().all(|v| v.is_finite() && *v > 0.0))
@@ -485,6 +505,28 @@ fn argb(c: i32) -> u32 {
 fn rgb_of(rgba: u32) -> u32 {
     (rgba & 0xFF) << 16 | (rgba >> 8 & 0xFF) << 8 | (rgba >> 16 & 0xFF)
 }
+/// The custom statistic a workstation's `useWithoutItem` awards after
+/// `openMenu`: `AbstractFurnaceBlock.openContainer` and
+/// `BrewingStandBlock.useWithoutItem` award it even when `createMenu` refused
+/// a lock, so the refused open calls this too.
+pub(super) fn station_open_stat(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "minecraft:crafting_table" => "interact_with_crafting_table",
+        "minecraft:furnace" => "interact_with_furnace",
+        "minecraft:blast_furnace" => "interact_with_blast_furnace",
+        "minecraft:smoker" => "interact_with_smoker",
+        "minecraft:brewing_stand" => "interact_with_brewingstand",
+        "minecraft:beacon" => "interact_with_beacon",
+        "minecraft:grindstone" => "interact_with_grindstone",
+        "minecraft:smithing_table" => "interact_with_smithing_table",
+        "minecraft:stonecutter" => "interact_with_stonecutter",
+        "minecraft:loom" => "interact_with_loom",
+        "minecraft:cartography_table" => "interact_with_cartography_table",
+        n if n.ends_with("anvil") => "interact_with_anvil",
+        _ => return None,
+    })
+}
+
 impl Game<'_> {
     /// `EnchantmentScreen.containerTick`'s `tickBook` for an open enchanting table.
     pub(super) fn tick_enchanting_book(&mut self) {
@@ -507,28 +549,13 @@ impl Game<'_> {
             return false;
         };
         if self.level.xp_seed == 0 {
-            self.level.xp_seed = self.world.random.next_int();
+            self.level.xp_seed = random_source::entity().next_int();
         }
         self.station = Some(Station::new(kind, pos));
         self.station_changed();
         self.beacon_opened();
         // The block's interaction statistic.
-        let stat = match name {
-            "minecraft:crafting_table" => "interact_with_crafting_table",
-            "minecraft:furnace" => "interact_with_furnace",
-            "minecraft:blast_furnace" => "interact_with_blast_furnace",
-            "minecraft:smoker" => "interact_with_smoker",
-            "minecraft:brewing_stand" => "interact_with_brewingstand",
-            "minecraft:beacon" => "interact_with_beacon",
-            "minecraft:grindstone" => "interact_with_grindstone",
-            "minecraft:smithing_table" => "interact_with_smithing_table",
-            "minecraft:stonecutter" => "interact_with_stonecutter",
-            "minecraft:loom" => "interact_with_loom",
-            "minecraft:cartography_table" => "interact_with_cartography_table",
-            n if n.ends_with("anvil") => "interact_with_anvil",
-            _ => "",
-        };
-        if !stat.is_empty() {
+        if let Some(stat) = station_open_stat(name) {
             self.award_custom_stat(stat, 1);
         }
         true
@@ -919,7 +946,7 @@ impl Game<'_> {
             &*name,
             "minecraft:anvil" | "minecraft:chipped_anvil" | "minecraft:damaged_anvil"
         );
-        if !creative && anvil && self.world.random.next_float() < 0.12 {
+        if !creative && anvil && random_source::entity().next_float() < 0.12 {
             match &*name {
                 "minecraft:anvil" => {
                     let _ = self.set_state_named(pos, "minecraft:chipped_anvil", &["facing"]);
@@ -1061,7 +1088,7 @@ impl Game<'_> {
         let pos = s.pos;
         let enchanted_item = enchanted.clone();
         self.enchantment_performed(lapis_needed as i32);
-        self.level.xp_seed = self.world.random.next_int();
+        self.level.xp_seed = random_source::entity().next_int();
         if let Some(s) = self.station.as_mut() {
             s.inputs[0] = Some(enchanted);
             if !self.creative
@@ -1420,7 +1447,7 @@ impl Game<'_> {
             batch.text(atlas, text, x, y, color, false);
             return;
         };
-        let cell = sheet.w / 16;
+        let cell = sheet.texels((atlas.width, atlas.height)).0 / 16;
         let (px, py) = (
             (sheet.u0 * atlas.width as f32) as u32,
             (sheet.v0 * atlas.height as f32) as u32,
@@ -1513,7 +1540,7 @@ impl Game<'_> {
             .data()
             .and_then(|d| d.written.as_ref())
             .map(|w| w.title.as_str())
-            .filter(|t| !t.trim().is_empty())
+            .filter(|t| !horizon_core::java_character::is_blank(t))
         {
             title.to_owned()
         } else if let Some(n) = stack.item_name() {
@@ -1553,8 +1580,9 @@ impl Game<'_> {
         creative: bool,
     ) -> Option<Vec<mod_api::TooltipElement>> {
         self.items().get(&stack.item)?;
+        let mod_callbacks = IN_TOOLTIP_CALLBACK.with(|depth| depth.get() == 0);
         Some(
-            self.build_stack_tooltip_lines(stack, false, creative, advanced, false)
+            self.build_stack_tooltip_lines(stack, false, creative, advanced, mod_callbacks)
                 .into_iter()
                 .map(|(text, color)| {
                     text.try_into_api()
@@ -1573,6 +1601,7 @@ impl Game<'_> {
         advanced: bool,
         mod_callbacks: bool,
     ) -> Vec<(horizon_client::text::Text, u32)> {
+        let _tooltip_callback_guard = mod_callbacks.then(TooltipCallbackGuard::enter);
         let e: &Enchantments = self.active_enchantment_definitions();
         let color = self.rarity_color(stack);
         let advanced = !nested && advanced;
@@ -1807,30 +1836,28 @@ impl Game<'_> {
         }
         details.start("minecraft:stored_enchantments", lines.len());
         if display.shows("minecraft:stored_enchantments") {
-            for (text, curse) in e.tooltip(stack.stored_enchantments()) {
-                push(
-                    &mut lines,
+            for (text, curse) in e.tooltip_text(stack.stored_enchantments()) {
+                lines.push((
                     text,
                     if curse {
                         rgba(255, 85, 85, 255)
                     } else {
                         rgba(170, 170, 170, 255)
                     },
-                );
+                ));
             }
         }
         details.start("minecraft:enchantments", lines.len());
         if display.shows("minecraft:enchantments") {
-            for (text, curse) in e.tooltip(stack.enchantments()) {
-                push(
-                    &mut lines,
+            for (text, curse) in e.tooltip_text(stack.enchantments()) {
+                lines.push((
                     text,
                     if curse {
                         rgba(255, 85, 85, 255)
                     } else {
                         rgba(170, 170, 170, 255)
                     },
-                );
+                ));
             }
         }
         details.start("minecraft:dyed_color", lines.len());
@@ -2360,7 +2387,9 @@ impl Game<'_> {
     /// a bundle's contents do (`ClientBundleTooltip`).
     pub(super) fn tooltip_with_carried(&self, stack: &ItemStack) -> bool {
         self.carried.is_none()
-            || horizon_client::bundle::Contents::of(self.items(), stack).is_some()
+            || (horizon_client::item_tooltip::tooltip_display(stack)
+                .shows("minecraft:bundle_contents")
+                && horizon_client::bundle::Contents::of(self.items(), stack).is_some())
     }
     /// Hovered-slot tooltip on the plain inventory, crafting and container screens.
     pub(super) fn draw_slot_tooltip(&mut self, batch: &mut HudBatch) {
@@ -2579,6 +2608,125 @@ mod tests {
         });
     }
 
+    #[test]
+    #[ignore = "daily"]
+    fn resource_tooltip_includes_mod_edits_and_falls_back_to_base_lines_reentrantly() {
+        use horizon_std::sync::Mutex;
+        use mod_api::{
+            self, ClientHost, Hooks, ItemPart, ItemResource, ItemTooltipEvent, ModEntry, Mods,
+            Registrar, TooltipAppendContext, TooltipAppender, TooltipElement, TooltipEvent,
+            TooltipPlacement,
+        };
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct PartLine;
+        #[mod_api::horizon_part]
+        impl ItemPart for PartLine {
+            fn tooltip(&self, _: &dyn ClientHost, event: &mut TooltipEvent<'_>) {
+                event
+                    .lines
+                    .push((mod_api::Text::literal("part-line"), u32::MAX));
+            }
+        }
+
+        struct AppenderLine;
+        impl TooltipAppender for AppenderLine {
+            fn append(
+                &self,
+                _: &dyn ClientHost,
+                _: &mod_api::ItemStack,
+                _: &TooltipAppendContext,
+                lines: &mut Vec<(mod_api::Text, u32)>,
+            ) {
+                lines.push((mod_api::Text::literal("appender-line"), u32::MAX));
+            }
+        }
+
+        struct TooltipMod {
+            nested_lines: Arc<Mutex<Vec<Vec<mod_api::Text>>>>,
+        }
+        #[mod_api::__subscriptions]
+        impl Hooks for TooltipMod {
+            fn register(&self, r: &mut dyn Registrar, _: &mod_api::RegistrationContext) {
+                let stick = r.item_key("minecraft:stick");
+                r.item_part(stick, PartLine);
+                r.register_tooltip_appender(
+                    "minecraft:lore",
+                    TooltipPlacement::After("minecraft:lore".to_owned()),
+                    Arc::new(AppenderLine),
+                );
+            }
+            fn item_tooltip(&self, host: &dyn ClientHost, event: &mut ItemTooltipEvent<'_>) {
+                // Re-entrant query from inside a tooltip callback must return base lines only
+                // without re-entering item parts, appenders or item_tooltip.
+                let nested = ItemResource::of(event.stack)
+                    .tooltip(host, event.advanced, event.creative)
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|el| match el {
+                        TooltipElement::Text(t, _) => Some(t),
+                        _ => None,
+                    })
+                    .collect();
+                self.nested_lines.lock().unwrap().push(nested);
+                event
+                    .lines
+                    .push((mod_api::Text::literal("event-line"), u32::MAX));
+            }
+        }
+
+        let nested_lines = Arc::new(Mutex::new(Vec::new()));
+        let mods: Mods = vec![ModEntry::new(
+            "tooltip_query",
+            Box::new(TooltipMod {
+                nested_lines: Arc::clone(&nested_lines),
+            }),
+        )]
+        .into();
+        mod_platform::testing::with_mods(mods.clone(), || {
+            crate::game::api_values::install_parts(&mods).unwrap();
+            crate::game::native_entity_refs::tests::with_client_game(|game| {
+                let mut stick = super::ItemStack::new("minecraft:stick", 1);
+                stick.data_mut().set_other(
+                    "minecraft:lore",
+                    Some(horizon_core::nbt::Tag::List(vec![
+                        horizon_core::nbt::Tag::String("base-lore".into()),
+                    ])),
+                );
+                let resource = ItemResource::of(&crate::game::api_values::test_snapshot(&stick));
+                let queried = resource.tooltip(game, false, false).unwrap();
+                let inventory: Vec<_> = game
+                    .stack_tooltip_lines(&stick, false, false)
+                    .into_iter()
+                    .map(|(text, color)| TooltipElement::Text(text.try_into_api().unwrap(), color))
+                    .collect();
+                assert!(queried == inventory);
+                let texts: Vec<mod_api::Text> = queried
+                    .iter()
+                    .filter_map(|el| match el {
+                        TooltipElement::Text(t, _) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(texts.contains(&mod_api::Text::literal("part-line")));
+                assert!(texts.contains(&mod_api::Text::literal("appender-line")));
+                assert!(texts.contains(&mod_api::Text::literal("event-line")));
+
+                let recorded = nested_lines.lock().unwrap();
+                assert!(!recorded.is_empty());
+                for nested in recorded.iter() {
+                    assert!(
+                        !nested.contains(&mod_api::Text::literal("part-line"))
+                            && !nested.contains(&mod_api::Text::literal("appender-line"))
+                            && !nested.contains(&mod_api::Text::literal("event-line")),
+                        "re-entrant query must return base lines only"
+                    );
+                }
+            });
+        });
+    }
+
     /// A stick's part adds its line where `Item.appendHoverText` does, after the name and before
     /// the advanced id line; `item_tooltip` (`ItemTooltipEvent`) then gets the whole tooltip, with
     /// its flags, and its changes are what shows. A stick whose tooltip is hidden asks neither.
@@ -2679,6 +2827,43 @@ mod tests {
             });
         });
     }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_mod_can_annotate_enchantments_by_their_description_key() {
+        use mod_api::{ClientHost, Hooks, ItemTooltipEvent, ModEntry, Mods, text::TextContent};
+
+        struct DescriptionMod;
+        #[mod_api::__subscriptions]
+        impl Hooks for DescriptionMod {
+            fn item_tooltip(&self, _: &dyn ClientHost, event: &mut ItemTooltipEvent<'_>) {
+                let line = event.lines.iter().position(|(text, _)| {
+                    matches!(&text.content, TextContent::Translatable { key, .. }
+                        if key == "enchantment.minecraft.sharpness")
+                });
+                if let Some(line) = line {
+                    event.lines.insert(
+                        line + 1,
+                        (mod_api::Text::literal("Test description"), u32::MAX),
+                    );
+                }
+            }
+        }
+        let mods: Mods = vec![ModEntry::new("description", Box::new(DescriptionMod))].into();
+        mod_platform::testing::with_mods(mods, || {
+            super::super::native_entity_refs::tests::with_game(|game| {
+                for item in ["minecraft:diamond_sword", "minecraft:enchanted_book"] {
+                    let mut stack = super::ItemStack::new(item, 1);
+                    stack.enchant("minecraft:sharpness", 3);
+                    let lines = game.stack_tooltip_lines(&stack, false, false);
+                    assert_eq!(lines[1].0.plain(), "Sharpness III", "{item}");
+                    assert_eq!(lines[1].1, super::rgba(170, 170, 170, 255));
+                    assert_eq!(lines[2].0.plain(), "Test description", "{item}");
+                }
+            });
+        });
+    }
+
     /// A helmet's armour lines go where `ItemStack.addAttributeTooltips` puts them; a mod's
     /// `gather_skipped_attribute_tooltips` takes a slot group out, heading and all, and its
     /// `add_attribute_tooltips` line lands right after what is left, with the local player

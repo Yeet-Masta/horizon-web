@@ -600,6 +600,7 @@ impl TeleportConsumeWorld for Teleporter<'_, '_> {
             .random_teleport(target, Some("minecraft:consumable_does_not_teleport_to")))
     }
     fn teleport_event(&mut self, _: Dim, old: Vec3) -> Result<(), Infallible> {
+        self.0.acting_teleport_cause([old.x, old.y, old.z], "chorus_fruit");
         let ctx = self.0.who_context(Some(Who::Player), None);
         self.0
             .post_game_event("minecraft:teleport", [old.x, old.y, old.z], ctx);

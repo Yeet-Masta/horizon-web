@@ -2,14 +2,13 @@
 //!
 //! Raw injection schema adapted from horizon-mixins (Copyright (c) 2026 levzzz),
 //! MIT licensed; see `HORIZON_MIXINS_LICENSE` and `THIRD_PARTY_NOTICES.md`.
-pub mod inject;
 mod jar;
 pub mod loops;
 pub mod mixin;
 mod wasm;
 pub use jar::{
     JarConflict, JarInputsError, JarRef, JarRequirement, MissingJar, collect_jar_requirements,
-    missing_jars,
+    jar_requirements_for, missing_jars,
 };
 pub use wasm::{MAX_WASM, Wasm, WasmError, sha512_of};
 
@@ -42,6 +41,12 @@ pub const MAX_WASM_MEMORY_MIB: u32 = 4096;
 /// The largest manifest this build reads.
 /// Maximum manifest bytes accepted by package readers and developer tools.
 pub const MAX_MANIFEST: u64 = 32 << 20;
+
+/// The most source files (`Cargo.toml`, `Cargo.lock`, `build.rs`, `src/**`, the root notices) a
+/// package selects: as many as its content files, so a port laid out one file per class fits.
+pub const MAX_SOURCE_FILES: usize = crate::content::MAX_FILES;
+/// The most bytes those source files take, unpacked.
+pub const MAX_SOURCE_BYTES: u64 = 64 << 20;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -110,12 +115,31 @@ pub struct Manifest {
     /// Game internals used by this mod, fingerprinted against its pinned build.
     #[serde(default)]
     pub internals: Vec<Internal>,
-    #[serde(default, deserialize_with = "inject::rows")]
-    pub inject: Vec<inject::Inject>,
     /// Free-form values other mods read through `PackageInfo::property`.
     #[serde(default)]
     pub properties: std::collections::BTreeMap<String, Property>,
+    /// The Java mod a port was made from, so its licence travels with the port
+    /// (docs/modpacks.md, Licences). Recorded only: nothing checks it yet.
+    #[serde(default)]
+    pub ported_from: Option<PortedFrom>,
 }
+
+/// `ported_from = { id, version, license, url }`: the original mod as its own metadata names it.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PortedFrom {
+    /// The original's mod id (`fabric.mod.json` `id`, `mods.toml` `modId`).
+    pub id: String,
+    pub version: String,
+    /// An SPDX id or the original's own licence string.
+    pub license: String,
+    /// The original's page, such as its Modrinth or CurseForge project.
+    pub url: String,
+}
+
+/// Why a manifest that declares `[[inject]]` is refused.
+pub const INJECT_REMOVED: &str = "[[inject]] was removed (#19576): listen through a typed hook in mod_api, \
+     or change the function with [[native.mixin]]; remove the [[inject]] tables";
 
 /// The most `[properties]` keys a manifest may declare.
 pub const MAX_PROPERTIES: usize = 64;
@@ -250,6 +274,9 @@ pub struct Native {
     /// caller is unidentified is refused with `NotPermitted`, whatever other mods declare.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub world_control: bool,
+    /// Whether the mod may regenerate the vanilla levels with `RuntimeLevels::reset_vanilla`; default off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub level_reset: bool,
 }
 
 /// One declared game internal, as listed in the pinned game's `internals.json`.
@@ -390,20 +417,9 @@ impl Manifest {
         };
         let m: Manifest = toml::from_str(text).map_err(|e| {
             // Serde knows the rejected field; this owning boundary supplies its provenance.
-            if let Ok(table) = toml::from_str::<toml::Table>(text)
-                && let Some(rows) = table.get("inject").and_then(toml::Value::as_array)
-            {
-                for row in rows {
-                    if let Some(Err(error)) = row.as_table().cloned().map(inject::row) {
-                        let field = |key| row.get(key).and_then(toml::Value::as_str).unwrap_or("?");
-                        let id = table.get("id").and_then(toml::Value::as_str).unwrap_or("?");
-                        return format!(
-                            "{MANIFEST}: {id}:{}: {}: {error}",
-                            field("id"),
-                            field("at")
-                        );
-                    }
-                }
+            // `inject` is an unknown field now; a manifest that has it is told why.
+            if toml::from_str::<toml::Table>(text).is_ok_and(|table| table.contains_key("inject")) {
+                return format!("{MANIFEST}: {INJECT_REMOVED}");
             }
             let native_alone = toml::from_str::<toml::Table>(text).is_ok_and(|mut table| {
                 table.contains_key("wasm")
@@ -416,19 +432,6 @@ impl Manifest {
                 format!("{MANIFEST}: {e}")
             }
         })?;
-        inject::Inject::check_all(&m.inject, &m.id, m.native.is_some() || m.wasm.is_some())
-            .map_err(|e| e.to_string())?;
-        for entry in &m.inject {
-            if m.dependencies
-                .keys()
-                .any(|id| entry.at.split("::").next() == Some(id.replace('-', "_").as_str()))
-            {
-                return Err(format!(
-                    "{}: target {} is another mod's function; use the library mod's own hooks and functions",
-                    entry.id, entry.at
-                ));
-            }
-        }
         Internal::check_all(&m.internals)?;
         if !m.internals.is_empty() && m.native.is_none() && m.wasm.is_none() {
             return Err(format!(
@@ -535,8 +538,7 @@ impl Manifest {
         }
         if let Some(native) = &m.native {
             // Native source edits share one id space.
-            let mut ids: std::collections::HashSet<_> =
-                m.inject.iter().map(|entry| &entry.id).collect();
+            let mut ids = std::collections::HashSet::new();
             for id in native
                 .mixin
                 .iter()
@@ -649,6 +651,23 @@ impl Manifest {
                 ));
             }
         }
+        if let Some(from) = &m.ported_from {
+            if [&from.id, &from.version, &from.license]
+                .iter()
+                .any(|text| text.trim().is_empty() || text.len() > 256)
+            {
+                return Err(format!(
+                    "{MANIFEST}: ported_from needs id, version and license, each at most 256 bytes"
+                ));
+            }
+            if from.url.len() > 2048
+                || !(from.url.starts_with("https://") || from.url.starts_with("http://"))
+            {
+                return Err(format!(
+                    "{MANIFEST}: ported_from url is an http(s) link of at most 2048 characters"
+                ));
+            }
+        }
         for (i, ns) in m.namespaces.iter().enumerate() {
             // Vanilla's namespace characters, at most as long as an id.
             let chars_ok = (1..=64).contains(&ns.len())
@@ -658,6 +677,13 @@ impl Manifest {
             if !chars_ok {
                 return Err(format!(
                     "{MANIFEST}: namespace {ns:?} is not [a-z0-9_.-]{{1,64}}"
+                ));
+            }
+            // Windows drops a folder name's trailing dot, so `horizon.` would write into
+            // `horizon`; a leading one is refused alike.
+            if ns.starts_with('.') || ns.ends_with('.') {
+                return Err(format!(
+                    "{MANIFEST}: namespace {ns:?} starts or ends with a dot"
                 ));
             }
             if RESERVED_NAMESPACES.contains(&ns.as_str()) {
@@ -730,12 +756,51 @@ pub fn source_file(name: &str) -> bool {
                 .any(|prefix| name.starts_with(prefix)))
 }
 
-fn plain_path(name: &str) -> bool {
-    !name.starts_with('/')
-        && !name.contains(['\\', ':'])
-        && !name
-            .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+pub(crate) fn plain_path(name: &str) -> bool {
+    path_problem(name).is_none()
+}
+
+/// Why `name` is no plain relative path every platform writes as the file it names. ASCII only,
+/// so the case-folded names the package checks compare are the file system's: no normalisation
+/// tells a composed `é` from `e` and a combining accent, which macOS stores as one.
+pub(crate) fn path_problem(name: &str) -> Option<&'static str> {
+    if !name.is_ascii() {
+        return Some("entry names must be ASCII");
+    }
+    if name.starts_with('/') || name.contains(['\\', ':']) {
+        return Some("entry names are relative and separated by `/`");
+    }
+    name.split('/').find_map(|part| {
+        if part.is_empty() || part == "." || part == ".." {
+            Some("entry names have no empty, `.` or `..` parts")
+        } else {
+            part_problem(part)
+        }
+    })
+}
+
+/// Why a path part names another file, or none, on some platform: a trailing dot or space
+/// (Windows drops them, so `a.` and `a ` are `a`), a `~` (NTFS short names such as `resour~1.rs`
+/// alias long ones), a Windows device name whatever its case, extension or trailing spaces
+/// (`COM¹`-`COM³` and `LPT¹`-`LPT³` too), or more than the 255 bytes file systems take.
+pub(crate) fn part_problem(part: &str) -> Option<&'static str> {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ');
+    let stem = stem.to_ascii_lowercase();
+    let superscript = ["com", "lpt"].iter().any(|device| {
+        stem.strip_prefix(device)
+            .is_some_and(|n| ["¹", "²", "³"].contains(&n))
+    });
+    if part.ends_with(['.', ' ']) {
+        Some("no part of an entry name may end in a dot or space, which Windows drops")
+    } else if part.contains('~') {
+        Some("entry names may not hold `~`, which Windows short names use")
+    } else if reserved_mod_id(&stem) || superscript {
+        Some("no part of an entry name may be a Windows device name")
+    } else if part.len() > 255 {
+        Some("no part of an entry name may be longer than 255 bytes")
+    } else {
+        None
+    }
 }
 
 /// A mod as found on disk.
@@ -864,9 +929,9 @@ impl Package {
             return Err("archive I/O is unavailable on wasm32".into());
             #[cfg(any(not(target_arch = "wasm32"), feature = "index"))]
             {
-                let file = horizon_std::fs::File::open(path).map_err(|e| e.to_string())?;
-                let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-                return Self::read_zip(&mut zip);
+                return Self::read_stream(
+                    horizon_std::fs::File::open(path).map_err(|e| e.to_string())?,
+                );
             }
         };
         let mut package = Self::from_parts(&toml, icon, has_cargo, has_source, has_wasm)?;
@@ -886,6 +951,22 @@ impl Package {
         Ok(package)
     }
 
+    /// Read and validate an archive from bytes the caller has already opened: the same rule
+    /// [`read_zip`](Self::read_zip) applies, so what a caller mounts is what these checks read
+    /// rather than a pathname that may hold another package by the time it is opened again.
+    pub fn read_stream<R: Read + std::io::Seek>(reader: R) -> Result<Self, String> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = reader;
+            Err("archive I/O is unavailable on wasm32".into())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut zip = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
+            Self::read_zip(&mut zip)
+        }
+    }
+
     /// Read and validate an archive, including all selected source and resource entries.
     #[cfg(any(not(target_arch = "wasm32"), feature = "index"))]
     pub fn read_zip<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Result<Self, String> {
@@ -896,11 +977,21 @@ impl Package {
         let mut entries = Vec::new();
         let mut layouts = None;
         let mut uses = false;
+        let mut folded = std::collections::HashSet::new();
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i).map_err(|e| e.to_string())?;
             let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             let mode = entry.unix_mode().unwrap_or_default();
             entries.push((name.clone(), entry.size(), entry.is_dir()));
+            // Every entry, a content-only package's too: a reader that takes `\` for `/` (the
+            // resource loader does) must see the same names the checks below saw.
+            if let Some(why) = path_problem(name.strip_suffix('/').unwrap_or(&name)) {
+                return Err(format!("invalid package path: {name:?}: {why}; rename it"));
+            }
+            // One file where case is ignored (Windows, macOS): staging writes one over the other.
+            if !folded.insert(name.strip_suffix('/').unwrap_or(&name).to_ascii_lowercase()) {
+                return Err(format!("duplicate package path, ignoring case: {name}"));
+            }
             let first = name.split('/').next().unwrap_or("");
             if legacy_path(&name) {
                 return Err(format!("{name}: unsupported package path"));
@@ -1018,7 +1109,7 @@ impl Package {
                     }
                 }
             }
-            if source_count > 511 || source_bytes > 64 << 20 {
+            if source_count > MAX_SOURCE_FILES || source_bytes > MAX_SOURCE_BYTES {
                 return Err("native package exceeds its entry or size limit".into());
             }
             if resource_count > crate::content::MAX_FILES
@@ -1130,7 +1221,7 @@ impl Package {
                             .checked_add(size)
                             .ok_or("native package too large")?;
                         *source_count += 1;
-                        if *source_bytes > 64 << 20 || *source_count > 511 {
+                        if *source_bytes > MAX_SOURCE_BYTES || *source_count > MAX_SOURCE_FILES {
                             return Err("native package exceeds its entry or size limit".into());
                         }
                         files.insert(
@@ -1215,7 +1306,10 @@ impl Package {
         put(MANIFEST, manifest_text.as_bytes())?;
         for (name, bytes) in files {
             let code = manifest.native.is_some() || manifest.wasm.is_some();
-            let source = code && source_file(name) && plain_path(name);
+            let source = code && source_file(name);
+            if let Some(why) = path_problem(name).filter(|_| source) {
+                return Err(format!("{name:?}: {why}; rename it"));
+            }
             if *name == crate::layouts::FILE {
                 crate::layouts::Layouts::read(*bytes)?;
                 put(name, bytes)?;
@@ -1373,15 +1467,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn injections_at_dependency_functions_are_refused_by_name() {
-        let text = format!(
-            "{EXAMPLE}[native]\ngame='26.3'\nmixins='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'\nhorizon='0123456789012345678901234567890123456789'\n[dependencies]\nchemlib='1'\n[[inject]]\nid='listen'\nat='chemlib::transfer'\nkind='head'\nwith='listen'\n"
-        );
-        let error = Manifest::parse(&text).unwrap_err();
-        assert!(
-            error.contains("chemlib::transfer") && error.contains("own hooks and functions"),
-            "{error}"
-        );
+    fn a_declared_inject_is_refused_as_removed() {
+        for inject in [
+            "[[inject]]\nid='listen'\nat='game::tick'\nkind='head'\nwith='listen'\n",
+            "inject=[]\n",
+        ] {
+            let error = Manifest::parse(&format!("{EXAMPLE}{inject}")).unwrap_err();
+            assert_eq!(error, format!("{MANIFEST}: {INJECT_REMOVED}"));
+        }
     }
 
     #[test]
@@ -1750,6 +1843,18 @@ capabilities = ["registries"]
             Package::write_files(&manifest, &[("Cargo.toml", b""), ("src/../bad.rs", b"")])
                 .is_err()
         );
+        // A source or documentation name says why it is refused.
+        let error = Package::write_files(
+            &manifest,
+            &[("Cargo.toml", b""), ("README.fran\u{e7}ais.md", b"")],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("README.fran\u{e7}ais.md")
+                && error.contains("must be ASCII")
+                && error.contains("rename it"),
+            "{error}"
+        );
         assert!(
             Package::write_files(
                 &manifest,
@@ -1823,6 +1928,30 @@ capabilities = ["registries"]
         horizon_std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A port written one file per class keeps more than 511 source files, far under the byte cap.
+    #[test]
+    fn a_native_project_of_many_source_files_packs_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        horizon_std::fs::create_dir_all(root.join("src/classes")).unwrap();
+        let manifest = format!(
+            "{EXAMPLE}[native]\ngame = '26.3'\nhorizon = '{}'\nmixins = '{}'\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        horizon_std::fs::write(root.join(MANIFEST), manifest).unwrap();
+        horizon_std::fs::write(root.join("Cargo.toml"), "[package]\nname = 'ruby'\n").unwrap();
+        horizon_std::fs::write(root.join("src/lib.rs"), "mod classes;\n").unwrap();
+        for i in 0..700 {
+            horizon_std::fs::write(root.join(format!("src/classes/c{i}.rs")), "pub struct C;\n")
+                .unwrap();
+        }
+        let bytes = Package::pack_directory(root).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(Package::read_zip(&mut zip).unwrap().manifest.id, "ruby");
+        assert!(zip.by_name("src/classes/c699.rs").is_ok());
+    }
+
     #[test]
     fn package_kind_requires_matching_source_and_native_declaration() {
         let root = horizon_std::env::temp_dir()
@@ -1871,6 +2000,11 @@ capabilities = ["registries"]
         }
         assert!(with("\"a\", \"a\"").unwrap_err().contains("twice"));
         assert!(with("\"Kaisyn\"").unwrap_err().contains("is not"));
+        for dotted in ["horizon.", ".kaisyn"] {
+            let e = with(&format!("\"{dotted}\"")).unwrap_err();
+            assert!(e.contains("with a dot"), "{e}");
+        }
+        assert!(with("\"kai.syn\"").is_ok(), "a dot inside stays allowed");
         assert!(with("\"\"").unwrap_err().contains("is not"));
     }
 
@@ -1897,6 +2031,37 @@ issues = \"http://example.org/issues\"
             .unwrap_err();
             assert!(e.contains(field), "{e}");
         }
+    }
+
+    #[test]
+    fn a_port_records_the_mod_it_came_from() {
+        assert_eq!(Manifest::parse(EXAMPLE).unwrap().ported_from, None);
+        let port = |row: &str| Manifest::parse(&format!("{EXAMPLE}ported_from = {{ {row} }}\n"));
+        let m = port(
+            "id = \"totemcounter\", version = \"1.14.0+mc26.3-fabric\", license = \"MIT\", \
+             url = \"https://modrinth.com/mod/totemcounter\"",
+        )
+        .unwrap();
+        assert_eq!(
+            m.ported_from,
+            Some(PortedFrom {
+                id: "totemcounter".into(),
+                version: "1.14.0+mc26.3-fabric".into(),
+                license: "MIT".into(),
+                url: "https://modrinth.com/mod/totemcounter".into(),
+            })
+        );
+        let e = port("id = \"a\", version = \"1\", license = \" \", url = \"https://a.b\"")
+            .unwrap_err();
+        assert!(e.contains("ported_from needs"), "{e}");
+        let e = port("id = \"a\", version = \"1\", license = \"MIT\", url = \"file:///x\"")
+            .unwrap_err();
+        assert!(e.contains("ported_from url"), "{e}");
+        assert!(port("id = \"a\", version = \"1\", license = \"MIT\"").is_err());
+        assert!(
+            port("id = \"a\", version = \"1\", license = \"MIT\", url = \"https://a.b\", x = 1")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2006,9 +2171,12 @@ issues = \"http://example.org/issues\"
             zip.write_all(bytes).unwrap();
             zip.finish().unwrap();
             let error = Package::read(&archive).err().unwrap();
-            // The one place a module may sit is refused for want of `[wasm]`.
+            // The one place a module may sit is refused for want of `[wasm]`; a name that
+            // isn't plain is refused before its bytes are looked at.
             let expected = if *name == WASM {
                 WasmError::Undeclared.to_string()
+            } else if name.starts_with("./") {
+                "invalid package path".to_string()
             } else {
                 "unsupported executable file".to_string()
             };
@@ -2043,6 +2211,58 @@ issues = \"http://example.org/issues\"
             .is_ok()
         );
         horizon_std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Entry names a platform writes as another file, or as none: native staging puts them on
+    /// disk, and one would overwrite another or go to a device.
+    #[test]
+    fn platform_special_entry_names_are_refused() {
+        use std::io::Write;
+        let read = |names: &[&str]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file(MANIFEST, options).unwrap();
+            zip.write_all(EXAMPLE.as_bytes()).unwrap();
+            for name in names {
+                if name.ends_with('/') {
+                    zip.add_directory(*name, options).unwrap();
+                } else {
+                    zip.start_file(*name, options).unwrap();
+                    zip.write_all(b"text").unwrap();
+                }
+            }
+            Package::read_zip(&mut zip::ZipArchive::new(zip.finish().unwrap()).unwrap())
+        };
+        assert!(read(&["README", "README.md", "NOTICE"]).is_ok());
+        let long = "a".repeat(256);
+        for (names, expected) in [
+            (&["README", "readme"][..], "ignoring case"),
+            (&["NOTICE", "notice/"][..], "ignoring case"),
+            (&["NUL.txt"][..], "Windows device name"),
+            (&["nul .txt"][..], "Windows device name"),
+            (&["README", "README."][..], "end in a dot or space"),
+            (&["README", "README "][..], "end in a dot or space"),
+            (&["docs/cafe\u{301}.txt"][..], "must be ASCII"),
+            (&["README.fran\u{e7}ais.md"][..], "must be ASCII"),
+            (&["docs/COM\u{b9}.txt"][..], "must be ASCII"),
+            (&["docs/com9"][..], "Windows device name"),
+            // An NTFS short name: on a volume that makes them, it is `resource_source.rs`.
+            (&["src/resource_source.rs", "src/resour~1.rs"][..], "`~`"),
+            (&[long.as_str()][..], "255 bytes"),
+        ] {
+            let error = read(names).err().unwrap_or_default();
+            assert!(
+                error.contains(expected)
+                    && (expected == "ignoring case" || error.contains("rename it")),
+                "{names:?}: {error}"
+            );
+        }
+        for device in ["COM\u{b9}.rs", "lpt\u{b3}", "aux .rs"] {
+            assert!(part_problem(device).is_some(), "{device}");
+        }
+        for part in ["com0.rs", "com10", "lpt\u{b9}0", "auxiliary.rs", "a.b"] {
+            assert_eq!(part_problem(part), None, "{part}");
+        }
     }
 
     #[test]

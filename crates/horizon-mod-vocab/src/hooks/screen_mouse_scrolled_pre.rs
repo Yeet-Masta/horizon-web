@@ -20,12 +20,9 @@ pub trait Hooks {
     /// while a screen of the game's or the title's is open (Options and the
     /// pack list opened from the title screen count, with no player and no
     /// `menu`; the title's own). It
-    /// does not fire on the connect and loading
-    /// screens, nor for a server dialog, the server pack, link and
-    /// code-of-conduct prompts, a book or a sign editor drawn over gameplay,
-    /// nor while a world loads or saves: the scroll there stays the game's
-    /// own. A wheel a gamepad or the keyboard's focus sends is not the mouse
-    /// and fires nothing.
+    /// does not fire on the connect and loading screens or on server dialogs
+    /// or prompts. The active book or sign editor receives it, including
+    /// a wheel routed there from a controller.
     #[hook(
         side = "client",
         contract = "cancel",

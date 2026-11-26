@@ -3,7 +3,12 @@
 //! reach any loaded level; both-side reads also reach the client's current level.
 //! A handle of an earlier open or an unloaded block reads `None` (or `false`).
 use super::Game;
-use horizon_client::{streaming::Streaming, world::World};
+use horizon_client::{
+    mobs::spawn_rules,
+    streaming::Streaming,
+    ticket_levels::{self, ChunkTickets},
+    world::World,
+};
 use horizon_core::{
     geometry::Direction,
     position::{BlockPos, ChunkPos},
@@ -12,8 +17,9 @@ use horizon_items::items::ItemStack;
 use horizon_world::registry::BlockStateId;
 use mod_api::world::mod_chunk_tickets::ModTicket;
 use mod_api::{
-    BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, DimensionKey,
-    Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
+    BlockHit, BlockTransformPreview, ChunkDeltaCursor, ChunkDeltas, ChunkRef, ChunkStatus,
+    ChunkTicket, ClipBlock, ClipFluid, DimensionKey, FullChunkStatus, Hand, LevelRef, LightLayer,
+    MapState, PlayerRef, RespawnData, TicketController, Vec3,
 };
 
 fn block_pos([x, y, z]: [i32; 3]) -> BlockPos {
@@ -185,24 +191,66 @@ impl Game<'_> {
             .map(|(structure, position)| mod_api::StructureSearchResult::new(structure, position))
     }
 
+    /// `StructureManager.getStructureAt` and `getStructureWithPieceAt`: the starts the chunk
+    /// at `pos` refers to whose box holds it, through the read the location predicate uses.
+    pub(super) fn level_structures_at(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+    ) -> Option<Vec<mod_api::StructureAt>> {
+        let world = self.native_level_world(level)?;
+        // The starts behind the chunk's references come from the terrain that locates them, and
+        // only from those it holds: a mod's read loads no chunk and builds no start. A level that
+        // can't resolve a reference can't say which structures are there, which isn't "none".
+        let locator = || {
+            if level.dimension() == self.dim.key() {
+                self.end.locator()
+            } else {
+                self.levels.parked_locator_of(level.dimension_id())
+            }
+        };
+        Some(
+            super::structures::cached_structures_reaching_in(world, &locator, pos)?
+                .into_iter()
+                .map(|reach| mod_api::StructureAt::new(reach.name, reach.in_box, reach.in_piece))
+                .collect(),
+        )
+    }
+
     /// `LevelReader.getBiome`: the noise cell selected by this level's BiomeManager zoom.
     /// Unlike a generating server query, an absent selected column returns None.
     fn native_read_biome(&self, level: LevelRef, pos: [i32; 3]) -> Option<String> {
+        let biome = self.native_biome_index(level, pos, true)?;
+        Some(world_biomes!(self).get(biome).name.clone())
+    }
+
+    /// The biome at `pos` in the world's biome table: `zoomed`, `LevelReader.getBiome` through
+    /// the level's biome zoom; otherwise the noise biome of the block's quart
+    /// (`BiomeManager.getNoiseBiomeAtPosition`). None for a stale level or an unloaded column.
+    pub(super) fn native_biome_index(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+        zoomed: bool,
+    ) -> Option<u16> {
         let world = self.native_level_read_world(level)?;
-        let streaming = if level.dimension() == self.native_level_key() {
-            &self.streaming
+        let [qx, qy, qz] = if zoomed {
+            let streaming = if level.dimension() == self.native_level_key() {
+                &self.streaming
+            } else {
+                self.levels.parked_streaming_of(level.dimension_id())?
+            };
+            streaming.biome_zoom.quart_at_block(block_pos(pos))
         } else {
-            self.levels.parked_streaming_of(level.dimension_id())?
+            pos.map(|v| v >> 2)
         };
-        let [qx, qy, qz] = streaming.biome_zoom.quart_at_block(block_pos(pos));
         let chunk = world.chunks.get(&(qx >> 2, qz >> 2))?;
         // ChunkAccess clamps to the dimension's height, not our padded storage.
         // Clamp before conversion to preserve signed block-coordinate extremes.
         let min_qy = world.shape.min_y >> 2;
         let max_qy = (world.shape.max_y() - 1) >> 2;
         let y = qy.clamp(min_qy, max_qy) << 2;
-        let biome = chunk.biome(qx << 2, y, qz << 2);
-        Some(world_biomes!(self).get(biome).name.clone())
+        Some(chunk.biome(qx << 2, y, qz << 2))
     }
 
     /// The authoritative server's `LevelReader.getBiome`, including parked levels.
@@ -354,6 +402,40 @@ impl Game<'_> {
                 .collect(),
         )
     }
+    /// Read the current client level's residency and content journal without loading any chunk.
+    pub(super) fn level_chunk_deltas(
+        &self,
+        level: LevelRef,
+        since: Option<ChunkDeltaCursor>,
+    ) -> Option<ChunkDeltas> {
+        if self.native_client_level()? != level {
+            return None;
+        }
+        let chunks = &self.world.chunks;
+        let now = chunks.touch_cursor();
+        let cursor = ChunkDeltaCursor::new(level, now);
+        let touched = since
+            .and_then(|since| since.for_level(level))
+            .filter(|&(_, seq)| seq <= now.1)
+            .and_then(|since| chunks.touched_since(since));
+        let loaded = |&(x, z)| mod_api::__private::built::chunk_delta([x, z], true);
+        let full = touched.is_none();
+        let mut changes: Vec<_> = match touched {
+            Some(keys) => keys.map(loaded).collect(),
+            None => chunks.keys().map(loaded).collect(),
+        };
+        changes.sort_unstable_by_key(|delta| delta.pos);
+        if !full {
+            changes.dedup_by_key(|delta| delta.pos);
+            for delta in &mut changes {
+                let [x, z] = delta.pos;
+                delta.loaded = chunks.contains_key(&(x, z));
+            }
+        }
+        Some(mod_api::__private::built::chunk_deltas(
+            cursor, full, changes,
+        ))
+    }
     /// Whether this chunk is loaded; false on a client or for a stale handle.
     pub(super) fn chunk_loaded(&self, chunk: ChunkRef) -> bool {
         self.chunk(chunk.level(), chunk.pos()).is_some()
@@ -362,6 +444,93 @@ impl Game<'_> {
     pub(super) fn chunk_status(&self, chunk: ChunkRef) -> Option<ChunkStatus> {
         self.chunk(chunk.level(), chunk.pos())
             .map(|_| ChunkStatus::Full)
+    }
+    /// Ticket state belongs to the same resident server level as the chunk, not necessarily
+    /// the level being ticked. Looking at a parked chunk does not switch the level in.
+    fn resident_chunk_ticket_sources(
+        &self,
+        level: LevelRef,
+        chunk: (i32, i32),
+    ) -> Option<(&ChunkTickets, &Streaming)> {
+        if !self.is_logical_server() || !self.level_handle_current(level) {
+            return None;
+        }
+        if level.dimension() == self.dim.key() {
+            return self
+                .world
+                .chunks
+                .contains_key(&chunk)
+                .then_some((&self.tickets, &self.streaming));
+        }
+        self.levels
+            .parked_of(level.dimension_id())?
+            .resident_chunk_ticket_sources(chunk)
+    }
+    /// `ChunkHolder.getFullStatus`: the loading track alone determines a resident chunk's status.
+    pub(super) fn chunk_full_status(&self, chunk: ChunkRef) -> Option<FullChunkStatus> {
+        let [x, z] = chunk.pos();
+        let (tickets, _) = self.resident_chunk_ticket_sources(chunk.level(), (x, z))?;
+        Some(match tickets.loading_level(x, z) {
+            ..=ticket_levels::ENTITY_TICKING => FullChunkStatus::EntityTicking,
+            ticket_levels::BLOCK_TICKING => FullChunkStatus::BlockTicking,
+            ticket_levels::FULL => FullChunkStatus::Full,
+            _ => FullChunkStatus::Inaccessible,
+        })
+    }
+    /// Direct tickets only: the scheduler's sources and the individual owners of its forced input.
+    pub(super) fn chunk_tickets(&self, chunk: ChunkRef) -> Option<Vec<ChunkTicket>> {
+        let [x, z] = chunk.pos();
+        let pos = (x, z);
+        let (tickets, streaming) = self.resident_chunk_ticket_sources(chunk.level(), pos)?;
+        let mut direct = Vec::new();
+        let mut push = |kind: &str, level| direct.push(ChunkTicket::new(kind.into(), level));
+        tickets.visit_direct_tickets(pos, &mut push);
+        let forced_level = i32::from(ticket_levels::ENTITY_TICKING);
+        if streaming.commanded().contains(&pos) {
+            push("forced", forced_level);
+        }
+        for controller in streaming
+            .mod_tickets()
+            .controllers_at(pos)
+            .filter_map(TicketController::from_slot)
+        {
+            push(controller.id(), forced_level);
+        }
+        direct.sort_unstable_by(|a, b| (&a.kind, a.level).cmp(&(&b.kind, b.level)));
+        Some(direct)
+    }
+    /// The section Y coordinates (bottom up) of a loaded chunk whose palette may hold
+    /// any state of `block` (`PalettedContainer.maybeHas`). None on a client, for a
+    /// stale handle, or when the chunk is not loaded.
+    pub(super) fn chunk_sections_with_block(
+        &self,
+        chunk: ChunkRef,
+        block: mod_api::BlockKey,
+    ) -> Option<Vec<i32>> {
+        let world = self.native_level_world(chunk.level())?;
+        let [cx, cz] = chunk.pos();
+        let loaded = world.chunks.get(&(cx, cz))?;
+        let name = block.id(self);
+        if name.is_empty() {
+            return Some(Vec::new());
+        }
+        let registry = self.pack.assets.registry;
+        let min_section = loaded.min_y() >> 4;
+        Some(
+            loaded
+                .sections
+                .iter()
+                .enumerate()
+                .filter(|(_, section)| {
+                    section.blocks.maybe_has(|v| {
+                        registry
+                            .state(BlockStateId(v))
+                            .is_some_and(|s| s.name == name)
+                    })
+                })
+                .map(|(index, _)| min_section + index as i32)
+                .collect(),
+        )
     }
     /// A handle for chunk `pos` of an open level, loaded or not, so a mod can
     /// force an unloaded chunk. None for a stale handle, on a client, and for
@@ -471,12 +640,6 @@ impl Game<'_> {
         forced: bool,
         natural_spawning: bool,
     ) -> bool {
-        if !calling_mod_owns(controller) {
-            return false;
-        }
-        if self.native_level_streaming(chunk.level()).is_none() || !chunk_in_world(chunk.pos()) {
-            return false;
-        }
         let [x, z] = chunk.pos();
         let ticket = ModTicket {
             controller: controller.slot(),
@@ -484,16 +647,53 @@ impl Game<'_> {
             chunk: (x, z),
             natural_spawning,
         };
-        let dimension = chunk.level().dimension_id();
-        let streaming = if dimension == self.dim.id() {
-            &mut self.streaming
-        } else if let Some(streaming) = self.levels.parked_streaming_of_mut(dimension) {
-            streaming
-        } else {
-            return false;
-        };
-        streaming.set_mod_forced(ticket, forced)
+        self.mod_ticket_streaming(chunk, controller)
+            .is_some_and(|streaming| streaming.set_mod_forced(ticket, forced))
     }
+    /// A runtime-only ticket of `controller` for `operation` on `chunk`, as
+    /// `chunk_set_mod_forced` holds a saved one, with the same refusals. Kept
+    /// apart from the saved tickets: never written, never validated, never
+    /// listed by `level_mod_forced_chunks`, and gone when its level closes.
+    pub(super) fn chunk_set_transient_forced(
+        &mut self,
+        chunk: ChunkRef,
+        controller: TicketController,
+        operation: u128,
+        forced: bool,
+        natural_spawning: bool,
+    ) -> bool {
+        let [x, z] = chunk.pos();
+        let ticket = horizon_client::mod_chunk_tickets::TransientTicket {
+            controller: controller.slot(),
+            operation,
+            chunk: (x, z),
+            natural_spawning,
+        };
+        self.mod_ticket_streaming(chunk, controller)
+            .is_some_and(|streaming| streaming.set_transient_forced(ticket, forced))
+    }
+    /// The streaming of `chunk`'s level for a ticket of `controller`: None
+    /// outside the calling mod's own controller, for a chunk outside the
+    /// world and for a level the server has not opened.
+    fn mod_ticket_streaming(
+        &mut self,
+        chunk: ChunkRef,
+        controller: TicketController,
+    ) -> Option<&mut Streaming> {
+        if !calling_mod_owns(controller) {
+            return None;
+        }
+        if self.native_level_streaming(chunk.level()).is_none() || !chunk_in_world(chunk.pos()) {
+            return None;
+        }
+        let dimension = chunk.level().dimension_id();
+        if dimension == self.dim.id() {
+            Some(&mut self.streaming)
+        } else {
+            self.levels.parked_streaming_of_mut(dimension)
+        }
+    }
+
     /// The chunk tickets `controller` holds in the level, as (owner, chunk
     /// position, natural_spawning), in order. None for a stale handle, on a
     /// client, outside a mod's hook and for another mod's controller.
@@ -700,6 +900,17 @@ impl Game<'_> {
         self.native_level_signals(level, |s| s.has_neighbor_signal(block_pos(pos)))
             .unwrap_or(false)
     }
+    /// `BlockState.isRedstoneConductor(level, pos)` for the block at `pos`, through the redstone
+    /// engine's own query so the two never disagree. None for a position that isn't loaded, and
+    /// as for `signal`.
+    pub(super) fn level_is_redstone_conductor(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+    ) -> Option<bool> {
+        let state = self.level_block_state(level, pos)?;
+        self.native_level_signals(level, |s| s.is_redstone_conductor(state, block_pos(pos)))
+    }
     /// Whether `pos` is inside the world's height and its chunk is loaded
     /// (`Level.isLoaded`, which is false outside `isInValidBounds`): a block
     /// read or write there finds the world. False on a client or for a stale
@@ -728,6 +939,29 @@ impl Game<'_> {
     /// `level_brightness`.
     pub(super) fn level_can_see_sky(&self, level: LevelRef, pos: [i32; 3]) -> Option<bool> {
         Some(self.level_brightness(level, LightLayer::Sky, pos)? >= 15)
+    }
+    /// `LevelReader.canSeeSkyFromBelowWater`: at and above the level's sea level `canSeeSky`;
+    /// below it, the sky seen at sea level and nothing on the way down that dampens light but
+    /// water, lava and bubble columns. The spawn rules' own scan. None on a client, for a stale
+    /// handle and for a position that isn't loaded.
+    pub(super) fn level_can_see_sky_from_below_water(
+        &self,
+        level: LevelRef,
+        pos: [i32; 3],
+    ) -> Option<bool> {
+        let world = self.native_level_world(level)?;
+        let [x, y, z] = pos;
+        if !world.is_loaded_at(x, y, z) {
+            return None;
+        }
+        let sea = self.level_sea_level(level)?;
+        let facts = self.res.facts();
+        Some(spawn_rules::sky_from_below_water(
+            sea,
+            y,
+            |y| world_brightness(world, LightLayer::Sky, [x, y, z]) >= 15,
+            |y| spawn_rules::lets_the_sky_through(facts, world.block(x, y, z)),
+        ))
     }
     /// `LevelLightEngine.checkBlock` at `pos`, queued with the level's light edits: the next
     /// update asks a `dynamic_light` block's parts again (`ask_edited_light_emission`) and
@@ -853,6 +1087,38 @@ impl Game<'_> {
         self.map(id)
             .and_then(|map| map.paint(colors))
             .unwrap_or(false)
+    }
+    /// `MapItemSavedData.setLocked` for a mod's call (`set_locked`). False on a client, for a
+    /// stale handle and a map nothing made; true otherwise, the flag set as given.
+    pub(super) fn level_set_map_locked(&mut self, level: LevelRef, id: i32, locked: bool) -> bool {
+        if !self.native_world_data_allowed(level) {
+            return false;
+        }
+        match self.map(id) {
+            Some(map) => {
+                map.set_locked(locked);
+                true
+            }
+            None => false,
+        }
+    }
+    /// `MapItem.create` for a mod's call: a new map in `level`'s dimension, centred on `center`
+    /// as given, at `scale` with `colors`. None on a client, for a stale handle, a scale over 4
+    /// and a colour list that is not 128 by 128.
+    pub(super) fn level_new_map(
+        &mut self,
+        level: LevelRef,
+        center: [i32; 2],
+        scale: u8,
+        colors: &[u8],
+    ) -> Option<i32> {
+        if !self.native_world_data_allowed(level) || scale > 4 || colors.len() != 128 * 128 {
+            return None;
+        }
+        let mut data = crate::game::maps::MapData::fresh(0.0, 0.0, scale, level.dimension_id());
+        data.center = center;
+        data.colors.copy_from_slice(colors);
+        Some(self.new_map_id(data))
     }
     /// Queue the level to be saved at the start of the next server tick. False for a stale
     /// handle and on a client.
@@ -1326,6 +1592,40 @@ mod tests {
             assert!(!stale.set_map_data(game, id, &colors));
             assert_eq!(level.map_data(game, i32::MAX), None, "a map nothing made");
 
+            // The locked flag changes alone: the pixels stay; refusals change nothing.
+            assert!(level.set_map_locked(game, id, true));
+            assert!(
+                level.set_map_locked(game, id, true),
+                "already locked is still true"
+            );
+            let locked = level.map_data(game, id).unwrap();
+            assert_eq!((locked.locked, locked.colors[5 + 2 * 128]), (true, 34));
+            assert!(!stale.set_map_locked(game, id, false));
+            assert!(
+                !level.set_map_locked(game, i32::MAX, false),
+                "a map nothing made"
+            );
+            assert!(level.map_data(game, id).unwrap().locked);
+            // A new map keeps the centre, scale and colours it is given, in the level's dimension.
+            let mut painted = vec![0u8; 128 * 128];
+            painted[7 + 3 * 128] = 52;
+            let made = level.new_map(game, [64, -64], 2, &painted).unwrap();
+            assert_ne!(made, id);
+            let new = level.map_data(game, made).unwrap();
+            assert_eq!(new.center, [64, -64]);
+            assert_eq!(
+                (new.scale, new.dimension.as_str()),
+                (2, "minecraft:overworld")
+            );
+            assert_eq!((new.colors[7 + 3 * 128], new.locked), (52, false));
+            assert_eq!(
+                level.new_map(game, [0, 0], 5, &painted),
+                None,
+                "scale over 4"
+            );
+            assert_eq!(level.new_map(game, [0, 0], 0, &painted[..10]), None);
+            assert_eq!(stale.new_map(game, [0, 0], 0, &painted), None);
+
             // Ticks run only in the level in place, at a loaded position inside its height.
             let height = level.height(game).unwrap();
             assert!(!level.block_tick(game, [0, height.0, 0]));
@@ -1543,6 +1843,53 @@ mod tests {
             assert_eq!(level.fluid_flow(game, [8, y, 8]), Some(Vec3::ZERO));
             assert_eq!(level.fluid_flow(game, [5, y, 5]), Some(Vec3::ZERO));
             assert_eq!(level.fluid_flow(game, [16, y, 0]), None);
+        });
+    }
+
+    /// `can_see_sky_from_below_water` is the spawn rules' scan down from sea level: kelp stops
+    /// it, a bubble column (`liquid()`) and water don't, and the block at the position itself
+    /// isn't scanned; at and above sea level it is `can_see_sky`. A position that isn't loaded
+    /// and a stale handle read None.
+    #[test]
+    #[ignore = "daily"]
+    fn the_sky_from_below_water_stops_at_kelp_and_not_at_a_bubble_column() {
+        use horizon_client::chunk::Chunk;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level(game.dim.id()).unwrap();
+            let sea = level.sea_level(game).unwrap();
+            let registry = &game.pack.assets.registry;
+            let water = registry.default_state("minecraft:water").unwrap();
+            let kelp = registry.default_state("minecraft:kelp").unwrap();
+            let column = registry.default_state("minecraft:bubble_column").unwrap();
+            for x in 0..3 {
+                for y in sea - 12..sea {
+                    game.world.set(x, y, 0, water).unwrap();
+                }
+            }
+            game.world.set(0, sea - 8, 0, kelp).unwrap();
+            game.world.set(1, sea - 8, 0, column).unwrap();
+            assert_eq!(level.can_see_sky(game, [0, sea, 0]), Some(true));
+            let below = |x, y| level.can_see_sky_from_below_water(game, [x, y, 0]);
+            assert_eq!(below(0, sea - 12), Some(false), "kelp stops the scan");
+            assert_eq!(
+                below(1, sea - 12),
+                Some(true),
+                "a bubble column is liquid()"
+            );
+            assert_eq!(below(2, sea - 12), Some(true), "open water");
+            assert_eq!(below(0, sea - 8), Some(true), "the kelp's own position");
+            assert_eq!(below(0, sea + 4), Some(true), "above sea level");
+            assert_eq!(below(1_000_000, sea - 12), None, "not loaded");
+            let stale = LevelRef::new(WorldEpoch::new(level.epoch().get() + 1), level.dimension());
+            assert_eq!(
+                stale.can_see_sky_from_below_water(game, [2, sea - 12, 0]),
+                None
+            );
         });
     }
 
@@ -1982,6 +2329,153 @@ mod tests {
     /// A game whose mods are `Machines` and `Other`, with their controllers registered.
     fn with_machines(test: impl FnOnce(&mut super::super::Game<'_>)) {
         mod_platform::testing::with_mods(mods(), || with_chunk_streaming(test));
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn chunk_ticket_diagnostics_distinguish_direct_sources_and_propagated_status() {
+        use crate::game::execution_role::ExecutionRole;
+        use horizon_client::{
+            chunk::Chunk,
+            motion::PlayerMotion,
+            ticket_levels::{Sources, ViewedTicket},
+        };
+        use horizon_core::geometry::Vec3;
+        use mod_api::FullChunkStatus::{self, BlockTicking, EntityTicking, Full, Inaccessible};
+        use std::sync::Arc;
+
+        with_machines(|game| {
+            let insert = |game: &mut super::Game<'_>, level: LevelRef, [x, z]: [i32; 2]| {
+                game.world
+                    .chunks
+                    .insert((x, z), Arc::new(Chunk::empty(x, z)));
+                game.chunk(level, [x, z]).unwrap()
+            };
+            let reads = |game: &super::Game<'_>,
+                         chunk: ChunkRef,
+                         status: FullChunkStatus,
+                         direct: &[(&str, i32)]| {
+                assert_eq!(chunk.full_status(game), Some(status), "{chunk:?}");
+                let tickets = chunk.tickets(game).unwrap();
+                let actual: Vec<_> = tickets.iter().map(|t| (t.kind.as_str(), t.level)).collect();
+                assert_eq!(actual, direct, "{chunk:?}");
+            };
+            let unavailable = |game: &super::Game<'_>, chunk: ChunkRef| {
+                assert_eq!(chunk.full_status(game), None, "{chunk:?}");
+                assert_eq!(chunk.tickets(game), None, "{chunk:?}");
+            };
+
+            let overworld = game.level(Dim::Overworld.id()).unwrap();
+            let end = LevelRef::new(overworld.epoch(), Dim::End.key());
+            let player = insert(game, overworld, [0, 0]);
+            let player_view = insert(game, overworld, [2, 0]);
+            let player_ring = insert(game, overworld, [3, 0]);
+            let forced = insert(game, overworld, [20, 0]);
+            let forced_ring = insert(game, overworld, [21, 1]);
+            let full_ring = insert(game, overworld, [22, 2]);
+            let idle = insert(game, overworld, [23, 3]);
+            let portal = insert(game, overworld, [40, 0]);
+            let portal_neighbor = insert(game, overworld, [41, 1]);
+            let mod_only = insert(game, overworld, [60, 0]);
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.settings.render_distance = 2;
+            game.settings.simulation_distance = 6;
+            assert!(forced.set_forced(game, true));
+            {
+                let _guard = in_mod("machines");
+                assert!(forced.set_mod_forced(
+                    game,
+                    quarry(),
+                    TicketOwner::Block([320, 64, 0]),
+                    true,
+                    false
+                ));
+                assert!(forced.set_transient_forced(game, quarry(), 1, true, false));
+                assert!(mod_only.set_transient_forced(game, quarry(), 2, true, false));
+            }
+            game.tickets.add_portal((40, 0));
+            game.update_chunk_tickets();
+            let count = game.world.chunks.len();
+
+            reads(
+                game,
+                player,
+                EntityTicking,
+                &[("player_loading", 31), ("player_simulation", 25)],
+            );
+            reads(game, player_view, EntityTicking, &[("player_loading", 31)]);
+            // Simulation permits entities here, but the loading track is only block ticking.
+            assert!(game.tickets.levels().in_entity_ticking_range(3, 0));
+            reads(game, player_ring, BlockTicking, &[]);
+            let forced_sources = [
+                ("forced", 31),
+                ("machines:quarry", 31),
+                ("machines:quarry", 31),
+            ];
+            reads(game, forced, EntityTicking, &forced_sources);
+            reads(game, forced_ring, BlockTicking, &[]);
+            reads(game, full_ring, Full, &[]);
+            reads(game, idle, Inaccessible, &[]);
+            reads(game, portal, EntityTicking, &[("portal", 30)]);
+            reads(game, portal_neighbor, EntityTicking, &[]);
+            reads(game, mod_only, EntityTicking, &[("machines:quarry", 31)]);
+            assert_eq!(idle.status(game), Some(mod_api::ChunkStatus::Full));
+
+            game.world.chunks.remove(&(21, 1)).unwrap();
+            game.world.chunks.remove(&(60, 0)).unwrap();
+            unavailable(game, forced_ring);
+            unavailable(game, mod_only);
+            unavailable(game, ChunkRef::new(end, forced.pos()));
+            let stale = LevelRef::new(
+                WorldEpoch::new(overworld.epoch().get() + 1),
+                overworld.dimension(),
+            );
+            unavailable(game, ChunkRef::new(stale, forced.pos()));
+            assert_eq!(game.world.chunks.len(), count - 2, "reads must not load");
+            assert_eq!(
+                game.tickets.portal_tickets()[0].ticks_left,
+                300,
+                "reads must not age tickets"
+            );
+
+            game.player = None;
+            game.world_root = game.save.root.clone();
+            game.enter_level(Dim::End).unwrap();
+            let viewed = insert(game, end, forced.pos());
+            let arena = insert(game, end, [0, 0]);
+            let arena_ring = insert(game, end, [9, 9]);
+            let ticking_view = insert(game, end, [2000, 2000]);
+            // Supply these inputs to the real scheduler without joining a remote viewer.
+            game.tickets.update(Some(Sources {
+                dragon: Some((0, 0)),
+                viewed: vec![
+                    ViewedTicket {
+                        center: (19, 0),
+                        radius: 1,
+                        ticking: false,
+                    },
+                    ViewedTicket {
+                        center: (2000, 2000),
+                        radius: 0,
+                        ticking: true,
+                    },
+                ],
+                ..Sources::default()
+            }));
+            reads(game, viewed, Full, &[("viewed", 33)]);
+            reads(game, ticking_view, EntityTicking, &[("viewed", 31)]);
+            reads(game, arena, EntityTicking, &[("dragon", 24)]);
+            reads(game, arena_ring, Full, &[]);
+            reads(game, forced, EntityTicking, &forced_sources);
+            assert_eq!(game.dim, Dim::End, "parked reads must not switch levels");
+
+            game.options.execution_role = ExecutionRole::Client;
+            unavailable(game, arena);
+            game.options.execution_role = ExecutionRole::IntegratedServer;
+            game.native_lifecycle.begin_close();
+            game.native_lifecycle_world_closed();
+            unavailable(game, arena);
+        });
     }
 
     #[test]
@@ -2883,6 +3377,78 @@ mod environment_read_tests {
 
     #[test]
     #[ignore = "daily"]
+    fn environment_floats_read_time_weather_and_the_biome_at_a_position() {
+        use crate::game::execution_role::ExecutionRole;
+        use horizon_protocol::connection::Pipe;
+
+        with_game(|game| {
+            let overworld = game.level("minecraft:overworld").unwrap();
+            paint_biome(game, "minecraft:plains");
+            game.world.weather.rain_level = (0.0, 0.0);
+            game.world.weather.thunder_level = (0.0, 0.0);
+            let sun = |game: &crate::game::Game<'_>| {
+                overworld.environment_float(
+                    game,
+                    "minecraft:visual/sky_light_factor",
+                    [8.5, 64.0, 8.5],
+                )
+            };
+            // data/minecraft/timeline/day.json: 1.0 from 730 to 11270, 0.24 from 13140 to 22860.
+            game.world.day_time = 6000;
+            assert_eq!(sun(game), Some(1.0));
+            assert_eq!(
+                overworld.environment_float(game, "visual/sky_light_factor", [8.5, 64.0, 8.5]),
+                Some(1.0),
+                "the namespace may be left out"
+            );
+            game.world.day_time = 18000;
+            assert_eq!(sun(game), Some(0.24));
+            game.world.day_time = 6000;
+            game.world.weather.rain_level = (1.0, 1.0);
+            let rainy = sun(game).unwrap();
+            assert!(rainy < 1.0, "rain dims the sky: {rainy}");
+            game.world.weather.rain_level = (0.0, 0.0);
+            // The biome layer: pale_garden.json sets audio/music_volume to 0.
+            let music = |game: &crate::game::Game<'_>| {
+                overworld.environment_float(game, "audio/music_volume", [8.5, 64.0, 8.5])
+            };
+            assert_eq!(music(game), Some(1.0));
+            paint_biome(game, "minecraft:pale_garden");
+            assert_eq!(music(game), Some(0.0));
+            assert_eq!(
+                overworld.environment_float(game, "visual/sky_color", [8.5, 64.0, 8.5]),
+                None,
+                "not a float"
+            );
+            assert_eq!(
+                overworld.environment_float(game, "visual/nothing", [0.0; 3]),
+                None
+            );
+            let stale = LevelRef::new(
+                WorldEpoch::new(overworld.epoch().get() + 1),
+                overworld.dimension(),
+            );
+            assert_eq!(
+                stale.environment_float(game, "visual/sky_light_factor", [0.0; 3]),
+                None
+            );
+
+            game.options.execution_role = ExecutionRole::Client;
+            game.options.dedicated = None;
+            let (client, _server) = Pipe::pair();
+            game.connect_local(client, "EnvironmentReadTest").unwrap();
+            game.remote.as_mut().unwrap().logged_in = true;
+            let level = game.level("minecraft:overworld").unwrap();
+            assert_eq!(
+                level.environment_float(game, "visual/sky_light_factor", [8.5, 64.0, 8.5]),
+                None,
+                "server only"
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn sky_and_logical_height_read_the_named_dimension_and_client_state() {
         use crate::game::execution_role::ExecutionRole;
         use horizon_client::chunk::LevelShape;
@@ -2931,6 +3497,14 @@ mod environment_read_tests {
                 Some(11),
                 "parked level keeps its dimension's sky"
             );
+            // The End's own branch of Game::sky_darken: the vanilla vectors record 0 at every time.
+            game.enter_level(Dim::End).unwrap();
+            for time in [0, 1234, 6000, 12500, 18000] {
+                game.world.day_time = time;
+                assert_eq!(game.sky_darken(), 0, "the End at {time}");
+            }
+            game.enter_level(Dim::Overworld).unwrap();
+            game.world.day_time = 6000;
             let stale = LevelRef::new(
                 WorldEpoch::new(overworld.epoch().get() + 1),
                 overworld.dimension(),
@@ -3165,6 +3739,101 @@ mod environment_read_tests {
         });
     }
 
+    /// A village start's box is its pieces' union grown by 12 for its terrain adaptation, so
+    /// its corner is in the box and in no piece, and a piece's corner is in both.
+    #[test]
+    #[ignore = "daily"]
+    fn structures_at_names_the_starts_whose_box_holds_a_position() {
+        use horizon_client::vanillagen::{TerrainResources, VanillaTerrain};
+        use mod_api::{StructureAt, StructureSearch};
+
+        with_game(|game| {
+            let directory = game.options.resources.join("worldgen");
+            let terrain = VanillaTerrain::for_dimension(
+                TerrainResources {
+                    data: Some(&game.pack.data_changes),
+                    dir: &directory,
+                    registry: game.pack.assets.registry,
+                    biomes: world_biomes!(game),
+                    item_data: &game.res.core.item_data,
+                },
+                12345,
+                "minecraft:overworld",
+            )
+            .unwrap();
+            let terrain = Arc::new(terrain);
+            game.end.set_locator(Some(terrain.clone()));
+            let overworld = game.level("minecraft:overworld").unwrap();
+            let village = "minecraft:village_plains";
+            let found = overworld
+                .find_nearest_structure(game, village, StructureSearch::new([0, 64, 0], 100))
+                .expect("seed 12345 has a plains village");
+            let home = (found.position[0] >> 4, found.position[2] >> 4);
+            let start = terrain
+                .starts_at(home.0, home.1)
+                .into_iter()
+                .find(|start| start.name == village)
+                .expect("the located chunk owns the start");
+            let in_piece = start.pieces[0].bounding_box().min;
+            let in_box = start.bounding_box.min;
+            assert!(
+                !start
+                    .pieces
+                    .iter()
+                    .any(|p| p.bounding_box().is_inside(in_box)),
+                "the box's corner is outside every piece"
+            );
+            let refer = |game: &mut crate::game::Game<'_>, pos: [i32; 3]| {
+                let mut chunk = Chunk::empty(pos[0] >> 4, pos[2] >> 4);
+                chunk.structure_refs = vec![(Arc::from(village), home)];
+                game.world
+                    .chunks
+                    .insert((pos[0] >> 4, pos[2] >> 4), Arc::new(chunk));
+            };
+            let unloaded = [in_box[0], in_box[1], in_box[2]];
+            assert_eq!(overworld.structures_at(game, unloaded), None);
+
+            refer(game, in_piece);
+            refer(game, in_box);
+            assert_eq!(
+                overworld.structures_at(game, in_piece),
+                Some(vec![StructureAt::new(village.to_owned(), true, true)])
+            );
+            assert_eq!(
+                overworld.structures_at(game, in_box),
+                Some(vec![StructureAt::new(village.to_owned(), true, false)])
+            );
+            let above = [in_box[0], start.bounding_box.max[1] + 1, in_box[2]];
+            assert_eq!(overworld.structures_at(game, above), Some(Vec::new()));
+            let stale = LevelRef::new(
+                WorldEpoch::new(overworld.epoch().get() + 1),
+                overworld.dimension(),
+            );
+            assert_eq!(stale.structures_at(game, in_piece), None);
+
+            // A reference to starts the generator doesn't hold: unknown, and nothing is built.
+            let far = (home.0 + 4000, home.1);
+            let mut chunk = Chunk::empty(in_box[0] >> 4, in_box[2] >> 4);
+            chunk.structure_refs = vec![(Arc::from(village), far)];
+            game.world
+                .chunks
+                .insert((in_box[0] >> 4, in_box[2] >> 4), Arc::new(chunk));
+            assert!(terrain.cached_starts_at(far.0, far.1).is_none());
+            assert_eq!(overworld.structures_at(game, in_box), None);
+            assert!(
+                terrain.cached_starts_at(far.0, far.1).is_none(),
+                "the read built no start"
+            );
+
+            game.end.set_locator(None);
+            assert_eq!(
+                overworld.structures_at(game, in_piece),
+                None,
+                "references nothing locates are unknown"
+            );
+        });
+    }
+
     /// API results over original fixture worlds, compared with independently recorded vanilla calls.
     #[test]
     #[ignore = "daily"]
@@ -3329,5 +3998,40 @@ mod environment_read_tests {
                 );
             }
         });
+    }
+
+    #[test]
+    fn chunk_sections_with_block_skips_empty_sections_and_returns_none_when_unloaded() {
+        if horizon_std::env::var_os("HORIZON_TEST_RESOURCES").is_none() {
+            return;
+        }
+        let mut game = crate::game::native_machines::tests::server_game();
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        let ore = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:diamond_ore")
+            .unwrap();
+        game.world.set(1, -48, 1, ore).unwrap();
+        game.world.set(2, 20, 2, ore).unwrap();
+
+        let level = <dyn mod_api::Host>::level(&game, "minecraft:overworld").unwrap();
+        let loaded = level.chunk_ref(&game, [0, 0]).unwrap();
+        let unloaded = level.chunk_ref(&game, [5, 5]).unwrap();
+        let ore_key = mod_api::__private::block_key("minecraft:diamond_ore").unwrap();
+        let gold_key = mod_api::__private::block_key("minecraft:gold_ore").unwrap();
+
+        assert_eq!(
+            loaded.sections_with_block(&game, ore_key),
+            Some(vec![-3, 1])
+        );
+        assert_eq!(
+            loaded.sections_with_block(&game, gold_key),
+            Some(Vec::new())
+        );
+        assert_eq!(unloaded.sections_with_block(&game, ore_key), None);
     }
 }

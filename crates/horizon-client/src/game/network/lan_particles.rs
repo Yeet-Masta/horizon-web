@@ -33,7 +33,7 @@ pub(super) struct LanExplosion {
 /// A particle request awaiting delivery to players in its level.
 pub(super) struct QueuedParticle {
     pub dimension: &'static str,
-    pub options: ParticleOptions,
+    pub options: std::sync::Arc<ParticleOptions>,
     pub state: Option<BlockStateId>,
     pub at: [f64; 3],
     pub spread: [f64; 3],
@@ -381,7 +381,7 @@ impl Game<'_> {
         }
         self.lan_send_particles(QueuedParticle {
             dimension: self.dim.id(),
-            options,
+            options: options.into(),
             state: None,
             at,
             spread: [0.0; 3],
@@ -394,13 +394,30 @@ impl Game<'_> {
     /// `ParticleTypes.STREAM_CODEC`'s value for `options`: the type's
     /// network id and the data it carries (`state` for the block particles).
     /// None while not serving, or for a particle whose data isn't sent from
-    /// here (items, trails).
+    /// here (items).
     pub(super) fn network_particle(
         &self,
         options: &ParticleOptions,
         state: Option<BlockStateId>,
     ) -> Option<Particle> {
         self.lan.as_ref()?.hub.particle(options, state)
+    }
+
+    /// A potion's break on an older release's server, whose splash event carried its sound
+    /// (`adapter::splash_sound`): the sound is played with the splash. False for an event to
+    /// skip, a sound already played that way; true for one to apply.
+    pub(super) fn splash_sound(&mut self, id: i32, pos: [i32; 3]) -> bool {
+        if !self.older_server() {
+            return true;
+        }
+        let Some(remote) = self.remote.as_mut() else {
+            return true;
+        };
+        let answer = remote.splash_sound.event(id, pos);
+        if let Some(sound) = answer.sound {
+            self.level_event_at(sound, pos, 0);
+        }
+        answer.apply
     }
 
     /// This window plays on an older release's server through the adapter.
@@ -543,7 +560,7 @@ impl Game<'_> {
             );
             return;
         }
-        for _ in 0..p.count {
+        for _ in 0..packet_particle_count(p.count) {
             let (at, v) = spread(self.particles.random(), p.randomization, p.pos, d, s);
             add(&mut self.particles, at, v);
         }
@@ -577,7 +594,13 @@ impl Game<'_> {
             let sound = self
                 .remote_sound_name(&p.sound)
                 .unwrap_or_else(|| "minecraft:entity.generic.explode".to_owned());
-            self.audio.play(&sound, Some(p.center), 4.0, pitch);
+            self.audio.play_on(
+                mod_api::SoundSource::Blocks as usize,
+                &sound,
+                Some(p.center),
+                4.0,
+                pitch,
+            );
         }
         if let Some(options) = self.received_particle(&p.particle, p.center) {
             self.particles.add(&options, p.center, [1.0, 0.0, 0.0]);
@@ -749,7 +772,7 @@ impl Game<'_> {
         }
         self.lan_send_particles(QueuedParticle {
             dimension: self.dim.id(),
-            options,
+            options: options.into(),
             state: None,
             at,
             spread: [1.0; 3],
@@ -911,6 +934,16 @@ fn explosion_packet(
     })
 }
 
+/// How many particles `handleParticleEvent` makes of a packet's `count`. Its
+/// particles share one group, which keeps no more than
+/// `ParticleGroup.MAX_PARTICLES` alive, so a larger count from a server only
+/// costs the client time (a loop of up to 2^31 draws); none below 1.
+fn packet_particle_count(count: i32) -> usize {
+    usize::try_from(count)
+        .unwrap_or(0)
+        .min(horizon_client::particles::MAX_PARTICLES)
+}
+
 #[cfg(test)]
 pub(in crate::game) mod tests {
     use super::*;
@@ -924,6 +957,16 @@ pub(in crate::game) mod tests {
     use horizon_client::particles::{ExplosionParticle, ParticleOptions, ParticleType};
     use horizon_core::random::LegacyRandom;
     use horizon_protocol::packets::play;
+
+    /// A packet's count makes at most as many particles as one group keeps
+    /// alive (16384); a negative one makes none.
+    #[test]
+    fn a_particle_packet_makes_at_most_a_group_of_particles() {
+        assert_eq!(packet_particle_count(40), 40);
+        assert_eq!(packet_particle_count(16_384), 16_384);
+        assert_eq!(packet_particle_count(i32::MAX), 16_384);
+        assert_eq!(packet_particle_count(-7), 0);
+    }
 
     #[test]
     fn legacy_effect_markers_select_providers_without_a_registry_lookup() {
@@ -1292,6 +1335,39 @@ pub(in crate::game) mod tests {
         assert_eq!(
             p.particle.data,
             Some(ParticleData::Color(0xFFFF_0000u32 as i32))
+        );
+    }
+
+    /// `EyeblossomBlock.Type.spawnTransformParticle`'s `TrailParticleOption`:
+    /// the one packet carries the target, the type's colour and the duration,
+    /// with no spread and no speed.
+    #[test]
+    fn trail_particles_carry_their_target_colour_and_duration() {
+        // `Particle::read` reads a trail's data from its pinned id, 59.
+        let mut names = vec!["minecraft:empty".to_string(); 59];
+        names.push("minecraft:trail".to_string());
+        let (hub, rx_near, rx_far) = test_hub("TrailTest", names, None);
+
+        let at = [0.5, 64.5, 0.5];
+        let target = [
+            0.806_652_791_887_043_2,
+            66.159_363_459_920_83,
+            0.988_928_599_005_058_9,
+        ];
+        let options = ParticleOptions::trail(target, 16_545_810, 24);
+        send_hub_level_particles(&hub, &options, at, [0.0; 3], 0.0, 1, None);
+
+        assert!(rx_far.try_recv().is_err(), "only players within 32 blocks");
+        let p = level_particles(&rx_near);
+        assert_eq!(p.count, 1, "one particle");
+        assert_eq!(p.dist, [0.0; 3]);
+        assert_eq!(p.max_speed, [0.0; 3]);
+        assert_eq!(p.randomization, 0, "DEFAULT");
+        assert_eq!(p.pos, at);
+        assert_eq!(p.particle.id, 59);
+        assert_eq!(
+            p.particle.data,
+            Some(ParticleData::Trail(target, 16_545_810, 24))
         );
     }
 }

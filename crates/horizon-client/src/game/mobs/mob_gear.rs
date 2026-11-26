@@ -8,7 +8,7 @@ use super::Game;
 mod drowned_spawn_tests;
 use horizon_client::{
     mobs::{
-        drops::{self, SLOTS},
+        drops::SLOTS,
         finalize::equip_stack,
         gear::{self, MAIN},
         spawner::equipment_table,
@@ -42,7 +42,7 @@ impl Game<'_> {
             return;
         }
         let params = EntityLootParams {
-            this: drops::loot_entity(m, None),
+            this: self.mob_loot_entity(m),
             ..EntityLootParams::default()
         };
         let seed = self.level.seed;

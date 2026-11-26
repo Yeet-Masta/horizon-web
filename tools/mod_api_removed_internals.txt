@@ -1,0 +1,71 @@
+# Game internals a native mod could declare (internals.json) that a pull request removed on purpose, checked by
+# tools/check_mod_api_unchanged.py. A removal passes only when its path is listed here; a listed path the game still
+# has fails, so a line goes when its internal comes back.
+#
+# One line per path: the path as internals.json writes it, then the issue, as `path  #issue`. A line for some of a
+# path's entries names their kind, their cfg or both: `path  kind=field  #issue`, `path  kind=fn  cfg=unix  #issue`
+# (`cfg=` alone: the unconditional ones). Lines starting with # are comments.
+horizon_client::game::dispenser::section_order  #19368
+horizon_client::game::native_replay::DEVICE_NAMES  #19310
+horizon_client::game::native_replay::MAX_RECORDING_ID  #19310
+horizon_client::game::native_replay::reparse_point  #19310
+horizon_client::game::native_replay::valid_id  #19310
+horizon_mod_package::manifest::inject::Inject  #19576
+horizon_mod_package::manifest::inject::Kind  #19576
+horizon_client::game::Game<'_>::lod_blue_map  kind=field  #19554
+horizon_client_render::bluemap::BlueMap  kind=struct  #19554
+horizon_client_render::bluemap::Candidate  kind=struct  #19554
+horizon_client_render::bluemap::Change  kind=struct  #19554
+horizon_client_render::bluemap::Columns  kind=type  #19554
+horizon_client_render::bluemap::Inner  kind=struct  #19554
+horizon_client_render::bluemap::Key  kind=type  #19554
+horizon_client_render::bluemap::Lowres  kind=struct  #19554
+horizon_client_render::bluemap::MapInfo  kind=struct  #19554
+horizon_client_render::bluemap::Palette  kind=struct  #19554
+horizon_client_render::bluemap::Pixel  kind=struct  #19554
+horizon_client_render::bluemap::Server  kind=struct  #19554
+horizon_client_render::bluemap::Settings  kind=struct  #19554
+horizon_client_render::bluemap::Slot  kind=enum  #19554
+horizon_client_render::bluemap::State  kind=struct  #19554
+horizon_client_render::bluemap::Tile  kind=struct  #19554
+horizon_client::game::points  #19576
+horizon_client::game::points::host_side  #19576
+horizon_client::game::points::mirror_in  #19576
+horizon_client::game::points::mirror_out  #19576
+horizon_client::game::points::unconverted  #19576
+horizon_client_render::ui::NINE_SLICE  #13220
+horizon_client_render::ui::draw_sprite  #13220
+horizon_client_render::ui::nine_slice_metadata  #13220
+horizon_client::game::interactions::Game<'_>::interaction_hit  #15412
+horizon_client_render::font::TrueType::ids  kind=field  #20187
+horizon_client::game::Game<'_>::hud  #20196
+horizon_client::game::Game<'_>::hud_layers  #20196
+horizon_client::game::reused_hud_vertices  #20196
+horizon_client::game::store_hud_vertices  #20196
+horizon_client::game::functions::FnState::next_seq  kind=field  #20401
+horizon_client::game::functions::Scheduled  kind=struct  #20401
+horizon_client::game::functions::Scheduled::id  kind=field  #20401
+horizon_client::game::functions::Scheduled::seq  kind=field  #20401
+horizon_client::game::functions::Scheduled::time  kind=field  #20401
+horizon_client::game::banners::Game<'_>::banner_layers_at  #20193
+horizon_client::game::banners::layer_textures  #20193
+horizon_client::game::item_draw::Game<'_>::item_level  kind=method  #20192
+horizon_client::game::native_shaders::manifest_refused  #20601
+horizon_client::game::shader_packs::block_id_table  #20601
+horizon_client::game::native_replay::FileIdentity  kind=struct  #19246
+horizon_client::game::native_replay::FileIdentity::device  kind=field  #19246
+horizon_client::game::native_replay::FileIdentity::index  kind=field  #19246
+horizon_client::game::native_replay::FileIdentity::of  kind=method  #19246
+horizon_client::game::native_replay::ReplayOrigin::identity  kind=field  #19246
+horizon_client::game::replay::Replay::archive  kind=field  #19246
+horizon_client::game::replay::Replay::identity  kind=field  #19246
+horizon_client::game::studio::archive_unchanged  kind=fn  #19246
+horizon_client::game::studio::note_written  kind=fn  #19246
+horizon_client_render::gfx::Renderer::pack_atlas  #20466
+horizon_client_render::gfx::Renderer::pack_material_atlases  #20466
+horizon_client::game::creatures::mob_group::Group<M>::deferred  kind=field  #18420
+horizon_client::game::creatures::mob_islands::Foreign<'_>::defers  kind=field  #18420
+horizon_client::game::creatures::mob_islands::defers  kind=fn  #18420
+horizon_client::game::spear::Game<'_>::remote_sync_look  #16850
+horizon_client::entry::horizon_look  #15407
+horizon_client::game::native_hooks::Game<'_>::screen_menu  kind=method  #20038

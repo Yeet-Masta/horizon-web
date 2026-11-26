@@ -1,0 +1,2 @@
+# The quiet-commands channel charges the spam throttler: the test needs prepared resources.
+horizon-client game::lan_quiet::tests::a_payload_counts_as_one_command_for_the_spam_throttler lib daily resources

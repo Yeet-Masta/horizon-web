@@ -1,5 +1,5 @@
 name: nightly build
-run-name: nightly build${{ inputs.request && format(' (request {0})', inputs.request) || '' }}
+run-name: nightly build${{ (github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main')) && ' (dry run)' || ' (real)' }}${{ inputs.request && format(' (request {0})', inputs.request) || '' }}${{ inputs.base && format(' on {0}', inputs.base) || '' }}${{ inputs.off_main && ' (off main)' || '' }}
 # The Nightly, the only build Horizon ships since 2026-10-28 (docs/release-flow.md "Nightly"; Ludovic). When the batch
 # train decides (release.yml, with the commit as `base`), once a night, and when a trusted
 # reviewer asks (`/nightly 2640 2642`, nightly-command.yml), it builds main plus the pull requests the reviewers
@@ -15,9 +15,9 @@ run-name: nightly build${{ inputs.request && format(' (request {0})', inputs.req
 #   pushes the merge as nightly/build-<date>-<n> and saves the set on the nightly-state branch.
 # - This file, game-build.yml and every script below run from main's copy: a schedule runs the default branch, and
 #   `uses: ./…` takes the caller's commit. A picked pull request's own .github/ is never read.
-# - `build` (game-build.yml, `trusted: false`) never reaches a release's tools: its macOS jobs run on the runner
-#   that already runs pull requests' parity jobs, never the release runner; its Rust cache has its own key and is
-#   never saved; and releases don't read the machine's shared sccache.
+# - `build` (game-build.yml, `trusted: false`): its macOS jobs run on the Nightly's runner, never the release runner;
+#   its Rust cache has its own key and is never saved; and its Mac jobs don't read machine-shared caches (no sccache,
+#   a fresh cargo home per run).
 # - `build` (game-build.yml) checks out and compiles the merge with no secrets: its token reads contents only and
 #   isn't kept in the checkout; the macOS programs are signed ad hoc (Developer ID needs the runner's keychain,
 #   which stays locked for nightlies).
@@ -32,6 +32,8 @@ run-name: nightly build${{ inputs.request && format(' (request {0})', inputs.req
 #   gh workflow run "nightly build"                     # now (skips when the pick is the same commit as last night's)
 #   gh workflow run "nightly build" -f force=true       # build and publish even if unchanged
 #   gh workflow run "nightly build" -f dry_run=true     # build and sign with a throwaway key, publish nothing
+#   gh workflow run "nightly build" -f dry_run=true -f off_main=true -f base=<full sha>   # a commit off main that a
+#                                                       # dry-run/* branch holds, as a dry run only (release-flow.md)
 # Since 2026-11-15 only by hand (release.yml, `/nightly`, or a dispatch): no scheduled build.
 on:
   workflow_dispatch:
@@ -60,6 +62,10 @@ on:
         description: The commit of main to build on (default main's newest with green checks and parity-main)
         type: string
         default: ''
+      off_main:
+        description: The base is off main (a dry run only, a commit a dry-run/* branch holds)
+        type: boolean
+        default: false
       urgent:
         description: Past the day's cap of 12 builds (the train, for a release-now pull request or a forced run)
         type: boolean
@@ -67,9 +73,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  # One build at a time. A newer request replaces one still waiting: it builds the set as it is by then, so no pick
-  # is lost.
-  group: nightly-build
+  # One real build at a time. A newer request replaces one still waiting: it builds the set as it is by then, so no
+  # pick is lost. A dry run (the `mode` step's rule: `dry_run`, or any dispatch off main) publishes nothing, so each
+  # gets a group of its own: it never holds up a real cut (whose `sdk-publish` rerun queues in the shared group) and
+  # never replaces it or another dry run as the waiting run (#18779).
+  group: nightly-build${{ (github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main')) && format('-dry-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 jobs:
   pick:
@@ -90,6 +98,7 @@ jobs:
       nightly: ${{ steps.pick.outputs.nightly }}
       source_tag: ${{ steps.pick.outputs.source_tag }}
       dry_run: ${{ steps.mode.outputs.dry_run }}
+      pushed: ${{ steps.pick.outputs.pushed }}  # a dry run's nightly/dry-run-<run>-<attempt>, set right after the push
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,6 +115,7 @@ jobs:
           NIGHTLY_ISSUE: ${{ inputs.issue }}
           NIGHTLY_PRS: ${{ inputs.prs }}
           NIGHTLY_BASE: ${{ inputs.base }}
+          NIGHTLY_OFF_MAIN: ${{ inputs.off_main }}
           NIGHTLY_URGENT: ${{ inputs.urgent }}
         run: |
           python3 tools/ci/nightly.py pick ${FORCE:+--force} | tee -a "$GITHUB_STEP_SUMMARY"
@@ -166,7 +176,11 @@ jobs:
     with:
       commit: ${{ needs.pick.outputs.sha }}
       publish: ${{ needs.pick.outputs.dry_run != 'true' && github.ref == 'refs/heads/main' }}
-    secrets: inherit
+    # Only the signing keys, and none in a dry run: its index and verify jobs run the built commit's own scripts.
+    # (RELEASE_SIGNING_KEY is the `release` environment's, which sdk-publish's sign job reads itself on a real run.)
+    secrets:
+      RELEASE_SIGNING_KEY: ${{ needs.pick.outputs.dry_run != 'true' && secrets.RELEASE_SIGNING_KEY || '' }}
+      RELEASE_SIGNING_KEY_NEXT: ${{ needs.pick.outputs.dry_run != 'true' && secrets.RELEASE_SIGNING_KEY_NEXT || '' }}
 
   sdk-index:
     needs: [pick, sdk, sdk-publish]
@@ -241,6 +255,8 @@ jobs:
           else echo "::warning::horizon-windows-arm64.zip is missing: SHA256SUMS goes out without it"; fi
           musl=(); if [[ -f dist/horizon-linux-musl-x86_64.tar.gz ]]; then musl=(dist/horizon-linux-musl-x86_64.tar.gz)
           else echo "::warning::horizon-linux-musl-x86_64.tar.gz is missing: SHA256SUMS goes out without it"; fi
+          # A failed macos-x64 leg no longer gets here (game-build.yml: it fails the build). Kept for an archive
+          # lost after its leg passed, and for the day that leg is made optional again.
           intel=(); if [[ -f dist/horizon-macos-x64.zip ]]; then intel=(dist/horizon-macos-x64.zip)
           else echo "::warning::horizon-macos-x64.zip is missing: SHA256SUMS goes out without it"; fi
           bash tools/ci/sign_release.sh nightly dist/horizon-linux-x86_64.tar.gz dist/horizon-windows-x64.zip \
@@ -351,6 +367,7 @@ jobs:
           # Intel macOS only when its build succeeded. Intel launchers have no fallback archive: they find no build of
           # theirs in this Nightly and keep the one they have.
           intel=()
+          # A failed macos-x64 leg no longer reaches the else below (game-build.yml); a lost archive still can.
           if [[ -f dist/horizon-macos-x64.zip ]]; then
             intel=("dist/horizon-macos-x64.zip#Game files the launcher installs (Nightly): macOS on Intel (horizon-macos-x64.zip)")
           else
@@ -408,3 +425,26 @@ jobs:
             text="the build failed, nothing was published: $RUN"
           fi
           gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE/comments" -f body="🤖 Nightly: $text"
+
+  dry-run-cleanup:
+    # A dry run's own nightly/dry-run-<run id>-<attempt> branch goes when the run ends, failed or cancelled too: that
+    # exact name, which `pick` reports right after pushing it, and only if it carries this run's id. Never in a real
+    # run, and never a pattern.
+    needs: [pick, build, sdk, sdk-publish, sdk-index, sign, publish, answer]
+    if: always() && needs.pick.outputs.dry_run == 'true' && needs.pick.outputs.pushed != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ needs.pick.outputs.pushed }}
+        run: |
+          [[ "$NAME" =~ ^nightly/dry-run-${GITHUB_RUN_ID}-[0-9]+$ ]] || { echo "::error::not this run's branch: $NAME"; exit 1; }
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$NAME" --silent 2>/dev/null; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$NAME"
+            echo "deleted \`$NAME\`" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "\`$NAME\` is already gone"
+          fi

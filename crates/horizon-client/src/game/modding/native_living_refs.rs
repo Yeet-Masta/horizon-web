@@ -946,6 +946,118 @@ impl Game<'_> {
     /// transaction — an abort stays quiet — while the equipment and the
     /// attribute map change at once, as later steps of the same transaction
     /// read them.
+    /// Update only the changed components of a living entity's live equipment stack in place
+    /// (keeping its item and count), without re-equipping it (no equip sound, game event or
+    /// attribute re-application), matching vanilla's `ItemStack.set`.
+    pub(super) fn edit_living_equipment_in_place(
+        &mut self,
+        living: LivingRef,
+        slot: EquipmentSlot,
+        resource: &ItemStack,
+    ) -> bool {
+        if self.remote.is_some() {
+            return false;
+        }
+        let Some(t) = self.native_living_target(living) else {
+            return false;
+        };
+        match t {
+            Target::Mob(id) => {
+                let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id) else {
+                    return false;
+                };
+                let old = if (slot as usize) <= 5 {
+                    horizon_client::mobs::finalize::item_stack(mob, slot as usize)
+                } else {
+                    mob.equipment_stacks()[slot as usize].clone()
+                };
+                let Some(old) = old.filter(|s| s.count > 0 && s.item == resource.item) else {
+                    return false;
+                };
+                let updated = ItemStack {
+                    count: old.count,
+                    ..resource.clone()
+                };
+                mob.set_equipment_stack(slot as usize, Some(updated))
+            }
+            Target::Stand(id) => {
+                let Some(stand) = self.armor_stands.iter_mut().find(|a| a.id == id) else {
+                    return false;
+                };
+                let Some(old) = stand
+                    .equipment
+                    .get(slot as usize)
+                    .filter(|s| s.count > 0 && s.item == resource.item)
+                else {
+                    return false;
+                };
+                let updated = ItemStack {
+                    count: old.count,
+                    ..resource.clone()
+                };
+                stand.equipment.set(slot as usize, Some(updated));
+                true
+            }
+            Target::Dragon(id) => {
+                let Some(dragon) = self.dragon.as_mut().filter(|d| d.id == id) else {
+                    return false;
+                };
+                let Some(old) = dragon
+                    .equipment
+                    .get(slot as usize)
+                    .filter(|s| s.count > 0 && s.item == resource.item)
+                else {
+                    return false;
+                };
+                let updated = ItemStack {
+                    count: old.count,
+                    ..resource.clone()
+                };
+                dragon.equipment.set(slot as usize, Some(updated));
+                true
+            }
+            Target::Player | Target::Guest(_) => self
+                .for_player(t, |g| {
+                    let old = match slot {
+                        EquipmentSlot::MainHand => {
+                            g.inventory.get(g.selected).and_then(Option::as_ref)
+                        }
+                        EquipmentSlot::OffHand => g.offhand.as_ref(),
+                        EquipmentSlot::Head => g.armor[0].as_ref(),
+                        EquipmentSlot::Chest => g.armor[1].as_ref(),
+                        EquipmentSlot::Legs => g.armor[2].as_ref(),
+                        EquipmentSlot::Feet => g.armor[3].as_ref(),
+                        EquipmentSlot::Body => g.equipment.get(6),
+                        EquipmentSlot::Saddle => g.equipment.get(7),
+                    };
+                    let Some(old) = old.filter(|s| s.count > 0 && s.item == resource.item) else {
+                        return false;
+                    };
+                    let updated = ItemStack {
+                        count: old.count,
+                        ..resource.clone()
+                    };
+                    match slot {
+                        EquipmentSlot::MainHand => g.inventory[g.selected] = Some(updated),
+                        EquipmentSlot::OffHand => g.offhand = Some(updated),
+                        EquipmentSlot::Head => g.armor[0] = Some(updated),
+                        EquipmentSlot::Chest => g.armor[1] = Some(updated),
+                        EquipmentSlot::Legs => g.armor[2] = Some(updated),
+                        EquipmentSlot::Feet => g.armor[3] = Some(updated),
+                        EquipmentSlot::Body => {
+                            let _ = g.equipment.set(6, Some(updated));
+                        }
+                        EquipmentSlot::Saddle => {
+                            let _ = g.equipment.set(7, Some(updated));
+                        }
+                    }
+                    true
+                })
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     pub(super) fn write_living_equipment(
         &mut self,
         living: LivingRef,
@@ -962,6 +1074,7 @@ impl Game<'_> {
         };
         let stack = equipment_stack(stack);
         let equippable = stack.as_ref().and_then(|s| self.equippable_slot_sound(s));
+        let hook_stack = stack.clone();
         if let Target::Mob(id) = t {
             let Some(mob) = self.mobs.iter_mut().find(|m| m.id == id) else {
                 return false;
@@ -988,6 +1101,12 @@ impl Game<'_> {
                         })
                         .flatten()
                 });
+                let sound = match (sound, &hook_stack) {
+                    (Some(sound), Some(stack)) => {
+                        self.mod_equip_sound(stack, self.equip_slot_name(slot), Some(sound))
+                    }
+                    (sound, _) => sound,
+                };
                 if defer {
                     self.after_commit(super::transactions::After::Equip {
                         at: [at.x, at.y, at.z],
@@ -1046,6 +1165,12 @@ impl Game<'_> {
                 let sound = equippable.as_ref().and_then(|(equip_slot, sound)| {
                     (*equip_slot as usize == slot as usize).then(|| sound.clone())
                 });
+                let sound = match (sound, &hook_stack) {
+                    (Some(sound), Some(stack)) => {
+                        self.mod_equip_sound(stack, self.equip_slot_name(slot), Some(sound))
+                    }
+                    (sound, _) => sound,
+                };
                 let (Target::Stand(id) | Target::Dragon(id)) = t else {
                     unreachable!("only a stand or the dragon gets here")
                 };
@@ -1153,6 +1278,22 @@ impl Game<'_> {
     pub(super) fn living_is_tamed(&self, living: LivingRef) -> Option<bool> {
         self.native_tamable(living).map(|m| m.extra.tame)
     }
+    /// Sets the tame flag of a tamable mob (`TamableAnimal.setTame(tame, false)`):
+    /// the owner stays and the taming side effects do not run. Marks the mob for
+    /// sync. False for a kind that can't be tamed, a player, or a stale handle.
+    pub(super) fn living_set_tamed(&mut self, living: LivingRef, tamed: bool) -> bool {
+        let Some(Target::Mob(id)) = self.native_living_target(living) else {
+            return false;
+        };
+        self.mobs
+            .iter_mut()
+            .find(|m| m.id == id && m.is_tamable())
+            .is_some_and(|m| {
+                m.extra.tame = tamed;
+                m.needs_sync = true;
+                true
+            })
+    }
     /// The owner's UUID (`OwnableEntity.getOwnerReference`): None for a wild
     /// mob, a kind that can't be tamed, or a stale handle. API @API:living_refs@.
     pub(super) fn living_owner(&self, living: LivingRef) -> Option<u128> {
@@ -1207,8 +1348,8 @@ impl Game<'_> {
         let v = horizon_client::entities::drop_motion(&mut m.random, m.yaw, m.head_pitch, randomly);
         let at = [m.position.x, m.eye_y() - f64::from(0.3f32), m.position.z];
         let thrower = thrown_from_hand.then(|| self.uuid_for(id));
-        self.spawn_item(stack, at, v, 40);
-        let item = self.just_spawned_item()?;
+        let id = self.spawn_item(stack, at, v, 40)?;
+        let item = self.dropped_item_mut(id)?;
         item.thrower = thrower;
         Some(item.id)
     }
@@ -2979,3 +3120,35 @@ mod tests {
         });
     }
 }
+
+#[cfg(test)]
+mod set_tamed_tests {
+    use horizon_client::chunk::Chunk;
+
+    #[test]
+    #[ignore = "daily"]
+    fn living_set_tamed_writes_a_tamable_mob_and_keeps_its_owner() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), std::sync::Arc::new(Chunk::empty(0, 0)));
+            let id = game
+                .spawn_mob(
+                    "minecraft:wolf",
+                    [2.5, 64.0, 2.5],
+                    true,
+                    super::super::creatures::SpawnSite::Finalizing(
+                        horizon_client::mobs::spawn_rules::Reason::Command,
+                    ),
+                )
+                .unwrap();
+            let wolf = game.living(game.entity(id).unwrap()).unwrap();
+            assert!(game.living_set_tamed(wolf, true));
+            assert_eq!(game.living_is_tamed(wolf), Some(true));
+            assert_eq!(game.living_owner(wolf), None);
+            assert!(game.living_set_tamed(wolf, false));
+            assert_eq!(game.living_is_tamed(wolf), Some(false));
+        });
+    }
+}
+

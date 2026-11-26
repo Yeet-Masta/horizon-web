@@ -85,8 +85,8 @@ pub struct Report {
     #[serde(skip_serializing_if = "is_zero")]
     pub folders_renamed: usize,
     pub copied: usize,
-    /// Namespaces besides the mod id its content owns ([`extra_namespaces`]),
-    /// listed in the manifest's `namespaces`.
+    /// Namespaces besides the folder mod's id ([`folder_id`]) its content owns: a hyphenated
+    /// mod id first, then [`extra_namespaces`]; listed in the manifest's `namespaces`.
     pub namespaces: Vec<String>,
     /// Files outside what a content mod may hold (other namespaces, vanilla
     /// data other than tags), kept in `outside/` for review.
@@ -146,6 +146,8 @@ pub struct Report {
     /// The loader's convention biome tags the structures and biome modifiers
     /// name, carried.
     pub convention_biome_tags: usize,
+    /// The loader's convention item tags the recipes name, carried or merged into the mod's.
+    pub convention_item_tags: usize,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -289,8 +291,9 @@ pub fn properties(blockstate: &Value) -> BTreeSet<String> {
 }
 
 /// A 1.21.1 ingredient (`{"item": id}`, `{"tag": t}` or a list of those) as
-/// 26.3's (`"id"`, `"#t"`, `["id", ...]`); `None` for what has no 26.3 form
-/// (custom ingredient types, tags inside lists).
+/// 26.3's (`"id"`, `"#t"`, `["id", ...]`); one already in 26.3's form as it
+/// is. `None` for what has no 26.3 form (custom ingredient types, tags inside
+/// lists).
 pub fn ingredient(v: &Value) -> Option<Value> {
     match v {
         Value::String(_) => Some(v.clone()),
@@ -306,10 +309,13 @@ pub fn ingredient(v: &Value) -> Option<Value> {
         Value::Array(list) => {
             let ids: Option<Vec<Value>> = list
                 .iter()
-                .map(|x| {
-                    x.get("item")
+                .map(|x| match x {
+                    // 26.3's own list: item ids (a tag can't be in one).
+                    Value::String(id) if !id.starts_with('#') => Some(x.clone()),
+                    _ => x
+                        .get("item")
                         .filter(|_| x.as_object().is_some_and(|o| o.len() == 1))
-                        .cloned()
+                        .cloned(),
                 })
                 .collect();
             match ids? {
@@ -1207,6 +1213,17 @@ fn variant_models(overrides: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<St
     variants
 }
 
+/// The folder mod's id for a jar's mod id: its folder, log and settings key, `[a-z0-9_]{1,64}`.
+/// Fabric ids may hold `-`, which is `_` here; the jar's assets and data keep their namespace,
+/// a legal one (`[a-z0-9_.-]`), listed in the manifest's `namespaces`. None for another id.
+pub fn folder_id(mod_id: &str) -> Option<String> {
+    let ok = (1..=64).contains(&mod_id.len())
+        && mod_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b));
+    ok.then(|| mod_id.replace('-', "_"))
+}
+
 /// Carries `jar` over into `out/carry/`. With the oracle's `facts`, blocks
 /// and items are the ones the mod registers, with the templates and numbers
 /// the facts give; `allowed` says which vanilla blocks the game has;
@@ -1218,20 +1235,15 @@ pub fn carry(
     facts: Option<&Facts>,
     allowed: &dyn Fn(&str) -> bool,
     pack: &Pack,
-    conventions: &BTreeMap<String, Value>,
+    conventions: &crate::worldgen::LoaderTags,
 ) -> Result<Report, String> {
     let loaded = pack.loaded;
     let id = &info.mod_id;
-    if id.is_empty()
-        || id.len() > 64
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    {
+    let Some(folder) = folder_id(id) else {
         return Err(format!(
-            "mod id {id:?} is not [a-z0-9_]{{1,64}}: rename it before carrying over"
+            "mod id {id:?} is not [a-z0-9_-]{{1,64}}: rename it before carrying over"
         ));
-    }
+    };
     let file = fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
     let mut zip = crate::zip_intake::open(file).map_err(|e| format!("{}: {e}", jar.display()))?;
     // The previous harness verdict describes the content we are about to replace.
@@ -1264,6 +1276,9 @@ pub fn carry(
     let mut convention = BTreeSet::new();
     let mut block_loot = BTreeSet::new();
     let mut biome_conventions = BTreeSet::new();
+    // The convention item tags the mod's own item tags include (`#c:dusts/redstone` in its
+    // `c:dusts`): they need the loader's as much as a recipe naming them does.
+    let mut item_tag_conventions = BTreeSet::new();
     let set_tags = crate::worldgen::structure_set_tags(&mut zip);
     let piece_counts = crate::worldgen::piece_counts(&mut zip);
     let mut java_carvers = crate::worldgen::java_carvers(&mut zip);
@@ -1335,6 +1350,13 @@ pub fn carry(
                 && (rel.starts_with("worldgen/") || rel.starts_with("structure/"))
             {
                 report.worldgen += 1;
+            }
+            // Every item tag the mod holds, in its namespaces or added to another's (`c:`).
+            if let Some(("data", _, rest)) = split(&name)
+                && rest.starts_with("tags/item/")
+                && let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+            {
+                crate::worldgen::convention_tags(&v, &mut item_tag_conventions);
             }
             if name.starts_with("assets/")
                 && (rel.starts_with("models/") || rel.starts_with("blockstates/"))
@@ -1625,12 +1647,14 @@ pub fn carry(
     // The loader's convention biome tags the structures, biome modifiers and
     // their tags name (NeoForge's `c:is_plains`...): the game has no loader, so
     // they come along.
-    for tag in crate::worldgen::with_included(&biome_conventions, conventions) {
+    let no_tags = BTreeMap::new();
+    let biomes = conventions.get("worldgen/biome").unwrap_or(&no_tags);
+    for tag in crate::worldgen::with_included(&biome_conventions, biomes) {
         let file = inside.join(format!("data/c/tags/worldgen/biome/{tag}.json"));
         if !file.exists() {
             write(
                 &file,
-                &serde_json::to_vec_pretty(&conventions[&tag]).unwrap_or_default(),
+                &serde_json::to_vec_pretty(&biomes[&tag]).unwrap_or_default(),
             )?;
             report.convention_biome_tags += 1;
         }
@@ -1818,14 +1842,66 @@ pub fn carry(
             report.items += 1;
         }
     }
+    // The loader's own convention item tags the recipes and the mod's own item tags name
+    // (NeoForge's `c:dusts/redstone`, whose members are vanilla's): the game has no loader, so
+    // they come along with the convention tags they include, as NeoForge merges them with the
+    // mods' own. A tag the mod holds itself (or the oracle filled in above) gets the loader's
+    // members added, unless it replaces.
+    let items = conventions.get("item").unwrap_or(&no_tags);
+    let named: BTreeSet<String> = convention
+        .iter()
+        .filter_map(|t| t.strip_prefix("c:"))
+        .map(str::to_owned)
+        .chain(item_tag_conventions)
+        .collect();
+    for tag in crate::worldgen::with_included(&named, items) {
+        let mut loader = items[&tag].clone();
+        renamed_ids(&mut loader);
+        let file = inside.join(format!("data/c/tags/item/{tag}.json"));
+        let merged = match fs::read(&file) {
+            Err(_) => Some(loader),
+            Ok(bytes) => {
+                // A file that isn't a tag object is left as the mod ships it.
+                let Ok(mut own @ Value::Object(_)) = serde_json::from_slice::<Value>(&bytes) else {
+                    continue;
+                };
+                if own["replace"].as_bool() == Some(true) {
+                    continue;
+                }
+                let have = own["values"].as_array().cloned().unwrap_or_default();
+                let added: Vec<Value> = loader["values"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|v| !have.contains(v))
+                    .cloned()
+                    .collect();
+                (!added.is_empty()).then(|| {
+                    own["values"] = Value::Array(have.into_iter().chain(added).collect());
+                    own
+                })
+            }
+        };
+        if let Some(tag_file) = merged {
+            write(
+                &file,
+                &serde_json::to_vec_pretty(&tag_file).unwrap_or_default(),
+            )?;
+            report.convention_item_tags += 1;
+        }
+    }
     let owned: Vec<String> = owned.iter().map(|n| n.to_string()).collect();
     let owned: Vec<&str> = owned.iter().map(String::as_str).collect();
     unregistered_recipes(&inside, &outside, id, &owned, &mut report)?;
     let q = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    if folder != *id {
+        report.namespaces.retain(|n| *n != folder);
+        report.namespaces.insert(0, id.clone());
+    }
     let name = if info.name.is_empty() { id } else { &info.name };
     let mut manifest = format!(
         "# Carried over from {jar} by horizon-port-pack, for local use only.\n# Licence: {license}\nid = {}\nname = {}\nversion = {}\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n",
-        q(id),
+        q(&folder),
         q(name),
         q(&info.version),
         // In a `#` comment: a line break from the jar would end it and write keys of its own.
@@ -2852,6 +2928,22 @@ mod tests {
         assert!(!upgrade_recipe(&mut tag_list));
     }
 
+    /// A recipe already in 26.3's form, as a mod made for 26.3 writes it, is
+    /// kept as it is and counted as one that loads: its list of items too.
+    #[test]
+    fn a_recipe_already_in_26_3_form_is_kept() {
+        let list = json!(["minecraft:coal", "minecraft:charcoal"]);
+        assert_eq!(ingredient(&list), Some(list.clone()));
+        let mut torch = json!({"type": "minecraft:crafting_shaped", "pattern": ["X", "#"],
+            "key": {"#": "minecraft:stick", "X": ["minecraft:coal", "minecraft:charcoal"]},
+            "result": {"id": "m:torch", "count": 4}});
+        let before = torch.clone();
+        assert!(upgrade_recipe(&mut torch));
+        assert_eq!(torch, before);
+        // A tag still can't be in a list.
+        assert_eq!(ingredient(&json!(["#c:coal", "minecraft:charcoal"])), None);
+    }
+
     /// A nested reference to 1.21.1's built-in empty table becomes an empty
     /// entry, with its weight.
     #[test]
@@ -3507,7 +3599,7 @@ mod tests {
                 ),
             ],
         );
-        let conventions = BTreeMap::from([
+        let biomes = BTreeMap::from([
             (
                 "is_overworld".to_owned(),
                 json!({"values": ["minecraft:plains"]}),
@@ -3521,6 +3613,7 @@ mod tests {
                 json!({"values": ["minecraft:the_end"]}),
             ),
         ]);
+        let conventions = BTreeMap::from([("worldgen/biome".to_owned(), biomes)]);
         let info = crate::jar::JarInfo {
             mod_id: "example".into(),
             ..Default::default()
@@ -3542,6 +3635,141 @@ mod tests {
         );
         assert!(!tags.join("is_end.json").exists());
         assert_eq!(report.convention_biome_tags, 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Recipes, and the mod's own item tags, that name the loader's own convention item tags
+    /// (`#c:dusts/redstone`, whose members are vanilla's) bring them along with the tags they
+    /// include, since the game has no loader to supply them; a tag the mod holds itself gets the
+    /// loader's members added, as NeoForge merges them, unless it replaces. Renamed vanilla ids
+    /// are 26.3's.
+    #[test]
+    fn recipes_bring_the_loader_convention_item_tags_they_name() {
+        let dir = temp_dir("item-conventions");
+        let jar = dir.join("machines.jar");
+        write_jar(
+            &jar,
+            &[
+                (
+                    "data/example/recipe/press.json",
+                    br##"{"type": "minecraft:crafting_shapeless", "ingredients": ["#c:dusts",
+                        "#c:ingots/copper", "#c:chains", "#c:gems/diamond", "#c:rods/wooden",
+                        "#c:conductive"], "result": {"id": "example:press"}}"##,
+                ),
+                (
+                    "data/c/tags/item/conductive.json",
+                    br##"{"values": ["example:wire", "#c:nuggets/copper"]}"##,
+                ),
+                (
+                    "data/c/tags/item/ingots/copper.json",
+                    br##"{"values": ["example:copper_ingot"]}"##,
+                ),
+                (
+                    "data/c/tags/item/gems/diamond.json",
+                    br##"{"replace": true, "values": ["example:diamond"]}"##,
+                ),
+                (
+                    "data/c/tags/item/rods/wooden.json",
+                    br##"["example:stick"]"##,
+                ),
+            ],
+        );
+        let items = BTreeMap::from([
+            (
+                "dusts".to_owned(),
+                json!({"values": ["#c:dusts/redstone", "#c:dusts/glowstone"]}),
+            ),
+            (
+                "dusts/redstone".to_owned(),
+                json!({"values": ["minecraft:redstone"]}),
+            ),
+            (
+                "dusts/glowstone".to_owned(),
+                json!({"values": ["minecraft:glowstone_dust"]}),
+            ),
+            (
+                "ingots/copper".to_owned(),
+                json!({"values": ["minecraft:copper_ingot"]}),
+            ),
+            ("chains".to_owned(), json!({"values": ["minecraft:chain"]})),
+            (
+                "rods/wooden".to_owned(),
+                json!({"values": ["minecraft:stick"]}),
+            ),
+            (
+                "gems/diamond".to_owned(),
+                json!({"values": ["minecraft:diamond"]}),
+            ),
+            (
+                "storage_blocks/redstone".to_owned(),
+                json!({"values": ["minecraft:redstone_block"]}),
+            ),
+            (
+                "nuggets".to_owned(),
+                json!({"values": ["#c:nuggets/copper"]}),
+            ),
+            (
+                "nuggets/copper".to_owned(),
+                json!({"values": ["minecraft:copper_nugget"]}),
+            ),
+        ]);
+        let conventions = BTreeMap::from([("item".to_owned(), items)]);
+        let info = crate::jar::JarInfo {
+            mod_id: "example".into(),
+            ..Default::default()
+        };
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+        };
+        let out = dir.join("out");
+        let report = carry(&jar, &info, &out, None, &|_| true, &pack, &conventions).unwrap();
+        let tags = out.join("carry/data/c/tags/item");
+        let tag = |t: &str| -> Value {
+            serde_json::from_slice(&fs::read(tags.join(format!("{t}.json"))).unwrap()).unwrap()
+        };
+        assert_eq!(
+            tag("dusts"),
+            json!({"values": ["#c:dusts/redstone", "#c:dusts/glowstone"]})
+        );
+        assert_eq!(
+            tag("dusts/redstone"),
+            json!({"values": ["minecraft:redstone"]})
+        );
+        assert_eq!(
+            tag("dusts/glowstone"),
+            json!({"values": ["minecraft:glowstone_dust"]})
+        );
+        assert_eq!(
+            tag("ingots/copper"),
+            json!({"values": ["example:copper_ingot", "minecraft:copper_ingot"]}),
+            "the mod's own members, then the loader's"
+        );
+        assert_eq!(tag("chains"), json!({"values": ["minecraft:iron_chain"]}));
+        assert_eq!(
+            fs::read(tags.join("rods/wooden.json")).unwrap(),
+            br##"["example:stick"]"##,
+            "a file that isn't a tag object is the mod's as shipped"
+        );
+        assert_eq!(
+            tag("gems/diamond"),
+            json!({"replace": true, "values": ["example:diamond"]}),
+            "a replacing tag is the mod's alone"
+        );
+        assert_eq!(
+            tag("nuggets/copper"),
+            json!({"values": ["minecraft:copper_nugget"]}),
+            "included by the mod's own c:conductive"
+        );
+        assert!(
+            !tags.join("storage_blocks/redstone.json").exists(),
+            "named by no recipe"
+        );
+        assert!(
+            !tags.join("nuggets.json").exists(),
+            "named by no recipe or tag"
+        );
+        assert_eq!(report.convention_item_tags, 6);
         fs::remove_dir_all(&dir).unwrap();
     }
 

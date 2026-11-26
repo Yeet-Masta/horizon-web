@@ -59,6 +59,54 @@ impl Game<'_> {
         ))
     }
 
+    /// The locator bar's tracked waypoints ([`waypoints`]); None outside a logged-in
+    /// client world.
+    pub(super) fn native_client_waypoints(&self) -> Option<mod_api::ClientWaypoints> {
+        self.native_session()?;
+        Some(waypoints(&self.waypoints))
+    }
+
+    /// The title, subtitle and action bar on screen now: a title or action bar whose time has
+    /// run out reads as None, and a subtitle shows only with its title. None outside a
+    /// logged-in client world.
+    pub(super) fn native_client_titles(&self) -> Option<mod_api::ClientTitles> {
+        use super::api_values::TryIntoApi;
+        self.native_session()?;
+        let t = &self.titles;
+        // A text too deep for the API reads as its plain words rather than dropping the read.
+        let text = |text: &horizon_client::text::Text| {
+            text.try_into_api()
+                .unwrap_or_else(|_| mod_api::Text::literal(text.plain()))
+        };
+        let title = t.title.clone().filter(|_| t.time > 0);
+        let subtitle = title.as_ref().and(t.subtitle.clone());
+        let action_bar = t.overlay.clone().filter(|_| t.overlay_time > 0);
+        Some(mod_api::ClientTitles::new(
+            title.as_ref().map(&text),
+            subtitle.as_ref().map(&text),
+            action_bar.as_ref().map(text),
+        ))
+    }
+
+    /// The boss bars the window shows, in the order the server added them. None outside a
+    /// logged-in client world.
+    pub(super) fn native_client_boss_bars(&self) -> Option<Vec<mod_api::ClientBossBarEntry>> {
+        use super::api_values::TryIntoApi;
+        self.native_session()?;
+        // A text too deep for the API reads as its plain words rather than dropping the bar.
+        let text = |text: &horizon_client::text::Text| {
+            text.try_into_api()
+                .unwrap_or_else(|_| mod_api::Text::literal(text.plain()))
+        };
+        Some(
+            self.boss_overlay
+                .bars(horizon_client::boss_overlay::now_millis())
+                .into_iter()
+                .map(|bar| mod_api::ClientBossBarEntry::new(text(&bar.name), bar.progress))
+                .collect(),
+        )
+    }
+
     /// The local player's item use (`isUsingItem`, `getUsedItemHand`, `getTicksUsingItem`,
     /// `getUseItemRemainingTicks`); None when no item is in use or outside a logged-in client
     /// world.
@@ -179,6 +227,44 @@ fn tab_list(
         .collect();
     mod_api::ClientTabList::new(entries, header.map(text), footer.map(text))
 }
+/// `ClientWaypointManager`'s table: the tracked waypoints in the order the server sent them,
+/// so the read cannot drift from what the bar holds.
+fn waypoints(waypoints: &horizon_client::locator_bar::ClientWaypoints) -> mod_api::ClientWaypoints {
+    use horizon_protocol::packets::play::{WaypointId, WaypointTarget};
+    let entries = waypoints
+        .entries()
+        .iter()
+        .map(|w| {
+            let id = match &w.id {
+                WaypointId::Uuid(uuid) => mod_api::ClientWaypointId::Uuid(*uuid),
+                WaypointId::Name(name) => mod_api::ClientWaypointId::Name(name.clone()),
+            };
+            let target = match w.target {
+                WaypointTarget::Empty => mod_api::ClientWaypointTarget::Empty,
+                WaypointTarget::Block([x, y, z]) => {
+                    mod_api::ClientWaypointTarget::Block(mod_api::BlockPos::new(x, y, z))
+                }
+                WaypointTarget::Chunk([x, z]) => mod_api::ClientWaypointTarget::Chunk([x, z]),
+                WaypointTarget::Azimuth(angle) => mod_api::ClientWaypointTarget::Azimuth(angle),
+            };
+            // `Ident::read` validates the style on the wire, so a server-sent style always
+            // parses; keep the entry on the default style rather than dropping it.
+            let style = mod_api::Identifier::parse(&w.style).unwrap_or_else(|_| {
+                mod_api::Identifier::parse("minecraft:default")
+                    .expect("the default waypoint style is a valid identifier")
+            });
+            mod_api::ClientWaypointEntry::new(
+                id,
+                target,
+                style,
+                // The packet stores the colour as ARGB; the API takes RGB, as
+                // `living_set_waypoint_color` does.
+                w.color.map(|c| (c as u32) & 0x00FF_FFFF),
+            )
+        })
+        .collect();
+    mod_api::ClientWaypoints::new(entries)
+}
 
 #[cfg(test)]
 pub(super) mod tests {
@@ -263,6 +349,171 @@ pub(super) mod tests {
         );
         assert_eq!(cleared.header, None);
         assert_eq!(cleared.footer, None);
+    }
+    /// The waypoint table as `client_waypoints` reads it: every tracked entry, in sent order.
+    #[test]
+    fn the_waypoints_read_as_the_bar_holds_them() {
+        use horizon_client::locator_bar::ClientWaypoints;
+        use horizon_protocol::packets::play::{
+            TrackedWaypoint, WaypointId, WaypointTarget, waypoint_operation,
+        };
+        let tracked = |id, style: &str, color, target| TrackedWaypoint {
+            operation: waypoint_operation::TRACK,
+            id,
+            style: style.into(),
+            color,
+            target,
+        };
+        let mut table = ClientWaypoints::default();
+        table.apply(&tracked(
+            WaypointId::Uuid(7),
+            "minecraft:default",
+            Some(0xFF10_2030u32 as i32),
+            WaypointTarget::Block([4, 5, 6]),
+        ));
+        table.apply(&tracked(
+            WaypointId::Name("home".into()),
+            "minecraft:default",
+            None,
+            WaypointTarget::Azimuth(0.5),
+        ));
+        table.apply(&tracked(
+            WaypointId::Uuid(9),
+            "minecraft:default",
+            Some(0xFF00_FF00u32 as i32),
+            WaypointTarget::Chunk([3, -2]),
+        ));
+        let list = waypoints(&table);
+        assert_eq!(
+            list.entries.len(),
+            3,
+            "every tracked waypoint, in sent order"
+        );
+        let first = &list.entries[0];
+        assert_eq!(first.id, mod_api::ClientWaypointId::Uuid(7));
+        assert_eq!(
+            first.target,
+            mod_api::ClientWaypointTarget::Block(mod_api::BlockPos::new(4, 5, 6))
+        );
+        assert_eq!(first.style.to_string(), "minecraft:default");
+        assert_eq!(
+            first.color,
+            Some(0x10_2030),
+            "ARGB on the wire reads as RGB"
+        );
+        assert_eq!(
+            list.entries[1].id,
+            mod_api::ClientWaypointId::Name("home".into())
+        );
+        assert_eq!(
+            list.entries[1].target,
+            mod_api::ClientWaypointTarget::Azimuth(0.5)
+        );
+        assert_eq!(list.entries[1].color, None, "no colour sent stays none");
+        assert_eq!(
+            list.entries[2].target,
+            mod_api::ClientWaypointTarget::Chunk([3, -2])
+        );
+        // Untracking drops the entry; the read follows the table.
+        table.apply(&TrackedWaypoint {
+            operation: waypoint_operation::UNTRACK,
+            id: WaypointId::Uuid(9),
+            style: "minecraft:default".into(),
+            color: None,
+            target: WaypointTarget::Empty,
+        });
+        let list = waypoints(&table);
+        assert_eq!(list.entries.len(), 2, "untracked waypoints leave the table");
+        assert_eq!(
+            list.entries[1].id,
+            mod_api::ClientWaypointId::Name("home".into())
+        );
+    }
+
+    /// The titles and boss bars a client reads are the ones the server sent it.
+    #[test]
+    #[ignore = "daily"]
+    fn title_and_boss_bar_reads_follow_what_the_server_sent() {
+        use horizon_protocol::packets::play::{self, Clientbound as C};
+        use horizon_core::nbt::Tag;
+
+        fn s(text: &str) -> Tag {
+            Tag::String(text.into())
+        }
+
+        fn plain(text: &mod_api::Text) -> String {
+            let own = match &text.content {
+                mod_api::text::TextContent::Literal(words) => words.as_str(),
+                _ => "",
+            };
+            text.children
+                .iter()
+                .map(plain)
+                .fold(own.to_owned(), |all, c| all + &c)
+        }
+
+        with_client_game(|game| {
+            assert_eq!(game.client_session().client_titles(), None);
+            assert_eq!(game.client_session().client_boss_bars(), None);
+            let _server = logged_client(game);
+            // Nothing shown yet: an empty snapshot, not None.
+            let titles = game.client_session().client_titles().unwrap();
+            assert!(titles.title.is_none());
+            assert!(titles.subtitle.is_none());
+            assert!(titles.action_bar.is_none());
+            assert_eq!(game.client_session().client_boss_bars(), Some(Vec::new()));
+
+            // Titles and an action bar.
+            game.handle_packet(C::SetSubtitleText(play::Text { text: s("sub") }))
+                .unwrap();
+            // A subtitle alone is not shown: the HUD draws it under a title.
+            assert!(
+                game.client_session()
+                    .client_titles()
+                    .unwrap()
+                    .subtitle
+                    .is_none()
+            );
+            game.handle_packet(C::SetTitleText(play::Text { text: s("big") }))
+                .unwrap();
+            game.handle_packet(C::SetActionBarText(play::Text { text: s("bar") }))
+                .unwrap();
+            let titles = game.client_session().client_titles().unwrap();
+            assert_eq!(
+                titles.title.as_ref().map(plain).as_deref(),
+                Some("big")
+            );
+            assert_eq!(
+                titles.subtitle.as_ref().map(plain).as_deref(),
+                Some("sub")
+            );
+            assert_eq!(
+                titles.action_bar.as_ref().map(plain).as_deref(),
+                Some("bar")
+            );
+            game.titles.clear();
+            game.titles.overlay_time = 0;
+            let titles = game.client_session().client_titles().unwrap();
+            assert!(titles.title.is_none() && titles.action_bar.is_none());
+
+            // A boss bar.
+            game.handle_packet(C::BossEvent(play::BossEvent {
+                id: 1,
+                action: play::BossAction::Add {
+                    name: s("Dragon"),
+                    progress: 0.5,
+                    color: 5,
+                    overlay: 0,
+                    darken: false,
+                    music: false,
+                    fog: false,
+                },
+            }))
+            .unwrap();
+            let bars = game.client_session().client_boss_bars().unwrap();
+            assert_eq!(bars.len(), 1);
+            assert_eq!(plain(&bars[0].name), "Dragon");
+        });
     }
 
     pub(in crate::game) fn logged_client(

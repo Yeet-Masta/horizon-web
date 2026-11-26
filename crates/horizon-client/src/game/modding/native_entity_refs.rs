@@ -8,6 +8,9 @@
 //! copy: the local player and the entities the server told it of, in the level
 //! it shows. The entities are those of the level in place (the one a hook runs
 //! in) and the server's players, whatever their level.
+#[cfg(test)]
+#[path = "native_entity_refs/display_query_tests.rs"]
+mod display_query_tests;
 #[path = "native_entity_refs/dragon_parts_table.rs"]
 pub(in crate::game) mod dragon_parts_table;
 #[path = "native_entity_refs/dragon_query.rs"]
@@ -83,12 +86,29 @@ fn entity_ray_hits(
 
 impl Game<'_> {
     /// An entity tracked by the remote client but absent from local entity lists.
-    fn native_client_tracked(&self, entity: EntityRef) -> Option<(&str, [f64; 3])> {
+    pub(super) fn native_client_tracked(&self, entity: EntityRef) -> Option<(&str, [f64; 3])> {
         let remote = self.remote.as_ref()?;
         if !remote.logged_in || self.native_lifecycle.epoch() != Some(entity.epoch()) {
             return None;
         }
         remote.tracked_entity(i32::try_from(entity.id()).ok()?)
+    }
+
+    /// The tracked display's position at the current interpolation tick.
+    fn native_client_display_position(&self, entity: EntityRef) -> Option<[f64; 3]> {
+        let id = i32::try_from(entity.id()).ok()?;
+        let display = self.text_displays.get(&id)?;
+        self.native_client_tracked(entity)?;
+        Some(display.position().to_array())
+    }
+
+    /// The live client box of a tracked display, which is held outside the entity lists.
+    pub(super) fn native_client_display_bounds(&self, entity: EntityRef) -> Option<Aabb> {
+        let [x, y, z] = self.native_client_display_position(entity)?;
+        let position = Vec3::new(x, y, z);
+        // The dimensions of all three display types are zero. Width and height
+        // metadata enlarge only the renderer's culling box.
+        Some(Aabb::new(position, position))
     }
 
     /// What a handle names now, or None for a stale or foreign one.
@@ -267,6 +287,9 @@ impl Game<'_> {
             return None;
         }
         let mut ids = self.listed_entities_in(bounds);
+        ids.extend(self.others.iter().filter_map(|entity| {
+            (entity.id != 0 && bounds.intersects(entity.display_bounds()?)).then_some(entity.id)
+        }));
         self.append_dragon_query_ids(bounds, false, &mut ids);
         ids.extend(
             self.fishing_hooks_here()
@@ -320,8 +343,9 @@ impl Game<'_> {
     }
     /// `ClientLevel.getEntities` for `level_entities_in`: the entities the server
     /// tracks to this client in entity-list order, other players among them (a
-    /// tracked player has a client copy, so its handle resolves), the dragon and
-    /// then the window's own player unless it spectates, then the dragon's parts.
+    /// tracked player has a client copy, so its handle resolves), displays by id,
+    /// the dragon and then the window's own player unless it spectates, then the
+    /// dragon's parts.
     /// None before login or for a level the client does not show.
     fn client_entities_in(&self, level: LevelRef, bounds: Aabb) -> Option<Vec<EntityRef>> {
         let remote = self.remote.as_ref().filter(|r| r.logged_in)?;
@@ -329,6 +353,18 @@ impl Game<'_> {
             return None;
         }
         let mut ids = self.listed_entities_in(bounds);
+        let first_display = ids.len();
+        ids.extend(self.text_displays.keys().filter_map(|&id| {
+            if id <= 0 {
+                return None;
+            }
+            let id = id as u32;
+            let handle = EntityRef::new(level.epoch(), id);
+            bounds
+                .intersects(self.native_client_display_bounds(handle)?)
+                .then_some(id)
+        }));
+        ids[first_display..].sort_unstable();
         self.append_dragon_query_ids(bounds, false, &mut ids);
         if self.mode_id() != 3
             && let Some(player) = &self.player
@@ -341,7 +377,10 @@ impl Game<'_> {
         Some(
             ids.into_iter()
                 .map(|id| EntityRef::new(level.epoch(), id))
-                .filter(|handle| self.native_entity_read_target(*handle).is_some())
+                .filter(|handle| {
+                    self.native_entity_read_target(*handle).is_some()
+                        || self.native_client_display_position(*handle).is_some()
+                })
                 .collect(),
         )
     }
@@ -450,6 +489,22 @@ impl Game<'_> {
     ) -> Result<bool, mod_api::LevelWriteError> {
         if !self.native_level_write_position(level, pos)? {
             return Ok(false);
+        }
+        use horizon_client::block_entity_types::{WATER_CAULDRON, type_for};
+        if !self.transactions.is_empty() && type_for(WATER_CAULDRON).is_some() {
+            let old = self.world.block(pos[0], pos[1], pos[2]);
+            let facts = self.res.facts();
+            let was = facts.get(old).name.as_ref();
+            let now = facts.get(state).name.as_ref();
+            if was == WATER_CAULDRON
+                || (was == "minecraft:cauldron" && now == WATER_CAULDRON)
+            {
+                if self.world_debug {
+                    return Ok(false);
+                }
+                return Ok(old != state
+                    && self.journal_set_block_with_flags(pos, state, flags.bits()));
+            }
         }
         Ok(self.native_set_block(level.dimension_id(), pos, state, flags.bits()))
     }
@@ -592,6 +647,35 @@ impl Game<'_> {
         let name = &self.res.facts().get(state).name;
         Some(self.items().mining_speed(tool, name))
     }
+    /// Place the configured feature `feature` at `pos` as `/place feature` does (Paper's
+    /// `World#generateTree`). Refusals are checked in order and named by [`FeatureRefusal`]; an
+    /// unloaded, out-of-world or locked position places nothing and is `Ok(false)`.
+    pub(super) fn level_generate_tree(
+        &mut self,
+        level: LevelRef,
+        pos: [i32; 3],
+        feature: &str,
+    ) -> Result<bool, mod_api::FeatureRefusal> {
+        use mod_api::FeatureRefusal;
+        if !self.is_logical_server() {
+            return Err(FeatureRefusal::Client);
+        }
+        if !self.level_handle_current(level) {
+            return Err(FeatureRefusal::Stale);
+        }
+        if self.dim.key() != level.dimension() {
+            return Err(FeatureRefusal::NotInPlace);
+        }
+        if !self.native_level_write_allowed(level, pos) {
+            return Ok(false);
+        }
+        let at = horizon_core::position::BlockPos::new(pos[0], pos[1], pos[2]);
+        let placed = self
+            .with_level(|b, level, ticks| b.place_feature(level, ticks, feature, at))
+            .ok_or(FeatureRefusal::UnknownFeature)?;
+        let _ = self.process_level_events();
+        Ok(placed)
+    }
     /// Apply bone meal to the block at `pos` as a dispenser does (`BoneMealItem.growCrop`, then
     /// `growWaterPlant`): the mods' `bonemeal` hook first, level event 1505 when something grew.
     /// False for a refused write, a stale or parked handle, a client, and a block that did not
@@ -627,6 +711,92 @@ impl Game<'_> {
             return false;
         }
         self.set_biome_at(pos, biome)
+    }
+    /// Set the biome of every 4x4x4 cell holding a block of `min <= pos < max` to `biome`, cell by
+    /// cell through `set_biome_at` (so each changed column is resent, and a transaction journals
+    /// it). Refusals are checked whole, before any cell changes, and named by [`BiomeFillRefusal`].
+    pub(super) fn level_fill_biome(
+        &mut self,
+        level: LevelRef,
+        min: [i32; 3],
+        max: [i32; 3],
+        biome: &str,
+    ) -> Result<u32, mod_api::BiomeFillRefusal> {
+        use mod_api::BiomeFillRefusal;
+        const MAX_CELLS: u64 = 16_384;
+        if !self.is_logical_server() {
+            return Err(BiomeFillRefusal::Client);
+        }
+        if !self.level_handle_current(level) {
+            return Err(BiomeFillRefusal::Stale);
+        }
+        if self.dim.key() != level.dimension() {
+            return Err(BiomeFillRefusal::NotInPlace);
+        }
+        if !world_biomes!(self).list.iter().any(|b| b.name == biome) {
+            return Err(BiomeFillRefusal::UnknownBiome);
+        }
+        if (0..3).any(|axis| min[axis] >= max[axis]) {
+            return Ok(0);
+        }
+        let (cx0, cx1) = (min[0] >> 2, (max[0] - 1) >> 2);
+        let (cy0, cy1) = (min[1] >> 2, (max[1] - 1) >> 2);
+        let (cz0, cz1) = (min[2] >> 2, (max[2] - 1) >> 2);
+        // Widened and checked: the three spans can each reach 2^30 cells.
+        let span = |lo: i32, hi: i32| (i64::from(hi) - i64::from(lo) + 1) as u64;
+        let cells = span(cx0, cx1)
+            .checked_mul(span(cy0, cy1))
+            .and_then(|n| n.checked_mul(span(cz0, cz1)))
+            .unwrap_or(u64::MAX);
+        if cells > MAX_CELLS {
+            return Err(BiomeFillRefusal::TooManyCells {
+                asked: u32::try_from(cells).unwrap_or(u32::MAX),
+                max: MAX_CELLS as u32,
+            });
+        }
+        let in_height =
+            self.world.shape.contains_y(min[1]) && self.world.shape.contains_y(max[1] - 1);
+        let columns_loaded = (min[0] >> 4..=(max[0] - 1) >> 4).all(|cx| {
+            (min[2] >> 4..=(max[2] - 1) >> 4).all(|cz| self.world.chunks.contains_key(&(cx, cz)))
+        });
+        if !in_height || !columns_loaded {
+            return Err(BiomeFillRefusal::NotLoaded);
+        }
+        // A carrier transfer fence on any block of a cell refuses the whole box, before any write.
+        for cy in cy0..=cy1 {
+            for cz in cz0..=cz1 {
+                for cx in cx0..=cx1 {
+                    for (dx, dy, dz) in (0..64).map(|i| (i & 3, (i >> 2) & 3, i >> 4)) {
+                        if self.world.carrier_fences.locks_cell(&[
+                            cx * 4 + dx,
+                            cy * 4 + dy,
+                            cz * 4 + dz,
+                        ]) {
+                            return Err(BiomeFillRefusal::NotLoaded);
+                        }
+                    }
+                }
+            }
+        }
+        let mut changed = 0u32;
+        let mut columns: Vec<(i32, i32)> = Vec::new();
+        for cy in cy0..=cy1 {
+            for cz in cz0..=cz1 {
+                for cx in cx0..=cx1 {
+                    if let Some(key) = self.write_biome_at([cx * 4, cy * 4, cz * 4], biome) {
+                        changed += 1;
+                        if !columns.contains(&key) {
+                            columns.push(key);
+                        }
+                    }
+                }
+            }
+        }
+        // One resend for each changed column, however many of its cells changed.
+        for key in columns {
+            self.after_commit(crate::game::transactions::After::Biome(key));
+        }
+        Ok(changed)
     }
     /// One residency boundary for state-bearing block writes; position refusal is vanilla.
     fn native_level_write_position(
@@ -803,9 +973,10 @@ impl Game<'_> {
         }
         match self.native_entity_read_target(entity) {
             Some(target) => self.target_position(target),
-            None => self
-                .native_client_tracked(entity)
-                .map(|(_, position)| position),
+            None => self.native_client_display_position(entity).or_else(|| {
+                self.native_client_tracked(entity)
+                    .map(|(_, position)| position)
+            }),
         }
     }
     /// The block the entity's position is in (`Entity.blockPosition`). API
@@ -1005,6 +1176,7 @@ pub(super) mod tests {
                 "XDG_DATA_HOME",
                 "XDG_CONFIG_HOME",
                 "XDG_RUNTIME_DIR",
+                "XDG_CACHE_HOME",
                 "HORIZON_LAUNCHER_TRASH",
                 "HORIZON_LAUNCHER_CLIPBOARD",
                 "HORIZON_LAUNCHER_DESKTOP",
@@ -1595,6 +1767,91 @@ pub(super) mod tests {
             let level = game.level(game.dim.id()).unwrap();
             assert_eq!(level.best_neighbor_signal(game, [4, 64, 5]), Some(0));
             assert_eq!(level.signal(game, [5, 64, 5], West), Some(0));
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_level_fills_a_box_of_biome_cells_and_refuses_whole() {
+        use horizon_client::chunk::Chunk;
+        use mod_api::BiomeFillRefusal;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let level = game.level(game.dim.id()).unwrap();
+            let target = usize::from(game.world.chunks[&(0, 0)].biome(0, 64, 0) == 0);
+            let name = world_biomes!(game).list[target].name.clone();
+            // Two cells in x, one in y (64..68), two in z: four 4x4x4 cells.
+            assert_eq!(
+                game.level_fill_biome(level, [0, 64, 0], [8, 68, 8], &name),
+                Ok(4)
+            );
+            assert_eq!(
+                usize::from(game.world.chunks[&(0, 0)].biome(7, 67, 7)),
+                target,
+                "the last cell of the box changed"
+            );
+            assert_eq!(
+                game.level_fill_biome(level, [0, 64, 0], [8, 68, 8], &name),
+                Ok(0),
+                "already set"
+            );
+            assert_eq!(
+                game.level_fill_biome(level, [0, 64, 0], [8, 68, 8], "minecraft:nope"),
+                Err(BiomeFillRefusal::UnknownBiome)
+            );
+            assert_eq!(
+                game.level_fill_biome(level, [100_000, 64, 0], [100_008, 68, 8], &name),
+                Err(BiomeFillRefusal::NotLoaded),
+                "unloaded columns refuse the whole box"
+            );
+            assert_eq!(
+                game.level_fill_biome(level, [4, 64, 4], [4, 68, 8], &name),
+                Ok(0),
+                "an empty box"
+            );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_level_generates_an_oak_tree_and_refuses_an_unknown_feature() {
+        use horizon_client::chunk::Chunk;
+        use mod_api::FeatureRefusal;
+        use std::sync::Arc;
+
+        with_game(|game| {
+            game.options.dedicated = Some(Vec::new());
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            let registry = game.pack.assets.registry;
+            let grass = registry.default_state("minecraft:grass_block").unwrap();
+            game.world.set(0, 63, 0, grass).unwrap();
+            let level = game.level(game.dim.id()).unwrap();
+            assert_eq!(
+                game.level_generate_tree(level, [0, 64, 0], "minecraft:oak"),
+                Ok(true)
+            );
+            let trunk = game.world.block(0, 64, 0);
+            assert_eq!(
+                &*game.res.facts().get(trunk).name,
+                "minecraft:oak_log",
+                "the trunk starts at the given position"
+            );
+            assert_eq!(
+                game.level_generate_tree(level, [0, 64, 0], "minecraft:nope"),
+                Err(FeatureRefusal::UnknownFeature)
+            );
+            assert_eq!(
+                game.level_generate_tree(level, [100_000, 64, 0], "minecraft:oak"),
+                Ok(false),
+                "unloaded"
+            );
         });
     }
 
@@ -2550,6 +2807,7 @@ pub(super) mod tests {
                         ticks_frozen: 0,
                         invulnerable: false,
                         invulnerable_time: 0,
+                        impulse: Default::default(),
                     });
                 }
                 guest.inventory[0] = Some(ItemStack::new("minecraft:stone", 1));

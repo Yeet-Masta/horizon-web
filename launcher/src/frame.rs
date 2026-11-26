@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// What a sidebar row says of its instance's game.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowPhase {
     Running,
     Starting,
@@ -908,10 +908,10 @@ impl Launcher {
                     .child(
                         ui::text(12.5, FontWeight::NORMAL, ink::NOTE)
                             .mt(px(4.))
-                            .child(trf("Launcher {version}", &[("version", version)])),
+                            .child(self.launcher_ready_note(version)),
                     )
                     .child(
-                        ui::solid("update-launcher", tr("Update"), 32., 13., &t)
+                        ui::solid("update-launcher", tr("Update now"), 32., 13., &t)
                             .mt(px(10.))
                             .w_full()
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {

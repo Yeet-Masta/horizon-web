@@ -10,14 +10,17 @@ use horizon_anticheat::{Check, Config, Strikes};
 use horizon_core::geometry::{Aabb, Vec3};
 use horizon_core::nbt::{JavaString, Tag};
 use horizon_std::time::Instant;
-use std::io::Write;
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
 pub struct Anticheat {
     pub config: Config,
     /// The thread writing `log`, started at the first flag: the tick only hands it the lines.
     log: Option<LogWriter>,
     /// The players' kicks by check, read from `strikes` at the first kick.
-    strikes: Option<Strikes>,
+    strikes: Option<StrikeStore>,
     /// When the previous server tick started, for the timer's balance.
     last_tick: Option<Instant>,
     tick_rate: f32,
@@ -83,21 +86,67 @@ impl Anticheat {
     /// Player `uuid` was kicked by `check`: its kicks by it so far and whether this one bans. The
     /// count is saved at once, so a restart doesn't forgive it.
     fn strike(&mut self, uuid: u128, check: Check) -> (u32, bool) {
-        let path = std::path::Path::new(&self.config.strikes);
-        let strikes = self.strikes.get_or_insert_with(|| {
-            horizon_std::fs::read(path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                .unwrap_or_default()
-        });
+        let path = Path::new(&self.config.strikes);
+        let store = self.strikes.get_or_insert_with(|| read_strikes(path));
         let ban_after = self.config.actions(check).ban_after;
-        let kick = strikes.kick(&uuid_text(uuid), check, ban_after);
-        if !self.config.strikes.is_empty()
-            && let Ok(json) = serde_json::to_vec_pretty(strikes)
-        {
-            let _ = horizon_std::fs::write(path, json);
+        let kick = store.strikes.kick(&uuid_text(uuid), check, ban_after);
+        if store.persist {
+            let result = serde_json::to_vec_pretty(&store.strikes).and_then(|json| {
+                horizon_server_files::durable::write(path, &json).map_err(serde_json::Error::io)
+            });
+            if let Err(error) = result {
+                log::warn!(
+                    "Could not save anticheat strikes to {}: {error}",
+                    path.display()
+                );
+            }
         }
         kick
+    }
+}
+
+struct StrikeStore {
+    strikes: Strikes,
+    /// False when persistence is disabled or the existing file could not be read cleanly, so
+    /// subsequent kicks keep counting in memory without overwriting the file on disk.
+    persist: bool,
+}
+
+fn read_strikes(path: &Path) -> StrikeStore {
+    if path.as_os_str().is_empty() {
+        return StrikeStore {
+            strikes: Strikes::default(),
+            persist: false,
+        };
+    }
+    match horizon_std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(strikes) => StrikeStore {
+                strikes,
+                persist: true,
+            },
+            Err(error) => {
+                log::warn!("Invalid anticheat strikes in {}: {error}", path.display());
+                StrikeStore {
+                    strikes: Strikes::default(),
+                    persist: false,
+                }
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => StrikeStore {
+            strikes: Strikes::default(),
+            persist: true,
+        },
+        Err(error) => {
+            log::warn!(
+                "Could not read anticheat strikes from {}: {error}",
+                path.display()
+            );
+            StrikeStore {
+                strikes: Strikes::default(),
+                persist: false,
+            }
+        }
     }
 }
 
@@ -132,6 +181,19 @@ fn uuid_text(uuid: u128) -> String {
 
 /// Server ticks a claim of the ground keeps its height after the ground last held the player.
 const GROUND_GRACE: u64 = 10;
+
+/// How `ground` refused a claim of the ground ([`Hub::anticheat_ground`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GroundRefusal {
+    /// Flagged and dropped.
+    Dropped,
+    /// Dropped without a flag: the same claim again, standing still where one was dropped. The move
+    /// counts toward vanilla's floating kick and the client is told the blocks under it, as for a
+    /// claim that stands.
+    Again,
+    /// Flagged, and the player kicked: the move is refused.
+    Kicked,
+}
 
 /// Whether an entity of `kind` at `at` may carry a player standing at `player`: the entities players
 /// stand on (boats, rafts, minecarts, shulkers, happy ghasts, 4 blocks tall), within 4 blocks sideways and
@@ -198,11 +260,24 @@ impl Hub {
             return;
         };
         if ac.config.runs(Check::Prediction) {
-            self.guests.update(i, |g| {
+            let overdue = self.guests.update(i, |g| {
                 let (input, sprinting) = (g.input, g.client_sprinting);
-                g.record.get_or_insert_default().tick_end(input, sprinting);
+                let record = g.record.get_or_insert_default();
+                record.tick_end(input, sprinting);
+                record
+                    .overdue()
+                    .filter(|_| record.ended().is_multiple_of(20))
             });
+            // A client that leaves the pings unanswered keeps the replay from knowing what it had
+            // seen: once a second while it does, that counts as a tick as far off as one can weigh.
+            if let Some(pings) = overdue {
+                let detail = format!("left the server's last {pings} pings unanswered");
+                self.flag(i, Check::Prediction, 5.0, &detail, events);
+            }
         }
+        let Some(ac) = self.anticheat.as_deref() else {
+            return;
+        };
         if !ac.config.runs(Check::Timer) {
             return;
         }
@@ -280,11 +355,11 @@ impl Hub {
 
     /// `ground`, for a move from guest `i` that says it ends on the ground at `to` (`stands`: the move
     /// itself was stopped by something below): None when the claim stands (or isn't judged, or the check
-    /// only logs: `setback = 0`), else whether the move is refused because the player was kicked. A
-    /// false claim is dropped (vanilla's fall damage follows); the player is never sent back, and the
-    /// move doesn't count toward vanilla's floating kick. A claim at the height where the
-    /// ground last held the player, within half a second, isn't judged: the block may have gone
-    /// server-side (broken, pushed) before the client heard.
+    /// only logs: `setback = 0`), else how it was refused. A false claim is dropped (vanilla's fall
+    /// damage follows); the player is never sent back, and the move doesn't count toward vanilla's
+    /// floating kick. A claim at the height where the ground last held the player, within half a
+    /// second, isn't judged: the block may have gone server-side (broken, pushed) before the client
+    /// heard.
     pub(super) fn anticheat_ground(
         &mut self,
         i: usize,
@@ -292,13 +367,16 @@ impl Hub {
         stands: bool,
         ctx: &TickCtx,
         events: &mut Vec<HostEvent>,
-    ) -> Option<bool> {
+    ) -> Option<GroundRefusal> {
         if !self.anticheat.as_deref()?.config.runs(Check::Ground) {
             return None;
         }
-        // Standing still: no fall to skip, whatever holds the player up (a block the server doesn't
-        // have, seen on the official server after a long teleport). Hovering is vanilla's floating kick.
-        if self.guests[i].position == to {
+        // Standing still where the server has the player at rest: no fall to skip, whatever holds the
+        // player up (a block the server doesn't have, seen on the official server after a long
+        // teleport). Hovering is vanilla's floating kick. A claim without a new position while the
+        // server has the player falling would end that fall: it is judged like any other.
+        let still = self.guests[i].position == to;
+        if still && !self.falling(i) {
             return None;
         }
         let ticks = self.ticks;
@@ -316,6 +394,12 @@ impl Hub {
             ticks.saturating_sub(t) <= GROUND_GRACE && (y - to[1]).abs() < 1.0E-3
         }) {
             return None;
+        }
+        // The same claim again, standing still where one was dropped: dropped again, without a flag.
+        // A client on a block the server doesn't have sends one with every turn of its head.
+        if still && self.guests[i].anticheat.ground_refused == Some(to) {
+            let logs_only = self.anticheat.as_deref()?.config.ground.setback == 0.0;
+            return (!logs_only).then_some(GroundRefusal::Again);
         }
         let (fx, fz) = (to[0].floor() as i32, to[2].floor() as i32);
         let below = if self
@@ -337,7 +421,22 @@ impl Hub {
         // The correction is the dropped claim, never a setback: sent back into the air it claimed to
         // stand in, an honest player (on a block the server doesn't have) claims it again and again,
         // and hovers there until vanilla's floating kick. Only the anticheat's own kick ends it.
-        Some(!self.guests[i].left_reason.is_empty())
+        self.guests
+            .update(i, |g| g.anticheat.ground_refused = Some(to));
+        Some(if self.guests[i].left_reason.is_empty() {
+            GroundRefusal::Dropped
+        } else {
+            GroundRefusal::Kicked
+        })
+    }
+
+    /// Whether the server has guest `i` falling: its last accepted move did not end on the ground,
+    /// and its body has a fall distance or a move accepted this tick went down.
+    fn falling(&self, i: usize) -> bool {
+        let g = &self.guests[i];
+        !g.on_ground
+            && (g.motion.as_ref().is_some_and(|m| m.fall_distance > 0.0)
+                || g.moves.iter().any(|(moved, _)| moved[1] < 0.0))
     }
 
     /// Whether something at `to` can hold guest `i` up; None: not judged. Only blocks that can't hold
@@ -550,6 +649,120 @@ impl Hub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_strike_save_keeps_the_last_complete_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("strikes.json");
+        let config = Config {
+            strikes: path.to_str().unwrap().to_owned(),
+            ..Config::default()
+        };
+
+        let mut first = Anticheat::new(config.clone());
+        assert_eq!(first.strike(1, Check::Ground), (1, false));
+        let before = horizon_std::fs::read(&path).unwrap();
+
+        // Pointing at a directory fails to read; in-memory counts still advance
+        // and the existing path is left intact rather than overwritten.
+        let unreadable_dir = dir.path().join("unreadable-strikes");
+        horizon_std::fs::create_dir(&unreadable_dir).unwrap();
+        let mut unreadable = Anticheat::new(Config {
+            strikes: unreadable_dir.to_str().unwrap().to_owned(),
+            ..Config::default()
+        });
+        assert_eq!(unreadable.strike(1, Check::Ground), (1, false));
+        assert_eq!(unreadable.strike(1, Check::Ground), (2, true));
+        assert!(unreadable_dir.is_dir());
+
+        // Invalid JSON also stays intact on disk while counts continue in memory.
+        let corrupt = dir.path().join("corrupt.json");
+        horizon_std::fs::write(&corrupt, b"{not json").unwrap();
+        let mut invalid = Anticheat::new(Config {
+            strikes: corrupt.to_str().unwrap().to_owned(),
+            ..Config::default()
+        });
+        assert_eq!(invalid.strike(1, Check::Ground), (1, false));
+        assert_eq!(invalid.strike(1, Check::Ground), (2, true));
+        assert_eq!(horizon_std::fs::read(&corrupt).unwrap(), b"{not json");
+
+        // When publication fails (e.g. a read-only parent directory on Unix),
+        // the last complete file stays intact without relying on any staging filename.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked_dir = dir.path().join("locked");
+            horizon_std::fs::create_dir(&locked_dir).unwrap();
+            let locked_path = locked_dir.join("strikes.json");
+            horizon_std::fs::write(&locked_path, &before).unwrap();
+            let locked_config = Config {
+                strikes: locked_path.to_str().unwrap().to_owned(),
+                ..Config::default()
+            };
+            let mut restarted = Anticheat::new(locked_config.clone());
+            horizon_std::fs::set_permissions(
+                &locked_dir,
+                horizon_std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+            // Skip the read-only directory assertion only if the process bypasses mode bits (e.g. root).
+            let can_write_locked = horizon_std::fs::File::create(locked_dir.join("probe")).is_ok();
+            let _ = horizon_std::fs::remove_file(locked_dir.join("probe"));
+            if !can_write_locked {
+                assert_eq!(restarted.strike(1, Check::Ground), (2, true));
+                assert_eq!(horizon_std::fs::read(&locked_path).unwrap(), before);
+            }
+            horizon_std::fs::set_permissions(
+                &locked_dir,
+                horizon_std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            if !can_write_locked {
+                let mut recovered = Anticheat::new(locked_config);
+                assert_eq!(recovered.strike(1, Check::Ground), (2, true));
+                assert_eq!(
+                    read_strikes(&locked_path).strikes.0[&uuid_text(1)]["ground"],
+                    0
+                );
+            }
+
+            // Symlinks and Unix permissions are preserved when replacing the strikes file.
+            let target = dir.path().join("real-strikes.json");
+            horizon_std::fs::write(&target, &before).unwrap();
+            horizon_std::fs::set_permissions(
+                &target,
+                horizon_std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let link = dir.path().join("link-strikes.json");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let mut linked = Anticheat::new(Config {
+                strikes: link.to_str().unwrap().to_owned(),
+                ..Config::default()
+            });
+            assert_eq!(linked.strike(1, Check::Ground), (2, true));
+            assert!(
+                horizon_std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                horizon_std::fs::metadata(&target)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(read_strikes(&target).strikes.0[&uuid_text(1)]["ground"], 0);
+        }
+
+        // Normal reload from the saved file still advances and persists.
+        let mut restarted = Anticheat::new(config);
+        assert_eq!(restarted.strike(1, Check::Ground), (2, true));
+        assert_eq!(read_strikes(&path).strikes.0[&uuid_text(1)]["ground"], 0);
+    }
 
     /// The log's lines reach the file in the order flagged, every one of them by the time the
     /// anticheat is dropped (the server stopping), even a flood written just before.

@@ -205,10 +205,32 @@ impl GeneratorData {
         // and the block behaviours) need only the tags: they run on threads of
         // their own while this one reads the rest. A new world's first chunks
         // wait for all of it, with the chunk workers idle.
+        // The block tables ask which templates ask their own ground, which is the class
+        // chain in the behaviours: those load first and hand the answer over, still on
+        // threads of their own.
+        let (ground_askers_tx, ground_askers_rx) = std::sync::mpsc::channel();
+        let behaviours = loading({
+            let root = dir.parent().map(Path::to_owned);
+            move || {
+                let behaviours = root
+                    .filter(|root| root.join("block-behaviours.json").fs_exists())
+                    .and_then(|root| crate::level::Behaviours::load(registry, &root).ok())
+                    .map(Arc::new);
+                let askers = behaviours
+                    .as_deref()
+                    .map(crate::level::Behaviours::states_asking_their_ground)
+                    .unwrap_or_default();
+                let _ = ground_askers_tx.send(askers);
+                behaviours
+            }
+        })?;
         let blocks = loading({
             let (dir, tags, fluids) = (dir.join("blocks"), block_tags.clone(), fluid_tags.clone());
             move || {
-                super::super::generator_blocks::BlockBehavior::load(&dir, registry, &tags, &fluids)
+                let askers = ground_askers_rx.recv().unwrap_or_default();
+                super::super::generator_blocks::BlockBehavior::load(
+                    &dir, registry, &tags, &fluids, askers,
+                )
             }
         })?;
         let structures = loading({
@@ -227,14 +249,6 @@ impl GeneratorData {
                     )
                     .with_templates(ov.templates().clone()),
                 )))
-            }
-        })?;
-        let behaviours = loading({
-            let root = dir.parent().map(Path::to_owned);
-            move || {
-                root.filter(|root| root.join("block-behaviours.json").fs_exists())
-                    .and_then(|root| crate::level::Behaviours::load(registry, &root).ok())
-                    .map(Arc::new)
             }
         })?;
         let tag_set = |name: &str| -> Result<BTreeSet<&str>, GeneratorError> {
@@ -294,6 +308,11 @@ impl GeneratorData {
         let source_catalog =
             BiomeSourceCatalog::new(&biome_set, &biome_tags, &presets.keys().cloned().collect())?;
         let carvers = CarverCatalog::from_json(&read_bundle(dir, ov, "carvers")?)?;
+        let left_out: BTreeSet<String> =
+            match fs::read_to_string(dir.join(crate::worldgen::carver::LEFT_OUT)) {
+                Ok(text) => serde_json::from_str(&text)?,
+                Err(_) => BTreeSet::new(),
+            };
         let mut biome_names = Vec::new();
         let mut biome_ids = BTreeMap::new();
         let mut biome_json = Vec::new();
@@ -304,7 +323,12 @@ impl GeneratorData {
             biome_names.push(Arc::<str>::from(name.as_str()));
             temperatures.push(BiomeTemperatureSettings::from_json(json)?);
             let value: Value = serde_json::from_str(json)?;
-            biome_carvers.push(carvers.decode_set(&value["carvers"].to_string())?);
+            let (set, dropped) =
+                carvers.decode_set_leaving_out(&value["carvers"].to_string(), &left_out)?;
+            warnings.extend(dropped.into_iter().map(|id| {
+                format!("biome {name}: carver {id} was left out of the mods' content, dropped")
+            }));
+            biome_carvers.push(set);
             biome_json.push(json.clone());
         }
         let carving_blocks = CarvingBlocks::from_registry(

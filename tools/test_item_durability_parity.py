@@ -10,9 +10,10 @@ import random
 import struct
 import math
 try:
-    from . import lab, test_rust_parity as base
+    from . import lab, oracle_folders, test_rust_parity as base
 except ImportError:
     import lab
+    import oracle_folders
     import test_rust_parity as base
 
 
@@ -61,12 +62,13 @@ def main():
         run(['java','-Xmx512M','-cp',os.pathsep.join([str(classes),str(jars[side]),dependency_path]),'dev.horizonlab.parity.VanillaItemDurabilityOracle',mode,path],side+'-'+mode)
     fixtures=list(corpus());inputs=build/'inputs.txt';inputs.write_text(''.join(json.dumps(value,separators=(',',':'))+'\n' for value in fixtures),encoding='utf-8')
     fixture_paths=[inputs];tested_fixtures=base.source_hashes(fixture_paths)
-    run(['cargo','build','--release','-p','horizon-world','--example','world_probe'],'compile-rust')
+    run(['cargo','build','--profile','fast','-p','horizon-world','--example','world_probe'],'compile-rust')
     metadata=json.loads(subprocess.check_output(['cargo','metadata','--no-deps','--format-version','1'],cwd=lab.ROOT,text=True))
-    binary=Path(metadata['target_directory'])/'release/examples'/('world_probe.exe' if os.name=='nt' else 'world_probe')
+    binary=Path(metadata['target_directory'])/'fast/examples'/('world_probe.exe' if os.name=='nt' else 'world_probe')
     run([binary,'item_durability_fixture',build],'rust');references=[]
     for side,jar in jars.items():
-        java(side,side,build);reference=build/f'{side}.txt';matched=base.compare(reference,build/'rust.txt')
+        (build/f'{side}.txt').unlink(missing_ok=True)  # the layout before: the reference beside the work files
+        folder=oracle_folders.folder(build/f'oracle-{side}',*fixture_paths,call=(classes,jars[side],side));java(side,side,folder);reference=folder/f'{side}.txt';matched=base.compare(reference,build/'rust.txt')
         references.append({'side':side,'jar_sha256':lab.digest(jar,'sha256'),'output_sha256':lab.digest(reference,'sha256'),'matched_output_lines':matched})
         print(f'{side}: {matched:,} item durability output lines match Rust',flush=True)
     base.ensure_sources_unchanged(sources,tested_sources);base.ensure_sources_unchanged(fixture_paths,tested_fixtures)

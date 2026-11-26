@@ -2,7 +2,7 @@
 
 <!-- Generated from launcher/src/cli.rs by cli_tools::markdown(); a test fails when this file is out of date. Update it with: HORIZON_WRITE_DOCS=1 cargo test --manifest-path launcher/Cargo.toml the_launcher_reference -->
 
-Every command of `horizon-launcher`, and the tool `horizon-launcher mcp` offers for it. A tool's arguments are the command's, in snake_case. A tool runs the command with `--json` and returns what it printed. The tools that change the player's things for good need `confirm: true`. The tools that send something or reach other people say "only when the player asks". The game's own tools, `game_*`, are in [horizon-ctl-commands.md](horizon-ctl-commands.md). For unsigned developer installations only, `HORIZON_LAUNCHER_DEVELOPER_OFFLINE=1` enables account-free Play. Only the exact value `1` enables it. The installed base must have persisted developer provenance, and the selected game must advertise `--developer-single-player` through `--launch-api`; older games must be rebuilt and reinstalled. Signed releases, Nightlies and their native descendants keep the account check. This mode supplies no session, blocks normal external connections and LAN hosting, and preserves managed launch leases, instance settings and unsigned labels. It is not a sandbox for native mods. If direct execution reports unregistered cache directories, use Horizon Launcher Play from the same launcher data directory with the intended instance and installed version (`horizon-launcher play --instance <instance> --version <tag>`).
+Every command of `horizon-launcher`, and the tool `horizon-launcher mcp` offers for it. A tool's arguments are the command's, in snake_case. A tool runs the command with `--json` and returns what it printed. The tools that change the player's things for good need `confirm: true`. The tools that send something or reach other people say "only when the player asks". The game's own tools, `game_*`, are in [horizon-ctl-commands.md](horizon-ctl-commands.md). For unsigned developer installations only, `HORIZON_LAUNCHER_DEVELOPER_OFFLINE=1` enables account-free Play. Only the exact value `1` enables it. The installed base must have persisted developer provenance, and the selected game must advertise `--developer-single-player` through `--launch-api`; older games must be rebuilt and reinstalled. Signed releases, Nightlies and their native descendants keep the account check. This mode supplies no session, blocks normal external connections and LAN hosting, and preserves managed launch leases, instance settings and unsigned labels. It is not a sandbox for native mods. If the game says a folder isn't registered by the launcher, start it with Play from the same launcher data directory, with the intended instance and installed version (`horizon-launcher play --instance <instance> --version <tag>`).
 
 With No AI on, `mcp` and `agent-config` are hidden and refuse; every other command stays. See [agent-control.md](agent-control.md#no-ai).
 
@@ -105,7 +105,7 @@ Start the client (needs a signed-in Microsoft account that owns Minecraft: Java 
 - `--arg`: An extra argument for the game, passed through as-is (repeatable), for example --server-thread
 - `--account`: Play this launch as this signed-in account (its name or UUID), without changing the one `account select` picked: several games can play as several accounts at once
 
-MCP: `play`, then the `game_*` tools.
+MCP: `play` (its `arg` needs `confirm: true`), then the `game_*` tools.
 
 ## `horizon-launcher server`
 
@@ -240,7 +240,7 @@ MCP: `account_select`.
 
 ## `horizon-launcher settings`
 
-Show the launcher's settings, or set one (the Settings page): selected-version TAG, game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the selected one, the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), cache-limit-gib N (managed cache limit in GiB: 10, 25 (default), 50, 100; 0 disables automatic cleanup).
+Show the launcher's settings, or set one (the Settings page): selected-version TAG (use this version for the selected Horizon instance), game-architecture auto|x64|arm64, minecraft-dir PATH, server-dir PATH ("default" resets a folder), install-new-versions on|off, prune-old-versions on|off (delete old versions after an install, keeping the ones instances use and the newest few), keep-versions N (how many of the newest to keep; "default" is 2), opening-animation on|off, proxy http://host:port|socks5://host:port ("default" removes it), while-playing stay|minimize|hide (what the window does while the game runs), language system|en|fr|ru|de|zh|es|uk|pl (the window's language; system follows the computer's), accent violet|blue|teal|green|amber|red|pink|#rrggbb|DEGREES (a named accent, any colour, or any hue), background PATH (a picture behind Home; "default" shows Horizon's landscape), cache-limit-gib N (managed cache limit in GiB: 10, 25 (default), 50, 100; 0 disables automatic cleanup).
 
     horizon-launcher settings [KEY] [VALUE]
 
@@ -257,7 +257,7 @@ Show or set the extra arguments the game starts with (for example --server-threa
 
 - `ARGS`: Omit to show the current arguments
 
-MCP: `game_args`.
+MCP: `game_args`, needs `confirm: true`.
 
 ## `horizon-launcher share-log`
 
@@ -442,7 +442,7 @@ A Java instance's Java: its own Java home or the automatic pick, memory and JVM 
 - `--args`: Extra JVM arguments (one string; "" clears them)
 - `--window`: The game window's size, as 1280x720; "default" goes back to the game's own
 
-MCP: `instance_java`.
+MCP: `instance_java`, needs `confirm: true`.
 
 ## `horizon-launcher instance loader`
 

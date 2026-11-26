@@ -11,7 +11,7 @@ mod source_tests;
 
 /// Ranges are rounded up to this many vertices to limit fragmentation, and
 /// start at multiples of it (`flat` names sections by these blocks).
-pub const GRAIN: u64 = 256;
+pub const GRAIN: u64 = 64;
 /// The largest page of the section arena, and of arenas shaders bind whole
 /// as storage, in bytes.
 pub const PAGE_BYTES: u64 = 256 << 20;
@@ -21,35 +21,78 @@ pub const PAGE_BYTES: u64 = 256 << 20;
 pub const LARGE_PAGE_BYTES: u64 = (1 << 31) - (1 << 20);
 
 /// Free vertex ranges: start -> length, never adjacent.
-#[derive(Debug, PartialEq)]
-struct FreeList(BTreeMap<u64, u64>);
+#[derive(Debug)]
+struct FreeList {
+    ranges: BTreeMap<u64, u64>,
+    /// Total free vertices across `ranges`, maintained in O(1).
+    total: u64,
+    /// Upper bound on the largest single free range in `ranges`:
+    /// raised on `give`/`give_all`, tightened whenever `take(len)` misses.
+    max_bound: u64,
+}
+
+impl PartialEq for FreeList {
+    fn eq(&self, other: &Self) -> bool {
+        self.ranges == other.ranges && self.total == other.total
+    }
+}
 
 impl FreeList {
     fn new(capacity: u64) -> Self {
-        Self(BTreeMap::from([(0, capacity)]))
+        Self {
+            ranges: BTreeMap::from([(0, capacity)]),
+            total: capacity,
+            max_bound: capacity,
+        }
     }
-    /// First fit.
+    #[cfg(test)]
+    fn from_ranges(ranges: BTreeMap<u64, u64>) -> Self {
+        let total = ranges.values().sum();
+        let max_bound = ranges.values().copied().max().unwrap_or(0);
+        Self {
+            ranges,
+            total,
+            max_bound,
+        }
+    }
+    /// First fit, skipping pages whose total or largest free range cannot hold `len`.
     fn take(&mut self, len: u64) -> Option<u64> {
-        let (&start, &free) = self.0.iter().find(|(_, l)| **l >= len)?;
-        self.0.remove(&start);
+        if len > self.total || len > self.max_bound {
+            return None;
+        }
+        let Some((&start, &free)) = self.ranges.iter().find(|(_, l)| **l >= len) else {
+            self.max_bound = self.max_bound.min(len.saturating_sub(1));
+            return None;
+        };
+        self.ranges.remove(&start);
         if free > len {
-            self.0.insert(start + len, free - len);
+            self.ranges.insert(start + len, free - len);
+        }
+        self.total -= len;
+        if self.total == 0 {
+            self.max_bound = 0;
+        } else if self.ranges.len() == 1 {
+            self.max_bound = self.total;
+        } else {
+            self.max_bound = self.max_bound.min(self.total);
         }
         Some(start)
     }
     fn give(&mut self, start: u64, len: u64) {
+        self.total += len;
         let (mut start, mut len) = (start, len);
-        if let Some((&prev, &prev_len)) = self.0.range(..start).next_back()
+        if let Some((&prev, &prev_len)) = self.ranges.range(..start).next_back()
             && prev + prev_len == start
         {
-            self.0.remove(&prev);
+            self.ranges.remove(&prev);
             start = prev;
             len += prev_len;
         }
-        if let Some(next_len) = self.0.remove(&(start + len)) {
+        if let Some(next_len) = self.ranges.remove(&(start + len)) {
             len += next_len;
         }
-        self.0.insert(start, len);
+        self.max_bound = self.max_bound.max(len);
+        self.ranges.insert(start, len);
     }
     /// `give` for many ranges: one merge of the sorted ranges into the list,
     /// where giving them one by one costs a few tree lookups each.
@@ -61,7 +104,7 @@ impl FreeList {
             return;
         }
         ranges.sort_unstable();
-        let mut free = std::mem::take(&mut self.0).into_iter().peekable();
+        let mut free = std::mem::take(&mut self.ranges).into_iter().peekable();
         let mut given = ranges.into_iter().peekable();
         let mut merged: Vec<(u64, u64)> = Vec::new();
         loop {
@@ -77,8 +120,27 @@ impl FreeList {
                 _ => merged.push((start, len)),
             }
         }
+        let mut total = 0u64;
+        let mut max_bound = 0u64;
+        for &(_, len) in &merged {
+            total += len;
+            max_bound = max_bound.max(len);
+        }
+        self.total = total;
+        self.max_bound = max_bound;
         // Sorted: the tree is built in one pass.
-        self.0 = merged.into_iter().collect();
+        self.ranges = merged.into_iter().collect();
+    }
+    /// End of the last range in use (excludes any trailing free range up to `capacity`).
+    fn last_used_end(&self, capacity: u64) -> u64 {
+        match self.ranges.last_key_value() {
+            Some((&start, &len)) if start + len == capacity => start,
+            _ => capacity,
+        }
+    }
+    /// Whether the entire `0..capacity` span is free.
+    fn is_all_free(&self, capacity: u64) -> bool {
+        self.total == capacity
     }
 }
 
@@ -88,7 +150,7 @@ pub(super) const LOOK_BYTES: u64 = 8;
 /// One vertex buffer of the arena; only the newest page grows.
 struct Page {
     buffer: wgpu::Buffer,
-    /// Optional shader-pack source records, indexed by the vertex index / 4.
+    /// Optional shader-pack source records, one a slot (a quad's at its first vertex).
     sources: Option<wgpu::Buffer>,
     /// A 0.2 shader pack's quad looks (`mesher::QuadLook`), one a slot, while it reads them.
     looks: Option<wgpu::Buffer>,
@@ -103,7 +165,7 @@ struct Page {
 impl Page {
     /// Vertices in the page's free ranges.
     fn free_vertices(&self) -> u64 {
-        self.free.0.values().sum()
+        self.free.total
     }
 }
 
@@ -300,10 +362,7 @@ impl Arena {
     /// submitted, most of a page just made or grown.
     pub fn binding(&self, page: u32) -> wgpu::BufferSlice<'_> {
         let p = self.pages[page as usize].as_ref().expect("live arena page");
-        let end = match p.free.0.last_key_value() {
-            Some((&start, &len)) if start + len == p.capacity => start,
-            _ => p.capacity,
-        };
+        let end = p.free.last_used_end(p.capacity);
         // A page a draw names holds a range; wgpu refuses an empty slice.
         p.buffer.slice(..end.max(GRAIN) * self.stride)
     }
@@ -327,13 +386,14 @@ impl Arena {
     }
 
     fn source_buffer(device: &wgpu::Device, capacity: u64) -> Option<wgpu::Buffer> {
-        if capacity / 4 * 8 > device.limits().max_storage_buffer_binding_size {
+        let bytes = capacity * 8;
+        if bytes > device.limits().max_storage_buffer_binding_size {
             return None;
         }
         try_create(
             device,
             "Terrain quad sources",
-            capacity / 4 * 8,
+            bytes,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 | wgpu::BufferUsages::COPY_SRC,
@@ -466,18 +526,20 @@ impl Arena {
             p.sources = Self::source_buffer(device, p.capacity);
         }
         if let Some(buffer) = &p.sources {
-            let bytes = vertices / 4 * 8;
+            let bytes = vertices * 8;
             if bytes > 0 {
                 // Recycled ranges must never keep another mesh's identity, even for a
                 // missing or incomplete sidecar. Zero records have no valid bit.
-                encoder.clear_buffer(buffer, start / 4 * 8, Some(bytes));
-                if sources.len() as u64 == vertices / 4 {
-                    uploads.buffer(
-                        encoder,
-                        buffer,
-                        start / 4 * 8,
-                        bytemuck::cast_slice(sources),
-                    );
+                encoder.clear_buffer(buffer, start * 8, Some(bytes));
+                if sources.len() as u64 == vertices {
+                    uploads.buffer(encoder, buffer, start * 8, bytemuck::cast_slice(sources));
+                } else if sources.len() as u64 == vertices / 4 {
+                    let mut scattered =
+                        vec![crate::mesher::TerrainSource::default(); vertices as usize];
+                    for (q, &src) in sources.iter().enumerate() {
+                        scattered[q * 4] = src;
+                    }
+                    uploads.buffer(encoder, buffer, start * 8, bytemuck::cast_slice(&scattered));
                 }
             }
         }
@@ -506,18 +568,17 @@ impl Arena {
         if let Some(found) = self.alloc_existing(len) {
             return Some(found);
         }
-        let last = self.pages.len().saturating_sub(1);
-        if let Some(page) = self.pages.last().and_then(Option::as_ref)
-            && page.capacity < self.page_limit
-            && self.closing != Some(last as u32)
-        {
-            let current = page.capacity;
+        if let Some((index, current)) = self.pages.iter().enumerate().rev().find_map(|(i, p)| {
+            let p = p.as_ref()?;
+            (p.capacity < self.page_limit && self.closing != Some(i as u32))
+                .then_some((i, p.capacity))
+        }) {
             let grown = self.grown(current, len);
             if (grown - current >= len || grown == self.page_limit)
-                && self.grow(device, encoder, last, grown)
-                && let Some(start) = self.pages[last].as_mut().unwrap().free.take(len)
+                && self.grow(device, encoder, index, grown)
+                && let Some(start) = self.pages[index].as_mut().unwrap().free.take(len)
             {
-                return Some((last as u32, start));
+                return Some((index as u32, start));
             }
         }
         let capacity = if self.pages.is_empty() {
@@ -698,17 +759,17 @@ impl Arena {
             vertices * self.stride,
         );
         if let Some(to_sources) = self.sources(to.0) {
-            let bytes = vertices / 4 * 8;
+            let bytes = vertices * 8;
             if bytes > 0 {
                 match self.sources(from.0) {
                     Some(from_sources) => encoder.copy_buffer_to_buffer(
                         from_sources,
-                        from.1 / 4 * 8,
+                        from.1 * 8,
                         to_sources,
-                        to.1 / 4 * 8,
+                        to.1 * 8,
                         bytes,
                     ),
-                    None => encoder.clear_buffer(to_sources, to.1 / 4 * 8, Some(bytes)),
+                    None => encoder.clear_buffer(to_sources, to.1 * 8, Some(bytes)),
                 }
             }
         }
@@ -767,7 +828,7 @@ impl Arena {
     /// MiB. Doubling left the section arena of a loaded view at render distance
     /// 12 at 192 MiB for some 95 MiB of vertices.
     fn grown(&self, current: u64, len: u64) -> u64 {
-        let step = (current / 2).min(PAGE_BYTES / self.stride);
+        let step = (current / 2).max(1).min(PAGE_BYTES / self.stride);
         (current + step).max(current + len).min(self.page_limit)
     }
     /// Moves a page into a larger buffer; false (the page unchanged) when
@@ -794,15 +855,23 @@ impl Arena {
             .then(|| Self::source_buffer(device, capacity))
             .flatten();
         let old = self.pages[page].as_mut().expect("live arena page");
-        // Copies recorded for the old buffer run before this one.
-        encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, old.capacity * self.stride);
-        if let (Some(from), Some(to)) = (&old.sources, &sources) {
-            encoder.copy_buffer_to_buffer(from, 0, to, 0, from.size());
+        let used_end = old.free.last_used_end(old.capacity);
+        // Copies recorded for the old buffer run before this one; trailing free
+        // space past `used_end` holds no live ranges and need not be copied.
+        if used_end > 0 {
+            encoder.copy_buffer_to_buffer(&old.buffer, 0, &buffer, 0, used_end * self.stride);
+            if let (Some(from), Some(to)) = (&old.sources, &sources) {
+                // One record a slot, as `write_sources` and `copy` place them.
+                let bytes = used_end * 8;
+                if bytes > 0 {
+                    encoder.copy_buffer_to_buffer(from, 0, to, 0, bytes);
+                }
+            }
+            if let (Some(from), Some(to)) = (&old.looks, &looks) {
+                encoder.copy_buffer_to_buffer(from, 0, to, 0, used_end * LOOK_BYTES);
+            }
         }
         old.sources = sources;
-        if let (Some(from), Some(to)) = (&old.looks, &looks) {
-            encoder.copy_buffer_to_buffer(from, 0, to, 0, from.size());
-        }
         old.looks = looks;
         let previous = old.capacity;
         old.buffer = buffer;
@@ -818,10 +887,12 @@ impl Arena {
         for page in &mut self.pages {
             if page
                 .as_ref()
-                .is_some_and(|p| p.free.0.len() == 1 && p.free.0.get(&0) == Some(&p.capacity))
+                .is_some_and(|p| p.free.is_all_free(p.capacity))
                 && let Some(p) = page.take()
             {
                 released.push(p.buffer);
+                released.extend(p.sources);
+                released.extend(p.looks);
             }
         }
         if self.closing.is_some_and(|page| !self.has_page(page)) {
@@ -836,8 +907,35 @@ impl Arena {
     /// Drops every page; gives back their buffers, for a [`Graveyard`].
     pub fn clear(&mut self) -> Vec<wgpu::Buffer> {
         self.closing = None;
-        self.pages.drain(..).flatten().map(|p| p.buffer).collect()
+        let mut released = Vec::new();
+        for p in self.pages.drain(..).flatten() {
+            released.push(p.buffer);
+            released.extend(p.sources);
+            released.extend(p.looks);
+        }
+        released
     }
+}
+
+/// Expands per-quad `sources` to match `packed` arena slots: compact records (`FULL == 0`)
+/// store their source at their record slot `q`, while fallback quads (`FULL != 0`) store their
+/// source at their first vertex slot `q + rec[0]`, matching `pack_atlas::PULL_FLAT`.
+pub(crate) fn expand_packed_sources(
+    packed: &[[u32; 6]],
+    sources: &[crate::mesher::TerrainSource],
+) -> Vec<crate::mesher::TerrainSource> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![crate::mesher::TerrainSource::default(); packed.len()];
+    for (q, (&rec, &src)) in packed.iter().zip(sources).enumerate() {
+        if rec[5] & crate::mesher::packed::FULL == 0 {
+            out[q] = src;
+        } else if let Some(slot) = out.get_mut(q + rec[0] as usize) {
+            *slot = src;
+        }
+    }
+    out
 }
 
 /// Frames a released page waits before it is freed: by then the GPU is done with the frames that
@@ -1050,7 +1148,7 @@ mod tests {
             .collect();
         arena.release_all(released);
         let free = |page: u32| -> Vec<(u64, u64)> {
-            let free = &arena.pages[page as usize].as_ref().unwrap().free.0;
+            let free = &arena.pages[page as usize].as_ref().unwrap().free.ranges;
             free.iter().map(|(&start, &len)| (start, len)).collect()
         };
         assert_eq!(free(first), vec![(0, 4 * GRAIN)]);
@@ -1179,16 +1277,17 @@ mod tests {
             // Split, a grain of solid quads each (the first's translucent ones, and
             // all of a water section's, in the translucent arena); else a grain of
             // solid and translucent quads, and one of translucent quads alone.
+            let q = (GRAIN / 4) as u32;
             let mut sections = if split {
                 vec![
-                    section((0, a), (0, 0), 64, 64),
-                    section((0, 0), (0, GRAIN), 0, 64),
-                    section((0, b), (0, 0), 64, 0),
+                    section((0, a), (0, 0), q, q),
+                    section((0, 0), (0, GRAIN), 0, q),
+                    section((0, b), (0, 0), q, 0),
                 ]
             } else {
                 vec![
-                    section((0, a), (0, a + 128), 32, 32),
-                    section((0, b), (0, b), 0, 64),
+                    section((0, a), (0, a + GRAIN / 2), q / 2, q / 2),
+                    section((0, b), (0, b), 0, q),
                 ]
             };
             // A range's first and last vertex hold its section's number, and the
@@ -1363,16 +1462,17 @@ mod tests {
             at,
             2 * GRAIN,
         );
+        let q = (GRAIN / 4) as u32;
         let mut section = SectionGpu {
             page: 0,
             start: 0,
             translucent_at: (0, at),
-            solid: 64,
-            solid_slots: 64 * 4,
+            solid: q,
+            solid_slots: u64::from(q) * 4,
             packed: false,
             packed_far: false,
-            sides: crate::mesher::Sides::unsorted(64),
-            translucent: 128,
+            sides: crate::mesher::Sides::unsorted(q),
+            translucent: 2 * q,
             sort: super::super::translucency::SortState::new(Vec::new()),
             sorted_indices: None,
             flat_id: Some(id),
@@ -1553,7 +1653,8 @@ mod tests {
         }
     }
 
-    /// Pages double up to `PAGE_BYTES`, then grow by `PAGE_BYTES` at most.
+    /// Large pages grow by half again up to `PAGE_BYTES` per step so they never
+    /// over-allocate by hundreds of MiB.
     #[test]
     fn large_pages_grow_by_bounded_steps() {
         let _gpu = crate::gfx::test_gpu::lock();
@@ -1734,7 +1835,7 @@ mod tests {
         // `oversized` looks at the counts only: a small buffer stands in.
         let buffer = try_create(&device, "Stand-in page", 4, wgpu::BufferUsages::VERTEX).unwrap();
         let mut shrinks = |capacity: u64, used: u64, host: bool| {
-            let free = FreeList(BTreeMap::from([(used, capacity - used)]));
+            let free = FreeList::from_ranges(BTreeMap::from([(used, capacity - used)]));
             let buffer = buffer.clone();
             arena.pages = vec![Some(Page {
                 sources: None,
@@ -1849,6 +1950,29 @@ mod tests {
         let _b = free.take(GRAIN).unwrap();
         free.give(a, GRAIN);
         assert_eq!(free.take(GRAIN), Some(a));
+    }
+
+    #[test]
+    fn free_list_tracks_total_and_max_bound_across_misses_and_coalescing() {
+        let mut free = FreeList::new(6 * GRAIN);
+        let ranges: Vec<_> = (0..6).map(|_| free.take(GRAIN).unwrap()).collect();
+        assert_eq!((free.total, free.max_bound), (0, 0));
+        assert_eq!(free.take(GRAIN), None);
+        // Alternating holes of 1 grain each: total is 3 grains, largest single hole is 1 grain.
+        for i in [0usize, 2, 4] {
+            free.give(ranges[i], GRAIN);
+        }
+        assert_eq!(free.total, 3 * GRAIN);
+        assert_eq!(free.take(2 * GRAIN), None);
+        // Miss tightened `max_bound` below 2 grains without breaking 1-grain allocations.
+        assert!(free.max_bound < 2 * GRAIN);
+        // Giving back range 1 coalesces 0..3*GRAIN and raises `max_bound`.
+        free.give(ranges[1], GRAIN);
+        assert_eq!(free.total, 4 * GRAIN);
+        assert!(free.max_bound >= 3 * GRAIN);
+        assert_eq!(free.take(3 * GRAIN), Some(0));
+        assert_eq!(free.total, GRAIN);
+        assert_eq!(free.max_bound, GRAIN);
     }
 
     fn read(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer, offset: u64) -> u32 {
@@ -2005,5 +2129,178 @@ mod tests {
             roomy.pages[page as usize].as_ref().unwrap().capacity,
             64 * GRAIN
         );
+    }
+
+    #[test]
+    fn write_sources_stores_packed_and_unpacked_quad_sources_by_slot() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut arena = Arena::new(&device, 24, 4 * GRAIN, false);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut uploads = super::super::upload::Uploads::new(&device);
+
+        let (p0, s0) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+        let packed_sources: Vec<_> = (0..GRAIN as u32)
+            .map(|i| crate::mesher::TerrainSource::new(100 + i, [1, 2, 3], 4, false))
+            .collect();
+        arena.write_sources(
+            &device,
+            &mut encoder,
+            &mut uploads,
+            p0,
+            s0,
+            GRAIN,
+            &packed_sources,
+        );
+
+        let (p1, s1) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+        let unpacked_sources: Vec<_> = (0..(GRAIN / 4) as u32)
+            .map(|i| crate::mesher::TerrainSource::new(200 + i, [4, 5, 6], 7, true))
+            .collect();
+        arena.write_sources(
+            &device,
+            &mut encoder,
+            &mut uploads,
+            p1,
+            s1,
+            GRAIN,
+            &unpacked_sources,
+        );
+
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+
+        let read_range = |page: u32, start: u64, count: u64| -> Vec<crate::mesher::TerrainSource> {
+            let buffer = arena.sources(page).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            wgpu::util::DownloadBuffer::read_buffer(
+                &device,
+                &queue,
+                &buffer.slice(start * 8..(start + count) * 8),
+                move |r| tx.send(r.unwrap().to_vec()).unwrap(),
+            );
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            bytemuck::pod_collect_to_vec(&rx.recv().unwrap())
+        };
+
+        assert_eq!(read_range(p0, s0, GRAIN), packed_sources);
+        let read_unpacked = read_range(p1, s1, GRAIN);
+        for (q, expected) in unpacked_sources.iter().enumerate() {
+            assert_eq!(read_unpacked[q * 4], *expected);
+            assert_eq!(read_unpacked[q * 4 + 1], Default::default());
+        }
+    }
+
+    /// A page that grows keeps every range's sources, one record a slot (#19605): a quarter of
+    /// them came along, and the rest of the page's faces lost their block (`mc_Entity` -1).
+    #[test]
+    fn a_grown_page_keeps_every_slots_sources() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((device, queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let mut arena = Arena::new(&device, 24, 4 * GRAIN, false);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut uploads = super::super::upload::Uploads::new(&device);
+        // Four ranges fill the first page; a fifth grows it.
+        let mut written = Vec::new();
+        for n in 0..5u32 {
+            let (page, start) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+            let sources: Vec<_> = (0..GRAIN as u32)
+                .map(|i| crate::mesher::TerrainSource::new(1000 * (n + 1) + i, [1, 2, 3], 4, false))
+                .collect();
+            arena.write_sources(
+                &device,
+                &mut encoder,
+                &mut uploads,
+                page,
+                start,
+                GRAIN,
+                &sources,
+            );
+            written.push((page, start, sources));
+        }
+        assert!(
+            written.iter().all(|w| w.0 == written[0].0),
+            "one page, grown"
+        );
+        uploads.finish(&encoder);
+        queue.submit([encoder.finish()]);
+        for (n, (page, start, sources)) in written.iter().enumerate() {
+            let buffer = arena.sources(*page).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            wgpu::util::DownloadBuffer::read_buffer(
+                &device,
+                &queue,
+                &buffer.slice(start * 8..(start + GRAIN) * 8),
+                move |r| tx.send(r.unwrap().to_vec()).unwrap(),
+            );
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let read: Vec<crate::mesher::TerrainSource> =
+                bytemuck::pod_collect_to_vec(&rx.recv().unwrap());
+            assert_eq!(&read, sources, "range {n} at {start}");
+        }
+    }
+
+    #[test]
+    fn expand_packed_sources_handles_padding_and_fallback_quads() {
+        use crate::mesher::{TerrainSource, packed::FULL};
+        let s0 = TerrainSource::new(10, [1, 2, 3], 0, false);
+        let s1 = TerrainSource::new(20, [4, 5, 6], 5, true);
+        // 2 compact quads padded to 4 slots.
+        let padded = [[0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0], [0; 6], [0; 6]];
+        let expanded_padded = expand_packed_sources(&padded, &[s0, s1]);
+        assert_eq!(
+            expanded_padded,
+            vec![s0, s1, TerrainSource::default(), TerrainSource::default()]
+        );
+
+        // 2 quads: q0 compact, q1 fallback pointing +3 slots to slot 4 (plus 2 padding slots at 2..4, 4 vertex slots at 4..8).
+        let mixed = [
+            [0, 0, 0, 0, 0, 0],
+            [3, 0, 0, 0, 0, FULL],
+            [0; 6],
+            [0; 6],
+            [0; 6],
+            [0; 6],
+            [0; 6],
+            [0; 6],
+        ];
+        let expanded_mixed = expand_packed_sources(&mixed, &[s0, s1]);
+        assert_eq!(expanded_mixed.len(), 8);
+        assert_eq!(expanded_mixed[0], s0);
+        assert_eq!(expanded_mixed[1], TerrainSource::default());
+        assert_eq!(expanded_mixed[4], s1);
+    }
+
+    #[test]
+    fn no_pack_packed_sections_keep_sources_disabled() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((device, _queue)) = device() else {
+            eprintln!("no GPU adapter: skipped");
+            return;
+        };
+        let packed = [[0; 6]; 4];
+        let expanded = expand_packed_sources(&packed, &[]);
+        assert!(expanded.is_empty());
+
+        let mut arena = Arena::new(&device, 24, 4 * GRAIN, false);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut uploads = super::super::upload::Uploads::new(&device);
+        let (page, start) = arena.alloc(&device, &mut encoder, GRAIN).unwrap();
+        arena.write_sources(
+            &device,
+            &mut encoder,
+            &mut uploads,
+            page,
+            start,
+            4,
+            &expanded,
+        );
+        assert!(arena.sources(page).is_none());
     }
 }

@@ -47,9 +47,9 @@ impl MountState {
 ///
 /// `AbstractHorse.isFood` is the `#minecraft:horse_food` tag, `ZombieHorse`
 /// overrides it with `#minecraft:zombie_horse_food` (a red mushroom and
-/// nothing else), and the horse food tag carries no red mushrooms; a skeleton
-/// horse inherits the horse food tag but only a tamed one gets that far
-/// (`SkeletonHorse.mobInteract` passes for an untamed one).
+/// nothing else), and the horse food tag carries no red mushrooms. A skeleton
+/// horse inherits the horse food tag, but nothing asks it: `SkeletonHorse`
+/// adds no food branch to `AbstractHorse.mobInteract`'s, which has none.
 fn eating(species: Species, item: &str) -> Option<(f32, i32, u8, bool)> {
     let camel = species == Species::Camel;
     // CamelHusk.isFood: rabbit's feet (and it never falls in love).
@@ -130,8 +130,9 @@ impl Game<'_> {
         self.mobs.iter().position(|m| m.id == id)
     }
     /// `Entity.interact` / `Mob.canShearEquipment` / `Mob.attemptToShearEquipment`
-    /// / `Mob.shearItem`: the saddle of a `#can_equip_saddle` mob comes off
-    /// before its mobInteract can ride it, with the saddle's shearing sound.
+    /// / `Mob.shearItem`: the horse or nautilus armor of a `#can_equip_saddle`
+    /// mob, else its saddle, comes off before its mobInteract can ride it,
+    /// with the item's shearing sound.
     /// An occupied mount is not sheared: its mobInteract runs instead.
     pub(super) fn shear_saddle(&mut self, index: usize, item: &str) -> Option<bool> {
         let m = &self.mobs[index];
@@ -170,39 +171,72 @@ impl Game<'_> {
         if self.keys.held(Action::Sneak) {
             return None;
         }
-        // attemptToShearEquipment takes the body slot before the saddle: horse
-        // and nautilus armor come off first (not modelled here).
-        if m.extra
-            .body_id()
-            .is_some_and(|b| b.ends_with("_horse_armor") || b.ends_with("_nautilus_armor"))
-        {
-            return None;
-        }
-        let saddle = m.saddle_item()?;
-        if &*saddle.item != "minecraft:saddle" {
-            return None;
-        }
-        let silent = m.silent;
-        let at = m.position;
-        let offset = horizon_client::mobs::riders::passenger_attachment(m)[1];
+        // attemptToShearEquipment: the first shearable slot in EquipmentSlot
+        // order, so horse and nautilus armor (BODY) come off before the saddle.
+        let armor = m.extra.body_stack().and_then(|b| {
+            let sound = if b.item.ends_with("_horse_armor") {
+                "minecraft:item.horse_armor.unequip"
+            } else if b.item.ends_with("_nautilus_armor") {
+                "minecraft:item.armor.unequip_nautilus"
+            } else {
+                return None;
+            };
+            (!self.kept_on(b)).then_some((horizon_items::equipment::BODY, sound))
+        });
+        let (slot, sound) = match armor {
+            Some(found) => found,
+            None => {
+                let saddle = m.saddle_item()?;
+                if &*saddle.item != "minecraft:saddle" || self.kept_on(&saddle) {
+                    return None;
+                }
+                (horizon_items::equipment::SADDLE, "minecraft:item.saddle.unequip")
+            }
+        };
+        self.shear_equipment(index, slot, sound);
+        Some(true)
+    }
+    /// `EnchantmentHelper.has(stack, PREVENT_ARMOR_CHANGE)` for a survival
+    /// player: `attemptToShearEquipment` leaves such an item on.
+    pub(super) fn kept_on(&self, stack: &ItemStack) -> bool {
+        !self.creative && world_stations!(self).enchantments.prevents_armor_change(stack)
+    }
+    /// `Mob.shearItem` on mob `index`'s `slot` (BODY or SADDLE), then
+    /// `attemptToShearEquipment`'s `playSound(equippable.shearingSound())`:
+    /// the shears take a point of damage, the slot empties, `GameEvent.SHEAR`
+    /// fires, the item drops at the mob's average passenger attachment
+    /// (unturned) and `player_sheared_equipment` triggers.
+    pub(super) fn shear_equipment(&mut self, index: usize, slot: usize, sound: &str) {
+        let m = &self.mobs[index];
+        let (id, silent, at) = (m.id, m.silent, m.position);
+        let offset = horizon_client::mobs::riders::average_attachment(m);
+        let stack = if slot == horizon_items::equipment::SADDLE {
+            m.saddle_item()
+        } else {
+            m.extra.body_stack().cloned()
+        };
+        let Some(stack) = stack else { return };
         self.damage_held_tool();
-        self.mobs[index].set_saddle(None);
+        if slot == horizon_items::equipment::SADDLE {
+            self.mobs[index].set_saddle(None);
+        } else {
+            self.mobs[index].extra.set_body_stack(None);
+        }
         let context = self.who_context(Some(Who::Player), None);
         self.post_game_event("minecraft:shear", [at.x, at.y, at.z], context);
         self.mob_equip_event(id, [at.x, at.y, at.z], false);
-        self.spawn_at_location(at, offset, saddle.clone());
+        // Entity.spawnAtLocation(level, stack, offset): with the default pickup delay.
+        self.spawn_item_own(
+            stack.clone(),
+            [at.x + offset[0], at.y + offset[1], at.z + offset[2]],
+            10,
+        );
         let target = self.mob_entity(&self.mobs[index]);
-        self.trigger_item_entity("minecraft:player_sheared_equipment", &saddle, &target);
-        // attemptToShearEquipment: playSound(equippable.shearingSound()).
+        self.trigger_item_entity("minecraft:player_sheared_equipment", &stack, &target);
+        // Entity.playSound: nothing from a silent mob.
         if !silent {
-            self.audio.play(
-                "minecraft:item.saddle.unequip",
-                Some([at.x, at.y, at.z]),
-                1.0,
-                1.0,
-            );
+            self.audio.play(sound, Some([at.x, at.y, at.z]), 1.0, 1.0);
         }
-        Some(true)
     }
     /// `Pig` / `Strider.mobInteract`: saddle an adult, or ride a saddled one.
     fn interact_steerable(&mut self, index: usize, item: &str) -> bool {
@@ -240,6 +274,10 @@ impl Game<'_> {
             return true;
         }
         let id = m.id;
+        let species = m.species();
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -279,19 +317,53 @@ impl Game<'_> {
         self.swing_arm();
         true
     }
+    /// Passenger capacity of a mount species: 2 for camels, 4 for happy ghasts, 1 for others.
+    pub(super) fn mount_capacity(species: Species) -> usize {
+        if matches!(species, Species::Camel | Species::CamelHusk) {
+            2
+        } else if species == Species::HappyGhast {
+            4
+        } else {
+            1
+        }
+    }
+    /// Total passengers (mobs, guests, and host) aboard `vehicle`, excluding the currently acting player.
+    pub(super) fn mount_passenger_count(&self, vehicle: u32) -> usize {
+        let mob_passengers = self
+            .mobs
+            .iter()
+            .filter(|p| p.extra.mount == Some(vehicle) && !p.removed && p.alive())
+            .count();
+        let guest_passengers = self.lan.as_ref().map_or(0, |h| {
+            h.hub
+                .guests
+                .iter()
+                .filter(|g| {
+                    Some(g.conn) != self.lan_acting
+                        && self.guest_current_vehicle(g.conn) == Some(vehicle)
+                })
+                .count()
+        });
+        let host_passenger = if self.lan_acting.is_some() {
+            usize::from(self.host_current_vehicle() == Some(vehicle))
+        } else {
+            0
+        };
+        mob_passengers + guest_passengers + host_passenger
+    }
     /// `AbstractHorse.mobInteract`. Returns whether the click was used.
     pub(super) fn interact_mount(&mut self, index: usize, item: &str) -> bool {
         let held = self.held().cloned();
         let m = &self.mobs[index];
         let species = m.species();
-        // A server player rides it already (`isVehicle`: no seat, no feeding).
-        if self.ridden_by_guest(m.id) {
-            return false;
-        }
+        let id = m.id;
         if matches!(species, Species::Pig | Species::Strider) {
             return self.interact_steerable(index, item);
         }
         if horizon_client::mobs::llama::is_llama(species) {
+            if self.mount_passenger_count(id) > 0 {
+                return false;
+            }
             return self.interact_llama(index, item);
         }
         if species == Species::HappyGhast {
@@ -303,15 +375,11 @@ impl Game<'_> {
         if !equine::is_equine(species) || !m.alive() || Some(m.id) == self.riding {
             return false;
         }
-        // AbstractHorse.mobInteract: a horse a mob rides (`isVehicle`) has no
+        // AbstractHorse.mobInteract: a horse with a rider (`isVehicle`) has no
         // seat, inventory or feeding to give. Camels seat two and check their
         // passengers themselves.
-        let id = m.id;
         if !matches!(species, Species::Camel | Species::CamelHusk)
-            && self
-                .mobs
-                .iter()
-                .any(|p| p.extra.mount == Some(id) && !p.removed && p.alive())
+            && self.mount_passenger_count(id) > 0
         {
             return false;
         }
@@ -348,16 +416,19 @@ impl Game<'_> {
             self.open_mount_menu(index);
             return true;
         }
-        if self.feed_mount(index, item) {
+        // `AbstractHorse.mobInteract` has no food branch and `SkeletonHorse`
+        // adds none: wheat mounts a tamed skeleton horse instead of feeding it.
+        if species != Species::SkeletonHorse && self.feed_mount(index, item) {
             return true;
         }
         let m = &mut self.mobs[index];
-        if m.is_baby() {
-            return false;
-        }
+        // `AbstractHorse.mobInteract` seats, saddles and arms no baby, but
+        // `AbstractChestedHorse.mobInteract` chests one: its branch has no baby
+        // test, so the flag is only read below the chest arm.
+        let baby = m.is_baby();
         let at = m.center();
         let tamed = m.extra.tame;
-        let sound = if item == "minecraft:saddle" && tamed && !m.extra.saddled() {
+        let sound = if item == "minecraft:saddle" && tamed && !m.extra.saddled() && !baby {
             m.set_saddle(held.map(|s| ItemStack { count: 1, ..s }));
             // Camel.getSaddleSound (the equip sound of a camel's saddle).
             Some(match species {
@@ -366,9 +437,10 @@ impl Game<'_> {
                 _ => "minecraft:entity.horse.saddle",
             })
         } else if item.ends_with("_horse_armor")
-            && species == Species::Horse
+            && super::mount_menu::can_wear_horse_armor(species)
             && tamed
             && m.extra.body_id().is_none()
+            && !baby
         {
             m.extra
                 .set_body_stack(held.map(|s| ItemStack { count: 1, ..s }));
@@ -377,6 +449,7 @@ impl Game<'_> {
             && matches!(species, Species::Donkey | Species::Mule)
             && tamed
             && !m.extra.chested
+            && (!baby || !dandelion)
         {
             m.extra.chested = true;
             // AbstractChestedHorse.playChestEquipsSound, which Mule overrides
@@ -410,7 +483,9 @@ impl Game<'_> {
             let feet = [m.position.x, m.position.y, m.position.z];
             if !silent {
                 match seed {
-                    Some(seed) => self.audio.play_seeded(sound, Some(feet), 1.0, pitch, seed),
+                    Some(seed) => self
+                        .audio
+                        .play_seeded(sound, Some(feet), 1.0, pitch, seed, None),
                     None => self.audio.play(sound, Some(feet), 1.0, pitch),
                 }
             }
@@ -425,9 +500,15 @@ impl Game<'_> {
                 .insert((at[0].floor() as i32 >> 4, at[2].floor() as i32 >> 4));
             return true;
         }
+        if baby {
+            return false;
+        }
         // doPlayerRide: `AbstractHorse.doPlayerRide` turns the rider to the
         // horse's yaw before it seats them.
         let id = self.mobs[index].id;
+        if self.mount_passenger_count(id) >= Self::mount_capacity(species) {
+            return false;
+        }
         if !self.native_may_board(id) {
             return true;
         }
@@ -445,14 +526,17 @@ impl Game<'_> {
         let Some((heal, age_up, temper, love)) = eating(self.mobs[index].species(), item) else {
             return false;
         };
+        let m = &self.mobs[index];
+        let eligible = love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0;
+        let Some((index, loved)) = self.animal_love_decision(index, eligible) else {
+            return true;
+        };
         let m = &mut self.mobs[index];
-        let mut used = false;
-        let mut loved = false;
-        if love && m.extra.tame && m.extra.age == 0 && m.extra.in_love <= 0 {
+        let loved = loved && m.extra.tame;
+        let mut used = eligible;
+        if loved {
             m.extra.in_love = 600;
             m.extra.love_player = true;
-            used = true;
-            loved = true;
         }
         if m.health < m.attrs.max_health && heal > 0.0 {
             m.heal(&self.loop_context, heal);
@@ -515,7 +599,9 @@ impl Game<'_> {
             self.love_cause.insert(id, self.lan_acting);
             let kind = self.mobs[index].kind.id.clone();
             self.native_entity_enter_love_mode(id, &kind, self.lan_acting_uuid);
-            self.mob_event_particles(id, 18);
+            if self.feeding_animal_index(index, id).is_some() {
+                self.mob_event_particles(id, 18);
+            }
         }
         self.consume_held();
         true
@@ -600,16 +686,12 @@ impl Game<'_> {
         let m = &mut self.mobs[i];
         if jump > 0.0 {
             // AbstractHorse.onPlayerJump: slide on the keys and rear (horses,
-            // donkeys and mules).
+            // donkeys and mules). The jump sound is not played here: vanilla's
+            // server plays it in `handleStartJump`, which the guest's
+            // START_RIDING_JUMP reaches (`lan_start_riding_jump`), and
+            // `playJumpSound` must not sound twice (#16360).
             if equine::is_equine(m.species()) {
                 equine::on_player_jump(m);
-            }
-            // The nautilus plays its dash sound itself.
-            if equine::is_equine(m.species()) {
-                // playJumpSound, which the server broadcasts for a guest.
-                let sound = format!("minecraft:{}", equine::jump_sound(m));
-                let at = m.center();
-                self.audio.play(&sound, Some(at), 0.4, 1.0);
             }
         }
         let m = &mut self.mobs[i];
@@ -662,7 +744,14 @@ impl Game<'_> {
             // Camel.getPassengerAttachmentPoint: the driver half a block
             // forward, at the body anchor (lower while sitting), turned with
             // the camel. Its point already carries the camel's own scale.
-            seat_of(m, horizon_client::mobs::camel::passenger_attachment(m))
+            // Camel.getPassengerAttachmentPoint uses the passenger's place
+            // in getPassengers(): the second rider sits behind the driver.
+            let seat = self.remote.as_ref().map_or(0, |r| r.passenger_index);
+            let count = self.seated_passengers(m.id).len().max(1);
+            seat_of(
+                m,
+                horizon_client::mobs::camel::passenger_attachment_at(m, seat, count, false),
+            )
         } else {
             seat_of(m, horizon_client::mobs::riders::type_attachment(m))
         };
@@ -974,10 +1063,17 @@ impl Game<'_> {
         equine::is_equine(species) || horizon_client::mobs::nautilus::is_nautilus(species)
     }
     /// `Player.jumpableVehicle`: a saddled mount that jumps (not a pig or a
-    /// strider, which a saddle only steers).
+    /// strider, which a saddle only steers), and a camel only while it moves
+    /// (`Camel.canJump` adds `!refuseToMove`).
     pub(super) fn jumpable_mount(&self) -> bool {
-        self.mount_index()
-            .is_some_and(|i| self.mobs[i].extra.saddled() && Self::jumps(self.mobs[i].species()))
+        self.remote.as_ref().is_none_or(|r| r.first_passenger)
+            && self.mount_index().is_some_and(|i| {
+                let m = &self.mobs[i];
+                m.extra.saddled()
+                    && Self::jumps(m.species())
+                    && !(crate::mobs::camel::is_camel(m.species())
+                        && crate::mobs::camel::refuse_to_move(m))
+            })
     }
     /// `willPrioritizeJumpInfo`: charging a jump or recharging.
     pub(super) fn mount_jumping(&self) -> bool {
@@ -1828,7 +1924,8 @@ mod tests {
         let mut m = horizon_client::mobs::Mob::new(id, kind, Vec3::new(at[0], at[1], at[2]), 0.0);
         m.extra.tame = true;
         m.health = m.attrs.max_health;
-        m.random = horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
+        m.random =
+            horizon_core::random::EntityRandom::own(horizon_core::random::LegacyRandom::new(seed));
         game.mobs.clear();
         game.mobs.push(m);
     }
@@ -1934,8 +2031,7 @@ mod tests {
         assert_eq!(game.mobs[0].extra.age, -23800, "camel cactus ages 10 s");
     }
 
-    /// Equips `item` on mob 0 and collects the sounds and the `minecraft:equip`
-    /// game events it made.
+    /// Clicks `item` on mob 0 and collects its sounds and game events.
     fn equip(game: &mut Game<'_>, item: &str) -> (bool, Shown) {
         game.inventory[game.selected] = Some(ItemStack::new(item, 2));
         game.audio.capture = Some(Vec::new());
@@ -1950,16 +2046,90 @@ mod tests {
             .into_iter()
             .map(|s| (s.event, s.position, s.volume, s.pitch))
             .collect();
-        let events = crate::game::sculk::TEST_POSTED_EVENTS.with(|events| {
-            events
-                .borrow_mut()
-                .take()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(event, _, _)| *event == "minecraft:equip")
-                .collect()
-        });
+        let events = crate::game::sculk::TEST_POSTED_EVENTS
+            .with(|events| events.borrow_mut().take().unwrap_or_default());
         (used, Shown { sounds, events })
+    }
+
+    /// `AbstractHorse.mobInteract` arms a tamed zombie horse
+    /// (`#minecraft:can_wear_horse_armor` holds it) instead of seating the
+    /// rider, `AbstractChestedHorse.mobInteract` chests a foal (its own branch
+    /// has no baby test), and `SkeletonHorse.mobInteract` has no food branch,
+    /// so wheat mounts a hurt one instead of healing it.
+    #[test]
+    #[ignore = "daily"]
+    fn a_zombie_horse_arms_a_foal_is_chested_and_a_skeleton_horse_is_mounted() {
+        let mut resources = None;
+        let mut game = server_game(&mut resources)
+            .expect("set HORIZON_TEST_RESOURCES to valid prepared resources");
+        // Iron horse armour on a tamed zombie horse: worn, and the player stays
+        // on the ground.
+        mount(&mut game, "minecraft:zombie_horse", 1, [1.5, 64.0, -2.5], 5);
+        let (used, Shown { sounds, events }) = equip(&mut game, "minecraft:iron_horse_armor");
+        assert!(used, "the armour click is taken");
+        assert_eq!(
+            game.mobs[0].extra.body_id(),
+            Some("minecraft:iron_horse_armor")
+        );
+        assert_eq!(game.riding, None, "armour does not seat the player");
+        assert_eq!(
+            events,
+            vec![("minecraft:equip", [1.5, 64.0, -2.5], Some(Who::Mob(1)))]
+        );
+        assert_eq!(sounds.len(), 1, "{sounds:?}");
+        assert_eq!(sounds[0].0, "minecraft:entity.horse.armor");
+        assert_eq!(
+            game.inventory[game.selected].as_ref().map(|s| s.count),
+            Some(1),
+            "the armour is consumed"
+        );
+
+        // A chest on a tamed foal: donkeys and mules take one while still young.
+        mount(&mut game, "minecraft:donkey", 2, [0.5, 64.0, 0.5], 9);
+        game.mobs[0].extra.age = -24000;
+        game.offhand = Some(ItemStack::new("minecraft:golden_dandelion", 1));
+        let (used, _) = equip(&mut game, "minecraft:chest");
+        assert!(!used, "a held golden dandelion prevents chesting a foal");
+        assert!(!game.mobs[0].extra.chested);
+        game.offhand = None;
+        let (used, Shown { sounds, events }) = equip(&mut game, "minecraft:chest");
+        assert!(used, "a foal takes the chest");
+        assert!(game.mobs[0].extra.chested);
+        assert_eq!(game.riding, None);
+        assert!(events.is_empty(), "chesting posts no event: {events:?}");
+        assert_eq!(sounds.len(), 1, "{sounds:?}");
+        assert_eq!(sounds[0].0, "minecraft:entity.donkey.chest");
+        assert_eq!(
+            game.inventory[game.selected].as_ref().map(|s| s.count),
+            Some(1),
+            "the chest is consumed"
+        );
+
+        // Wheat on a hurt tamed skeleton horse: no food branch, so it is
+        // mounted instead of healed, with its mouth shut and its own random
+        // untouched.
+        mount(
+            &mut game,
+            "minecraft:skeleton_horse",
+            3,
+            [2.5, 64.0, 2.5],
+            13,
+        );
+        let hurt = game.mobs[0].attrs.max_health - 5.0;
+        game.mobs[0].health = hurt;
+        let (used, Shown { sounds, events }) = equip(&mut game, "minecraft:wheat");
+        assert!(used, "wheat mounts a skeleton horse");
+        assert_eq!(game.riding, Some(3), "the click seats the player");
+        assert_eq!(game.mobs[0].health, hurt, "wheat heals nothing");
+        assert!(sounds.is_empty(), "no eating sound: {sounds:?}");
+        assert!(events.is_empty(), "no eat event: {events:?}");
+        assert_eq!(game.mobs[0].anim.v[2], 0.0, "the mouth stays shut");
+        assert_eq!(equine::temper(&game.mobs[0]), 0, "no temper from wheat");
+        assert_eq!(
+            game.mobs[0].random.clone().next_float(),
+            horizon_core::random::LegacyRandom::new(13).next_float(),
+            "the mount's own random drew nothing"
+        );
     }
 
     /// `LivingEntity.onEquipItem`: a saddle or horse armour plays its equip sound

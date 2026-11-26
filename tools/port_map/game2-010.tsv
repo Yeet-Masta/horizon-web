@@ -38,20 +38,20 @@ EnchantmentHelper.doPostAttackEffects	port	crates/horizon-client/src/game/items/
 EnchantmentHelper.doPostAttackEffectsWithItemSourceOnBreak	port	crates/horizon-client/src/game/items/enchant_effects.rs::Game::post_attack	gap: minor: melee hits with the held item only; projectile and attacker-less hits are not here
 EnchantmentHelper.stopLocationBasedEffects	inline	crates/horizon-client/src/game/items/enchant_effects.rs::Game::tick_soul_speed	gap: minor: only Soul Speed; the boots-changed branch stops it
 EnchantmentHelper.tickEffects	inline	crates/horizon-client/src/game/items/enchant_effects.rs::Game::tick_soul_speed	gap: minor: only Soul Speed's tick effect; it is the only one in the data
-EnchantmentHelper.processProjectileCount	port	crates/horizon-client/src/game/items/crossbow.rs::Game::tick_crossbow	gap: minor: Multishot's three shots are hard-coded, not read from projectile_count
-EnchantmentHelper.processProjectileSpread	port	crates/horizon-client/src/game/items/crossbow.rs::Game::shoot_crossbow	gap: minor: 10 degrees hard-coded, not read from projectile_spread (same value)
+EnchantmentHelper.processProjectileCount	port	crates/horizon-client/src/game/items/crossbow.rs::Game::tick_crossbow	projectile_count controls a player's volley size; mob AI loads its own
+EnchantmentHelper.processProjectileSpread	port	crates/horizon-client/src/game/items/crossbow.rs::Game::shoot_crossbow	projectile_spread controls a player's volley angles
 EnchantmentHelper.getPiercingCount	inline	crates/horizon-client/src/game/items/crossbow.rs::Game::shoot_crossbow	projectile_piercing read for the arrow's pierce level there
 EnchantmentHelper.onHitBlock	port	crates/horizon-client/src/game/items/trident.rs::Game::channel_rod_hit	Channeling's lightning rod hit; the only hit_block effect in the data
 EnchantmentHelper.modifyDurabilityToRepairFromXp	port	crates/horizon-client/src/game/items/enchant_effects.rs::Game::mending	Mending's repair with XP
-EnchantmentHelper.getFishingLuckBonus	port	crates/horizon-client/src/game/items/fishing.rs::Game::use_fishing_rod	Luck of the Sea read when the rod is cast
-EnchantmentHelper.getFishingTimeReduction	port	crates/horizon-client/src/game/items/fishing.rs::Game::use_fishing_rod	Lure ticks read at cast; used by catching_fish
+EnchantmentHelper.getFishingLuckBonus	port	crates/horizon-client/src/game/items/fishing.rs::Game::use_fishing_rod	fishing_luck_bonus truncated and clamped at cast
+EnchantmentHelper.getFishingTimeReduction	port	crates/horizon-client/src/game/items/fishing.rs::Game::use_fishing_rod	fishing_time_reduction clamped, then converted to lure ticks at cast
 EnchantmentHelper.getTridentReturnToOwnerAcceleration	port	crates/horizon-client/src/game/items/trident.rs::ThrownTrident::loyalty_pull	Loyalty level pull and acceleration
-EnchantmentHelper.modifyCrossbowChargingTime	port	crates/horizon-client/src/game/items/crossbow.rs::Game::charge_ticks	Quick Charge: 1.25 s minus 0.25 s per level
+EnchantmentHelper.modifyCrossbowChargingTime	port	crates/horizon-client/src/game/items/crossbow.rs::Game::charge_ticks	crossbow_charge_time from 1.25 seconds, with the holder random
 EnchantmentHelper.getTridentSpinAttackStrength	inline	crates/horizon-client/src/game/items/trident.rs::Game::release_trident	Riptide's strength 1.5 + 0.75 per level above the first, folded into the release
 EnchantmentHelper.hasTag	port	crates/horizon-items/src/enchant.rs::Enchantments::in_tag	per enchantment id; callers loop over the stack
 EnchantmentHelper.has	port	crates/horizon-items/src/enchant.rs::Enchantments::has_component	any enchantment on the stack with the component
-EnchantmentHelper.pickHighestLevel	port	crates/horizon-client/src/game/items/crossbow.rs::Game::charging_sounds	gap: minor: Quick Charge sounds only; the trident sound is hard-coded in release_trident (riptide_N)
-EnchantmentHelper.getHighestLevel	inline	crates/horizon-client/src/game/items/crossbow.rs::Game::charging_sounds	reads the quick_charge level directly
+EnchantmentHelper.pickHighestLevel	port	crates/horizon-items/src/enchant.rs::Enchantments::pick_highest_level	level-indexed sound selection from the stack enchantment component
+EnchantmentHelper.getHighestLevel	inline	crates/horizon-items/src/enchant.rs::Enchantments::pick_highest_level	selects the highest-level enchantment providing the component
 EnchantmentHelper.filterCompatibleEnchantments	inline	crates/horizon-items/src/enchant.rs::Enchantments::select	exclusivity filter folded into the selection loop
 EnchantmentHelper.isEnchantmentCompatible	port	crates/horizon-items/src/enchant.rs::Enchantments::compatible	pair check; the /enchant command loops over the existing ones
 EnchantmentHelper.enchantItemFromProvider	port	crates/horizon-client/src/game/mobs/mob_gear.rs::Game::enchant_spawn_equipment	gap: minor: mob spawn gear only; pillager, vindicator, skeleton trap and enderman providers are not read here
@@ -94,8 +94,8 @@ Level.getWorldBorderAdjustedRespawnData	missing		unsure: respawn clamp to the wo
 Level.hasEntities	missing		unsure: no entity-in-box test found for this use
 Level.getClockTimeTicks	port	crates/horizon-client/src/game/blocks/level_access.rs::GameLevel::day_time	day time; no separate clock time
 Level.getThunderLevel	port	crates/horizon-client-render/src/world.rs::World::levels	thunder scaled by rain
-Level.setThunderLevel	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::handle_packet	weather game event sets the thunder level
-Level.setRainLevel	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::handle_packet	weather game event sets the rain level
+Level.setThunderLevel	port	crates/horizon-client/src/game/network/remote/apply_packet.rs::Game::apply_packet_body	weather game event sets the thunder level
+Level.setRainLevel	port	crates/horizon-client/src/game/network/remote/apply_packet.rs::Game::apply_packet_body	weather game event sets the rain level
 Level.fillReportDetails	skip:debug		crash-report details
 BlockGetter.getBlockEntity	skip:other		bare block_entities map lookup at each caller
 BlockGetter.isBlockInLine	skip:other		no caller in 26.3 code

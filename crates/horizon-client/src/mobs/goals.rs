@@ -1497,11 +1497,11 @@ impl Goal for MeleeAttack {
                 _ => self.interval,
             };
             self.until_attack = adjusted(true, interval);
-            m.swing();
+            m.swing_for_attack(false);
             super::ai::do_hurt_target(m, who, cx);
+            // `Fox.this.playSound(FOX_BITE, 1.0F, 1.0F)`: `Entity.playSound`, skipped when silent.
             if let Some(sound) = self.bite {
-                let at = [m.position.x, m.position.y, m.position.z];
-                cx.events.push(MobEvent::Sound(sound, at, 1.0, 1.0));
+                m.sound(sound, cx.events);
             }
         }
         if self.zombie {
@@ -1966,10 +1966,13 @@ impl Goal for HurtByTarget {
                 return;
             }
             for other in ids {
-                cx.events.push(MobEvent::SetTarget {
+                // A target-change hook may have switched the selected player:
+                // the alert carries the one this mob now targets.
+                cx.events.push(cx.w.route_player_event(MobEvent::SetTarget {
                     mob: other,
                     target: by,
-                });
+                    player: None,
+                }));
             }
         }
         if cub {
@@ -2234,6 +2237,11 @@ impl Goal for Tempt {
         }
     }
 }
+
+mod brain_look;
+
+pub use brain_look::BrainLookAround;
+
 fn look_angles(look: [f64; 3]) -> (f64, f64) {
     let yaw = (-look[0]).atan2(look[2]).to_degrees();
     let pitch = (-look[1]).asin().to_degrees();

@@ -1,17 +1,20 @@
 //! Vanilla's friends machinery without its screens: authlib's
 //! `MinecraftServicesFriendsService` (`getFriends`, `updateFriends`,
 //! `updateAttributes`, `updatePresence`), `RemoteFriendListUpdateHandler`'s worker and
-//! state, `PlayerSocialManager`'s flags, and `PresenceHandler`'s posting.
+//! state, `PlayerSocialManager`'s flags and block list (`UserApiService`'s
+//! `getBlocklist`), and `PresenceHandler`'s posting.
 //!
 //! `title::poll_account` starts this the way `Minecraft`'s constructor does: the
 //! account's `friendsPreferences` (`UserFlag.FRIENDS_ENABLED`,
-//! `UserFlag.ACCEPT_FRIEND_INVITES`) decide whether the worker reads the lists. No
-//! screen shows them yet; the overlay and the Online options are later parts.
+//! `UserFlag.ACCEPT_FRIEND_INVITES`) decide whether the worker reads the lists, and
+//! `startOnlineMode`'s block-list refresh runs once at the same point. No screen shows
+//! them yet; the overlay and the Online options are later parts.
 //!
 //! The requests keep authlib's cache rules: `If-None-Match` with the last `ETag`, a 304
 //! or an empty answer keeps the cached lists, `Retry-After` sets the poll interval, and
 //! `getFriendData` waits out a ten-second cooldown between reads. The presence statuses
 //! are `PresenceHandler.getPresenceStatus`'s, supplied by the client each tick.
+mod blocklist;
 mod list_updates;
 mod model;
 mod presence;
@@ -33,7 +36,10 @@ use service::{Service, send_json, session, url};
 use horizon_std::sync::Mutex;
 use horizon_std::time::{Duration, Instant};
 use serde_json::{Value, json};
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
 
 /// `PlayerSocialManager`'s flags.
 #[derive(Default)]
@@ -75,7 +81,9 @@ fn lock() -> std::sync::MutexGuard<'static, Inner> {
 
 /// `Minecraft`'s constructor: make the social manager, whose `friendListEnabled` comes
 /// from the account's `friendsPreferences`, and start the updater when it is on.
-/// Called once; later calls leave the running manager alone.
+/// `PlayerSocialManager.startOnlineMode` also starts the block-list refresh here
+/// (`Minecraft.java:2899`, once the user properties have arrived). Called once;
+/// later calls leave the running manager alone.
 pub fn init(friends_enabled: bool, allow_requests: bool) {
     {
         let mut inner = lock();
@@ -88,6 +96,7 @@ pub fn init(friends_enabled: bool, allow_requests: bool) {
         inner.handler.enabled = friends_enabled;
     }
     spawn_updater();
+    blocklist::refresh();
 }
 
 /// `PlayerSocialManager.setFriendListEnabled`: the Online options switch.
@@ -219,4 +228,24 @@ fn uuid(id: u128) -> String {
         &hex[16..20],
         &hex[20..32]
     )
+}
+
+/// `PlayerSocialManager.startOnlineMode` (`UserApiService.refreshBlockList`):
+/// one block-list fetch, run again only once the service's cooldown has passed.
+pub fn refresh_block_list() {
+    blocklist::refresh();
+}
+
+/// `PlayerSocialManager.isBlocked` (`UserApiService.isBlockedPlayer`): whether
+/// the account has blocked this player outside the game. Never the NIL UUID;
+/// nobody until the fetch lands, and a due refresh starts off-thread where
+/// vanilla would fetch on the calling thread.
+pub fn is_blocked_player(id: u128) -> bool {
+    blocklist::is_blocked_player(id)
+}
+
+/// The account's blocked players (`UserApiService`'s set), empty while the
+/// fetch has not landed.
+pub fn blocked_players() -> HashSet<u128> {
+    blocklist::blocked_players()
 }

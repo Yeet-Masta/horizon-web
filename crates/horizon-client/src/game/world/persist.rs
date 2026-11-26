@@ -215,6 +215,9 @@ pub struct EntityMemory {
     /// spawner, a shulker bullet): the value replaces the kind's constructor
     /// default and is never saved.
     pub(super) no_physics: HashMap<u32, bool>,
+    /// The entities a mod kept out of the saves (`entity_set_saved`), by id;
+    /// forgotten with the entity.
+    pub(super) unsaved: HashSet<u32>,
     /// Entities of types Horizon does not simulate, kept per chunk and
     /// written back unchanged.
     unknown: HashMap<(i32, i32), Vec<Tag>>,
@@ -746,13 +749,15 @@ impl Game<'_> {
             self.tick_chunks.wait(key);
         }
         // The saved list is consumed: later saves take the scheduler's ticks.
-        if loaded && let Some(c) = self.world.chunks.get_mut(&key) {
-            let c = Arc::make_mut(c);
-            if let Some(s) = c.saved.as_mut() {
-                let s = Arc::make_mut(s);
-                s.block_ticks.clear();
-                s.fluid_ticks.clear();
-            }
+        if loaded {
+            self.world.chunks.mutate_chunk(key, |c| {
+                let c = Arc::make_mut(c);
+                if let Some(s) = c.saved.as_mut() {
+                    let s = Arc::make_mut(s);
+                    s.block_ticks.clear();
+                    s.fluid_ticks.clear();
+                }
+            });
         }
         // PistonMovingBlockEntity.loadAdditional: blocks saved mid-move carry
         // on moving; later saves take them from the level (arismoko/horizon#3310).
@@ -768,7 +773,7 @@ impl Game<'_> {
         for &(pos, piston) in &pistons {
             self.restore_moving_piston(pos, piston, saved.as_deref());
         }
-        if let Some(c) = self.world.chunks.get_mut(&key) {
+        self.world.chunks.mutate_chunk(key, |c| {
             let c = Arc::make_mut(c);
             if let Some(s) = c.saved.as_mut() {
                 Arc::make_mut(s).block_entities.retain(|tag| {
@@ -776,7 +781,7 @@ impl Game<'_> {
                     !pistons.iter().any(|(p, _)| [p.x, p.y, p.z] == at)
                 });
             }
-        }
+        });
     }
     /// `PistonMovingBlockEntity.loadAdditional`, for a `minecraft:piston`
     /// entity whose block is still a moving piston.
@@ -1021,6 +1026,10 @@ impl Game<'_> {
     ) {
         self.next_entity += 1;
         if let Some(mut a) = entity_nbt::armor_stand_from_nbt(&tag, self.next_entity) {
+            a.equipment
+                .iter_mut()
+                .flatten()
+                .for_each(|stack| self.clean_stack(stack));
             a.live
                 .retain_supplier(&self.motion.attributes, "minecraft:armor_stand");
             if let Some(state) = transferred {
@@ -1102,7 +1111,10 @@ impl Game<'_> {
     ) {
         self.next_entity += 1;
         if let Some(mut f) = entity_nbt::item_frame_from_nbt(&tag, self.next_entity) {
-            let item = f.item.take();
+            let mut item = f.item.take();
+            if let Some(stack) = item.as_mut() {
+                self.clean_stack(stack);
+            }
             f.set_item(item);
             if let Some(state) = transferred {
                 self.adopt_transferred_entity_state(f.id, state);
@@ -1172,10 +1184,17 @@ impl Game<'_> {
             self.persist.unknown.entry(key).or_default().push(tag);
         }
     }
-
-    /// `Entity.load`: adopt the bounded TAG_LIST_CODEC input as a set.
-    /// Keep that adopted Mob state in the retained compound for commands and saves.
+    /// `Entity.load`: adopt the bounded TAG_LIST_CODEC input as a set
+    /// (`this.tags.clear(); input.read("Tags", TAG_LIST_CODEC).ifPresent(this.tags::addAll)`,
+    /// Entity.java:2230-2231, into the `Set<String> tags` of :286).
+    /// Keep that adopted state in the retained compound for commands and saves.
     pub(in crate::game) fn normalize_loaded_mob_tags(tag: &mut Tag) {
+        Self::normalize_loaded_tags(tag);
+    }
+
+    /// [`Self::normalize_loaded_mob_tags`] for every kind that keeps `Tags`, not
+    /// only a mob: the same `Entity.load` set for a retained raw compound.
+    pub(in crate::game) fn normalize_loaded_tags(tag: &mut Tag) {
         let Tag::Compound(raw) = tag else {
             return;
         };
@@ -1461,6 +1480,11 @@ impl Game<'_> {
     ) -> Option<(Tag, u32, [i32; 4])> {
         let vehicle = vehicle?;
         let root = parent_vehicle_root(vehicle, others, |id| self.vehicle_of(id))?;
+        // A root vehicle a mod kept out of the saves (`entity_set_saved`) is not in the
+        // rider's file either, or it would come back with the player.
+        if self.persist.unsaved.contains(&root) {
+            return None;
+        }
         let entity = self.vehicle_tree_nbt(root)?;
         let attach = self.uuid_for(vehicle);
         Some((root_vehicle_tag(attach, entity), root, attach))
@@ -1589,6 +1613,7 @@ impl Game<'_> {
         self.entity_attachments.remove(&id);
         self.persist.raw.remove(&id);
         self.persist.no_physics.remove(&id);
+        self.persist.unsaved.remove(&id);
     }
     /// Detach a travelling entity without discarding its in-memory attachments.
     pub(super) fn detach_entity(&mut self, id: u32) {
@@ -1606,9 +1631,14 @@ impl Game<'_> {
     }
     /// `Entity.applyEffectsFromBlocks` on a fire-immune entity that is not
     /// burning (`EndCrystal.tick`): the loaded `Fire` is reset to
-    /// `-getFireImmuneTicks()`, which is 0.
+    /// `-getFireImmuneTicks()`, which is 0. Only a crystal that ticked: one in
+    /// an entity-ticking chunk.
     pub(super) fn clear_crystal_fire(&mut self) {
+        let ticking = self.entity_ticking_area();
         for c in &self.crystals {
+            if !ticking(c.position.x.floor() as i32, c.position.z.floor() as i32) {
+                continue;
+            }
             let key = anon_key("minecraft:end_crystal", c.position);
             if let Some((_, Tag::Compound(raw))) = self.persist.anon.get_mut(&key)
                 && let Some(fire) = raw.get_mut(&"Fire".into())
@@ -1647,8 +1677,18 @@ impl Game<'_> {
                 map.insert(key.into(), v.clone());
             }
         }
+        // `Entity.saveWithoutId` writes `TicksFrozen` only while it is positive,
+        // and only a `LivingEntity` thaws, so these entities keep it unchanged.
+        // Read as an int (`NumericTag.intValue`) and written back as one, whatever tag type was loaded.
+        if let Some(ticks) = horizon_client::save::number(tag.get("TicksFrozen"))
+            && ticks as i32 > 0
+        {
+            map.insert("TicksFrozen".into(), Tag::Int(ticks as i32));
+        }
         if !map.is_empty() {
-            self.persist.raw.insert(id, Tag::Compound(map));
+            let mut kept = Tag::Compound(map);
+            Self::normalize_loaded_tags(&mut kept);
+            self.persist.raw.insert(id, kept);
         }
     }
     /// `Entity.isSilent`: mobs model it directly; other entities retain it
@@ -1677,6 +1717,7 @@ impl Game<'_> {
         if let Tag::Compound(c) = &mut tag {
             c.remove(&"Team".into());
         }
+        Self::normalize_loaded_tags(&mut tag);
         self.persist.raw.insert(id, tag);
     }
     /// The UUID entity `id` was loaded with, and the attachments `tag` saved under it.
@@ -1914,16 +1955,43 @@ impl Game<'_> {
         // yet given an id is not a lookup member: its join stands in.
         let mut out: HashMap<(i32, i32), Vec<Tag>> =
             keys.iter().map(|k| (*k, Vec::new())).collect();
+        let orb_entries: HashMap<_, _> = self
+            .orbs
+            .iter()
+            .filter(|orb| keys.contains(&chunk_of(orb.position)))
+            .map(|orb| (orb.join, orb.section_order))
+            .collect();
         {
             let admission = self.resident_entities.table.get_mut().admission_order();
-            for (key, mut tags) in roots {
+            for tags in roots.values_mut() {
                 tags.sort_by_cached_key(|(id, join, tag)| {
                     (section_order(tag), admission(*id).unwrap_or(*join))
                 });
-                out.entry(key)
-                    .or_default()
-                    .extend(tags.into_iter().map(|(_, _, tag)| tag));
             }
+        }
+        for (key, mut tags) in roots {
+            if !orb_entries.is_empty() {
+                // Reorder only the root-orb slots so pickups preserve section entry
+                // order across reload. Passenger orbs are written with their vehicles.
+                let mut slots = Vec::new();
+                let mut orbs = Vec::new();
+                for (_, join, tag) in &mut tags {
+                    if let Some(&entry) = orb_entries.get(join)
+                        && self.saved_entity_is_root(tag)
+                    {
+                        let order = (section_order(tag), entry);
+                        orbs.push((order, std::mem::replace(tag, Tag::End)));
+                        slots.push(tag);
+                    }
+                }
+                orbs.sort_by_key(|(order, _)| *order);
+                for (slot, (_, tag)) in slots.into_iter().zip(orbs) {
+                    *slot = tag;
+                }
+            }
+            out.entry(key)
+                .or_default()
+                .extend(tags.into_iter().map(|(_, _, tag)| tag));
         }
         for key in keys {
             let unknown = if remove {
@@ -2178,12 +2246,24 @@ impl Game<'_> {
         keys.contains(&chunk_of(o.position)).then(|| {
             let raw = anon_raw(&self.persist, "minecraft:experience_orb", o.position);
             let uuid = saved_uuid(&self.persist, o.id);
-            let tag = with_raw(
+            let mut tag = with_raw(
                 with_raw(entity_nbt::orb_to_nbt(o, uuid), raw.as_ref()),
                 self.persist.raw.get(&o.id),
             );
+            self.save_portal_cooldown(o.id, &mut tag);
             (chunk_of(o.position), tag)
         })
+    }
+    /// `Projectile.addAdditionalSaveData`'s `Owner`: the reference the projectile was loaded
+    /// with, else the UUID of the mob that shot it (a shulker's bullet), which the mob keeps
+    /// for its own save. A player's is left to the callers that write it.
+    pub(in crate::game) fn projectile_owner_uuid(&mut self, i: usize) -> Option<[i32; 4]> {
+        let p = &self.creatures.projectiles[i];
+        match (p.owner_uuid, p.owner) {
+            (Some(uuid), _) => Some(uuid),
+            (None, Some(Who::Mob(id))) => Some(self.uuid_for(id)),
+            _ => None,
+        }
     }
     pub(super) fn save_projectile(
         &mut self,
@@ -2194,6 +2274,8 @@ impl Game<'_> {
         if !keys.contains(&chunk_of(p.position)) || !entity_nbt::saved_with_chunk(p) {
             return None;
         }
+        let owner = self.projectile_owner_uuid(i);
+        let p = &self.creatures.projectiles[i];
         // `ShulkerBullet`'s target, over the UUID bridge: a mob the level has
         // no UUID for writes no `Target` rather than a made-up one.
         let target = match &p.kind {
@@ -2203,7 +2285,6 @@ impl Game<'_> {
             } => self.save_who_uuid(*who),
             _ => None,
         };
-        let owner = p.owner_uuid;
         let raw = anon_raw(&self.persist, p.kind.id(), p.position);
         let uuid = saved_uuid(&self.persist, p.id);
         let in_block = p
@@ -2339,7 +2420,8 @@ impl Game<'_> {
         let a = &self.armor_stands[i];
         keys.contains(&chunk_of(a.position)).then(|| {
             let uuid = self.saved_uuid_or_random(a.id);
-            let tag = entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&a.id));
+            let mut tag = entity_nbt::armor_stand_to_nbt(a, uuid, self.persist.raw.get(&a.id));
+            self.save_portal_cooldown(a.id, &mut tag);
             (chunk_of(a.position), tag)
         })
     }

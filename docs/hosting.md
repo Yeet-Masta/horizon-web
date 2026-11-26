@@ -118,7 +118,10 @@ horizon-server init --eula --world survival --seed 12345 --port 25565 --whitelis
 
 `--no-whitelist` turns the whitelist off, and `--offline` turns online mode off (see "Before you start").
 The players you add are looked up as Minecraft accounts in online mode, and get offline UUIDs on an offline
-server, as vanilla does.
+server, as vanilla does. A lookup Mojang's services don't answer (they rate-limit busy addresses, often a host's,
+with HTTP 429) is tried three times, 750 ms apart, as vanilla's bulk lookup does; if it still fails, `init` says
+so ("Couldn't look up Alex: Mojang's services are rate-limiting this address...") rather than that the player
+doesn't exist. The same goes for `op`, `whitelist add` and `ban` while the server is stopped.
 
 Start the server in the foreground, with the console on your terminal (Ctrl-C stops it cleanly):
 
@@ -148,6 +151,11 @@ command takes `--dir FOLDER` to work on a server folder from elsewhere.
 You edit one file. The server writes vanilla's `server.properties` from it before every start, so the game
 reads exactly what a vanilla server reads, and a vanilla server folder works as it is.
 
+Unlike vanilla's `Settings.loadFromFile`, the dedicated game treats `server.properties` as empty only
+when it is missing. If the file cannot be read for another reason, the game stops startup (including
+`--initSettings`) or skips saving a runtime setting instead of replacing the file with defaults. The
+error names the path so you can check the file and its permissions.
+
 ```toml
 [server]
 motd = "A Minecraft Server"
@@ -173,6 +181,9 @@ seed = ""                    # empty: a random seed on the first start
 game_mode = "survival"
 difficulty = "easy"
 hardcore = false
+level_type = "minecraft:normal"  # a new world's preset: minecraft:flat, large_biomes, amplified, single_biome_surface
+generator_settings = "{}"    # a JSON object; minecraft:flat reads its layers and biome from it
+generate_structures = true
 
 # Any other server.properties key, spelled as vanilla spells it:
 [properties]
@@ -447,6 +458,55 @@ A running server takes the difficulty, the default game mode, the whitelist, the
 player limit and the backup settings at once; the rest applies at its next start, and `config set` says which. `--json` prints that as `saved`, `applied`
 and `restart`.
 
+**`/restart`** saves and stops the game as `/stop` does, and the server starts it again: from in game, the console,
+RCON and `horizon-server cmd restart`, for owners (the permission `/stop` needs). The command exists only on a
+server `horizon-server` runs, so vanilla's command tree is unchanged elsewhere; a game started by hand answers on its
+console that nothing would start it again, and does nothing. The game program is looked up again at every start, so a
+new engine put in place beforehand (`engine.path`, or the release `current` points at) runs after the restart. Put it
+there with `mv` or `install`, which swap the file: copying over the running program fails or corrupts it.
+With `[proxy]` on (below), the players stay connected through it.
+
+### Behind the server's own proxy: `[proxy]`
+
+    [proxy]
+    enabled = true
+
+Off by default. With it on, `horizon-server` listens on `server.port` itself and runs the game on 127.0.0.1, on
+`game_port` (0: a free port), with Velocity forwarding and a secret it makes (`forwarding.secret`, kept in
+`.horizon/`; a `forwarding.secret` you wrote for a Velocity of your own stops the start). It logs each player in
+itself, with `online_mode` as set (the account check and the encryption), then logs into the game as that player
+and passes the packets along as they are. The game sees the player's real UUID, name, skin and address, and its own
+whitelist, bans and player limit apply as always. The server list is the game's own, or says "restarting" while the
+game is down. It is read when `horizon-server` starts, not when the game does.
+
+    [proxy]
+    enabled = true
+    hold_seconds = 60       # how long a held player waits for the game, 1 to 3600
+
+**What players see during a restart.** Whatever stops the game for a restart (`/restart`, `horizon-server restart`,
+the API, the panel, an update, a backup restore) or ends it (a crash), the proxy sends each player a request to
+set the world up again, and the player's game shows its loading screen. The player stays on the same connection:
+no disconnect, no login, no auto-reconnect. The proxy keeps them alive while the game is down. When the game is
+back, the proxy logs into it again as the same player, passes its configuration (registries, tags, packs) to the
+client and replays what the client said at its first login (its settings, brand, plugin channels and chat
+session); then play goes on from the game's own join, so the player is placed where the saved player data says,
+with their inventory. A player who connects while the game is down is logged in the same way and waits in the
+loading screen. The server list says "restarting" meanwhile.
+
+If the game is not back after `hold_seconds`, the held players are disconnected with a message that says so. A
+stop for good (`horizon-server stop`, Ctrl-C, the service stopping) is not held: players get the game's own
+"server closed", and a `stop` typed in game disconnects them with "the server was stopped" once the game has ended.
+A player who is in the middle of joining when the game stops is held in the configuration they were in: the
+game's registries reach them a second time, which is not tried against every client version.
+
+The proxy relays a stopping game's own kick as a hold. To keep a plugin or a restart script from being mistaken
+for a kick, only the reason `multiplayer.disconnect.server_shutdown` is held; bans, kicks and timeouts reach the
+player as they are.
+
+It is not a general proxy: one game, the one this server runs, and no routing (for several servers, see
+[#7484](https://github.com/horizon-rust/horizon/issues/7484)). Clients of an older release (`accept_older_clients`)
+can't join through it. The game's own port is private: a login that doesn't come from the proxy is refused.
+
 The server restarts the game by itself if it crashes: after 5 s, then waiting longer each time, up to 5
 minutes. It keeps the crash report and gives up after 5 crashes in 10 minutes, and `status` says why.
 
@@ -479,7 +539,8 @@ so, with an Update button that runs `horizon-server update` (section 5), and sho
 horizon-server panel
 ```
 
-prints a login link that works once, for 10 minutes. The panel listens on `127.0.0.1:8130`, this computer
+prints a login link that works once, for 10 minutes. A sign-in lasts for its browser tab, until it goes 12
+hours unused or for 7 days at most; then make a new link. The panel listens on `127.0.0.1:8130`, this computer
 only. To reach it from your other devices:
 
 - put your tailnet address in `[panel] bind` (for example `bind = "100.101.102.103:8130"`), or
@@ -770,7 +831,7 @@ docker run -d --name horizon -p 25565:25565 --stop-timeout 180 \
 - `HORIZON_EULA=true` accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA) for this server. Without it
   the container stops and says why.
 - The first start writes `/data/server.toml` from `HORIZON_EULA`, `HORIZON_WORLD`, `HORIZON_SEED`,
-  `HORIZON_PORT`, `HORIZON_WHITELIST`, `HORIZON_PLAYERS`, `HORIZON_OP` and `HORIZON_ONLINE`. Later starts use
+  `HORIZON_LEVEL_TYPE`, `HORIZON_GENERATOR_SETTINGS`, `HORIZON_PORT`, `HORIZON_WHITELIST`, `HORIZON_PLAYERS`, `HORIZON_OP` and `HORIZON_ONLINE`. Later starts use
   the file.
 - The mounted folder must come from release v2026.10.17.07 or newer (see step 2).
 - Manage it with `docker exec horizon horizon-server status` (and `cmd`, `backup`, `logs`, ...).

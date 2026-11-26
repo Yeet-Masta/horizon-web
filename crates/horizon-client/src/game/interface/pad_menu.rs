@@ -19,7 +19,7 @@
 mod keys;
 
 use super::event_loop::EventLoopCtl;
-use super::{Game, Screen, key_focus};
+use super::{Game, Screen, books::BookScreen, editor_overlay::EditorOverlay, key_focus};
 use horizon_client::actions::Action;
 use horizon_client::{
     Result,
@@ -370,6 +370,9 @@ impl Game<'_> {
 
     /// The open screen is one the crosshair drives, whatever is over it.
     fn pad_pointer_screen(&self) -> bool {
+        if let Some(editor) = self.active_editor_overlay() {
+            return editor == EditorOverlay::Book;
+        }
         matches!(
             self.screen,
             Screen::HudEditor
@@ -377,8 +380,7 @@ impl Game<'_> {
                 | Screen::Creative
                 | Screen::Stats
                 | Screen::Advancements
-        ) || self.book.is_some()
-            || (self.screen == Screen::Options && self.ui.options.page() == Page::Packs)
+        ) || (self.screen == Screen::Options && self.ui.options.page() == Page::Packs)
     }
 
     pub(super) fn pad_focus_mode(&self) -> bool {
@@ -634,11 +636,12 @@ impl Game<'_> {
     }
 
     /// The event being handled is one the pad or the keyboard's focus made
-    /// up (`pad_synthetic_event`), not the window's. A controller's click or
+    /// up (`pad_synthetic_event`), or a registered input source made
+    /// (`input_made_pointer_event`), not the window's. A controller's click or
     /// a focused widget's is not the mouse, so the native mods' mouse hooks
     /// skip it.
     pub(super) fn pad_synthetic_input(&self) -> bool {
-        self.pad.menu.synthetic
+        self.input_made_pointer_event()
     }
 
     fn pad_click_at(&mut self, event_loop: &dyn EventLoopCtl, at: (f32, f32), right: bool) {
@@ -945,7 +948,9 @@ impl Game<'_> {
                 }
             }
             // A sign has no field to press, so A opens its keyboard from anywhere on it.
-            Button::South if !prompt && self.sign_edit.is_some() => self.pad_open_keyboard(),
+            Button::South if self.active_editor_overlay() == Some(EditorOverlay::Sign) => {
+                self.pad_open_keyboard()
+            }
             Button::South | Button::West => {
                 self.pad_take_pointer(event_loop);
                 self.pad_pointer_button(event_loop, button == Button::West, true);
@@ -2040,9 +2045,11 @@ impl Game<'_> {
     /// fields, the LAN port, a dialog's input, the command box and the edit
     /// screens of the jigsaw, structure and test blocks.
     fn pad_typing(&self) -> bool {
+        if let Some(editor) = self.active_editor_overlay() {
+            return editor == EditorOverlay::Sign
+                || matches!(self.book, Some(BookScreen::Edit { .. }));
+        }
         (self.screen == Screen::Chat && self.title.is_none())
-            || self.sign_edit.is_some()
-            || matches!(self.book, Some(super::books::BookScreen::Edit { .. }))
             || (self.screen == Screen::Creative && self.creative_screen.tab().search)
             || self.recipe_search_focused()
             || self.station_typing()
@@ -2063,12 +2070,13 @@ impl Game<'_> {
 
     /// Enter on these goes on to a new line: a dialog's, a sign's or a book's page.
     fn pad_enter_keeps_typing(&self) -> bool {
-        self.dialog_typing_lines()
-            || self.sign_edit.is_some()
-            || matches!(
-                self.book,
-                Some(super::books::BookScreen::Edit { signing: false, .. })
-            )
+        match self.active_editor_overlay() {
+            Some(EditorOverlay::Sign) => true,
+            Some(EditorOverlay::Book) => {
+                matches!(self.book, Some(BookScreen::Edit { signing: false, .. }))
+            }
+            None => self.dialog_typing_lines(),
+        }
     }
 
     /// Open the on-screen keyboard over the focused field: Horizon's, or
@@ -2103,8 +2111,10 @@ impl Game<'_> {
             self.pad.in_use,
             menu.open_polls,
             !self.prompt_open()
-                && ((self.screen == Screen::Chat && !self.ui.in_bed_chat)
-                    || self.sign_edit.is_some()),
+                && match self.active_editor_overlay() {
+                    Some(editor) => editor == EditorOverlay::Sign,
+                    None => self.screen == Screen::Chat && !self.ui.in_bed_chat,
+                },
         ) {
             self.pad.menu.osk_dismissed = true;
             self.pad_open_keyboard();
@@ -2126,7 +2136,10 @@ impl Game<'_> {
             Output::Done => (Some(KeyCode::Enter), None),
             // Chat's suggestions (CommandSuggestions.keyPressed): Tab, Up and Down.
             Output::Complete | Output::Previous | Output::Next => {
-                if self.screen == Screen::Chat && !self.dialog_open() {
+                if self.screen == Screen::Chat
+                    && !self.prompt_open()
+                    && self.active_editor_overlay().is_none()
+                {
                     let key = match out {
                         Output::Complete => KeyCode::Tab,
                         Output::Previous => KeyCode::ArrowUp,
@@ -2158,15 +2171,22 @@ impl Game<'_> {
             if let Err(e) = result {
                 log::warn!("Horizon: on-screen keyboard: {e}");
             }
+        } else if self.prompt_open() {
+            // The keyboard can still be up for one poll after a prompt covers its field.
+            return;
+        } else if let Some(editor) = self.active_editor_overlay() {
+            if key.is_some_and(|key| self.screen_key_pressed(key, false)) {
+                return;
+            }
+            let text = text.and_then(|text| self.editor_text_pre(text));
+            if key.is_some() || text.is_some() {
+                self.editor_input(editor, key, text.as_deref());
+            }
         } else if self.screen == Screen::Chat && self.title.is_none() {
             match text {
                 Some(t) => self.chat_type(t),
                 None => self.chat_key_code(key.expect("a key"), None),
             }
-        } else if self.sign_edit.is_some() {
-            self.sign_input(key, text);
-        } else if self.book.is_some() {
-            self.book_input(key, text);
         } else if self.screen == Screen::Creative && self.creative_screen.tab().search {
             if backspace {
                 self.creative_search_backspace(false);
@@ -2247,17 +2267,23 @@ impl Game<'_> {
     /// quill saves and closes, a sign closes and sends its text); a dialog's input has none, so
     /// the keyboard closes. Never a new line: that's the New Line key.
     fn pad_osk_done_lines(&mut self) {
+        let editor = self.active_editor_overlay();
+        if editor.is_some() && self.screen_key_pressed(KeyCode::Enter, false) {
+            return;
+        }
         self.pad.menu.osk = None;
         self.pad.menu.osk_dismissed = true;
         if self.dialog_typing_lines() {
             return;
         }
-        if self.sign_edit.is_some() {
-            self.close_sign_editor();
-        } else if self.book.is_some()
-            && let Err(e) = self.book_control(Some("done"))
-        {
-            log::warn!("Horizon: on-screen keyboard: {e}");
+        match editor {
+            Some(EditorOverlay::Sign) => self.close_sign_editor(),
+            Some(EditorOverlay::Book) => {
+                if let Err(e) = self.book_control(Some("done")) {
+                    log::warn!("Horizon: on-screen keyboard: {e}");
+                }
+            }
+            None => {}
         }
     }
 
@@ -2385,6 +2411,7 @@ mod tests {
     fn labelled(label: &str, rect: Rect) -> widgets::Widget {
         let [x, y, w, h] = rect;
         widgets::Widget {
+            id: None,
             label: label.to_owned(),
             x,
             y,

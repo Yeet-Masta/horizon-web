@@ -24,6 +24,12 @@ pub fn native_living_heal(context: &LoopContext, entity: u32, amount: &mut f32, 
     crate::native_client_hooks::living_heal(context, entity, amount, cancel);
 }
 
+/// A living entity healed by `amount` for `cause` (`living_heal_cause`, listen only).
+#[inline(never)]
+pub fn native_living_heal_cause(context: &LoopContext, entity: u32, cause: &str, amount: f32) {
+    crate::native_client_hooks::living_heal_cause(context, entity, cause, amount);
+}
+
 impl PlayerMotion {
     /// Player.causeFoodExhaustion: creative and spectator abilities suppress
     /// exhaustion from movement, attacks and effects.
@@ -62,6 +68,12 @@ impl PlayerMotion {
                         &mut observer,
                     )?
                     .heal(amount)?;
+                    native_living_heal_cause(
+                        context,
+                        self.entity_id as u32,
+                        "regeneration",
+                        amount,
+                    );
                 }
             }
             let saturation = self.health.food.saturation;
@@ -148,15 +160,22 @@ impl FoodWorld for TickWorld<'_> {
         Ok(self.rules.natural_regeneration)
     }
     fn is_hurt(&mut self, _: &mut FoodData) -> Result<bool> {
-        let mut observer = Updates(self.events);
-        Ok(PlayerAttributeHealth::new(
-            self.attributes,
-            self.data,
-            self.ids,
-            *self.dead,
-            &mut observer,
-        )?
-        .is_hurt()?)
+        let health = self
+            .data
+            .get(self.ids.health)
+            .expect("validated health field");
+        if health <= 0.0 || health.is_nan() {
+            return Ok(false);
+        }
+        let max_health = self
+            .attributes
+            .value_of(
+                "minecraft:max_health",
+                horizon_world::attribute_map::ValueKind::Computed,
+            )
+            .map_err(|e| std::io::Error::other(format!("player health attribute lookup: {e:?}")))?
+            as f32;
+        Ok(health < max_health)
     }
     fn heal(&mut self, _: &mut FoodData, mut amount: f32) -> Result<()> {
         let mut cancel = false;
@@ -165,14 +184,16 @@ impl FoodWorld for TickWorld<'_> {
             return Ok(());
         }
         let mut observer = Updates(self.events);
-        Ok(PlayerAttributeHealth::new(
+        PlayerAttributeHealth::new(
             self.attributes,
             self.data,
             self.ids,
             *self.dead,
             &mut observer,
         )?
-        .heal(amount)?)
+        .heal(amount)?;
+        native_living_heal_cause(self.context, self.entity as u32, "satiated", amount);
+        Ok(())
     }
     fn health(&mut self, _: &mut FoodData) -> Result<f32> {
         Ok(self

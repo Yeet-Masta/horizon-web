@@ -112,6 +112,15 @@ To change wear without attaching a Part to an item, use an enchantment's
 A part does not get the wearing entity;
 `host.players().acting_player()` names the player on the paths a player takes.
 
+`ItemPart::get_equip_sound` is `IItemExtension.getEquipSound`: the sound event played when `event.stack` is equipped
+in `event.slot` (`head`, `offhand`, and so on, or a mod's own place name). `event.sound` arrives with the stack's own
+`equippable.equip_sound` (`None` for the generic armour sound); a part may set it to any `namespace:path` id, including
+one from its own content mod's resources. A different answer for a different slot lets one item sound different in
+different places. It is asked where the game decides an equip sound: a player's armour and off hand, a `LivingRef`
+equipment change (mobs, armor stands and the dragon), a mount's saddle and a dispenser's armour. A mod that equips
+items into its own places can ask the same hook from its own equip moment. It only chooses the sound; it cannot stop
+the equip. Server-side.
+
 ## Mending repair
 
 `ItemPart::xp_repair_ratio` is `IItemExtension.getXpRepairRatio`: the durability points Mending restores to a
@@ -160,6 +169,10 @@ lookup.
   `event.old`, the stack it shows. `event.slot_changed` says the stack came from another slot (always false for the
   off hand). `event.reequip` starts `false` for the same stack changed in place or an equal one but for its damage.
   It is asked each client tick, for each hand, while the shown and held stacks differ; an empty hand isn't asked.
+- `Hooks::should_cause_reequip_animation_in_slot` is the same question asked right after it, for every mod that
+  listens and whatever the item, with `event.slot` naming the equipment slot (`mainhand` or `offhand`) and
+  `event.reequip` holding the answer the item parts left. `ItemPart::should_cause_reequip_animation` and its fields are
+  unchanged, so a mod built against it keeps working.
 - `ItemPart::should_cause_block_break_reset` is `IItemExtension.shouldCauseBlockBreakReset`: whether a break
   restarts because the main hand changed. `event.stack` is the stack the break began with and `event.held` the main
   hand now. `event.reset` starts `true` when they aren't the same item with the same components (count and damage

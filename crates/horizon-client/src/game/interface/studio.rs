@@ -6,7 +6,7 @@ use super::{Game, Screen, packs};
 use horizon_client::{
     Result,
     packet_source::PacketSource,
-    studio::{ReplayDriver, TimelineAction},
+    studio::{ReplayDriver, TimelineAction, mcpr::REPLAY_STUDIO_OWNER},
     text::Text,
 };
 use horizon_std::time::Duration;
@@ -34,6 +34,19 @@ impl Studio {
     /// The free camera flies, apart from the player.
     pub(super) fn flying(&self) -> bool {
         self.freecam.active
+    }
+
+    pub(super) fn set_camera_data(&mut self, data: Option<&[u8]>) {
+        self.freecam.track = match data.map(serde_json::from_slice) {
+            Some(Ok(track)) => track,
+            Some(Err(error)) => {
+                log::warn!("Studio: could not read the replay's camera path: {error}");
+                Default::default()
+            }
+            None => Default::default(),
+        };
+        self.timeline.selected_keyframe = None;
+        self.timeline.dragging_keyframe = None;
     }
 }
 
@@ -332,6 +345,11 @@ impl Game<'_> {
                 }
             }
             TimelineAction::Seek(time_ms) => {
+                // The timeline can still act once the replay is gone (a drag let go after a
+                // failed read or a recorded leave closed it).
+                if !self.replay.playing() {
+                    return;
+                }
                 let time_ms = if self.replay.standalone {
                     time_ms
                 } else {
@@ -423,12 +441,7 @@ impl Game<'_> {
 
     /// Add a bookmark at the replay playhead and save it in the `.mcpr` archive.
     pub(super) fn add_studio_marker(&mut self) {
-        let Some(replay) = self
-            .replay
-            .driver
-            .as_mut()
-            .and_then(|driver| driver.as_any_mut().downcast_mut::<ReplayDriver>())
-        else {
+        let Some(replay) = self.replay.edit_driver() else {
             return;
         };
         let label = Text::translate(
@@ -468,25 +481,33 @@ impl Game<'_> {
     /// Saves the free camera's path into the replay playing, when it changed.
     pub(super) fn save_studio_camera_track(&mut self) -> std::io::Result<()> {
         if self.studio.camera_track_dirty
-            && let Some(driver) = self
-                .replay
-                .driver
-                .as_mut()
-                .and_then(|driver| driver.as_any_mut().downcast_mut::<ReplayDriver>())
+            && let Some(driver) = self.replay.edit_driver()
         {
-            driver.save_camera_track(&self.studio.freecam.track)?;
+            let track = &self.studio.freecam.track;
+            let json = if track.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_vec_pretty(track).map_err(std::io::Error::other)?)
+            };
+            driver.write_mod_data(REPLAY_STUDIO_OWNER, json.as_deref())?;
             self.studio.camera_track_dirty = false;
         }
         Ok(())
     }
 
     /// A replay opened: the timeline shows it and the free camera takes its saved path.
-    pub(super) fn studio_replay_opened(&mut self, driver: &ReplayDriver) {
+    pub(super) fn studio_replay_opened(&mut self, driver: &mut ReplayDriver) {
         self.studio.timeline.duration_ms = u64::from(driver.duration_ms());
         self.studio.timeline.current_time_ms = 0;
         self.studio.timeline.playing = !driver.is_paused();
         self.studio.timeline.markers = driver.markers().to_vec();
-        self.studio.freecam.track = driver.camera_track().cloned().unwrap_or_default();
+        match driver.read_mod_data(REPLAY_STUDIO_OWNER) {
+            Ok(data) => self.studio.set_camera_data(data.as_deref()),
+            Err(error) => {
+                log::warn!("Studio: could not read the replay's camera path: {error}");
+                self.studio.set_camera_data(None);
+            }
+        }
         self.studio.camera_track_dirty = false;
     }
 
@@ -502,24 +523,10 @@ impl Game<'_> {
         {
             self.studio.freecam.update_spline_playback(position);
         }
-        if let Some((position, duration, paused, markers)) =
-            self.replay.driver.as_ref().map(|replay| {
-                let markers = replay
-                    .as_any()
-                    .downcast_ref::<ReplayDriver>()
-                    .map_or_else(Vec::new, |driver| driver.markers().to_vec());
-                (
-                    replay.position_ms(),
-                    replay.duration_ms(),
-                    replay.is_paused(),
-                    markers,
-                )
-            })
-        {
-            self.studio.timeline.current_time_ms = u64::from(position);
-            self.studio.timeline.duration_ms = u64::from(duration);
-            self.studio.timeline.playing = !paused;
-            self.studio.timeline.markers = markers;
+        if let Some(replay) = self.replay.driver.as_ref() {
+            self.studio.timeline.current_time_ms = u64::from(replay.position_ms());
+            self.studio.timeline.duration_ms = u64::from(replay.duration_ms());
+            self.studio.timeline.playing = !replay.is_paused();
         }
     }
 
@@ -527,8 +534,55 @@ impl Game<'_> {
     pub(super) fn studio_replay_closing(&mut self) {
         if let Err(error) = self.save_studio_camera_track() {
             log::warn!("Studio: could not save camera path: {error}");
+            self.save_studio_camera_draft();
         }
         self.studio.camera_track_dirty = false;
+    }
+
+    /// The camera path a failed save on close would lose, written as JSON to a
+    /// new `<recording>.camera-draft*.json` beside the
+    /// recording, else in the game folder's `recordings/`; the player is told where.
+    fn save_studio_camera_draft(&mut self) {
+        let Some(recording) = self
+            .replay
+            .driver
+            .as_ref()
+            .and_then(|driver| driver.as_any().downcast_ref::<ReplayDriver>())
+            .map(|driver| driver.path().to_path_buf())
+        else {
+            return;
+        };
+        let stem = recording
+            .file_stem()
+            .map_or("replay".into(), |stem| stem.to_string_lossy());
+        let beside = recording
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let written = serde_json::to_vec_pretty(&self.studio.freecam.track)
+            .map_err(std::io::Error::other)
+            .and_then(|json| {
+                write_camera_draft(beside, &stem, &json).or_else(|_| {
+                    let fallback = horizon_client::studio::recorder::default_recordings_dir();
+                    horizon_std::fs::create_dir_all(&fallback)?;
+                    write_camera_draft(&fallback, &stem, &json)
+                })
+            });
+        match written {
+            Ok(path) => {
+                let path = path.display().to_string();
+                log::warn!("Studio: the unsaved camera path was kept in {path}");
+                self.system_message(Text::tr("horizon.studio.replay.camera_draft", &[&path]));
+            }
+            Err(error) => {
+                let error = error.to_string();
+                log::error!("Studio: the unsaved camera path is lost: {error}");
+                self.system_message(Text::tr(
+                    "horizon.studio.replay.camera_draft.error",
+                    &[&error],
+                ));
+            }
+        }
     }
 
     /// The replay closed: the timeline empties and the free camera lands.
@@ -635,6 +689,11 @@ impl Game<'_> {
                     return true;
                 }
             }
+            if !self.studio.flying() && !self.studio.rmb_down {
+                // First-person view of the recorded player: the click is ours, but it never
+                // grabs the pointer, so mouse motion cannot turn the recorded view.
+                return true;
+            }
             if pressed {
                 self.studio.topbar.close_dropdown();
                 self.studio.rmb_down = true;
@@ -740,5 +799,58 @@ impl Game<'_> {
             }
             _ => {}
         }
+    }
+}
+
+/// The longest suffix `write_camera_draft` appends (`.camera-draft-99.json`, 21 bytes); keeping
+/// the stem within 234 bytes keeps every candidate within the 255-byte filename limit.
+const MAX_CAMERA_DRAFT_STEM_BYTES: usize = 255 - ".camera-draft-99.json".len();
+
+/// `json` in a new file in `dir`, never over an earlier draft.
+fn write_camera_draft(dir: &std::path::Path, stem: &str, json: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let mut end = MAX_CAMERA_DRAFT_STEM_BYTES.min(stem.len());
+    while !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let stem = if end == 0 { "replay" } else { &stem[..end] };
+    for n in 1..100 {
+        let name = if n == 1 {
+            format!("{stem}.camera-draft.json")
+        } else {
+            format!("{stem}.camera-draft-{n}.json")
+        };
+        let path = dir.join(name);
+        match horizon_std::fs::File::create_new(&path) {
+            Ok(mut file) => {
+                file.write_all(json)?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other("too many camera path drafts"))
+}
+
+#[cfg(test)]
+mod camera_draft_tests {
+    use super::write_camera_draft;
+
+    #[test]
+    fn long_stems_stay_within_255_bytes_and_number_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let long_ascii = "a".repeat(250);
+        let first = write_camera_draft(dir.path(), &long_ascii, b"{\"v\":1}").unwrap();
+        let second = write_camera_draft(dir.path(), &long_ascii, b"{\"v\":2}").unwrap();
+        assert!(first.file_name().unwrap().len() <= 255);
+        assert!(second.file_name().unwrap().len() <= 255);
+        assert_ne!(first, second);
+        assert_eq!(horizon_std::fs::read(&first).unwrap(), b"{\"v\":1}");
+        assert_eq!(horizon_std::fs::read(&second).unwrap(), b"{\"v\":2}");
+
+        let long_utf8 = "é".repeat(125); // 250 bytes, 2-byte chars
+        let utf8 = write_camera_draft(dir.path(), &long_utf8, b"{}").unwrap();
+        assert!(utf8.file_name().unwrap().len() <= 255);
     }
 }

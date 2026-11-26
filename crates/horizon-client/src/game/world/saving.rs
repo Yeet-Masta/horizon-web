@@ -1,9 +1,10 @@
 //! The save screen freezes simulation, but keeps pumping window events while
 //! snapshots are prepared in small batches and the region workers drain.
-use super::{Game, loading_frame};
-use horizon_client::{Result, hud::HudBatch};
+use super::{ClientQuit, Game, loading_frame};
+use horizon_client::{Result, hud::HudBatch, text::Text};
 use horizon_std::fs::PathExt as _;
 use horizon_std::time::{Duration, Instant};
+use mod_api::{ClosingSaveOperation, ClosingSaveStage};
 use std::collections::{HashSet, VecDeque};
 
 pub(super) struct ClosingSave {
@@ -12,7 +13,14 @@ pub(super) struct ClosingSave {
     reply: Option<std::sync::mpsc::Sender<String>>,
     started: Instant,
     stage: Stage,
+    disconnect_reason: Option<Text>,
 }
+impl ClosingSave {
+    pub(super) fn disconnecting(&self) -> bool {
+        self.disconnect_reason.is_some()
+    }
+}
+
 enum Stage {
     Generation,
     Chunks(VecDeque<(i32, i32)>),
@@ -20,6 +28,12 @@ enum Stage {
     Writes,
     Server,
     Quit,
+}
+
+/// Joining a stopped server can surface its tick error and immediately end
+/// the event loop. Keep polling export output and its manifest first.
+pub(super) fn integrated_save_ready(stopped: bool, pending_mod_export: bool) -> bool {
+    stopped && !pending_mod_export
 }
 
 // Bound the work in both sparse and block-entity-heavy worlds. A single chunk
@@ -39,6 +53,12 @@ impl Game<'_> {
             })
     }
     pub(super) fn begin_closing_save(&mut self, quit: bool) -> Result<()> {
+        if quit {
+            self.cancel_export_on_quit();
+            self.client_quit.set(ClientQuit::ShuttingDown);
+        } else {
+            self.interrupt_export_for_world_exit("export interrupted because the world closed");
+        }
         if let Some(save) = &mut self.pending_save {
             save.quit |= quit;
             return Ok(());
@@ -51,6 +71,7 @@ impl Game<'_> {
                 reply: None,
                 started: Instant::now(),
                 stage: Stage::Quit,
+                disconnect_reason: None,
             });
             return Ok(());
         }
@@ -70,6 +91,7 @@ impl Game<'_> {
                 reply: None,
                 started: Instant::now(),
                 stage: Stage::Server,
+                disconnect_reason: None,
             });
         } else if self.remote.is_some() {
             if !quit {
@@ -86,6 +108,7 @@ impl Game<'_> {
                 reply: None,
                 started: Instant::now(),
                 stage: Stage::Quit,
+                disconnect_reason: None,
             });
         } else {
             self.close_container();
@@ -98,9 +121,18 @@ impl Game<'_> {
                 reply: None,
                 started: Instant::now(),
                 stage: Stage::Generation,
+                disconnect_reason: None,
             });
         }
         self.capture(false);
+        Ok(())
+    }
+
+    pub(super) fn begin_integrated_disconnect(&mut self, reason: Text) -> Result<()> {
+        self.begin_closing_save(false)?;
+        if let Some(save) = &mut self.pending_save {
+            save.disconnect_reason = Some(reason);
+        }
         Ok(())
     }
 
@@ -129,6 +161,7 @@ impl Game<'_> {
             reply: Some(reply),
             started: Instant::now(),
             stage: Stage::Generation,
+            disconnect_reason: None,
         });
         Ok(())
     }
@@ -147,7 +180,7 @@ impl Game<'_> {
                         .integrated
                         .as_ref()
                         .ok_or("the integrated server stopped with an error")?;
-                    if !server.stopped() {
+                    if !integrated_save_ready(server.stopped(), self.pending_mod_export()) {
                         return Ok(false);
                     }
                     // Drop/join only after completion; leave_server's teardown
@@ -155,7 +188,7 @@ impl Game<'_> {
                     if save.quit {
                         self.integrated.take().unwrap().stop()?;
                     } else {
-                        self.leave_server(None)?;
+                        self.leave_server(save.disconnect_reason.take())?;
                     }
                     Ok(true)
                 }
@@ -274,10 +307,10 @@ impl Game<'_> {
     }
 
     pub(super) fn render_closing_save(&mut self) -> Result<()> {
-        if matches!(
-            self.pending_save.as_ref().map(|save| &save.stage),
-            Some(Stage::Quit)
-        ) {
+        let Some(save) = &self.pending_save else {
+            return Ok(());
+        };
+        if matches!(save.stage, Stage::Quit) {
             return Ok(());
         }
         // disconnectWithSavingScreen: a GenericMessageScreen, its title and
@@ -289,26 +322,58 @@ impl Game<'_> {
             )
             .without_navigation()
         });
-        let Some(renderer) = &mut self.renderer else {
+        let Some(renderer) = &self.renderer else {
             return Ok(());
         };
         let mut hud = HudBatch::new(
             [renderer.config.width, renderer.config.height],
             self.settings.gui_scale_inputs(),
         );
-        let progress = match self.pending_save.as_ref().map(|save| &save.stage) {
-            Some(Stage::Chunks(_)) => 0.25,
-            Some(Stage::Entities(_)) => 0.5,
-            Some(Stage::Writes) => 0.9,
-            _ => 0.0,
+        let progress = match save.stage {
+            Stage::Chunks(_) => Some(0.25),
+            Stage::Entities(_) => Some(0.5),
+            Stage::Writes => Some(0.9),
+            _ => None,
         };
-        horizon_client::level_loading::draw_progress(
-            &mut hud,
-            &self.gui.atlas,
-            "Saving world...",
-            progress,
-        );
-        renderer.render(&loading_frame(&hud))?;
+        let mut replacement = None;
+        if !renderer.suspended
+            && mod_api::__private::listened(mod_api::HookId::ClosingSaveScreenDraw)
+        {
+            let operation = if !save.close {
+                ClosingSaveOperation::ExplicitSave
+            } else if save.quit {
+                ClosingSaveOperation::QuitClient
+            } else {
+                ClosingSaveOperation::LeaveWorld
+            };
+            let stage = match save.stage {
+                Stage::Generation => ClosingSaveStage::Generation,
+                Stage::Chunks(_) => ClosingSaveStage::Chunks,
+                Stage::Entities(_) => ClosingSaveStage::Entities,
+                Stage::Writes => ClosingSaveStage::Writes,
+                Stage::Server => ClosingSaveStage::Server,
+                Stage::Quit => unreachable!("quit without a saving screen"),
+            };
+            self.native_closing_save_screen_draw(
+                operation,
+                stage,
+                progress,
+                &mut hud,
+                &mut replacement,
+            );
+        }
+        if replacement.is_none() {
+            horizon_client::level_loading::draw_progress(
+                &mut hud,
+                &self.gui.atlas,
+                "Saving world...",
+                progress.unwrap_or(0.0),
+            );
+        }
+        self.renderer
+            .as_mut()
+            .unwrap()
+            .render(&loading_frame(&hud))?;
         Ok(())
     }
 
@@ -317,7 +382,7 @@ impl Game<'_> {
     /// the save has one. The Select World list shows it as the world's preview.
     pub(super) fn tick_world_icon(&mut self) {
         // Its grab would take a sequence's frame.
-        if self.screenshot_sequence.is_some() {
+        if self.screenshot_sequence.is_some() || self.export.is_some() {
             return;
         }
         let Some(icon) = self.world_icon.as_ref() else {
@@ -372,19 +437,37 @@ impl Game<'_> {
 impl Game<'_> {
     /// Save the level in place: its changed chunks, its entities and its raids.
     pub(super) fn save_level(&mut self, wait: bool) -> Result<()> {
+        self.save_level_pass(wait, wait)
+    }
+
+    /// Queue the level's snapshots for the writer and drain its generation, without waiting for
+    /// the disk: what an idle close needs before it drops the level.
+    pub(super) fn save_level_queued(&mut self) -> Result<()> {
+        self.save_level_pass(true, false)
+    }
+
+    /// With `drain`, the generation and the saves in flight are waited for, and their proto
+    /// chunks are saved here rather than by a worker (a save job of the streamer's pool is not
+    /// the writer's, and nothing else would wait for it before the level goes). With `durable`,
+    /// the writer is waited for too: the level's chunks, entities and attachments are on disk
+    /// when this returns.
+    fn save_level_pass(&mut self, drain: bool, durable: bool) -> Result<()> {
         self.admit_level_save()?;
         self.save_border();
         self.save_chunk_tickets()?;
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            match self.streaming.prepare_save(&mut self.world, wait, deadline) {
+            match self
+                .streaming
+                .prepare_save(&mut self.world, drain, deadline)
+            {
                 horizon_client::streaming::SaveStep::Full(chunk) => {
                     self.native_late_full_chunk_snapshot(&chunk);
                     self.streaming.save_finished(chunk);
                 }
                 horizon_client::streaming::SaveStep::Protos(protos) => {
                     self.native_proto_snapshots(&protos);
-                    self.streaming.finish_save(protos, wait);
+                    self.streaming.finish_save(protos, drain);
                     break;
                 }
                 horizon_client::streaming::SaveStep::Pending => unreachable!(),
@@ -400,12 +483,12 @@ impl Game<'_> {
         self.save
             .save_later(&chunks, self.pack.assets.registry, world_biomes!(self))?;
         // Prepare entities while the chunk writer runs, then use one barrier.
-        if !wait {
+        if !drain {
             self.world.modified.autosaved(&keys, Instant::now());
         }
         self.save_entities(false)?;
         self.save_raids();
-        if wait {
+        if durable {
             self.save.flush()?;
         }
         if mod_api::__private::listened(mod_api::HookId::LevelSave) {

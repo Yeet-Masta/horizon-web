@@ -7,11 +7,14 @@ use super::{
     native_scene::{SceneBlock, scene_matrix},
     native_scene_live::{LiveScenes, check, facing_viewer, lives, scene_key, ticks_to_run},
 };
+use crate::game::host::draw::GameDrawContext;
 use glam::Vec3;
+use horizon_client::hud::{Blend, HudBatch};
 use horizon_world::registry::BlockStateId;
 use mod_api::{
-    Compound, GuiEntity, SCENE_CATCH_UP, SCENE_MAX_ANIMATING, SCENE_MAX_ENTITIES,
-    SCENE_MAX_PARTICLES, Scene, SceneClock, SceneEntity, SceneError, SceneParticle, SceneView,
+    Compound, DrawContext as _, GuiEntity, SCENE_CATCH_UP, SCENE_MAX_ANIMATING, SCENE_MAX_ENTITIES,
+    SCENE_MAX_PARTICLES, SCENE_MAX_TEXTURED_QUADS, Scene, SceneClock, SceneEntity, SceneError,
+    SceneParticle, SceneTexturedQuad, SceneView, SceneWithQuadsError,
 };
 
 fn cow(pos: [f64; 3]) -> SceneEntity {
@@ -183,10 +186,223 @@ fn lit_furnace(game: &super::Game<'_>) -> mod_api::BlockState {
 
 /// Draws `scene` as `DrawContext::draw_scene` does: the result and the vertices drawn.
 fn draw(game: &super::Game<'_>, scene: &Scene, view: SceneView) -> (Result<(), SceneError>, usize) {
-    let mut batch = horizon_client::hud::HudBatch::scratch([320, 240]);
-    let result = crate::game::api_values::aggregates::scene_blocks(&scene.blocks)
-        .and_then(|prepared| game.native_draw_scene(&mut batch, RECT, &prepared, scene, view));
+    let mut batch = HudBatch::scratch([320, 240]);
+    let result = GameDrawContext::new(game, &mut batch).draw_scene(RECT, scene, view);
     (result, batch.vertices.len())
+}
+
+#[test]
+#[ignore = "daily"]
+fn posed_scene_sections_move_independently_in_one_depth_pass() {
+    use crate::game::api_values::TryIntoApi as _;
+    use mod_api::{SceneSection, SceneSectionError};
+
+    crate::game::native_entity_refs::tests::with_client_game(|game| {
+        let stone = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:stone")
+            .unwrap()
+            .try_into_api()
+            .unwrap();
+        let scene = Scene::new(vec![
+            mod_api::SceneBlock::new([0, 0, 0], stone, None),
+            mod_api::SceneBlock::new([1, 0, 0], stone, None),
+        ]);
+        let view = SceneView::new([0.0; 3], 0.0, 0.0, 20.0);
+        let pose = SceneSection::new(1, 1, [0.25, 0.75, 0.0], [0.0, 90.0, 0.0], [0.0; 3]);
+        let mut batch = HudBatch::scratch([320, 240]);
+        let mut context = GameDrawContext::new(game, &mut batch);
+        let overlapping = SceneSection::new(0, 2, [0.0; 3], [0.0; 3], [0.0; 3]);
+        assert_eq!(
+            context.draw_scene_with_sections(RECT, &scene, view, &[overlapping, pose]),
+            Err(SceneSectionError::BadSection { index: 1 })
+        );
+        drop(context);
+        assert!(batch.vertices.is_empty());
+
+        GameDrawContext::new(game, &mut batch)
+            .draw_scene_with_sections(RECT, &scene, view, &[pose])
+            .unwrap();
+        let ends = |include: fn(f32) -> bool| {
+            batch
+                .vertices
+                .iter()
+                .filter(|v| include(v.pos[1]))
+                .map(|v| v.pos[0])
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), x| {
+                    (lo.min(x), hi.max(x))
+                })
+        };
+        // With the unturned camera, pixel x is 60 - 20 * scene x.
+        // The raised cube turns [1,2] of X into [0,1] of -Z and [0,1] of Z
+        // into [0,1] of X, then shifts right in scene axes by a quarter block.
+        for (got, want) in [
+            (ends(|y| y < 20.0), (35.0, 55.0)),
+            (ends(|y| y > 48.0), (40.0, 60.0)),
+        ] {
+            assert!(
+                (got.0 - want.0).abs() < 0.001 && (got.1 - want.1).abs() < 0.001,
+                "{got:?}"
+            );
+        }
+        assert_eq!(
+            batch.blends.len(),
+            1,
+            "both cubes test against the same depth buffer"
+        );
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn textured_faces_use_the_real_atlas_and_share_the_scene_clip_and_depth() {
+    crate::game::native_entity_refs::tests::with_client_game(|game| {
+        let scene = Scene::new(vec![mod_api::SceneBlock::new(
+            [0, 0, 0],
+            lit_furnace(game),
+            None,
+        )]);
+        let view = SceneView::new([0.5; 3], 0.0, 0.0, 20.0);
+        let corners = [
+            [0.0, 1.0, 2.0],
+            [1.0, 1.0, 2.0],
+            [1.0, 0.0, 2.0],
+            [0.0, 0.0, 2.0],
+        ];
+        let uv = [[0.25, 0.125], [0.75, 0.0], [1.0, 0.875], [0.0, 1.0]];
+        let quad = SceneTexturedQuad::new("minecraft:block/water_still", corners, uv, 0xA010_80FF);
+        let mut batch = HudBatch::scratch([320, 240]);
+        assert_eq!(
+            GameDrawContext::new(game, &mut batch).draw_scene_with_quads(
+                RECT,
+                &scene,
+                view,
+                &[quad]
+            ),
+            Ok(())
+        );
+        assert!(
+            batch.vertices.len() > 6,
+            "faces and block share the same run"
+        );
+        assert_eq!(
+            batch.blends,
+            vec![(
+                0..batch.vertices.len() as u32,
+                Blend::Depth([10, 10, 100, 80])
+            )]
+        );
+        let sprite = game.gui.atlas.sprites["block/water_still"];
+        let pos = [[70.0, 40.0], [50.0, 40.0], [50.0, 60.0], [70.0, 60.0]];
+        for (v, i) in batch.vertices[..6].iter().zip([0, 1, 2, 0, 2, 3]) {
+            assert_eq!(v.pos, pos[i]);
+            assert_eq!(v.color, 0xA0FF_8010);
+            assert_eq!(v.depth, 1.0, "the rear face is farthest");
+            let [u, w] = uv[i];
+            assert!((v.uv[0] - ((1.0 - u) * sprite.u0 + u * sprite.u1)).abs() < 1e-6);
+            assert!((v.uv[1] - ((1.0 - w) * sprite.v0 + w * sprite.v1)).abs() < 1e-6);
+        }
+        assert!(batch.vertices[6..].iter().all(|v| v.depth < 1.0));
+        assert_eq!(game.live_scenes.borrow().len(), 0);
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn invalid_textured_faces_do_not_touch_the_batch_or_keep_or_advance_a_scene() {
+    crate::game::native_entity_refs::tests::with_client_game(|game| {
+        let scene = |id, tick| Scene::new(Vec::new()).with_clock(SceneClock::new(id, tick, 0.0));
+        let quad = SceneTexturedQuad::new(
+            "block/water_flow",
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ],
+            [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            0xFFFF_FFFF,
+        );
+        assert_eq!(draw(game, &scene(4, 0), view()).0, Ok(()));
+        game.frames += 1;
+        let mut batch = HudBatch::scratch([320, 240]);
+        let mut bad_uv = quad.clone();
+        bad_uv.uv[3][1] = 1.01;
+        let mut bad_pos = quad.clone();
+        bad_pos.corners[2][0] = f32::NAN;
+        let mut bad_name = quad.clone();
+        bad_name.sprite = "guide:missing".into();
+        let check = |batch: &mut HudBatch, input: &[SceneTexturedQuad], error| {
+            assert_eq!(
+                GameDrawContext::new(game, batch).draw_scene_with_quads(
+                    RECT,
+                    &scene(4, 1),
+                    view(),
+                    input
+                ),
+                Err(error)
+            );
+            assert!(
+                batch.vertices.is_empty() && batch.blends.is_empty() && batch.patches.is_empty()
+            );
+            assert_eq!(game.scene_tick("", 4), Some(0));
+        };
+        check(
+            &mut batch,
+            &[quad.clone(), bad_uv],
+            SceneWithQuadsError::BadTexturedQuad { index: 1 },
+        );
+        check(
+            &mut batch,
+            &[quad.clone(), bad_pos],
+            SceneWithQuadsError::BadTexturedQuad { index: 1 },
+        );
+        check(
+            &mut batch,
+            &[quad.clone(), bad_name],
+            SceneWithQuadsError::UnknownSprite { index: 1 },
+        );
+        check(
+            &mut batch,
+            &vec![quad.clone(); SCENE_MAX_TEXTURED_QUADS + 1],
+            SceneWithQuadsError::TooManyTexturedQuads,
+        );
+        for id in 0..4 {
+            assert_eq!(draw(game, &scene(id, 0), view()).0, Ok(()), "scene {id}");
+        }
+        // Neither refusal spent a slot. Both kinds of budget fallback still draw the
+        // current frame's quads: with a cached scene (4) or without one (5).
+        for id in [4, 5] {
+            let before = batch.vertices.len();
+            assert_eq!(
+                GameDrawContext::new(game, &mut batch).draw_scene_with_quads(
+                    RECT,
+                    &scene(id, 1),
+                    view(),
+                    std::slice::from_ref(&quad),
+                ),
+                Err(SceneWithQuadsError::Scene(SceneError::TooManyScenes))
+            );
+            assert_eq!(batch.vertices.len(), before + 6);
+        }
+        assert_eq!(game.scene_tick("", 4), Some(0));
+        assert_eq!(game.scene_tick("", 5), None);
+        game.frames += 1;
+        let before = batch.vertices.len();
+        assert_eq!(
+            GameDrawContext::new(game, &mut batch).draw_scene_with_quads(
+                RECT,
+                &scene(4, 1),
+                view(),
+                &[quad]
+            ),
+            Ok(())
+        );
+        assert_eq!(batch.vertices.len(), before + 6);
+        assert_eq!(game.scene_tick("", 4), Some(1));
+    });
 }
 
 /// A lit furnace's scene `id` run from tick 0 to each of `ticks` in turn, one frame each.
@@ -438,5 +654,236 @@ fn two_mods_scenes_of_the_same_id_keep_their_own_state() {
         assert_eq!(game.scene_tick("ponder", 1), Some(0));
         assert!(!game.scene_particles("guide", 1).is_empty());
         assert!(game.scene_particles("ponder", 1).is_empty());
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_guide_ticks_another_mods_block_entity_copy_and_draws_its_changed_fields() {
+    use crate::game::execution_role::ExecutionRole;
+    use crate::game::native_entity_refs::tests::{run_fresh_cases, with_game_role};
+    use horizon_client::{
+        chunk::Chunk,
+        containers::{BlockEntity, ModBlockEntity, ModBlockEntityFields},
+        hud::HudBatch,
+    };
+    use horizon_std::sync::Mutex;
+    use mod_api::{
+        BlockEntityClientTickEvent, BlockEntityClientTicksEvent, BlockEntityPart,
+        BlockEntitySceneTickEvent, BlockEntitySubmitEvent, BlockPart, BlocksEvent, ClientHost,
+        GuiLayerPostEvent, Hooks, Identifier, Registrar, RegistrationContext, SceneBlockEntity,
+        Tag,
+    };
+    use std::sync::Arc;
+
+    const BLOCK: &str = "scene_machine:casing";
+    const KIND: &str = "scene_machine:rotor";
+    const POS: [i32; 3] = [0, 64, 0];
+    static TICKS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static DRAW_TIME: Mutex<Option<(i64, f32, f64)>> = Mutex::new(None);
+
+    fn phase(nbt: &Compound) -> i32 {
+        let Some(Tag::Int(phase)) = nbt.get(&"phase".into()) else {
+            panic!("fixture fields have no phase");
+        };
+        *phase
+    }
+
+    struct Rotor;
+    #[mod_api::horizon_part]
+    impl BlockPart for Rotor {}
+    #[mod_api::horizon_part]
+    impl BlockEntityPart for Rotor {
+        fn block_entity_scene_tick(&self, event: &mut BlockEntitySceneTickEvent<'_>) {
+            assert_eq!(event.pos, POS);
+            TICKS.lock().unwrap().push(event.tick);
+            let next = phase(&event.fields.nbt) + 1;
+            event.fields.nbt.insert("phase".into(), Tag::Int(next));
+        }
+
+        fn block_entity_client_ticks(
+            &self,
+            _: &dyn ClientHost,
+            event: &mut BlockEntityClientTicksEvent<'_>,
+        ) {
+            event.ticks = true;
+        }
+
+        fn block_entity_client_tick(
+            &self,
+            _: &mut dyn ClientHost,
+            _: &mut BlockEntityClientTickEvent<'_>,
+        ) {
+            panic!("drawing a guide must never run a world ticker");
+        }
+
+        fn block_entity_submit(&self, _: &dyn ClientHost, event: &mut BlockEntitySubmitEvent<'_>) {
+            assert_eq!(event.entity.id(), KIND);
+            assert_eq!(event.pos, POS);
+            let draw = &mut *event.draw;
+            *DRAW_TIME.lock().unwrap() =
+                Some((draw.game_time(), draw.partial(), draw.animation_time()));
+            let x = 0.125 + phase(&event.entity.nbt) as f32 / 32.0;
+            assert!(draw.quad(
+                "block/stone",
+                [
+                    [x, 0.75, -0.25],
+                    [x, 0.25, -0.25],
+                    [x + 0.125, 0.25, -0.25],
+                    [x + 0.125, 0.75, -0.25],
+                ],
+                [0.0, 0.0, 16.0, 16.0],
+                0xFF_0000,
+            ));
+        }
+    }
+
+    struct Machine;
+    #[mod_api::__subscriptions]
+    impl Hooks for Machine {
+        fn register(&self, r: &mut dyn Registrar, _: &RegistrationContext) {
+            let kind = r.block_entity_type("rotor").blocks(&[BLOCK]).build();
+            r.block_entity_part(&kind, Rotor).unwrap();
+        }
+        fn blocks(&self, _: &RegistrationContext, event: &mut BlocksEvent<'_>) {
+            event
+                .blocks
+                .push(mod_api::Block::new(BLOCK, "minecraft:stone"));
+        }
+    }
+
+    struct Guide {
+        layer: &'static str,
+        scene: Arc<Mutex<Option<Scene>>>,
+    }
+    #[mod_api::__subscriptions]
+    impl Hooks for Guide {
+        fn gui_layer_post(&self, _: &dyn ClientHost, event: &mut GuiLayerPostEvent<'_>) {
+            if event.layer == self.layer {
+                event
+                    .draw
+                    .draw_scene(
+                        RECT,
+                        self.scene.lock().unwrap().as_ref().unwrap(),
+                        SceneView::new([0.5, 64.5, 0.5], 0.0, 0.0, 20.0),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    if run_fresh_cases(
+        "game::native_scene_live_tests::a_guide_ticks_another_mods_block_entity_copy_and_draws_its_changed_fields",
+        "HORIZON_SCENE_BLOCK_ENTITY_TICK_CHILD",
+        &["game"],
+    ) {
+        return;
+    }
+    let input = Arc::new(Mutex::new(None));
+    let guide = |id| {
+        mod_api::ModEntry::new(
+            id,
+            Box::new(Guide {
+                layer: id,
+                scene: Arc::clone(&input),
+            }),
+        )
+    };
+    let mods: mod_api::Mods = vec![
+        mod_api::ModEntry::new("scene_machine", Box::new(Machine)),
+        guide("scene_guide"),
+        guide("other_guide"),
+    ]
+    .into();
+    mod_platform::__private::install(mods.clone());
+    crate::game::api_values::install_parts(&mods).unwrap();
+    let base =
+        std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+    let root = crate::game::mods::content_root(&base, &Default::default())
+        .unwrap()
+        .prepared()
+        .to_path_buf();
+    with_game_role(root, ExecutionRole::Client, |game| {
+        use crate::game::api_values::TryIntoApi as _;
+
+        let state = game.pack.assets.registry.default_state(BLOCK).unwrap();
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        game.world.set(0, 64, 0, state).unwrap();
+        let mut nbt = Compound::new();
+        nbt.insert("phase".into(), Tag::Int(91));
+        let real = ModBlockEntity::new(
+            KIND.into(),
+            ModBlockEntityFields {
+                nbt,
+                ..Default::default()
+            },
+        );
+        let revision = real.revision();
+        game.world
+            .block_entities
+            .insert((0, 64, 0), BlockEntity::Mod(Box::new(real)));
+        game.world.game_time = 500;
+        let client_time = (
+            game.world.game_time,
+            game.clock.fraction() as f32,
+            game.animation_time(),
+        );
+        let scene = |phase| {
+            let mut block_entity =
+                SceneBlockEntity::new(Identifier::parse(KIND).unwrap(), Default::default());
+            block_entity
+                .fields
+                .nbt
+                .insert("phase".into(), Tag::Int(phase));
+            Scene::new(vec![mod_api::SceneBlock::new(
+                POS,
+                state.try_into_api().unwrap(),
+                Some(block_entity),
+            )])
+        };
+        let mut frame = |owner, scene, phase, time| {
+            *input.lock().unwrap() = Some(scene);
+            game.frames += 1;
+            let mut batch = HudBatch::scratch([320, 240]);
+            game.native_gui_layer_post(owner, &mut batch);
+            assert_eq!(DRAW_TIME.lock().unwrap().take().unwrap(), time);
+            // The six red vertices come from the type's real renderer, not the stone model.
+            let red = batch
+                .vertices
+                .iter()
+                .filter(|v| v.color & 0x00FF_FF00 == 0 && v.color & 0xFF != 0)
+                .collect::<Vec<_>>();
+            assert_eq!(red.len(), 6);
+            let x = 60.0 - (0.125 + phase as f32 / 32.0 - 0.5) * 20.0;
+            assert!((red[0].pos[0] - x).abs() < 0.001, "phase {phase} not drawn");
+        };
+        let at = |seed, tick| {
+            scene(seed).with_clock(SceneClock::new(1, tick, 0.25).animate_blocks(false))
+        };
+        let time = |tick| (tick, 0.25, tick as f64 + 0.25);
+        frame("scene_guide", scene(3), 3, client_time);
+        frame("scene_guide", at(3, 7), 3, time(7));
+        frame("scene_guide", at(3, 8), 4, time(8));
+        frame("scene_guide", at(3, 8), 4, time(8));
+        frame("other_guide", at(3, 8), 3, time(8));
+        frame("scene_guide", at(3, 11), 7, time(11));
+        assert_eq!(std::mem::take(&mut *TICKS.lock().unwrap()), [8, 9, 10, 11]);
+        frame("scene_guide", at(3, 100), 23, time(100));
+        assert_eq!(*TICKS.lock().unwrap(), (81..=100).collect::<Vec<_>>());
+        TICKS.lock().unwrap().clear();
+        frame("scene_guide", at(3, 9), 3, time(9));
+        frame("scene_guide", at(6, 10), 6, time(10));
+        frame("scene_guide", at(6, 11), 7, time(11));
+        assert_eq!(*TICKS.lock().unwrap(), [11]);
+
+        let Some(BlockEntity::Mod(real)) = game.world.block_entities.get(&(0, 64, 0)) else {
+            panic!("the scene changed the world's block entity");
+        };
+        assert_eq!(phase(&real.nbt), 91);
+        assert_eq!(real.revision(), revision);
+        assert_eq!(game.world.block(0, 64, 0), state);
+        assert_eq!(game.world.game_time, 500);
     });
 }

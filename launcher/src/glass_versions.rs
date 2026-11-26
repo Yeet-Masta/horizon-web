@@ -65,22 +65,39 @@ impl Launcher {
     /// update came out the same day, [`horizon_launcher::nightly::same_day_time`]), for any screen
     /// that names it; the tag itself otherwise.
     pub(crate) fn version_name(&self, tag: &str) -> String {
-        match horizon_launcher::nightly::date_of(tag) {
-            Some(date) => {
-                let time = horizon_launcher::nightly::same_day_time(tag).unwrap_or_default();
-                trf("{date} update", &[("date", &published(date, &time))])
-            }
+        match horizon_launcher::nightly::published(tag) {
+            Some((date, time)) => trf(
+                "{date} update",
+                &[("date", &published(&date, &time.unwrap_or_default()))],
+            ),
             None => tag.to_owned(),
         }
     }
 
-    /// The launcher's version when Use picked one older than the newest installed: what an
-    /// instance set to Latest on Nightly plays then, named so "Latest" never says otherwise.
-    pub(crate) fn held_version(&self) -> Option<&String> {
-        self.settings
-            .selected
-            .as_ref()
-            .filter(|tag| self.installed.first() != Some(*tag))
+    /// The action Versions offers for this build on the instance Play starts.
+    pub(super) fn use_version_action(&self, tag: &str) -> Option<(String, String)> {
+        let instance = self.selected_instance().filter(|i| i.java.is_none())?;
+        let latest = horizon_launcher::nightly::latest_for(
+            instance.channel,
+            &self.installed,
+            self.settings.selected.as_deref(),
+        );
+        let follows = latest.as_deref() == Some(tag);
+        let pin = (!follows).then_some(tag);
+        (instance.version.as_deref() != pin).then(|| {
+            let tip = if follows {
+                trf(
+                    "Play the latest in {instance}. It moves to each new one.",
+                    &[("instance", &instance.name)],
+                )
+            } else {
+                trf(
+                    "Keep {instance} on this version. To follow new ones again, choose Latest in its settings, Installation.",
+                    &[("instance", &instance.name)],
+                )
+            };
+            (instance.id.clone(), tip)
+        })
     }
 
     /// The names of the Horizon instances that play `tag`.
@@ -189,7 +206,7 @@ impl Launcher {
                         ))),
                 )
                 .child(
-                    ui::quiet_icon("sponsor", Some("github"), tr("Sponsor on GitHub"), 36., &t)
+                    ui::quiet_icon("sponsor", None, tr("Sponsor"), 36., &t)
                         .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url)),
                 )
         });
@@ -479,9 +496,16 @@ impl Launcher {
             return self.glass_version_actions(&tag, cx).into_any_element();
         }
         if release.asset.is_none() {
-            return ui::text(13., FontWeight::NORMAL, ink::QUIET)
-                .child(tr("No build for this platform"))
-                .into_any_element();
+            let (line, download) = horizon_launcher::refusals::no_build_card();
+            let line = ui::text(13., FontWeight::NORMAL, ink::QUIET).child(line);
+            return match download {
+                Some(url) => line
+                    .id(SharedString::from(format!("no-build-{tag}")))
+                    .cursor_pointer()
+                    .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url))
+                    .into_any_element(),
+                None => line.into_any_element(),
+            };
         }
         // After a failed attempt the card says to try again: the button says so too.
         let failed = self.install_error.as_ref().is_some_and(|(t, _)| *t == tag);
@@ -531,7 +555,6 @@ impl Launcher {
     /// again before it removes.
     fn glass_version_actions(&self, tag: &str, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let selected = self.selected().map(String::as_str) == Some(tag);
         let confirming = self.confirm_remove.as_deref() == Some(tag);
         let (t1, t2, t3) = (tag.to_string(), tag.to_string(), tag.to_string());
         let mut d = div().flex().items_center().gap(px(8.));
@@ -561,29 +584,13 @@ impl Launcher {
                     )),
                 );
         }
-        if !selected {
-            // Use changes what the selected instance plays; its label says whom that moves.
-            let follows = self.selected_instance().is_none_or(|i| {
-                i.java.is_some()
-                    || (i.version.is_none() && i.channel == instances::Channel::Nightly)
-            });
-            let tip = match (follows, self.selected_instance()) {
-                (false, Some(i)) => trf(
-                    "Play this version only in {instance}. To go back to the latest, choose Latest in its settings, Installation.",
-                    &[("instance", &i.name)],
-                ),
-                _ => tr("Play this version in every Nightly instance set to Latest.")
-                    .to_string(),
-            };
+        if let Some((id, tip)) = self.use_version_action(tag) {
             d = d.child(
                 ui::quiet(SharedString::from(format!("use-{tag}")), tr("Use"), 36., &t)
                     .tooltip(ui::tip(tip))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if follows {
-                            this.settings.selected = Some(t1.clone());
-                            this.save_settings();
-                        } else {
-                            this.pin_version(Some(t1.clone()));
+                        if let Err(e) = this.use_version_for(&id, &t1) {
+                            this.install_error = Some((t1.clone(), e));
                         }
                         cx.notify();
                     })),

@@ -103,7 +103,7 @@ AbstractTexture.getTexture	skip:java		accessor
 AbstractTexture.getTextureView	skip:java		accessor
 CubeMapTexture.loadContents	port	crates/horizon-client-render/src/gfx/panorama.rs::Faces::try_load	six faces read, flipped and stacked
 CubeMapTexture.doLoad	port	crates/horizon-client-render/src/gfx/panorama.rs::Panorama::new	cube texture creation and upload
-DynamicAtlasTree.insertInner	skip:other		dynamic atlas packing; Horizon uses texture-array layers, not a rectangle packer
+DynamicAtlasTree.insertInner	port	crates/horizon-client-render/src/font/pages.rs::DynamicAtlasTree::insert_inner	first-fit splits and the one-pixel separator on shader-visible font pages
 DynamicTexture.createTexture	skip:other		GPU texture creation for CPU pixels; Horizon has no DynamicTexture class
 DynamicTexture.upload	port	crates/horizon-client-render/src/gfx.rs::Renderer::update_lightmap	gap: minor: only the lightmap upload goes through here
 DynamicTexture.dumpContents	skip:debug		dump debug action

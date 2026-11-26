@@ -379,7 +379,7 @@ pub fn main() -> Result<()> {
                 -pitch * (std::f32::consts::PI / 180.0),
                 0.0,
             ),
-            anim: &|_| anim.clone(),
+            anim: &|_, _| anim.clone(),
             texts: Some(&texts),
             partial: float(&case["partial"]),
             game_time: case["gameTime"].as_i64().unwrap_or(0),
@@ -392,7 +392,12 @@ pub fn main() -> Result<()> {
             nether: false,
             lid: &|_| open,
             sign: &|_| sign.as_ref(),
-            banner: &|_| layers.clone(),
+            sign_revision: None,
+            banner: &|_, visit| {
+                for (texture, tint) in &layers {
+                    visit(texture, *tint);
+                }
+            },
             skull: &|_| None,
             glyph: &|c| atlas.glyph_cell(c),
             glyphs: atlas.font.epoch(),
@@ -414,7 +419,7 @@ pub fn main() -> Result<()> {
                     return json!({"texture": "environment/end_sky", "v": v, "color": q[0].color,
                                   "light": q[0].light, "custom": true});
                 }
-                if q[0].layer == 6 {
+                if q[0].layer & 0xffff == 6 {
                     let texture = "entity/end_portal/end_gateway_beam";
                     let u0 = sprites.get(texture).map_or(0.0, |r| r.u0);
                     let v: Vec<Value> = q

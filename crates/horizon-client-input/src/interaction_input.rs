@@ -50,6 +50,10 @@ pub trait InteractionWorld {
     /// every click of the tick reads, even after one of them changed the
     /// block it names (a creative break, then a use that replaces it).
     fn pick_hit_result(&mut self);
+    /// `Minecraft.handleKeybinds` keys that run after `pick_hit_result()` (and hotbar number-key
+    /// selection) and before the attack, use and pick loops: swap offhand (F), drop (Q) and mount
+    /// inventory (E).
+    fn queued_keys(&mut self) {}
     /// The tick's clicks are done: later picks follow the crosshair again.
     fn release_hit_result(&mut self);
     fn using_item(&self) -> bool;
@@ -104,6 +108,7 @@ impl InteractionInput {
     }
     pub fn tick(&mut self, world: &mut impl InteractionWorld, attack_down: bool, use_down: bool) {
         world.pick_hit_result();
+        world.queued_keys();
         let mut instant = false;
         if world.using_item() {
             if !use_down {
@@ -429,5 +434,57 @@ mod tests {
             ticks.push([count("attack"), count("use")]);
         }
         assert_eq!(ticks, [[64, 64], [64, 6], [22, 0], [0, 0]]);
+    }
+
+    #[test]
+    fn queued_keys_run_after_pick_hit_result_and_before_attack_use_pick() {
+        #[derive(Default)]
+        struct Ordered(Vec<&'static str>);
+        impl InteractionWorld for Ordered {
+            fn pick_hit_result(&mut self) {
+                self.0.push("pick_hit_result");
+            }
+            fn queued_keys(&mut self) {
+                self.0.push("queued_keys");
+            }
+            fn release_hit_result(&mut self) {
+                self.0.push("release_hit_result");
+            }
+            fn using_item(&self) -> bool {
+                false
+            }
+            fn release_using(&mut self) {}
+            fn start_attack(&mut self) -> bool {
+                self.0.push("attack");
+                false
+            }
+            fn start_use(&mut self, _: bool) {
+                self.0.push("use");
+            }
+            fn pick(&mut self) {
+                self.0.push("pick");
+            }
+            fn use_delay(&self) -> u32 {
+                0
+            }
+            fn continue_attack(&mut self, _: bool) {}
+        }
+        let mut input = InteractionInput::default();
+        let mut world = Ordered::default();
+        input.press(Button::Attack);
+        input.press(Button::Use);
+        input.press(Button::Pick);
+        input.tick(&mut world, false, false);
+        assert_eq!(
+            world.0,
+            [
+                "pick_hit_result",
+                "queued_keys",
+                "attack",
+                "use",
+                "pick",
+                "release_hit_result",
+            ]
+        );
     }
 }

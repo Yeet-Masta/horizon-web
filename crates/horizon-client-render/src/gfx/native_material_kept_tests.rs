@@ -353,7 +353,7 @@ fn the_material_reads_what_before_world_wrote_this_frame() {
     assert_eq!(got, [1.0, 0.0, 1.0, 1.0], "the reset frame");
     let got = frame(gpu, &mut pack, (&source, None), 6, None, None);
     assert_eq!(got, [2.0, 1.0, 2.0, 1.0], "after the reset");
-    let error = pollster::block_on(scope.pop());
+    let error = horizon_std::block_on_or(scope.pop(), None);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -394,7 +394,7 @@ fn the_material_reads_last_frame_s_chain_as_previous() {
         );
         assert_eq!(got[0], n as f32 - 1.0, "frame {n}");
     }
-    let error = pollster::block_on(scope.pop());
+    let error = horizon_std::block_on_or(scope.pop(), None);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -455,7 +455,7 @@ fn a_material_reads_eight_resources_within_the_device_s_limits() {
         assert_eq!(got, [10.0, 0.0, 100.0, 1.0]);
         let got = frame(gpu, &mut pack, (&source, None), 2, None, None);
         assert_eq!(got, [10.0, 10.0, 100.0, 1.0]);
-        let error = pollster::block_on(scope.pop());
+        let error = horizon_std::block_on_or(scope.pop(), None);
         assert!(error.is_none(), "{error:?}");
     }
     let instance = crate::gfx::test_gpu::instance();
@@ -536,7 +536,7 @@ fn a_traced_material_reads_kept_resources() {
         assert!(got[0] < 0.0, "{got:?}");
         assert_eq!(got[1..], [4.0, 5.0, 0.0]);
     }
-    let error = pollster::block_on(scope.pop());
+    let error = horizon_std::block_on_or(scope.pop(), None);
     assert!(error.is_none(), "{error:?}");
 }
 
@@ -658,6 +658,6 @@ fn a_material_that_reads_loads_with_its_shadow_and_relief() {
         let n = n as f32;
         assert_eq!(got, [n, n - 1.0, n, 1.0], "frame {n}");
     }
-    let error = pollster::block_on(scope.pop());
+    let error = horizon_std::block_on_or(scope.pop(), None);
     assert!(error.is_none(), "{error:?}");
 }

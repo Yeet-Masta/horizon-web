@@ -1,0 +1,2 @@
+# Movement statistics branch on the current climbable state; the test boots a game with prepared vanilla resources.
+horizon-client game::stats::tests::movement_stats_uses_current_on_climbable_branch lib daily resources

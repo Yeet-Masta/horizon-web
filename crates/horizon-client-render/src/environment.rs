@@ -54,7 +54,7 @@ pub struct Sky {
     pub star_brightness: f32,
     pub sunrise_color: [f32; 4],
     pub cloud_color: [f32; 4],
-    /// `gameplay/sky_light_level`, the server-side sky darkening.
+    /// `gameplay/sky_light_level`, the server-side sky darkening, 0 to 15 as the attribute.
     pub sky_light_level: f32,
     /// Environmental fog (`visual/fog_start_distance` / `fog_end_distance`).
     pub fog_start: f32,
@@ -975,38 +975,59 @@ impl Environment {
         let mut biomes = HashMap::new();
         let mut post = HashMap::new();
         let tags = std::cell::RefCell::new(HashMap::new());
-        for file in root.list("data/minecraft/worldgen/biome/") {
-            let Some(name) = file
-                .strip_prefix("data/minecraft/worldgen/biome/")
-                .and_then(|s| s.strip_suffix(".json"))
-            else {
-                continue;
-            };
-            if name.contains('/') {
+        for namespace in root.namespaces("data") {
+            if !horizon_core::level_id::valid_level_namespace(&namespace) {
+                log::debug!("skipping biome namespace with invalid id: {namespace}");
                 continue;
             }
-            let biome: Json = serde_json::from_slice(&root.read(&file)?)?;
-            let name = format!("minecraft:{name}");
-            let mut map = match AttributeMap::parse(&biome["attributes"]) {
-                Ok(map) => map,
-                Err(e) => {
-                    log::warn!("biome {}: {e}", file);
+            let prefix = format!("data/{namespace}/worldgen/biome/");
+            for file in root.list(&prefix) {
+                let Some(path) = file
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if !horizon_core::level_id::valid_level_path(path) {
+                    log::debug!("skipping biome with invalid path: {file}");
                     continue;
                 }
-            };
-            let mut post_map = AttributeMap::default();
-            for m in &packs.biomes {
-                let in_tag =
-                    |tag: &str| biome_tag(root, tag, &mut tags.borrow_mut()).contains(&name);
-                if m.targets.matches(&name, in_tag) {
-                    resolver.apply(&mut map, &m.base);
-                    resolver.apply(&mut post_map, &m.post_process);
+                let bytes = match root.read(&file) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        log::warn!("biome {file}: {e}");
+                        continue;
+                    }
+                };
+                let biome: Json = match serde_json::from_slice(&bytes) {
+                    Ok(biome) => biome,
+                    Err(e) => {
+                        log::warn!("biome {file}: {e}");
+                        continue;
+                    }
+                };
+                let name = format!("{namespace}:{path}");
+                let mut map = match AttributeMap::parse(&biome["attributes"]) {
+                    Ok(map) => map,
+                    Err(e) => {
+                        log::warn!("biome {}: {e}", file);
+                        continue;
+                    }
+                };
+                let mut post_map = AttributeMap::default();
+                for m in &packs.biomes {
+                    let in_tag =
+                        |tag: &str| biome_tag(root, tag, &mut tags.borrow_mut()).contains(&name);
+                    if m.targets.matches(&name, in_tag) {
+                        resolver.apply(&mut map, &m.base);
+                        resolver.apply(&mut post_map, &m.post_process);
+                    }
                 }
+                if !post_map.is_empty() {
+                    post.insert(name.clone(), post_map);
+                }
+                biomes.insert(name, map);
             }
-            if !post_map.is_empty() {
-                post.insert(name.clone(), post_map);
-            }
-            biomes.insert(name, map);
         }
         builder.biome_layer(biomes.values());
         let mut ids = Vec::new();
@@ -1133,6 +1154,32 @@ impl Environment {
         }
     }
 
+    /// `EnvironmentAttributeSystem.getValue(attribute, pos)` with no interpolator: the biome
+    /// layer reads one biome, `full` for an attribute with full-resolution biomes
+    /// (`BiomeManager.getBiome`), `noise` for the others (`getNoiseBiomeAtPosition`). Each
+    /// timeline track reads the clock it names through `clock` (`ClockManager.getTotalTicks`).
+    pub fn value_at(
+        &self,
+        id: &str,
+        clock: &dyn Fn(&str) -> i64,
+        weather: (f32, f32),
+        noise: Option<&AttributeMap>,
+        full: Option<&AttributeMap>,
+    ) -> Option<Value> {
+        let attribute = attribute(id)?;
+        let biome = |full_resolution: bool| if full_resolution { full } else { noise };
+        let conditions = Conditions {
+            rain: weather.0,
+            thunder: weather.1,
+            blend: None,
+            biome: &biome,
+            clock,
+            post_blend: None,
+            post_biome: None,
+        };
+        self.system.value(attribute, &conditions)
+    }
+
     /// The sky state the renderer draws.
     pub fn sample(&self, at: &Sample) -> Sky {
         let float = |id: &str| match self.value(id, at) {
@@ -1161,7 +1208,7 @@ impl Environment {
             star_brightness: float("visual/star_brightness"),
             sunrise_color: argb("visual/sunrise_sunset_color"),
             cloud_color: argb("visual/cloud_color"),
-            sky_light_level: float("gameplay/sky_light_level") / 15.0,
+            sky_light_level: float("gameplay/sky_light_level"),
             fog_start: float("visual/fog_start_distance"),
             fog_end: float("visual/fog_end_distance"),
             cloud_fog_end: float("visual/cloud_fog_end_distance"),
@@ -1208,8 +1255,74 @@ mod tests {
             )]));
             let environment = Environment::load(&source).unwrap();
             assert_eq!(sky_darken(&environment, 0, 0.0, 0.0), expected);
+            // The sampled sky keeps the attribute's scale, as vanilla's probe prints it, and
+            // truncating from it gives the same darkening.
+            let sky = environment.sample(&Sample::default());
+            assert_eq!(sky.sky_light_level, level);
+            assert_eq!((15.0 - sky.sky_light_level) as i32, expected);
             assert!(Environment::load_dimension(&source, "missing").is_err());
         }
+    }
+
+    #[test]
+    fn a_value_at_a_position_reads_the_noise_biome_over_the_dimension() {
+        use horizon_assets::resource_source::Resource;
+        let file = |json: &str| Resource::bytes(json.as_bytes().to_vec());
+        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "data/minecraft/dimension_type/overworld.json".into(),
+                file(r#"{"attributes":{"minecraft:visual/sky_light_factor":0.5}}"#),
+            ),
+            (
+                "data/minecraft/worldgen/biome/plains.json".into(),
+                file(r#"{"attributes":{"minecraft:visual/sky_light_factor":0.25}}"#),
+            ),
+        ]));
+        let environment = Environment::load(&source).unwrap();
+        let plains = environment.biome("minecraft:plains");
+        let factor = |noise, full| match environment.value_at(
+            "visual/sky_light_factor",
+            &|_| 6000,
+            (0.0, 0.0),
+            noise,
+            full,
+        ) {
+            Some(Value::Float(f)) => f,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(factor(plains, None), 0.25, "the noise biome's layer");
+        assert_eq!(factor(None, None), 0.5, "no biome: the dimension's value");
+        // Not a full-resolution attribute: the block's zoomed biome isn't read.
+        assert_eq!(factor(None, plains), 0.5);
+        assert!(
+            environment
+                .value_at("visual/no_such_attribute", &|_| 0, (0.0, 0.0), None, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_value_at_a_position_reads_each_timeline_on_its_own_clock() {
+        use horizon_assets::resource_source::Resource;
+        let file = |json: &str| Resource::bytes(json.as_bytes().to_vec());
+        let source = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "data/minecraft/dimension_type/overworld.json".into(),
+                file(r#"{"attributes":{},"timelines":["test:tide"]}"#),
+            ),
+            (
+                "data/test/timeline/tide.json".into(),
+                file(
+                    r#"{"clock":"test:tide","tracks":{"minecraft:visual/sky_light_factor":
+                    {"modifier":"multiply","keyframes":[{"ticks":0,"value":0.5},{"ticks":1000,"value":0.1}]}}}"#,
+                ),
+            ),
+        ]));
+        let environment = Environment::load(&source).unwrap();
+        // The tide clock is at 0 while the day clock is at 6000: the track reads its own clock.
+        let clock = |name: &str| if name == "test:tide" { 0 } else { 6000 };
+        let value = environment.value_at("visual/sky_light_factor", &clock, (0.0, 0.0), None, None);
+        assert_eq!(value, Some(Value::Float(0.5)));
     }
 
     fn overworld() -> Option<Environment> {
@@ -1585,5 +1698,105 @@ mod tests {
         assert_eq!(sky("minecraft:forest"), [1.0, 0.0, 0.0]);
         // Plains land on the transparent pixel: the colour before stays.
         assert_eq!(sky("minecraft:plains"), [128.0 / 255.0; 3]);
+    }
+
+    #[test]
+    fn biomes_load_across_all_namespaces_and_nested_paths() {
+        use horizon_assets::resource_source::Resource;
+        let file = |json: &str| Resource::bytes(json.as_bytes().to_vec());
+        let world = ResourceSource::indexed(std::collections::BTreeMap::from([
+            (
+                "data/minecraft/dimension_type/overworld.json".into(),
+                file(
+                    r##"{"has_skylight": true, "has_ceiling": false,
+                    "attributes": {"minecraft:visual/sky_color": "#808080", "minecraft:visual/fog_color": "#000000"}}"##,
+                ),
+            ),
+            (
+                "data/minecraft/worldgen/biome/plains.json".into(),
+                file(r##"{"attributes": {"minecraft:visual/sky_color": "#404040"}}"##),
+            ),
+            (
+                "data/minecraft/worldgen/biome/sub/x.json".into(),
+                file(r##"{"attributes": {"minecraft:visual/sky_color": "#202020"}}"##),
+            ),
+            (
+                "data/custom/worldgen/biome/sub/grove.json".into(),
+                file(
+                    r##"{"attributes": {"minecraft:visual/sky_color": "#00ff00", "minecraft:visual/fog_color": "#0000ff"}}"##,
+                ),
+            ),
+            (
+                "data/custom/worldgen/biome/broken.json".into(),
+                file("{not valid json"),
+            ),
+            (
+                "data/BadNS/worldgen/biome/ignored.json".into(),
+                file(r#"{"attributes": {}}"#),
+            ),
+            (
+                "data/custom/worldgen/biome/BadPath.json".into(),
+                file(r#"{"attributes": {}}"#),
+            ),
+        ]));
+        let pack = ResourceSource::indexed(std::collections::BTreeMap::from([(
+            "assets/mypack/polytone/biome_modifiers/grove_fog.json".into(),
+            file(
+                r##"{"targets": "custom:sub/grove", "attributes_modifiers": {"visual/fog_color": "#ff0000"}}"##,
+            ),
+        )]));
+        let modifiers = PackModifiers::read(&pack);
+        let env = Environment::load_dimension_with(&world, "overworld", &modifiers).unwrap();
+
+        assert!(env.biome("minecraft:plains").is_some());
+        assert!(env.biome("minecraft:sub/x").is_some());
+        assert!(env.biome("custom:sub/grove").is_some());
+        assert!(env.biome("custom:broken").is_none());
+        assert!(env.biome("BadNS:ignored").is_none());
+        assert!(env.biome("custom:BadPath").is_none());
+
+        let grove = sky_at(&env, "custom:sub/grove", 0.0);
+        assert_eq!(grove.sky_color, [0.0, 1.0, 0.0]);
+        assert_eq!(grove.fog_color, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn directory_backed_biomes_enumerate_namespaces_and_skip_malformed() {
+        let dir = horizon_std::env::temp_dir()
+            .join(format!("horizon-env-biome-dir-{}", std::process::id()));
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+        let write = |rel: &str, body: &str| {
+            let path = dir.join(rel);
+            horizon_std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            horizon_std::fs::write(path, body).unwrap();
+        };
+        write(
+            "data/minecraft/dimension_type/overworld.json",
+            r##"{"has_skylight": true, "has_ceiling": false,
+                "attributes": {"minecraft:visual/sky_color": "#808080"}}"##,
+        );
+        write(
+            "data/minecraft/worldgen/biome/plains.json",
+            r##"{"attributes": {"minecraft:visual/sky_color": "#404040"}}"##,
+        );
+        write(
+            "data/minecraft/worldgen/biome/sub/x.json",
+            r##"{"attributes": {"minecraft:visual/sky_color": "#202020"}}"##,
+        );
+        write(
+            "data/custom/worldgen/biome/sub/grove.json",
+            r##"{"attributes": {"minecraft:visual/sky_color": "#00ff00"}}"##,
+        );
+        write("data/custom/worldgen/biome/broken.json", "{not valid json");
+
+        let root = ResourceSource::directory(dir.clone());
+        let env = Environment::load_dimension_with(&root, "overworld", &PackModifiers::default())
+            .unwrap();
+        let _ = horizon_std::fs::remove_dir_all(&dir);
+
+        assert!(env.biome("minecraft:plains").is_some());
+        assert!(env.biome("minecraft:sub/x").is_some());
+        assert!(env.biome("custom:sub/grove").is_some());
+        assert!(env.biome("custom:broken").is_none());
     }
 }

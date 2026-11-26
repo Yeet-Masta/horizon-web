@@ -489,6 +489,20 @@ impl Game<'_> {
     pub(super) fn raiding_nearby(&self, at: [i32; 3]) -> Option<i32> {
         self.raiding.raids.nearby(at).map(|(id, _)| id)
     }
+    /// `ServerLevel.getRaidAt(blockPosition())` for `m`: an active raid within
+    /// 96 blocks of its block.
+    pub(super) fn raid_at_mob(&self, m: &Mob) -> bool {
+        self.raiding_nearby(block_of(m.position)).is_some()
+    }
+    /// The loot facts of a live mob (`drops::loot_entity`), with a raider's
+    /// whole `Raider.hasRaid`: its own raid, or an active raid at its block.
+    pub(super) fn mob_loot_entity(&self, m: &Mob) -> horizon_world::loot::LootEntity {
+        let mut e = horizon_client::mobs::drops::loot_entity(m, None);
+        if e.captain.is_some() && !e.has_raid {
+            e.has_raid = self.raid_at_mob(m);
+        }
+        e
+    }
     /// `/raid start`: a raid in the local village at the given omen level.
     /// `RaidCommand.start` reaches it through `Raids.createOrExtendRaid`, so
     /// the player's Raid Omen is absorbed (`Raid.absorbRaidOmen`) before the

@@ -41,8 +41,12 @@ Each frame without a shader pack (`Renderer::render` in `gfx.rs`), in order:
 Under a shader pack its post passes take step 2's place. A 0.2 pack's `[tonemap]` runs at their end and takes step
 4's, so the post effects after it get a tone-mapped picture.
 A 0.2 pack without `[[post]]` whose frame holds gamma light (not `blend = "linear"` on the float frame) keeps step
-2's FXAA alone (FXAA's blend is made for gamma light, rule 3): `world_post` draws the world onto a target of the
-world's size, in the frame's encoding, and the pack's output decodes that in the world's place (`WorldOutput::resolved`).
+2's FXAA or TAA (their blends are made for gamma light, rule 3). TAA upscales and sharpens as without a pack where the
+pack's `[tonemap]`, if it has one, never reads `previous` (`Capabilities::engine_upscale`); elsewhere it runs at the
+world's size, its upscaling and sharpening off. `world_post` resolves the world in the frame's encoding, FXAA onto a
+target of the world's size and TAA into its history, which it sharpens onto a target of the history's size where it
+upscales, and the pack's output decodes that in the world's place (`WorldOutput::resolved`), before the `[tonemap]`.
+Under any other pack TAA is off.
 
 A pass on the world's light belongs in steps 2 and 3, before the tone curve, and never sees the HUD. After the tone
 curve the frame is what the display will show, so no pass there treats it as light. Frame generation interpolates

@@ -8,15 +8,14 @@ description = "Downloads, prepares and starts Horizon builds"
 [workspace]
 
 [dependencies]
-horizon-mod-point-emit = { path = "../crates/horizon-mod-point-emit" }
 horizon-addresses = { path = "../crates/horizon-addresses" }
 # Reads the object members out of the mods' rlibs for the API route's C link (`native_mods/api_route.rs`).
 object = { version = "0.39", default-features = false, features = ["read_core", "archive", "pe", "std"] }
 # The catalog and mod-owned trait injections share their generation rules.
 # GPUI Fast (longbridge/gpui-fast): Zed's GPUI with retained views and cached scroll layers, under
 # its own name. wgpu renders on Linux, not blade (#3812).
-gpui = { package = "gpui-fast", version = "0.1.13" }
-gpui_platform = { package = "gpui-fast-platform", version = "0.1.13", features = ["wayland", "x11", "font-kit"] }
+gpui = { package = "gpui-fast", version = "0.1.15" }
+gpui_platform = { package = "gpui-fast-platform", version = "0.1.15", features = ["wayland", "x11", "font-kit"] }
 ureq = { version = "2", features = ["json", "tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -110,7 +109,8 @@ keyring = { version = "3", features = ["windows-native"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 # Shortcuts written by the shell itself (shortcut::write_windows_link): the hand-laid Shell Link has
 # no target ID list, so Explorer shows an empty target and starts nothing.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }
+# Move Data reads Task Scheduler for background servers (servers::scheduled_tasks).
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Variant", "Win32_UI_Shell"] }
 # Per-user setup: the Uninstall entry and the launcher's own key under HKCU (installer.rs).
 winreg = "0.56"
 
@@ -121,7 +121,7 @@ winresource = "0.1"
 [dev-dependencies]
 # The mod inventory's `Side` in tests (`mod_api::Side`, which the launcher does not depend on).
 horizon-mod-vocab = { path = "../crates/horizon-mod-vocab" }
-horizon-mod-api-gen = { path = "../crates/horizon-mod-api-gen", features = ["listener-fixture"] }
+horizon-mod-api-gen = { path = "../crates/horizon-mod-api-gen" }
 libc = "0.2"
 # Tokenize source strings for the translation completeness test, including multiline calls.
 syn = "2"

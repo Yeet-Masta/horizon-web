@@ -125,7 +125,11 @@ impl Game<'_> {
             && let Some(at) = entity_nbt::position(&tag)
         {
             let key = anon_key(&kind, at);
-            let was = self.persist.anon.insert(key.clone(), (at, tag.clone()));
+            // `Entity.load` reads `Tags` into the entity's set, and this copy is
+            // what `save_*` overlays, so it holds the adopted set too.
+            let mut kept = tag.clone();
+            Self::normalize_loaded_tags(&mut kept);
+            let was = self.persist.anon.insert(key.clone(), (at, kept));
             self.journal_anon((key, was));
         }
         // Each tree has one loader: object-backed vehicles retain every rider for

@@ -5,6 +5,8 @@ use horizon_client::{
     motion::PlayerMotion,
     projectiles::{Projectile, ProjectileKind},
 };
+use crate::game::commands::Target;
+use horizon_core::nbt::Tag;
 use horizon_core::{geometry::Vec3, position::ChunkPos, random::RandomSource};
 use std::sync::Arc;
 fn with_game(test: impl FnOnce(&mut Game<'_>)) {
@@ -90,6 +92,47 @@ fn owner(game: &Game<'_>) -> u32 {
         .unwrap()
         .id
 }
+/// `Shulker.hurtServer`: damage tagged `is_projectile` by a shulker bullet makes an open shulker
+/// teleport (`hitByShulkerBullet`), also from `/damage ... by <bullet>`; a closed one stays.
+#[test]
+#[ignore = "daily"]
+fn damage_by_a_shulker_bullet_teleports_an_open_shulker() {
+    with_game(|game| {
+        assert!(game.run_command(
+            "summon shulker 7.5 200 7.5 {UUID:[I;114,0,0,1],Peek:100b,PersistenceRequired:1b}"
+        ));
+        assert!(game.run_command(
+            "summon shulker 20.5 200 20.5 {UUID:[I;114,0,0,2],Peek:0b,PersistenceRequired:1b}"
+        ));
+        assert!(
+            game.run_command(
+                "summon shulker_bullet 9.5 202 9.5 {UUID:[I;114,0,0,20],NoGravity:1b}"
+            )
+        );
+        // Give both shulkers a teleport candidate on the fixture's stone floor.
+        for n in [1, 2] {
+            let shulker = game
+                .mobs
+                .iter_mut()
+                .find(|mob| game.persist.uuid_of(mob.id) == Some([114, 0, 0, n]))
+                .unwrap();
+            shulker.random.set_seed(13);
+        }
+        let at = |game: &Game<'_>, n: i32| {
+            game.mobs
+                .iter()
+                .find(|m| game.persist.uuid_of(m.id) == Some([114, 0, 0, n]))
+                .unwrap()
+                .position
+        };
+        let (open, closed) = (at(game, 1), at(game, 2));
+        assert!(game.run_command("damage 00000072-0000-0000-0000-000000000001 1 minecraft:mob_projectile by 00000072-0000-0000-0000-000000000014"));
+        assert!(game.run_command("damage 00000072-0000-0000-0000-000000000002 1 minecraft:mob_projectile by 00000072-0000-0000-0000-000000000014"));
+        assert_ne!(at(game, 1), open);
+        assert_eq!(at(game, 2), closed);
+    });
+}
+/// `Projectile.tick`: a rocket loaded without `HasBeenShot` posts
 /// `projectile_shoot` on its first tick, once; one loaded shot posts none.
 /// `FireworkRocketEntity.tick`'s launch sound skips a silent one.
 #[test]
@@ -736,5 +779,109 @@ fn finish_hit_uses_registered_guest_context_and_restores_the_host() {
             first,
             vec![("minecraft:projectile_shoot", at, Some(Who::Player))]
         );
+    });
+}
+
+/// `Projectile.addAdditionalSaveData` writes the owner reference of any projectile: a bullet a
+/// mob shot (its owner a `Who`, no loaded reference) saves its shooter's UUID.
+#[test]
+#[ignore = "daily"]
+fn a_bullet_a_mob_shot_saves_its_owner() {
+    with_game(|game| {
+        let shooter = owner(game);
+        let mut bullet = Projectile::new(
+            ProjectileKind::ShulkerBullet {
+                target: None,
+                dir: None,
+                steps: 0,
+                delta: [0.0; 3],
+                seed: 1,
+            },
+            Vec3::new(6.5, 201.5, 6.5),
+            Some(Who::Mob(shooter)),
+        );
+        bullet.velocity = Vec3::ZERO;
+        game.creatures.projectiles.push(bullet);
+        let index = game.creatures.projectiles.len() - 1;
+        assert_eq!(game.projectile_owner_uuid(index), Some([114, 0, 0, 99]));
+        let id = game.creatures.projectiles[index].id;
+        let owner_of = |tag: &Tag| tag.get("Owner").cloned();
+        let ints = |u: [i32; 4]| Tag::IntArray(u.to_vec());
+        // `/data get entity` and the chunk save both write the owner's UUID.
+        let command = game.command_target_nbt(Target::Projectile(id)).unwrap();
+        assert_eq!(owner_of(&command), Some(ints([114, 0, 0, 99])));
+        let keys = std::collections::HashSet::from([(0, 0)]);
+        let saved = game.entity_chunks(&keys, false);
+        let tag = saved
+            .iter()
+            .flat_map(|(_, tags)| tags)
+            .find(|t| t.get("id") == Some(&Tag::String("minecraft:shulker_bullet".into())))
+            .unwrap();
+        assert_eq!(owner_of(tag), Some(ints([114, 0, 0, 99])));
+        // A loaded reference wins over the shooter.
+        game.creatures
+            .projectiles
+            .update(index, |p| p.owner_uuid = Some([5, 6, 7, 8]));
+        assert_eq!(game.projectile_owner_uuid(index), Some([5, 6, 7, 8]));
+        let command = game.command_target_nbt(Target::Projectile(id)).unwrap();
+        assert_eq!(owner_of(&command), Some(ints([5, 6, 7, 8])));
+        let saved = game.entity_chunks(&keys, false);
+        let tag = saved
+            .iter()
+            .flat_map(|(_, tags)| tags)
+            .find(|t| t.get("id") == Some(&Tag::String("minecraft:shulker_bullet".into())))
+            .unwrap();
+        assert_eq!(owner_of(tag), Some(ints([5, 6, 7, 8])));
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn bounced_arrow_keeps_tick_order_without_refiring_projectile_launch() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct LaunchCounter(Arc<AtomicUsize>);
+    #[mod_api::__subscriptions]
+    impl mod_api::Hooks for LaunchCounter {
+        fn projectile_launch(
+            &self,
+            _: &mut dyn mod_api::ServerHost,
+            _: &mut mod_api::ProjectileLaunchEvent<'_>,
+        ) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let launches = Arc::new(AtomicUsize::new(0));
+    let mods = vec![mod_api::ModEntry::new(
+        "launch_counter",
+        Box::new(LaunchCounter(launches.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        with_game(|game| {
+            assert!(game.run_command(
+                "summon arrow 6.5 201.5 10.5 {NoGravity:1b,Motion:[0d,0d,1d]}"
+            ));
+            assert!(game.run_command(
+                "summon arrow 8.5 201.5 10.5 {NoGravity:1b,Motion:[0d,0d,1d]}"
+            ));
+            let ids: Vec<u32> = game.creatures.projectiles.iter().map(|p| p.id).collect();
+            assert_eq!(ids.len(), 2);
+            let (first_id, second_id) = (ids[0], ids[1]);
+            let before_bounce = launches.load(Ordering::Relaxed);
+
+            // Simulate the first arrow bouncing off an entity: it must stay ahead of the second
+            // projectile and must not fire `projectile_launch` again.
+            let first = game.creatures.projectiles.remove(0);
+            game.finish_arrow_hit(first, super::EntityHit::Deflected);
+
+            let after_ids: Vec<u32> = game.creatures.projectiles.iter().map(|p| p.id).collect();
+            assert_eq!(after_ids, vec![first_id, second_id]);
+            assert_eq!(launches.load(Ordering::Relaxed), before_bounce);
+        });
     });
 }

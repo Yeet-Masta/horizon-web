@@ -114,6 +114,9 @@ impl SaveDir {
     }
 
     fn far_region_record(&self, x: i32, z: i32) -> Option<NamedTag> {
+        if let Some(backend) = &self.backend {
+            return backend.read_tag("region", x, z).ok()?;
+        }
         let region = (x >> 5, z >> 5);
         let stamp = || {
             let cache = self.regions.lock().ok()?;
@@ -131,7 +134,7 @@ impl SaveDir {
         }
         // The region is being written, or was a moment ago. The writer's own
         // open file is in the gameplay cache, and exact under its lock.
-        read_region_record(&self.root, &self.regions, "region", x, z).ok()?
+        read_region_record(&self.root, &self.regions, None, "region", x, z).ok()?
     }
 }
 
@@ -159,7 +162,7 @@ mod tests {
         }))
     }
     fn write(save: &SaveDir, records: &[((i32, i32), &Record)]) {
-        write_region_records(&save.root, &save.regions, "region", records).unwrap();
+        write_region_records(&save.root, &save.regions, "region", None, records).unwrap();
     }
     /// What a far read finds for the chunk: `(xPos, zPos, version)`.
     fn far(save: &SaveDir, (x, z): (i32, i32)) -> Option<(i64, i64, i64)> {

@@ -59,6 +59,38 @@ pub(in crate::game) enum Owner {
     Block([i32; 3]),
 }
 
+#[derive(Clone, Copy)]
+struct ItemModifier<'a> {
+    json: &'a serde_json::Value,
+    /// The original typed component payloads of an inline modifier.
+    snbt: Option<&'a Tag>,
+}
+
+impl<'a> ItemModifier<'a> {
+    fn field(self, key: &str) -> Self {
+        Self {
+            json: &self.json[key],
+            snbt: self.snbt.and_then(|tag| tag.get(key)),
+        }
+    }
+
+    fn elements(self) -> impl Iterator<Item = Self> {
+        let tags = match self.snbt {
+            Some(Tag::List(tags)) => tags.as_slice(),
+            _ => &[],
+        };
+        self.json
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(move |(i, json)| Self {
+                json,
+                snbt: tags.get(i),
+            })
+    }
+}
+
 fn mob_slot(name: &str) -> Option<usize> {
     Some(match name {
         "mainhand" => 0,
@@ -616,6 +648,7 @@ impl Game<'_> {
         slot: &Slot,
         stack: Option<ItemStack>,
     ) -> bool {
+        let stack = stack.filter(|s| s.count > 0 && &*s.item != "minecraft:air");
         self.equipment_slot_accepts(slot, &stack) && self.slot_set(slot, stack)
     }
     /// Put a stack (or nothing) in a slot; false when the slot cannot take it.
@@ -630,6 +663,7 @@ impl Game<'_> {
         stack: Option<ItemStack>,
         effects: bool,
     ) -> bool {
+        let stack = stack.filter(|s| s.count > 0 && &*s.item != "minecraft:air");
         if matches!(
             s,
             Slot::Inv(_) | Slot::MainHand | Slot::Armor(_) | Slot::Offhand | Slot::Equipment(_)
@@ -856,16 +890,43 @@ impl Game<'_> {
             .as_deref()
             .map(horizon_client::item_data::command_components)
         {
-            Some(Ok(tag)) => horizon_client::item_data::decode_components_for_item(id, Some(&tag)),
+            Some(Ok(mut tag)) => {
+                // PatchedDataComponentMap.applyPatch drops values equal to the
+                // prototype. In vanilla, common item components include empty
+                // enchantments; a native mod can change or remove that default.
+                if let Tag::Compound(patch) = &mut tag {
+                    patch.retain(|key, value| {
+                        if !matches!(value, Tag::Compound(levels) if levels.is_empty())
+                            || !key
+                                .0
+                                .iter()
+                                .copied()
+                                .eq("minecraft:enchantments".encode_utf16())
+                        {
+                            return true;
+                        }
+                        self.items()
+                            .component_defaults
+                            .get(id)
+                            .and_then(|prototype| prototype.get(key))
+                            != Some(value)
+                    });
+                }
+                horizon_client::item_data::decode_components_for_item(id, Some(&tag))
+            }
             Some(Err(e)) => return Err(CommandError::new(Text::literal(e))),
             None => (0, None),
         };
-        let stack = ItemStack {
+        let mut stack = ItemStack {
             item: id.as_str().into(),
             count,
             damage,
             extra,
         };
+        // The same applyPatch rule for the decoded values: `damage=-0.5f` is the prototype's 0.
+        if let Some(prototype) = self.items().component_defaults.get(id) {
+            horizon_client::item_data::drop_prototype_values(&mut stack, prototype);
+        }
         // ItemInput.createItemStack: a count above the stack's max (its
         // max_stack_size component, else the item's) is refused.
         let max_stack = self.stack_max_size(&stack);
@@ -949,7 +1010,7 @@ impl Game<'_> {
     /// applied to a stack; `None` when the stack ends up empty.
     fn apply_item_modifier(
         &mut self,
-        m: &serde_json::Value,
+        modifier: ItemModifier<'_>,
         stack: Option<ItemStack>,
         rng: &mut horizon_core::random::LegacyRandom,
         this: Option<&horizon_client::advancements::EntityView>,
@@ -974,12 +1035,20 @@ impl Game<'_> {
                 _ => v["value"].as_f64().unwrap_or(0.) as i32,
             }
         };
+        let m = modifier.json;
         match m {
-            Value::Array(list) => list.iter().fold(stack, |s, f| {
+            Value::Array(_) => modifier.elements().fold(stack, |s, f| {
                 self.apply_item_modifier(f, s, rng, this, origin, depth + 1)
             }),
             Value::String(id) => match self.fns.store.item_modifiers.get(id).cloned() {
-                Some(f) => self.apply_item_modifier(&f, stack, rng, this, origin, depth + 1),
+                Some(f) => self.apply_item_modifier(
+                    ItemModifier { json: &f, snbt: None },
+                    stack,
+                    rng,
+                    this,
+                    origin,
+                    depth + 1,
+                ),
                 None => stack,
             },
             Value::Object(_) => {
@@ -990,12 +1059,9 @@ impl Game<'_> {
                     return Some(stack);
                 }
                 match m["type"].as_str().unwrap_or("") {
-                    "minecraft:sequence" => {
+                    "minecraft:sequence" | "sequence" => {
                         #[allow(clippy::manual_try_fold)]
-                        return m["functions"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
+                        return modifier.field("functions").elements()
                             .fold(Some(stack), |s, f| {
                                 self.apply_item_modifier(f, s, rng, this, origin, depth + 1)
                             });
@@ -1125,29 +1191,22 @@ impl Game<'_> {
                         };
                         set_custom_data(&mut stack, &tag);
                     }
-                    "minecraft:set_components" => {
-                        let patch = m["components"].clone();
-                        edit_components(&mut stack, |c| {
-                            for (k, v) in patch.as_object().into_iter().flatten() {
-                                let (remove, key) = match k.strip_prefix('!') {
-                                    Some(rest) => (true, rest),
-                                    None => (false, k.as_str()),
-                                };
-                                let key = if key.contains(':') {
-                                    key.to_owned()
-                                } else {
-                                    format!("minecraft:{key}")
-                                };
-                                if remove {
-                                    c.remove(&key.as_str().into());
-                                } else {
-                                    c.insert(
-                                        key.as_str().into(),
-                                        horizon_client::scoreboard::json_to_tag(v),
-                                    );
-                                }
-                            }
-                        });
+                    "minecraft:set_components" | "set_components" => {
+                        // SetComponentsFunction.run validates before ItemCommands limits the count.
+                        let components = modifier.field("components");
+                        let patch = components.snbt.map_or_else(
+                            || std::borrow::Cow::Owned(
+                                horizon_client::scoreboard::json_to_tag(components.json)
+                            ),
+                            std::borrow::Cow::Borrowed,
+                        );
+                        if let Tag::Compound(patch) = patch.as_ref() {
+                            horizon_client::item_data::apply_components_and_validate(
+                                &mut stack,
+                                patch,
+                                self.items(),
+                            );
+                        }
                     }
                     "minecraft:toggle_tooltips" => {
                         let toggles = m["toggles"].clone();
@@ -1200,10 +1259,10 @@ impl Game<'_> {
                             c.insert("minecraft:tooltip_display".into(), Tag::compound(display));
                         });
                     }
-                    "minecraft:filtered" => {
+                    "minecraft:filtered" | "filtered" => {
                         let pass = self.loot_item_filter(&m["item_filter"], &stack);
-                        let branch = if pass { &m["on_pass"] } else { &m["on_fail"] };
-                        if branch.is_null() {
+                        let branch = modifier.field(if pass { "on_pass" } else { "on_fail" });
+                        if branch.json.is_null() {
                             return Some(stack);
                         }
                         return self.apply_item_modifier(
@@ -1230,7 +1289,7 @@ impl Game<'_> {
     }
     /// `ResourceOrIdArgument.getLootModifier`: an inline modifier (SNBT) or
     /// a registered one.
-    pub(super) fn item_modifier_arg(&mut self, ctx: &Context, name: &str) -> R<serde_json::Value> {
+    fn item_modifier_arg(&self, ctx: &Context, name: &str) -> R<(serde_json::Value, Option<Tag>)> {
         let raw = match ctx.get(name) {
             Some(Arg::Resource(s) | Arg::Str(s)) => s.clone(),
             _ => return Err(err("command.failed", &[])),
@@ -1238,7 +1297,7 @@ impl Game<'_> {
         if raw.starts_with('{') || raw.starts_with('[') {
             let (tag, _) = horizon_core::nbt::parse_snbt(&raw)
                 .map_err(|e| err("argument.nbt.invalid", &[&e]))?;
-            return Ok(horizon_client::scoreboard::tag_to_json(&tag));
+            return Ok((horizon_client::scoreboard::tag_to_json(&tag), Some(tag)));
         }
         let id = if raw.contains(':') {
             raw
@@ -1250,6 +1309,7 @@ impl Game<'_> {
             .item_modifiers
             .get(&id)
             .cloned()
+            .map(|json| (json, None))
             .ok_or_else(|| {
                 err(
                     "argument.resource_or_id.no_such_element",
@@ -1263,9 +1323,10 @@ impl Game<'_> {
         let Some(Arg::Str(slot_name)) = ctx.get("slot").cloned() else {
             return Ok(0);
         };
-        let modifier = self.item_modifier_arg(ctx, "modifier")?;
+        let (json, snbt) = self.item_modifier_arg(ctx, "modifier")?;
+        let modifier = ItemModifier { json: &json, snbt: snbt.as_ref() };
         let source = self.command_source.unwrap_or_else(|| self.player_source());
-        let view = source.entity.map(|t| self.entity_view_asked(t, &modifier));
+        let view = source.entity.map(|t| self.entity_view_asked(t, &json));
         let seed = horizon_std::time::SystemTime::now()
             .duration_since(horizon_std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as i64);
@@ -1295,7 +1356,7 @@ impl Game<'_> {
                         &mut selected,
                         |g, current| {
                             g.apply_item_modifier(
-                                &modifier,
+                                modifier,
                                 Some(current),
                                 &mut rng,
                                 view.as_ref(),
@@ -1319,7 +1380,7 @@ impl Game<'_> {
                     continue;
                 };
                 let new = self.apply_item_modifier(
-                    &modifier,
+                    modifier,
                     Some(current.clone()),
                     &mut rng,
                     view.as_ref(),
@@ -1427,16 +1488,17 @@ impl Game<'_> {
             }
             // ItemCommands.applyModifier on each source stack.
             if ctx.get("modifier").is_some() {
-                let modifier = self.item_modifier_arg(ctx, "modifier")?;
+                let (json, snbt) = self.item_modifier_arg(ctx, "modifier")?;
+                let modifier = ItemModifier { json: &json, snbt: snbt.as_ref() };
                 let source = self.command_source.unwrap_or_else(|| self.player_source());
-                let view = source.entity.map(|t| self.entity_view_asked(t, &modifier));
+                let view = source.entity.map(|t| self.entity_view_asked(t, &json));
                 let mut rng = horizon_core::random::LegacyRandom::new(0);
                 found = found
                     .into_iter()
                     .map(|s| {
                         s.and_then(|s| {
                             self.apply_item_modifier(
-                                &modifier,
+                                modifier,
                                 Some(s),
                                 &mut rng,
                                 view.as_ref(),
@@ -2854,6 +2916,18 @@ mod registered_slot_source_preservation_tests {
         resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
         name: &str,
     ) -> (Game<'a>, std::path::PathBuf) {
+        let (mut game, high) = packs(resources, name);
+        game.ensure_datapacks();
+        assert!(game.run_command("setblock 0 100 0 chest{Items:[{Slot:0b,id:\"stone\",count:5},{Slot:1b,id:\"dirt\",count:2},{Slot:3b,id:\"stone\",count:7}]}"));
+        assert!(game.run_command("scoreboard objectives add slotprobe dummy"));
+        (game, high)
+    }
+
+    /// A world with two packs that both define `parity:first_three`; nothing loaded yet.
+    fn packs<'a>(
+        resources: &'a mut Option<std::sync::Arc<crate::game::Resources>>,
+        name: &str,
+    ) -> (Game<'a>, std::path::PathBuf) {
         let mut game = crate::game::game_tests::tests::server_game(resources);
         game.build_registries();
         game.set_allow_commands(true);
@@ -2869,10 +2943,42 @@ mod registered_slot_source_preservation_tests {
             high = path;
         }
         game.world_root = root;
-        game.ensure_datapacks();
+        (game, high)
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn a_broken_slot_source_refuses_the_first_load_until_it_is_fixed() {
+        let mut resources = None;
+        let directory = tempfile::tempdir().unwrap();
+        let world = directory.path().join("slot-source-first-load-world");
+        let (mut game, file) = packs(&mut resources, world.to_str().unwrap());
+        let features = game.level.enabled_features.clone();
+        let fixed = horizon_std::fs::read_to_string(&file).unwrap();
+        // Broken before any command runs, since a command loads the packs lazily.
+        horizon_std::fs::write(&file, "{").unwrap();
         assert!(game.run_command("setblock 0 100 0 chest{Items:[{Slot:0b,id:\"stone\",count:5},{Slot:1b,id:\"dirt\",count:2},{Slot:3b,id:\"stone\",count:7}]}"));
         assert!(game.run_command("scoreboard objectives add slotprobe dummy"));
-        (game, high)
+        // The last one parses and binds; only its codec refuses the slot range.
+        for definition in [
+            "{",
+            r#""parity:first_three""#,
+            r#"{"type":"minecraft:slot_range","slots":"container.nope"}"#,
+        ] {
+            horizon_std::fs::write(&file, definition).unwrap();
+            // MinecraftServer: the world does not open on a failed first load.
+            assert!(
+                game.open_world_datapacks(&features).is_err(),
+                "{definition}"
+            );
+            // The lazy path admits nothing either.
+            game.ensure_datapacks();
+            assert!(!game.run_command("execute if slots block 0 100 0 parity:first_three"));
+        }
+        // Nothing marked the packs loaded, so the next lazy load picks up the fix.
+        horizon_std::fs::write(&file, fixed).unwrap();
+        game.ensure_datapacks();
+        count(&mut game, 3);
     }
 
     fn count(game: &mut Game<'_>, expected: i32) {
@@ -2881,6 +2987,67 @@ mod registered_slot_source_preservation_tests {
             game.score.board.score("#r", "slotprobe").unwrap().value,
             expected
         );
+    }
+
+    /// A world's first open admits the packs before its tables exist, so a filter and a
+    /// function naming a tag their pack adds must not be dropped after the check passed.
+    #[test]
+    #[ignore = "daily"]
+    fn a_first_open_admits_a_filter_naming_an_item_tag_its_pack_adds() {
+        let mut resources = None;
+        let directory = tempfile::tempdir().unwrap();
+        let world = directory.path().join("slot-source-first-open-tag-world");
+        let (mut game, file) = packs(&mut resources, world.to_str().unwrap());
+        let data = file.parent().unwrap().parent().unwrap().to_path_buf();
+        horizon_std::fs::create_dir_all(data.join("tags/item")).unwrap();
+        horizon_std::fs::write(
+            data.join("tags/item/allowed.json"),
+            r#"{"values":["minecraft:stone"]}"#,
+        )
+        .unwrap();
+        horizon_std::fs::create_dir_all(data.join("function")).unwrap();
+        horizon_std::fs::write(
+            data.join("function/probe.mcfunction"),
+            "execute if items block 0 100 0 container.0 #parity:allowed\n",
+        )
+        .unwrap();
+        horizon_std::fs::write(&file, r##"{"type":"minecraft:filtered","slot_source":{"type":"minecraft:slot_range","slots":"container.*"},"item_filter":{"items":"#parity:allowed"}}"##).unwrap();
+        let features = game.level.enabled_features.clone();
+        let stack = game.open_world_datapacks(&features).unwrap();
+        let root = game.options.resources.clone();
+        game.open_world_tables(&stack, &root).unwrap();
+        assert!(game.run_command("setblock 0 100 0 chest{Items:[{Slot:0b,id:\"stone\",count:5},{Slot:1b,id:\"dirt\",count:2},{Slot:3b,id:\"stone\",count:7}]}"));
+        assert!(game.run_command("scoreboard objectives add slotprobe dummy"));
+        count(&mut game, 2); // The two stone stacks: the source was admitted.
+        assert!(game.run_command("function parity:probe")); // So was the function.
+    }
+
+    /// The candidate's own item tags count: the world tables that publish them are staged
+    /// after the slot sources are checked.
+    #[test]
+    #[ignore = "daily"]
+    fn a_filtered_source_may_name_an_item_tag_its_pack_adds() {
+        let mut resources = None;
+        let directory = tempfile::tempdir().unwrap();
+        let world = directory.path().join("slot-source-pack-tag-world");
+        let (mut game, file) = scene(&mut resources, world.to_str().unwrap());
+        let features = game.level.enabled_features.clone();
+        count(&mut game, 3);
+        let tag = file
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tags/item/allowed.json");
+        horizon_std::fs::create_dir_all(tag.parent().unwrap()).unwrap();
+        horizon_std::fs::write(&tag, r#"{"values":["minecraft:stone"]}"#).unwrap();
+        horizon_std::fs::write(&file, r##"{"type":"minecraft:filtered","slot_source":{"type":"minecraft:slot_range","slots":"container.*"},"item_filter":{"items":"#parity:allowed"}}"##).unwrap();
+        assert!(game.reload_datapacks(true, &features).is_ok());
+        count(&mut game, 2); // The two stone stacks.
+        // Without the tag the same source names a tag no pack defines any more.
+        horizon_std::fs::remove_file(&tag).unwrap();
+        assert!(game.reload_datapacks(true, &features).is_err());
+        count(&mut game, 2); // The rejected candidate keeps the loaded snapshot.
     }
 
     #[test]
@@ -2898,10 +3065,31 @@ mod registered_slot_source_preservation_tests {
         game.reload_datapacks(true, &game.level.enabled_features.clone())
             .unwrap();
         count(&mut game, 2);
-        horizon_std::fs::write(file, "{").unwrap();
-        game.reload_datapacks(true, &game.level.enabled_features.clone())
-            .unwrap();
-        count(&mut game, 1); // Existing policy: invalid higher JSON is skipped.
+        let features = game.level.enabled_features.clone();
+        horizon_std::fs::write(&file, "{").unwrap();
+        assert!(game.reload_datapacks(true, &features).is_err());
+        count(&mut game, 2); // Rejected candidate retains the accepted snapshot.
+        // The registry reads a file with TYPED_CODEC: neither a holder id nor an
+        // inline list of sources loads, nor a source the codec refuses.
+        for definition in [
+            r#""parity:first_three""#,
+            r#"[{"type":"minecraft:slot_range","source":"container","slots":"container.0"}]"#,
+            // Parses and binds; only its codec refuses the slot range.
+            r#"{"type":"minecraft:slot_range","slots":"container.nope"}"#,
+            // FilteredSlotSource's item_filter is an ItemPredicate: its items must exist.
+            r#"{"type":"minecraft:filtered","slot_source":{"type":"minecraft:slot_range","slots":"container.0"},"item_filter":{"items":"minecraft:does_not_exist"}}"#,
+        ] {
+            horizon_std::fs::write(&file, definition).unwrap();
+            assert!(
+                game.reload_datapacks(true, &features).is_err(),
+                "{definition}"
+            );
+            count(&mut game, 2);
+        }
+        // The same filtered source with an item that exists loads.
+        horizon_std::fs::write(&file, r#"{"type":"minecraft:filtered","slot_source":{"type":"minecraft:slot_range","slots":"container.0"},"item_filter":{"items":"minecraft:stone"}}"#).unwrap();
+        assert!(game.reload_datapacks(true, &features).is_ok());
+        count(&mut game, 1); // container.0 holds stone.
         assert!(!game.run_command("execute if slots block 0 100 0 first_three"));
         assert_eq!(game.block_entity_nbt([0, 100, 0]).as_ref(), Some(&before));
         assert_eq!(game.world.game_time, clock);

@@ -10,6 +10,25 @@ use std::{
     sync::OnceLock,
 };
 
+/// Whether `state` is a block of a code mod that is installed and switched off now, so its
+/// template's own behaviour must wait (`LevelAccess::template_suppressed`). The registry's
+/// `code_block_owners` table names each state's owning mod (`u16::MAX`: none); a vanilla block
+/// costs one table read. Ask it only on the authoritative side: a client replays its server.
+#[inline]
+pub fn template_suppressed(
+    registry: &horizon_world::registry::BlockRegistry,
+    state: BlockStateId,
+) -> bool {
+    match registry
+        .code_block_owners
+        .get()
+        .and_then(|owners| owners.get(state.0 as usize))
+    {
+        Some(&owner) if owner != u16::MAX => !mod_api::__private::mod_index_on(usize::from(owner)),
+        _ => false,
+    }
+}
+
 /// `getEntityInsideCollisionShape` as the shared walk sees it: the whole block, boxes
 /// to sweep the move against, or nothing. This is the one point arismoko/horizon#1011 adds the Part's
 /// own shape at.
@@ -145,37 +164,52 @@ pub fn sweep_movements<W: InsideWalk>(
     visited: &mut crate::fast_hash::FxHashSet<i64>,
     effects: &mut mod_api::InsideEffects,
 ) -> Result<(), W::Error> {
-    use horizon_core::geometry::{Axis, Direction};
     for movement in movements {
-        let mut from = movement.from;
-        let delta = movement.to.subtract(movement.from);
-        let mut budget = 16;
-        match movement.original {
-            Some(original) if delta.length_squared() > 0.0 => {
-                for axis in Axis::step_order(original) {
-                    let step = delta.component(axis);
-                    if step != 0.0 {
-                        let to = from.relative(
-                            match axis {
-                                Axis::X => Direction::East,
-                                Axis::Y => Direction::Up,
-                                Axis::Z => Direction::South,
-                            },
-                            step,
-                        );
-                        budget -= sweep_inside_blocks(walk, from, to, visited, effects, budget)?;
-                        from = to;
-                    }
+        sweep_movement_segments(*movement, |from, to, budget| {
+            sweep_inside_blocks(walk, from, to, visited, effects, budget)
+        })?;
+    }
+    Ok(())
+}
+
+/// Split a recorded move in vanilla's axis order, sharing the step budget across segments.
+/// The visitor reports how many steps it used, or stops the walk with an error.
+pub fn sweep_movement_segments<E>(
+    movement: horizon_world::entity_move::MovementRecord,
+    mut sweep: impl FnMut(
+        horizon_core::geometry::Vec3,
+        horizon_core::geometry::Vec3,
+        i32,
+    ) -> Result<i32, E>,
+) -> Result<(), E> {
+    use horizon_core::geometry::{Axis, Direction};
+    let mut from = movement.from;
+    let delta = movement.to.subtract(from);
+    let mut budget = 16;
+    match movement.original {
+        Some(original) if delta.length_squared() > 0.0 => {
+            for axis in Axis::step_order(original) {
+                let step = delta.component(axis);
+                if step != 0.0 {
+                    let to = from.relative(
+                        match axis {
+                            Axis::X => Direction::East,
+                            Axis::Y => Direction::Up,
+                            Axis::Z => Direction::South,
+                        },
+                        step,
+                    );
+                    budget -= sweep(from, to, budget)?;
+                    from = to;
                 }
             }
-            _ => {
-                budget -=
-                    sweep_inside_blocks(walk, movement.from, movement.to, visited, effects, 16)?;
-            }
         }
-        if budget <= 0 {
-            sweep_inside_blocks(walk, movement.to, movement.to, visited, effects, 1)?;
+        _ => {
+            budget -= sweep(movement.from, movement.to, budget)?;
         }
+    }
+    if budget <= 0 {
+        sweep(movement.to, movement.to, 1)?;
     }
     Ok(())
 }
@@ -210,11 +244,9 @@ pub struct Hooks {
     pub inside_fire: fn(
         &mut DamageLevel<'_>,
         &'static str,
-        i32,
-        &str,
-        BlockStateId,
-        BlockPos,
+        Contact<'_>,
         bool,
+        &mod_api::SweptEntity,
         &mut mod_api::InsideEffects,
         &mut Vec<InsideWrite>,
     ),
@@ -438,6 +470,11 @@ pub fn minecart_pass(entity: i32, state: BlockStateId, position: BlockPos) {
             }));
         });
     }
+}
+
+/// Whether any contact is noted and not taken yet.
+pub fn has_pending() -> bool {
+    PENDING.with_borrow(|pending| !pending.is_empty())
 }
 
 /// The contacts noted since the last call, in the order they happened.

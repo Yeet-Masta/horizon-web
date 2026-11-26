@@ -37,6 +37,57 @@ pub trait EffectsClientHost {
     #[access(ClientSetup)]
     fn play_local_sound(&self, sound: &SoundPlay, after: u32) -> Option<SoundRef>;
     /// Side: client.
+    /// Plays the mod's own samples for this player only, as `play_local_sound` plays a sound
+    /// event: an emote's song, a recording or a synthesised tune a mod decoded or made itself.
+    /// `samples` are signed 16-bit PCM, interleaved, `channels` (1 or 2) to a frame, at `rate`
+    /// frames a second (8000 to 192000); playback begins `start` frames in, to join a song
+    /// already under way. `sound` says how it plays, as for `play_local_sound`: its source's
+    /// volume slider, its volume, pitch, position, attenuation and looping (a loop restarts
+    /// from the first frame). Its event isn't loaded; it names the play for `play_sound` hooks
+    /// and `muffle_sounds`' exemptions, and shows that event's subtitle if the resources have
+    /// one. The samples are copied, so the slice can be dropped after the call. The `SoundRef`
+    /// follows and controls the play as `play_local_sound`'s does, and `set_position` moves it
+    /// (a song following its player). None, with nothing played, on a server, for a value out of
+    /// range, an empty clip, a `start` past its end or more than 28 800 000 samples (ten
+    /// minutes of mono at 48 kHz).
+    #[access(ClientSetup)]
+    fn play_local_pcm(
+        &self,
+        sound: &SoundPlay,
+        samples: &[i16],
+        rate: u32,
+        channels: u16,
+        start: u32,
+        after: u32,
+    ) -> Option<SoundRef>;
+    /// Side: client.
+    /// Pauses every sound of `source` (`paused` true) or carries them on (false), as the pause
+    /// menu pauses the world's sounds (`SoundEngine.pauseAllExcept`) but for one source and until
+    /// it is carried on: the game's own pause and resume, and a level change, leave a paused
+    /// source paused. The pause is the client's, shared by every mod and not counted per mod:
+    /// any mod carrying the source on ends it, another mod's pause included. A streamed or
+    /// looping sound of it that starts meanwhile (a music disc is streamed), and any sound of
+    /// `Music`, starts paused and keeps its channel, so paused `Music` keeps its track and the
+    /// music manager starts no other; a track that starts paused shows no Now Playing toast.
+    /// Carried on, each plays from where it was, one that started paused from its start. Any
+    /// other sound of it doesn't start at all: a block breaking, a raindrop, a note block or a
+    /// mod's own one-shot `play_local_sound` (whose `SoundRef` reads `Stopped`), so a long pause
+    /// can't use up the sound channels. Only sounds played on that very source: `Master` pauses
+    /// the sounds played on master, not every sound. It takes `&self`, so any client hook can
+    /// ask: it applies at the next audio update (once a client tick), before the
+    /// `play_local_sound` plays asked with it. False on a server.
+    #[access(ClientSetup)]
+    fn sound_source_pause(&self, source: SoundSource, paused: bool) -> bool;
+    /// Side: client.
+    /// Stops every sound of `source` playing, a paused one too, as a stop-sound packet naming
+    /// only the source does (`SoundEngine.stop(null, source)`, `/stopsound @s <source>`); a sound
+    /// still waiting out a delay isn't playing yet and is left. Stopping `Music` skips the track:
+    /// the music manager waits its delay and starts the next one, as after `/stopsound`. It takes
+    /// `&self` and applies at the next audio update, before the `play_local_sound` plays asked
+    /// with it, which start after the stop. False on a server.
+    #[access(ClientSetup)]
+    fn sound_source_stop(&self, source: SoundSource) -> bool;
+    /// Side: client.
     /// The particles alive in the client's level (`ParticleEngine.countParticles`): 0 once
     /// a clear is asked, and on a server.
     #[access(ClientSetup)]
@@ -94,4 +145,11 @@ pub trait EffectsClientBackend {
     /// end. While the game is paused the fade waits, and an interface or music sound keeps playing.
     #[access(ClientSetup)]
     fn sound_fade(&self, sound: SoundRef, volume: f32, ticks: u32) -> bool;
+    /// Side: client.
+    /// Moves the sound to `position` in the client's level from the next audio update, as a
+    /// sound following its entity moves: a song played at its player follows them. A relative
+    /// sound's position is an offset from the listener. False for a position that isn't finite,
+    /// for a sound that is already over, and on a server.
+    #[access(ClientSetup)]
+    fn sound_set_position(&self, sound: SoundRef, position: [f64; 3]) -> bool;
 }

@@ -7,7 +7,6 @@ use horizon_client::{
     Result,
     assets::Properties,
     collisions::{SceneCollisions, no_collision_or_liquid},
-    random_source,
     world::World,
     world_spawn::{
         PlayerSpawnFinder, SpawnCandidate, SpawnLevel, level_respawn_pos, spawn_pos_in_chunk,
@@ -141,8 +140,8 @@ impl Game<'_> {
                     // getChunk(FULL) of the tested chunk alone: its 3x3 is decorated.
                     if !self.world.chunks.contains_key(&(cx, cz)) {
                         let area = [((cx, cz), -1)];
-                        if self.streaming.extra != area {
-                            self.streaming.extra = area.to_vec();
+                        if !self.streaming.extra.contains(&area[0]) {
+                            self.streaming.extra.push(area[0]);
                             self.streaming.rank_full_task(cx, cz);
                         }
                         return Ok(None);
@@ -158,6 +157,38 @@ impl Game<'_> {
             self.spawn_spiral.advance();
         }
         Ok(Some([ox * 16 + 8, height, oz * 16 + 8]))
+    }
+    /// The chunk `find_world_spawn` waits for while a reset's spawn search runs, as an area to keep loading: the
+    /// search walks outward from the origin and the players' own chunks do not reach it.
+    pub(super) fn world_spawn_search_area(&self) -> Option<((i32, i32), i32)> {
+        if !self.world_spawn_pending || self.dim != super::Dim::Overworld {
+            return None;
+        }
+        let ((ox, oz), _) = self.spawn_origin?;
+        let (dx, dz) = self.spawn_spiral.current()?;
+        Some(((ox + dx, oz + dz), -1))
+    }
+    /// The world spawn a reset of the vanilla levels cleared, found again once the Overworld's chunks around the
+    /// search origin are there: the Overworld's turn in the server tick calls this until it has the spawn.
+    pub(super) fn find_pending_world_spawn(&mut self) -> Result<()> {
+        if !self.world_spawn_pending {
+            return Ok(());
+        }
+        let Some([x, y, z]) = self.find_world_spawn()? else {
+            return Ok(());
+        };
+        self.level.spawn = Some([f64::from(x), f64::from(y), f64::from(z)]);
+        self.level.world_spawn = Some([x, y, z]);
+        self.spawn = Some(horizon_core::geometry::Vec3::new(
+            f64::from(x) + 0.5,
+            f64::from(y),
+            f64::from(z) + 0.5,
+        ));
+        self.streaming.extra.clear();
+        self.world_spawn_pending = false;
+        // Players already placed hold the spawn from before the reset.
+        self.lan_broadcast_world_spawn();
+        Ok(())
     }
     /// MinecraftServer.setInitialSpawn's bonus chest: BonusChestFeature.place
     /// in the spawn chunk, a chest with the spawn bonus loot and a torch on
@@ -256,7 +287,7 @@ impl Game<'_> {
     /// which the caller must have loaded (the finder tries at most 1024
     /// columns).
     pub(super) fn search_spawn(
-        &self,
+        &mut self,
         suggestion: [i32; 3],
         state: &mut Option<PlayerSpawnFinder>,
     ) -> std::result::Result<Vec3, (i32, i32)> {
@@ -303,8 +334,10 @@ impl Game<'_> {
         }
     }
     /// A new PlayerSpawnFinder around `suggestion`: the respawn radius, cut
-    /// by the world border; the suggestion itself in adventure mode.
-    fn spawn_finder(&self, suggestion: [i32; 3]) -> PlayerSpawnFinder {
+    /// by the world border; the suggestion itself in adventure mode. Vanilla
+    /// draws the walk's start offset from `Level.random`, so two searches in
+    /// one world walk the same columns.
+    fn spawn_finder(&mut self, suggestion: [i32; 3]) -> PlayerSpawnFinder {
         if self.level.game_mode == 2 {
             let mut finder = PlayerSpawnFinder::new(suggestion, 0, |_| 0);
             finder.next_candidate();
@@ -326,7 +359,7 @@ impl Game<'_> {
             radius = 1;
         }
         PlayerSpawnFinder::new(suggestion, radius, |n| {
-            random_source::entity().next_int_bound(n).unwrap_or(0)
+            self.world.random.next_int_bound(n).unwrap_or(0)
         })
     }
     /// ServerPlayer.adjustSpawnLocation for a server's new player: where
@@ -335,7 +368,7 @@ impl Game<'_> {
     /// stand in one spot. Vanilla waits for each candidate's chunk; a server
     /// tick can't, so a candidate in a chunk not loaded yet is passed over,
     /// and `spawn` stays when the search never reaches a loaded column.
-    pub(super) fn server_player_spawn(&self, spawn: [f64; 3]) -> [f64; 3] {
+    pub(super) fn server_player_spawn(&mut self, spawn: [f64; 3]) -> [f64; 3] {
         let suggestion = spawn.map(|v| v.floor() as i32);
         let mut finder = self.spawn_finder(suggestion);
         while let Some(candidate) = finder.next_candidate() {

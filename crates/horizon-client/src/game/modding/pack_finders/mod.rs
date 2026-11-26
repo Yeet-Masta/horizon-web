@@ -64,7 +64,18 @@ impl PackFinders for Registry {
         let source = if package.fs_is_dir() {
             ResourceSource::directory(package.clone())
         } else {
-            ResourceSource::archive(package).map_err(|_| PackFinderError::MissingPackage)?
+            // One snapshot, checked as the package's own checks check it and mounted from the same
+            // bytes: the path may hold a package written since discovery, and the lenient view a
+            // second open would check and this exact one can list different entries.
+            let zip = horizon_assets::zip::Zip::open_exact(package)
+                .map_err(|_| PackFinderError::MissingPackage)?;
+            let validated = horizon_mod_package::Package::read_stream(zip.reader())
+                .map_err(|_| PackFinderError::MissingPackage)?;
+            // A file put in the package's place must not front another mod's namespace.
+            if validated.manifest.id != location.namespace() {
+                return Err(PackFinderError::MissingPackage);
+            }
+            ResourceSource::opened_archive(zip)
         };
         let source = source
             .subdirectory(location.path())

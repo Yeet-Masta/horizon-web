@@ -21,5 +21,13 @@ pub fn exit_if_compile_child() {
     }
 }
 
-/// A typed API-point listener supplied by generated native startup.
-pub use mod_points::__private::SlotListener;
+// Keeps the empty `mod_points` in the SDK build (Cargo.toml says why).
+use mod_points as _;
+
+/// A point listener of generated native startup; none exists since #19576.
+pub use mod_api::__private::native::SlotListener;
+
+#[cfg(test)]
+#[path = "../build_identity.rs"]
+#[allow(dead_code)] // `resolve` runs `git`; only build.rs calls it, the tests stay off processes
+mod build_identity;

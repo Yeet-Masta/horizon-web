@@ -197,9 +197,12 @@ pub fn build_with_conditions(
     tables(base, &plan, &overlay, &jobs)?;
     // Mod files, and every tag addition gathered per tag file.
     let mut tags: BTreeMap<String, TagMerge> = BTreeMap::new();
-    let mut warnings = Vec::new();
+    let mut warnings = plan.warnings.clone();
     let mut worldgen: BTreeMap<&str, Vec<(String, String)>> = BTreeMap::new();
     let mut additions: BTreeMap<&str, Vec<Addition>> = BTreeMap::new();
+    // Carvers the root leaves out: the worldgen loader drops a biome's
+    // reference to one only when no data pack supplies it.
+    let mut left_out_carvers: BTreeSet<String> = BTreeSet::new();
     let mut modifiers = Vec::new();
     let mut structure_modifiers = Vec::new();
     let mut namespaces: std::collections::BTreeSet<String> = mods
@@ -245,10 +248,13 @@ pub fn build_with_conditions(
                 })?;
                 // Dynamic registry entries use the same owning-load conditions as tags.
                 // Evaluate before parsing required modifier fields.
-                if biomes::is_modifier(&file) || structures::is_modifier(&file) {
+                let carver = worldgen_entry(&file).filter(|(bundle, _)| *bundle == CARVERS);
+                if biomes::is_modifier(&file) || structures::is_modifier(&file) || carver.is_some()
+                {
                     let doc: J = serde_json::from_slice(&bytes)
                         .map_err(|e| format!("mod {}: {file}: {e}", m.id))?;
                     if !tag_conditions_hold(&doc, conditions, &file)? {
+                        left_out_carvers.extend(carver.map(|(_, id)| id));
                         continue;
                     }
                 }
@@ -285,6 +291,16 @@ pub fn build_with_conditions(
                         )?);
                     } else if let Some((bundle, id)) = worldgen_entry(&file) {
                         let text = String::from_utf8(bytes).map_err(|e| format!("{file}: {e}"))?;
+                        // The world decodes every carver at start, used or
+                        // not: one it can't read is left out.
+                        if bundle == CARVERS
+                            && let Err(e) =
+                                horizon_world::worldgen::carver::WorldCarver::from_json(&text)
+                        {
+                            warnings.push(format!("mod {}: {file}: carver left out: {e}", m.id));
+                            left_out_carvers.insert(id);
+                            continue;
+                        }
                         let entries = worldgen.entry(bundle).or_default();
                         match Addition::read(bundle, &text).map_err(|e| format!("{file}: {e}"))? {
                             Some(addition) => additions.entry(bundle).or_default().push(addition),
@@ -384,6 +400,10 @@ pub fn build_with_conditions(
             apply_additions(&mut doc, list).map_err(|e| format!("{bundle}: {e}"))?;
         }
         overlay.write(bundle, &serde_json::to_vec(&doc)?)?;
+        if *bundle == CARVERS && !left_out_carvers.is_empty() {
+            let name = format!("worldgen/{}", horizon_world::worldgen::carver::LEFT_OUT);
+            overlay.write(&name, &serde_json::to_vec(&left_out_carvers)?)?;
+        }
         if *bundle == PLACED_FEATURES {
             placed_doc = Some(doc);
         } else if *bundle == BIOMES {
@@ -471,7 +491,16 @@ pub fn build_with_conditions(
             by_item(|i| i.crafting_remainder.as_deref()),
         ),
         (MOD_ITEM_TEMPLATES, by_item(|i| i.template.as_deref())),
-        (MOD_ITEM_BLOCKS, by_item(|i| i.block.as_deref())),
+        // A wall form can be earlier in the block registry than its primary form.
+        // The shared Block.asItem is not enough to choose the item's primary block.
+        (
+            MOD_ITEM_BLOCKS,
+            by_item(|i| {
+                i.block
+                    .as_deref()
+                    .or_else(|| i.wall_pair.as_ref().map(|_| i.rename.to.as_str()))
+            }),
+        ),
     ] {
         if !map.is_empty() {
             overlay.write(name, &serde_json::to_vec(&map)?)?;
@@ -533,28 +562,34 @@ pub fn resource_root_with_conditions(
             || !m.content.blocks.is_empty()
             || !m.content.items.is_empty()
             || !m.content.block_entity_types.is_empty()
+            || !m.content.vanilla_shapes.is_empty()
     });
     if inventory.is_empty() && !has_content {
         return Ok(base.to_owned());
     }
     let mut stamp = stamp(base, jar_store, mods, inventory)?;
-    if conditions.has_registered() {
+    // Code-only roots never read the conditions, so they keep one root per stamp.
+    if has_content && (conditions.has_registered() || conditions.feature_flags().is_some()) {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         stamp.hash(&mut hash);
         conditions.hash(&mut hash);
-        // Handlers can read config that has no persistent fingerprint. Give each
-        // build a fresh root, leaving every previously usable root untouched.
-        horizon_std::time::SystemTime::now()
-            .duration_since(horizon_std::time::UNIX_EPOCH)?
-            .as_nanos()
-            .hash(&mut hash);
+        if conditions.has_registered() {
+            // Handlers can read config that has no persistent fingerprint. Give each
+            // build a fresh root, leaving every previously usable root untouched.
+            horizon_std::time::SystemTime::now()
+                .duration_since(horizon_std::time::UNIX_EPOCH)?
+                .as_nanos()
+                .hash(&mut hash);
+        }
         stamp = format!("{:016x}{stamp}", hash.finish());
     }
     let roots = cache.join("mod-content");
     let out = roots.join(&stamp[..ROOT_NAME]);
     // Pin before examining the root. If a prune already admitted the old generation, this
     // waits for it to move that generation aside before looking for its stamp.
+    // The lock file goes beside the root, so the folder must exist before the hold.
+    fs::create_dir_all(&roots)?;
     let _preparing = retain_root(&out);
     if fs::read(out.join(STAMP)).is_ok_and(|s| s == stamp.as_bytes())
         && fs::read(out.join(horizon_mod_package::enabled::MARKER)).is_ok_and(|bytes| {
@@ -587,8 +622,13 @@ pub fn resource_root_with_conditions(
     }
     fs::write(out.join(STAMP), stamp)?;
     // Old roots go on a thread of their own: removing one linked file by file takes seconds, and
-    // the start would wait for each.
+    // the start would wait for each. Tests prune inline: a detached prune holds lock files open
+    // while a test removes its cache, which Windows refuses.
     let current = out.clone();
+    if cfg!(test) {
+        prune_roots(&roots, &current, KEEP_ROOTS);
+        return Ok(out);
+    }
     let spawned = horizon_std::thread::Builder::new()
         .name("mod-content-prune".into())
         .spawn(move || prune_roots(&roots, &current, KEEP_ROOTS));

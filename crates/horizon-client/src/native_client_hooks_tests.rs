@@ -83,6 +83,7 @@ pub(crate) fn install() {
                     *amount += 1.0;
                 }
             },
+            living_heal_cause: |_, _, _, _| {},
             living_breathe: |context, _, kind, can_breathe, consume, _| {
                 if context.setting("rules_mod", "stack").is_some() {
                     // A cod breathes on land; a salmon loses all its air at once.
@@ -91,6 +92,11 @@ pub(crate) fn install() {
                         "minecraft:salmon" => i32::MAX,
                         _ => *consume + 4,
                     };
+                }
+            },
+            player_login_profile: |player, name, properties| {
+                if mod_api::__private::listened(mod_api::HookId::PlayerLoginProfile) {
+                    mod_api::dispatch_player_login_profile(player, name, properties);
                 }
             },
             farmland_trample: |context, _, _, _, _, cancel| {
@@ -136,6 +142,10 @@ pub(crate) fn install() {
             living_flying_speed: |context, _, _, speed| {
                 *speed += context.setting("rules_mod", "stack").map_or(0.0, |_| 3.0);
             },
+            can_swim_in_fluid_listened: || false,
+            can_swim_in_fluid: |_, _, _, _, _, _| {},
+            living_fluid_travel_listened: || false,
+            living_fluid_travel: |_| {},
             block_jump_factor: |context, _, factor| {
                 *factor += context.setting("rules_mod", "stack").map_or(0.0, |_| 4.0);
             },
@@ -187,10 +197,29 @@ pub(crate) fn install() {
             can_fit_inside_container_items: |context, stack, fits| {
                 item_part(context, "can_fit_inside_container_items", stack, fits);
             },
+            // Every match is listed, so the matcher's choosing path runs in every test (unless
+            // a test turns `NOT_LISTENING` on); the choice stays the first unless a test's
+            // `recipe_choice` setting names a recipe.
+            crafting_recipe_choice_listens: || !NOT_LISTENING.with(std::cell::Cell::get),
+            crafting_recipe_choice: |context, crafter, _, _, recipes, _, choice| {
+                TOLD_CRAFTER.with(|told| told.set(Some(crafter)));
+                let wanted = context.setting("recipe_choice", "pick");
+                if let Some(i) = wanted.and_then(|w| recipes.iter().position(|r| *r == w.trim())) {
+                    *choice = i as u32;
+                }
+            },
         });
         assert!(
             installed,
             "the library's callbacks are installed only here in its tests"
         );
     });
+}
+
+thread_local! {
+    /// Who the last `crafting_recipe_choice` on this thread was told crafts.
+    pub(crate) static TOLD_CRAFTER: std::cell::Cell<Option<crate::crafting::Crafter>> =
+        const { std::cell::Cell::new(None) };
+    /// On this thread no mod listens to `crafting_recipe_choice`, as for a player without one.
+    pub(crate) static NOT_LISTENING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }

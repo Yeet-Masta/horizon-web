@@ -10,6 +10,7 @@ use horizon_client::{
     collisions::SceneCollisions,
     enchant::EffectContext,
     items::ItemStack,
+    lan::guest::Guest,
     mesher::Vertex,
     mobs::{Damage, DamageKind, Species, Who, anim::Poses},
 };
@@ -21,7 +22,7 @@ use horizon_core::{
 use mod_api::SoundSource;
 
 pub(super) use horizon_gameplay::trident::ThrownTrident;
-use horizon_gameplay::trident::{HALF, breeze_deflect, segment_box};
+use horizon_gameplay::trident::{HALF, breeze_deflect, loyalty_from_item, segment_box};
 
 /// A player a trident can return to (its owner) or that can pick it up: this
 /// game's own, or a server's guest in this level, which is all a server has.
@@ -36,6 +37,21 @@ struct Catcher {
     touches: bool,
     creative: bool,
     uuid: Option<[i32; 4]>,
+}
+/// `Abilities.instabuild` of the player a trident's hit names
+/// (`damageSources().trident(this, owner)`), which `VehicleEntity.hurtServer`
+/// (a discard, no item), `isCreativePlayer` (a fixed frame gives way, an
+/// invulnerable entity doesn't refuse) and `ItemFrame.dropItem`
+/// (`hasInfiniteMaterials`: no drops) read: the mode of the guest who threw it
+/// (`thrower`, found by `guest`; no player once they have left), else this
+/// game's own player's (`local`). Tridents tick outside every guest's turn,
+/// so `local` is never the throwing guest's.
+fn thrower_creative<'g>(
+    thrower: Option<u32>,
+    guest: impl FnOnce(u32) -> Option<&'g Guest>,
+    local: bool,
+) -> bool {
+    thrower.map_or(local, |conn| guest(conn).is_some_and(Guest::creative))
 }
 impl Game<'_> {
     /// The trident stack's maximum damage component, else its item's default.
@@ -219,6 +235,15 @@ impl Game<'_> {
                 if let Some(p) = self.player.as_mut() {
                     p.position.y += moved.y;
                 }
+                // `ServerPlayer.move` sends its client nothing: the client lifted
+                // itself. The acting player's record moves with its body, or the
+                // turn's end would send the lift back as a teleport that stops
+                // the spin (#19797).
+                if let Some(conn) = self.lan_acting
+                    && let Some(host) = self.lan.as_mut()
+                {
+                    host.hub.update_guest(conn, |g| g.position[1] += moved.y);
+                }
             }
             if !server_client {
                 let sound = format!("minecraft:item.trident.riptide_{}", riptide.min(3));
@@ -264,11 +289,16 @@ impl Game<'_> {
             self.persist.uuids.insert(id, uuid);
         }
         let owner_uuid = self.acting_player_uuid();
+        let loyalty = loyalty_from_item(
+            &world_stations!(self).enchantments,
+            &thrown,
+            &mut self.world.random,
+        );
         self.tridents.push(ThrownTrident {
             attachment_lifetime: Default::default(),
             join: Default::default(),
             id,
-            loyalty: thrown.enchantment_level("minecraft:loyalty"),
+            loyalty,
             stack: thrown,
             position: start,
             previous: start,
@@ -615,6 +645,9 @@ impl Game<'_> {
                     t.position.y + t.velocity.y,
                     t.position.z + t.velocity.z,
                 );
+                // AbstractArrow.tick drags a noPhysics flight too (0.99 in air
+                // and water alike), with no gravity.
+                t.velocity = t.velocity.scale(f64::from(0.99f32));
             } else {
                 t.turn_towards_movement();
                 // Mobs on the path, then blocks.
@@ -648,12 +681,19 @@ impl Game<'_> {
                         }
                     }
                 }
-                // Boats, minecarts and primed TNT are pickable too (`isPickable`).
+                // Boats, minecarts, primed TNT and armor stands that are not
+                // markers are pickable too (`isPickable`).
                 if !t.dealt_damage {
                     for (who, b) in self
                         .vehicle_targets()
                         .into_iter()
                         .chain(self.tnts.iter().map(|t| (Who::Mob(t.id), t.bounds())))
+                        .chain(
+                            self.armor_stands
+                                .iter()
+                                .filter(|a| !a.marker)
+                                .map(|a| (Who::Mob(a.id), a.bounds())),
+                        )
                     {
                         if let Who::Mob(id) = who
                             && let Some(d) = segment_box(t.position, t.velocity, b.inflate(grow))
@@ -752,20 +792,13 @@ impl Game<'_> {
                         attack.projectile = Some(t.id as i32);
                         attack.projectile_is_arrow = true;
                         Self::set_projectile_weapon(&mut attack, Some(&t.stack));
-                        let trident_source = DamageKind::Named(
-                            horizon_client::mobs::NamedDamage::registered(
-                                &self.health_resources.damage,
-                                "minecraft:trident",
-                            )
-                            .expect("registered vanilla trident damage"),
-                        );
                         if let Some(m) = self.mobs.iter_mut().find(|m| m.id == id) {
                             let from = Some([t.position.x, t.position.y, t.position.z]);
                             let hurt = m.damage_projectile(
                                 crate::game::entity::damage_level_of!(self, &attack),
                                 damage,
                                 Damage {
-                                    kind: trident_source,
+                                    kind: DamageKind::Trident,
                                     attacker: Some(Who::Player),
                                     from,
                                     attacker_species: None,
@@ -781,7 +814,11 @@ impl Game<'_> {
                         // ThrownTrident.onHitEntity on a boat or minecart:
                         // VehicleEntity.hurtServer takes the damage; an item
                         // frame's ItemFrame.hurtServer.
-                        let creative = t.guest.is_none() && self.creative;
+                        let creative = thrower_creative(
+                            t.guest,
+                            |conn| self.command_guest(conn),
+                            self.creative,
+                        );
                         let causing = match t.guest {
                             Some(conn) => self.command_guest(conn).map_or(0, |g| g.entity_id),
                             None => self.own_entity_id(),
@@ -792,12 +829,7 @@ impl Game<'_> {
                             direct: t.id as i32,
                             position: Some([t.previous.x, t.previous.y, t.previous.z]),
                         };
-                        let source_creative = match t.guest {
-                            Some(conn) => self.command_guest(conn).is_some_and(|g| g.creative()),
-                            None => self.creative,
-                        };
-                        let vanilla =
-                            self.saved_refuses_damage(id, "minecraft:trident", source_creative);
+                        let vanilla = self.saved_refuses_damage(id, "minecraft:trident", creative);
                         if let Some(i) = self.boats.iter().position(|b| b.id == id) {
                             let kind = self.boats[i].entity_type();
                             if !crate::game::entity::damage_level_of!(self, scoped)
@@ -828,6 +860,10 @@ impl Game<'_> {
                                 let hit = CartHit::attributed(Some(by));
                                 self.hurt_cart(i, damage, creative, false, hit);
                             }
+                        } else if self.armor_stands.iter().any(|a| a.id == id) {
+                            // ArmorStand.hurtServer: `trident` always kills a stand.
+                            let by = t.guest.map_or(Target::Player, Target::Guest);
+                            self.command_damage_stand(id, "minecraft:trident", Some(by));
                         } else {
                             // ItemFrame.hurtServer: the item comes out, or the frame breaks.
                             self.projectile_hurts_frame(id, true, creative);
@@ -1146,6 +1182,35 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// A guest's trident hits with that guest's abilities, whatever the
+    /// server's own state (`local`) holds: a creative guest's trident discards
+    /// the boat it breaks and knocks a framed item loose without a drop.
+    #[test]
+    fn a_guests_trident_hits_with_its_throwers_creative_mode() {
+        use crate::game::native_player_death::tests::new_guest;
+        let mut creative = new_guest(4, 104);
+        creative.game_mode = horizon_client::lan::guest::CREATIVE;
+        let survival = new_guest(5, 105);
+        let hub = |conn: u32| [&creative, &survival].into_iter().find(|g| g.conn == conn);
+        assert!(
+            super::thrower_creative(Some(4), hub, false),
+            "creative guest"
+        );
+        assert!(
+            !super::thrower_creative(Some(5), hub, true),
+            "survival guest"
+        );
+        assert!(
+            !super::thrower_creative(Some(6), hub, true),
+            "a thrower who left"
+        );
+        assert!(
+            super::thrower_creative(None, hub, true),
+            "this game's player"
+        );
+        assert!(!super::thrower_creative(None, hub, false));
+    }
+
     /// A stack can reach its final durability point after use began. The release
     /// guard is independent of admission, and short charges still do nothing.
     #[test]
@@ -1242,5 +1307,52 @@ mod tests {
         game.release_trident(10);
         assert_eq!(game.tridents[1].pickup, super::Pickup::CreativeOnly);
         assert!(game.held().is_some());
+    }
+
+    /// #19797: a player standing on the ground who lets go of a Riptide trident
+    /// keeps the launch its client made. The server lifts its own copy of the
+    /// player too (`move(SELF, (0, 1.1999999, 0))`), as vanilla does, and sends
+    /// the player nothing for it: a teleport there would stop the spin's motion.
+    #[test]
+    #[ignore = "daily"]
+    fn a_guests_riptide_from_the_ground_lifts_its_server_copy_without_a_teleport() {
+        use crate::game::native_sound_refs::tests::packets;
+        use horizon_client::lan::PlayerSender;
+        use horizon_protocol::packets::play::Clientbound as C;
+        use std::sync::Arc;
+
+        crate::game::native_guest_turn_tests::with_guests(|game| {
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(horizon_client::chunk::Chunk::empty(0, 0)));
+            let (tx, rx) = std::sync::mpsc::channel();
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(13, |g| {
+                    g.sender = PlayerSender::new(tx, Arc::default());
+                    g.on_ground = true;
+                })
+                .unwrap();
+            let mut riptide = super::ItemStack::new("minecraft:trident", 1);
+            riptide.enchant("minecraft:riptide", 1);
+            game.as_guest(13, |game| {
+                game.player.as_mut().unwrap().fluids.was_touching_water = true;
+                *game.held_mut() = Some(riptide);
+                game.release_trident(10);
+            })
+            .unwrap();
+            let guest = game.lan.as_ref().unwrap().hub.guest(13).unwrap();
+            assert_eq!(
+                guest.position,
+                [3.0, 64.0 + f64::from(1.1999999_f32), 5.0]
+            );
+            let teleports = packets(&rx)
+                .into_iter()
+                .filter(|p| matches!(p, C::PlayerPosition(_)))
+                .count();
+            assert_eq!(teleports, 0, "the lift was sent back as a teleport");
+        });
     }
 }

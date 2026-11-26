@@ -71,6 +71,10 @@ pub struct SavedBody {
     /// tags the host's own save keeps.
     pub invulnerable: bool,
     pub invulnerable_time: i32,
+    /// `current_impulse_context_reset_grace_time` and `current_explosion_impact_pos`
+    /// (LivingEntity): a wind charge's launch goes on measuring its fall from the
+    /// impact point after a rejoin.
+    pub impulse: horizon_world::living_fall::ImpulseContext,
 }
 
 impl SavedBody {
@@ -87,6 +91,7 @@ impl SavedBody {
             ticks_frozen: motion.ticks_frozen,
             invulnerable: motion.health.permanently_invulnerable,
             invulnerable_time: motion.health.invulnerable_time,
+            impulse: motion.impulse,
         }
     }
     /// Put it on a new body.
@@ -101,6 +106,7 @@ impl SavedBody {
         motion.ticks_frozen = self.ticks_frozen;
         motion.health.permanently_invulnerable = self.invulnerable;
         motion.health.invulnerable_time = self.invulnerable_time;
+        motion.impulse = self.impulse;
     }
 }
 
@@ -189,18 +195,35 @@ pub struct Guest {
     pub center_sent: Option<(i32, i32)>,
     /// Why the connection closed (the console's "lost connection").
     pub left_reason: String,
+    pub(super) logout_guard: Option<Arc<()>>,
     /// A validated movement report the mods have not ruled on yet (`player_move`).
     pub pending_move: Option<super::hub::PendingMove>,
+    /// Validated movement packets waiting to be told to `player_move_packet`, oldest first, and
+    /// the hub tick with how many were told in it (the per-tick budget, `MOVE_PACKET_BUDGET`).
+    pub move_packet_queue: VecDeque<super::hub::MovePacket>,
+    pub move_packets_told: (u64, usize),
     /// A disconnect was started ([`Guest::begin_disconnect`]); the connection closes when the
     /// server next polls it, and until then no other disconnect is sent.
     pub disconnect_pending: bool,
+    /// The mods are hearing `player_leaving` for this guest right now; a disconnect asked for
+    /// inside the hook is refused, as one is while [`Guest::disconnect_pending`].
+    pub leaving: bool,
     /// A mod's personal sidebar is on this client (`Game::native_sidebar`); it is gone with the
     /// connection.
     pub personal_sidebar: bool,
+    /// A mod's one-shot sidebar objective is on this client (`Game::native_send_sidebar`),
+    /// apart from the personal one; it is gone with the connection.
+    pub sent_sidebar_exists: bool,
+    /// The one-shot sidebar uses slot 1 or is waiting for the managed sidebar to clear.
+    /// A world write to slot 1 ends that claim without removing the objective.
+    pub sent_sidebar_claims_slot: bool,
     pub uuid: u128,
     pub name: String,
-    /// The profile's properties, for the player list (skins).
+    /// The properties the player logged in with (`ServerPlayer.getGameProfile`).
     pub properties: Vec<horizon_protocol::packets::login::Property>,
+    /// The properties a native mod set (`player_set_profile_property`): overrides by name over the login
+    /// ones in what is published (the player list, the profile lookups), never in `properties` itself.
+    pub profile_overrides: Vec<horizon_protocol::packets::login::Property>,
     pub entity_id: i32,
     pub sender: PlayerSender,
     pub latency: Arc<AtomicI32>,
@@ -215,6 +238,10 @@ pub struct Guest {
     /// the player away and they are still at the chunk it left. The hold ends (back to `None`) at
     /// an accepted move or teleport ack, a passenger or vehicle move, a camera change, a placement.
     pub held_ticket_chunk: Option<(i32, i32)>,
+    /// A mod's view centre for this player (`PlayerRef::set_view_center`): the chunk their chunk
+    /// tracking follows in place of their own, in their own level, without moving them. `None`:
+    /// their own chunk, as in vanilla. Ends at a respawn, a level change and when they leave.
+    pub view_center: Option<(i32, i32)>,
     pub previous_position: [f64; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -305,6 +332,12 @@ pub struct Guest {
     /// A position move arrived since the client's last ClientTickEnd
     /// (receivedPositionThisTick): a second one is a protocol error.
     pub position_this_tick: bool,
+    /// A move reached the player since its last ClientTickEnd
+    /// (`receivedMovementThisTick`): its own position packet, or the one its
+    /// vehicle drove (`handleMoveVehicle` → `handlePlayerKnownMovement`, which
+    /// a rider's `known_movement` comes from: a rider sends no position of its
+    /// own). Without one, `handleClientTickEnd` zeroes `known_movement`.
+    pub movement_this_tick: bool,
     /// Violation levels and the checks' state (the anticheat, when on).
     pub anticheat: horizon_anticheat::Player,
     /// The client ticks the movement prediction plays again (only while it records).
@@ -320,6 +353,8 @@ pub struct Guest {
     pub replay: Option<Box<super::prediction::Replay>>,
     /// What the server sent this tick that changes how the client moves (only while it records).
     pub changes: horizon_std::sync::Mutex<Vec<Change>>,
+    /// The pings sent to it that its client has not answered (`player_pong` hears only those).
+    pub pings: horizon_std::sync::Mutex<super::ping_ledger::PingLedger>,
     /// It accepted a move since the last entity range checks
     /// (ServerChunkCache.move), which then check all of its pairs again.
     pub moved: bool,
@@ -518,6 +553,11 @@ pub struct Guest {
     /// saves neither its player file nor its records, since the other server has the
     /// player now.
     pub released: bool,
+    /// The hand-overs of this player that were started (`player-export ... freeze`) and not
+    /// settled by a release. One outlives its freeze, which runs out on its own: the destination
+    /// may have committed in the meantime, so while any is unsettled the mods' `player_leaving`
+    /// is not heard for them. A successful `abort` settles its own hand-over only.
+    pub transfer_unresolved: Vec<u128>,
     /// Root command names the mods took out of this player's command tree
     /// (`native_player_commands_sent`); their tree is sent without them.
     pub hidden_commands: Vec<String>,
@@ -558,6 +598,8 @@ pub struct Guest {
     pub advancements_changed: std::collections::BTreeSet<usize>,
     /// The server's scoreboard as this player's client has it (lan/scoreboard.rs).
     pub scoreboard: super::scoreboard::View,
+    /// Whether this guest has received its initial `updateEntireScoreboard` sync.
+    pub scoreboard_synced: bool,
     /// Recipes unlocked since the client was last told
     /// (`ServerRecipeBook.addRecipes` sends them).
     pub recipes_unlocked: Vec<String>,
@@ -649,6 +691,11 @@ impl Guest {
         true
     }
 
+    /// Keep the pending logout registered while this guest is temporarily back in the hub.
+    pub fn take_logout_guard(&mut self) -> Option<Arc<()>> {
+        self.logout_guard.take()
+    }
+
     pub fn participates_online(&self) -> bool {
         self.kind == GuestKind::Network
     }
@@ -689,6 +736,17 @@ impl Guest {
                 .is_some_and(|(cx, cz)| super::hub::tracked(cx, cz, self.view_distance, x, z))
     }
 
+    /// Whether this guest is currently tracking entity `id` in `dimension` (in its own level or
+    /// through a viewed level).
+    pub fn tracks_entity(&self, dimension: &str, id: i32) -> bool {
+        (self.dimension == dimension && self.tracker.is_tracking(id))
+            || self
+                .viewed
+                .views
+                .get(dimension)
+                .is_some_and(|view| view.tracker.is_tracking(id))
+    }
+
     fn with_defaults(
         kind: GuestKind,
         j: GuestInit,
@@ -709,14 +767,21 @@ impl Guest {
             placed_at: 0,
             level_entered: 0,
             last_reported: (position, [0.0, 0.0]),
+            move_packet_queue: VecDeque::new(),
+            move_packets_told: (0, 0),
             center_sent: None,
             left_reason: String::new(),
+            logout_guard: None,
             pending_move: None,
             disconnect_pending: false,
+            leaving: false,
             personal_sidebar: false,
+            sent_sidebar_exists: false,
+            sent_sidebar_claims_slot: false,
             uuid: j.uuid,
             name: j.name,
             properties: j.properties,
+            profile_overrides: Vec::new(),
             entity_id,
             sender: j.sender,
             latency: j.latency,
@@ -726,6 +791,7 @@ impl Guest {
             recipe_sync: Default::default(),
             position,
             held_ticket_chunk: None,
+            view_center: None,
             previous_position: position,
             yaw: 0.0,
             pitch: 0.0,
@@ -770,11 +836,13 @@ impl Guest {
             rests_on_ground: false,
             support_blocks_sent: 0,
             position_this_tick: false,
+            movement_this_tick: false,
             anticheat: Default::default(),
             record: None,
             client_sprinting: false,
             replay: None,
             changes: Default::default(),
+            pings: Default::default(),
             moved: false,
             tab_hidden: Default::default(),
             loaded: false,
@@ -862,6 +930,7 @@ impl Guest {
             arrival_recentered: false,
             quiet_leave: false,
             released: false,
+            transfer_unresolved: Vec::new(),
             hidden_commands: Vec::new(),
             abilities: Default::default(),
             dimension: "minecraft:overworld".into(),
@@ -881,6 +950,7 @@ impl Guest {
             advancements_visible: Vec::new(),
             advancements_changed: Default::default(),
             scoreboard: Default::default(),
+            scoreboard_synced: false,
             recipes_unlocked: Vec::new(),
         }
     }
@@ -888,12 +958,40 @@ impl Guest {
     pub fn abilities_packet(&self) -> play::Clientbound {
         play::Clientbound::PlayerAbilities(self.abilities.packet())
     }
+    /// [`Self::send`] of a packet whose body was encoded once for every receiver.
+    pub fn send_shared(&self, packet: &play::Clientbound, body: &super::Body) {
+        if !self.participates_online() {
+            return;
+        }
+        if self.record.is_some() {
+            self.note_change(packet);
+        }
+        self.sender.send_many([body.clone()]);
+    }
+    /// Waypoint packets for this guest, in order, as [`Self::send`] and [`Self::send_shared`] each,
+    /// under one lock of its connection: a crowd's locator bar sends this guest hundreds a tick.
+    pub fn send_waypoints(&self, run: &[(u32, super::waypoints::Sent)]) {
+        if !self.participates_online() {
+            return;
+        }
+        if self.record.is_some() {
+            run.iter().for_each(|(_, s)| self.note_change(s.packet()));
+        }
+        self.sender
+            .send_many(run.iter().filter_map(|(_, s)| s.body()));
+    }
     pub fn send(&self, packet: &play::Clientbound) {
         if !self.participates_online() {
             return;
         }
         if self.record.is_some() {
             self.note_change(packet);
+        }
+        if let play::Clientbound::Ping(p) = packet {
+            self.pings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sent(p.id, horizon_std::time::Instant::now());
         }
         match packet.try_encode() {
             Ok(body) => self.sender.send(body),
@@ -1031,6 +1129,11 @@ impl Guest {
             (self.position[0].floor() as i32) >> 4,
             (self.position[2].floor() as i32) >> 4,
         )
+    }
+    /// The chunk this player's chunk tracking is centred on (`ChunkMap.move`'s section): a mod's
+    /// view centre, else their own chunk.
+    pub fn view_chunk(&self) -> (i32, i32) {
+        self.view_center.unwrap_or_else(|| self.chunk())
     }
     pub fn creative(&self) -> bool {
         self.game_mode == CREATIVE
@@ -2065,6 +2168,15 @@ pub(super) fn network_stack(
                 horizon_protocol::item::Component::Unit,
             ));
         }
+        // Glider too: the client starts a glide on its own (`LocalPlayer.aiStep`:
+        // `tryToStartFallFlying` reads `canGlideUsing`), so a chestplate given
+        // `glider` by a command or a mod glides only if its client sees it.
+        if d.other("minecraft:glider").is_some() {
+            stack.added.push((
+                horizon_protocol::item::component::GLIDER,
+                horizon_protocol::item::Component::Unit,
+            ));
+        }
         if let Some(component) = d
             .other("minecraft:kinetic_weapon")
             .and_then(|value| crate::item_sync::kinetic::encode(value, synced_id))
@@ -2898,6 +3010,22 @@ mod tests {
             received.component(component::LORE),
             Some(&Component::Lore(lines))
         );
+    }
+
+    #[test]
+    fn a_saved_glider_reaches_the_client() {
+        let mut item = ItemStack::new("minecraft:diamond_chestplate", 1);
+        item.data_mut()
+            .set_other("minecraft:glider", Some(Tag::Compound(Default::default())));
+        let sent = stack_to_network(|_| 7, |_, _| None, &Some(item));
+        let mut writer = Writer::new();
+        horizon_protocol::item::Slot::write(&sent, &mut writer);
+        let mut reader = Reader::new(&writer.data);
+        let received = horizon_protocol::item::Slot::read(&mut reader)
+            .unwrap()
+            .unwrap();
+        // A unit component: the client reads its presence (`glider_and_slot`).
+        assert!(received.component(component::GLIDER).is_some());
     }
 
     #[test]

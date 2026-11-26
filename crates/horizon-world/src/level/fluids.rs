@@ -753,6 +753,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `FlowingFluid.tick` for the fluid at `pos`.
     pub(crate) fn fluid_tick(&mut self, pos: BlockPos) {
         let mut state = self.state(pos);
+        // Asked before the fluid tick hook as well as after it, as in `tick_due_block`: the hook
+        // is dispatched and may cancel either way.
+        let suppressed = self.level.template_suppressed(state);
         let mut fluid = self.b.fluid(state);
         let kind = fluid.kind();
         let name = match kind {
@@ -761,7 +764,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             FluidKind::Mod(_) | FluidKind::ModFlowing(_) => kind.name(),
             FluidKind::Empty => return,
         };
-        if !self.level.allow_fluid_tick(pos, name) {
+        if !self.level.allow_fluid_tick(pos, name)
+            || suppressed
+            || self.level.template_suppressed(state)
+        {
             return;
         }
         if !fluid.is_source() {
@@ -897,7 +903,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     }
                 } else if self
                     .b
-                    .tag("minecraft:blocks_lava_fire_spread")
+                    .hot_tags
+                    .lava_fire_spread
+                    .as_deref()
                     .is_some_and(|tag| self.b.in_set(state, tag))
                 {
                     return;
@@ -994,9 +1002,123 @@ pub(crate) fn merged_face_occludes(
 }
 
 #[cfg(test)]
+use crate::bench_support;
+#[cfg(test)]
+#[path = "../../examples/support/tag_fixture.rs"]
+mod tag_fixture;
+#[cfg(test)]
+use crate as world;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::fluid::{ModFluidType, register_mod_fluid};
+
+    /// Scheduled fluid propagation plus a reproducible sample of lava random
+    /// ticks. The overhang steers ignition probes into the named tag predicate.
+    #[test]
+    #[ignore = "headless lava scene; run with --ignored --nocapture"]
+    fn benchmark_lava_flood() {
+        use crate::level::tests::{Fixture, World};
+        use horizon_std::time::Instant;
+        use serde_json::json;
+
+        const TICKS: usize = 240;
+        const RANDOM_TICKS_PER_TICK: usize = 8;
+        let repeats = horizon_std::env::var("HORIZON_BENCH_REPEATS")
+            .map_or(7, |value| value.parse().expect("HORIZON_BENCH_REPEATS"));
+        assert!(repeats > 0, "HORIZON_BENCH_REPEATS must be positive");
+        let (registry, behaviours) = tag_fixture::load().unwrap();
+        let f = Fixture {
+            registry,
+            behaviours,
+        };
+        let b = &f.behaviours;
+        let sources = (-4..4)
+            .flat_map(|x| (-4..4).map(move |z| BlockPos::new(x * 16 + 8, 1, z * 16 + 8)))
+            .collect::<Vec<_>>();
+        let mut samples = Vec::with_capacity(repeats);
+        let mut fluid_ticks = Vec::with_capacity(repeats);
+        for _ in 0..repeats {
+            let mut w = World::new(&f);
+            let stone = w.id("stone", &[]);
+            let lava = w.id("lava", &[]);
+            let expected = ["0", "2", "4", "6"].map(|level| w.id("lava", &[("level", level)]));
+            assert!(
+                b.tag("minecraft:blocks_lava_fire_spread")
+                    .unwrap()
+                    .contains(b.block(stone))
+            );
+            for &pos in &sources {
+                for dx in -7..=7 {
+                    for dz in -7..=7 {
+                        w.put(pos.offset(dx, -1, dz), stone);
+                    }
+                }
+                for dx in -1..=1 {
+                    for dz in -1..=1 {
+                        w.put(pos.offset(dx, 1, dz), stone);
+                    }
+                }
+                assert!(w.set(pos, lava));
+                assert_eq!(w.get(pos.offset(1, 0, 0)), b.air());
+            }
+
+            let timer = Instant::now();
+            for tick in 0..TICKS {
+                w.tick();
+                let mut sim = b.sim(&mut w.level, &mut w.ticks);
+                for i in 0..RANDOM_TICKS_PER_TICK {
+                    sim.lava_random_tick(
+                        sources[(tick * RANDOM_TICKS_PER_TICK + i) % sources.len()],
+                    );
+                }
+            }
+            samples.push(TICKS as f64 / timer.elapsed().as_secs_f64());
+
+            for &pos in &sources {
+                for dx in -4_i32..=4 {
+                    for dz in -4_i32..=4 {
+                        let distance = (dx.abs() + dz.abs()) as usize;
+                        assert_eq!(
+                            w.get(pos.offset(dx, 0, dz)),
+                            expected.get(distance).copied().unwrap_or(b.air()),
+                            "source at {pos:?}, offset ({dx}, {dz})",
+                        );
+                    }
+                }
+            }
+            let dispatched = w.level.fluid_asks.get();
+            assert!(dispatched >= (sources.len() * 25) as u32);
+            assert!(fluid_ticks.first().is_none_or(|&first| first == dispatched));
+            fluid_ticks.push(dispatched);
+        }
+        let stats = bench_support::stats(&samples);
+        if horizon_std::env::var_os("HORIZON_BENCH_JSON").is_some() {
+            println!(
+                "{}",
+                json!({
+                    "benchmark": "lava_flood",
+                    "unit": "ticks/s",
+                    "ticks_per_repeat": TICKS,
+                    "sources": sources.len(),
+                    "block_tags": tag_fixture::TAG_COUNT,
+                    "lava_random_ticks_per_tick": RANDOM_TICKS_PER_TICK,
+                    "scheduled_fluid_ticks": fluid_ticks,
+                    "stats": stats,
+                })
+            );
+        } else {
+            println!(
+                "Lava flood ({} sources, {} scheduled fluid ticks per repeat): median {:.2} ticks/s, MAD {:.2}, MAD/median {:.2}%",
+                sources.len(),
+                fluid_ticks[0],
+                stats["median"].as_f64().unwrap(),
+                stats["mad"].as_f64().unwrap(),
+                stats["mad_over_median"].as_f64().unwrap() * 100.0,
+            );
+        }
+    }
 
     fn mod_fluid(id: &str, tick_delay: i32) -> FluidKind {
         FluidKind::Mod(

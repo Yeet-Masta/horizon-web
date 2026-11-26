@@ -3,6 +3,7 @@
 //! The option screens live in `options_ui`.
 use crate::keybinds::KeyBinds;
 use crate::options_file::{OptionsFile, V};
+use horizon_optifine::better_grass::Mode as BetterGrassMode;
 use horizon_protocol::packets::configuration::ClientInformation;
 use horizon_std::fs;
 use std::path::Path;
@@ -20,13 +21,23 @@ pub fn set_source_volumes(volumes: [f32; 11]) {
 pub fn sound_source(event: &str) -> usize {
     let e = event.trim_start_matches("minecraft:");
     let index = |name: &str| SOUND_SOURCES.iter().position(|n| *n == name).unwrap_or(0);
-    const HOSTILE: [&str; 34] = [
+    const HOSTILE: [&str; 42] = [
         "zombie",
+        // ShulkerBullet.getSoundSource: HOSTILE (ShulkerBullet.java:63).
+        "shulker_bullet",
         "skeleton",
+        // Shulker and Hoglin override getSoundSource; Zoglin and Creaking
+        // extend Monster. All four are HOSTILE in pinned vanilla 26.3.
+        "shulker",
+        "hoglin",
+        "zoglin",
+        "creaking",
         "creeper",
         "spider",
         "cave_spider",
         "enderman",
+        // EnderDragon.getSoundSource: HOSTILE, so muting hostile silences it.
+        "ender_dragon",
         "witch",
         "slime",
         "magma_cube",
@@ -45,6 +56,9 @@ pub fn sound_source(event: &str) -> usize {
         "elder_guardian",
         "silverfish",
         "zombified_piglin",
+        // AbstractPiglin extends Monster.
+        "piglin",
+        "piglin_brute",
         "wither_skeleton",
         "bogged",
         "breeze",
@@ -60,16 +74,38 @@ pub fn sound_source(event: &str) -> usize {
     if e == "block.potent_sulfur.noxious_gas" {
         // PotentSulfurBlock.animateTick, its only caller, plays it as AMBIENT.
         index("ambient")
+    } else if e == "item.bottle.fill_dragonbreath" {
+        // BottleItem.use: SoundSource.NEUTRAL, even though the id starts with `item.`.
+        index("neutral")
+    } else if e == "item.bottle.empty" {
+        // PotionItem / CauldronInteractions / DispenseItemBehavior: SoundSource.BLOCKS.
+        index("block")
+    } else if e == "item.llama_carpet.unequip" {
+        // Equippable.shearingSound, played by Mob.playSound on the llama's NEUTRAL.
+        index("neutral")
     } else if e.starts_with("music_disc.") {
         index("record")
     } else if e.starts_with("item.goat_horn.") {
         // InstrumentItem.play: SoundSource.RECORDS.
         index("record")
+    } else if matches!(
+        e,
+        "item.honeycomb.wax_on" | "item.bone_meal.use" | "item.book.put"
+    ) {
+        // Vanilla plays these on SoundSource.BLOCKS at every call site:
+        // HoneycombItem.java:83,88,104, CopperGolem.java:233,
+        // DispenseItemBehavior.java:357, LevelEventHandler.java:285 and LecternBlock.java:137.
+        index("block")
     } else if e.starts_with("music.") {
         index("music")
     } else if e.starts_with("weather.") || e.starts_with("entity.lightning_bolt") {
         index("weather")
-    } else if e.starts_with("block.") {
+    } else if e.starts_with("block.note_block.") {
+        // NoteBlock.triggerEvent plays every instrument on RECORDS.
+        index("record")
+    } else if e.starts_with("block.") || e == "entity.generic.explode" {
+        // Block interactions (fence gates, redstone, etc.) and ServerExplosion's GENERIC_EXPLODE
+        // play on SoundSource.BLOCKS.
         index("block")
     } else if e.starts_with("ambient.") {
         index("ambient")
@@ -136,6 +172,7 @@ pub struct Settings {
     pub particles: u8,
     pub entity_distance: f32,
     pub entity_shadows: bool,
+    pub better_grass: BetterGrassMode,
     pub biome_blend: i32,
     /// "fast", "fancy", "fabulous" or "custom".
     pub graphics_preset: String,
@@ -247,6 +284,7 @@ impl Default for Settings {
             particles: 0,
             entity_distance: 1.0,
             entity_shadows: true,
+            better_grass: BetterGrassMode::Auto,
             biome_blend: 2,
             graphics_preset: "fancy".into(),
             mipmap_levels: 4,
@@ -337,6 +375,11 @@ fn put_s(f: &mut OptionsFile, key: &str, v: &str) {
     }
 }
 impl Settings {
+    /// The saved preference; the active pack determines whether `Auto` enables Better Grass.
+    pub fn better_grass_mode(&self) -> BetterGrassMode {
+        self.better_grass
+    }
+
     /// The index in `video_modes` of the preferred fullscreen mode, -1 (the desktop's own mode)
     /// when none is set or the monitor lacks it: `Monitor.indexOfMode`.
     pub fn video_mode_index(&self) -> i32 {
@@ -418,6 +461,8 @@ impl Settings {
         // Horizon's own key bindings live in horizon-extras.txt, not in options.txt.
         let emote = settings.extras.emote_key.clone();
         settings.keys.set("key.emote", &emote);
+        let fullbright = settings.extras.fullbright_key.clone();
+        settings.keys.set("key.fullbright", &fullbright);
         // The loaded set is the active one: `keybind` text components show its keys.
         settings.keys.sync_action_bindings();
         // `Options.load`: `sharePresence` decides what the friends service posts.
@@ -501,6 +546,12 @@ impl Settings {
             particles: f.int("particles") as u8,
             entity_distance: f.double("entityDistanceScaling") as f32,
             entity_shadows: f.bool("entityShadows"),
+            better_grass: match f.name("horizonBetterGrass").as_str() {
+                "off" => BetterGrassMode::Off,
+                "fast" => BetterGrassMode::Fast,
+                "fancy" => BetterGrassMode::Fancy,
+                _ => BetterGrassMode::Auto,
+            },
             biome_blend: f.int("biomeBlendRadius"),
             graphics_preset: f.name("graphicsPreset"),
             mipmap_levels: f.int("mipmapLevels"),
@@ -617,6 +668,16 @@ impl Settings {
         put_i(&mut f, "particles", i32::from(self.particles));
         put_f(&mut f, "entityDistanceScaling", self.entity_distance);
         put_b(&mut f, "entityShadows", self.entity_shadows);
+        put_name(
+            &mut f,
+            "horizonBetterGrass",
+            match self.better_grass {
+                BetterGrassMode::Auto => "auto",
+                BetterGrassMode::Off => "off",
+                BetterGrassMode::Fast => "fast",
+                BetterGrassMode::Fancy => "fancy",
+            },
+        );
         put_i(&mut f, "biomeBlendRadius", self.biome_blend);
         put_name(&mut f, "graphicsPreset", &self.graphics_preset);
         put_name(
@@ -730,6 +791,8 @@ impl Settings {
         };
         // Horizon's own bindings aren't in options.txt.
         next.keys.set("key.emote", self.keys.get("key.emote"));
+        next.keys
+            .set("key.fullbright", self.keys.get("key.fullbright"));
         Ok(next)
     }
     /// The `options.txt` text (Options.save).
@@ -747,6 +810,7 @@ impl Settings {
             crate::gamepad::store::keep(&self.controller);
             let mut extras = self.extras.clone();
             extras.emote_key = self.keys.get("key.emote").to_owned();
+            extras.fullbright_key = self.keys.get("key.fullbright").to_owned();
             extras.save(dir);
             horizon_hooks::settings::engine::save_own(dir, &[crate::extras::FILE]);
             self.mods.save(&crate::logging::shared_dir(dir));
@@ -832,6 +896,7 @@ pub enum Opt {
     Particles,
     EntityDistance,
     EntityShadows,
+    BetterGrass,
     BiomeBlend,
     Preset,
     Mipmaps,
@@ -895,6 +960,11 @@ pub enum Opt {
     /// Horizon's controller settings (`horizon-controller.txt`).
     PadEnabled,
     PadVibration,
+    /// How hard the handles (and the pad's own rumble actuators) buzz
+    /// (`PadSettings::vibration_strength`).
+    PadVibrationStrength,
+    /// How hard an Xbox pad's impulse triggers buzz (`PadSettings::impulse_strength`).
+    PadImpulseStrength,
     PadPlayInBackground,
     PadAdaptiveTriggers,
     PadLightbar,
@@ -957,6 +1027,23 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn better_grass_keeps_explicit_off_distinct_from_pack_default() {
+        let mut s = Settings::parse("");
+        assert_eq!(s.better_grass_mode(), BetterGrassMode::Auto);
+        for mode in [
+            BetterGrassMode::Off,
+            BetterGrassMode::Fast,
+            BetterGrassMode::Fancy,
+            BetterGrassMode::Auto,
+        ] {
+            s.better_grass = mode;
+            s = Settings::parse(&s.serialize());
+            assert_eq!(s.better_grass_mode(), mode);
+        }
+    }
+
     #[test]
     fn the_narrator_reads_its_status_and_the_voice_under_master() {
         let s = Settings::parse("narrator:2\nsoundCategory_master:0.5\nsoundCategory_voice:0.5\n");
@@ -970,12 +1057,70 @@ mod tests {
             horizon_narrator::Status::Off
         );
     }
+
+    /// `BottleItem.use` and `PotionItem` name their sounds `item.*` but play
+    /// them on NEUTRAL and BLOCKS. The name-family rule alone puts both on
+    /// PLAYER, so muting `soundCategory_player` would silence sounds vanilla
+    /// keeps audible.
+    #[test]
+    fn bottle_sounds_keep_their_vanilla_category() {
+        assert_eq!(
+            super::sound_source("minecraft:item.bottle.fill_dragonbreath"),
+            6
+        );
+        assert_eq!(super::sound_source("item.bottle.fill_dragonbreath"), 6);
+        assert_eq!(super::sound_source("minecraft:item.bottle.empty"), 4);
+        assert_eq!(super::sound_source("item.bottle.empty"), 4);
+        // Another `item.*` sound still follows the family rule.
+        assert_eq!(super::sound_source("minecraft:item.book.page_turn"), 7);
+    }
+
+    /// `Equippable.shearingSound` for a llama carpet is played by `Mob.playSound`
+    /// on the llama's NEUTRAL source, not on PLAYER like most `item.*` ids.
+    #[test]
+    fn llama_carpet_unequip_keeps_neutral_category() {
+        assert_eq!(
+            super::sound_source("minecraft:item.llama_carpet.unequip"),
+            6
+        );
+        assert_eq!(super::sound_source("item.llama_carpet.unequip"), 6);
+        assert_eq!(super::sound_source("minecraft:item.book.page_turn"), 7);
+    }
+
+    /// These item id events play on SoundSource.BLOCKS in pinned vanilla 26.3.
+    #[test]
+    fn item_sounds_played_on_blocks_keep_their_category() {
+        for event in [
+            "item.honeycomb.wax_on",
+            "item.bone_meal.use",
+            "item.book.put",
+        ] {
+            assert_eq!(sound_source(event), 4, "{event}");
+        }
+        // An ordinary item event still follows the family rule.
+        assert_eq!(sound_source("item.flintandsteel.use"), 7);
+    }
+
     /// `Monster.getSoundSource`: the verified families and inherited common sounds.
     #[test]
     fn hostile_families_keep_their_sound_category() {
         for (event, source) in [
             ("entity.zombie.hurt", 5),
+            ("block.note_block.harp", 2),
+            ("block.note_block.imitate.creeper", 2),
+            ("block.note_block.trumpet_exposed", 2),
+            ("entity.shulker_bullet.hit", 5),
+            ("entity.shulker_bullet.hurt", 5),
+            ("entity.shulker.ambient", 5),
+            ("entity.hoglin.ambient", 5),
+            ("entity.zoglin.ambient", 5),
+            ("entity.creaking.ambient", 5),
+            ("entity.piglin.ambient", 5),
+            ("entity.piglin_brute.ambient", 5),
             ("entity.cow.hurt", 6),
+            ("entity.ender_dragon.flap", 5),
+            ("entity.ender_dragon.growl", 5),
+            ("entity.ender_dragon.hurt", 5),
             ("block.stone.break", 4),
             ("entity.player.hurt", 7),
             ("entity.arrow.hit", 7),
@@ -1342,5 +1487,39 @@ mod tests {
         assert_eq!(loaded.horizon.api, GraphicsApi::Vulkan);
         assert_eq!(loaded.startup_api, GraphicsApi::Vulkan);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocks_category_covers_explosions_fence_gates_and_redstone() {
+        let blocks = super::SOUND_SOURCES
+            .iter()
+            .position(|&name| name == "block")
+            .unwrap();
+        for event in [
+            "entity.generic.explode",
+            "minecraft:entity.generic.explode",
+            "block.fence_gate.open",
+            "minecraft:block.fence_gate.close",
+            "block.cherry_wood_fence_gate.open",
+            "block.lever.click",
+            "block.stone_button.click_on",
+            "block.comparator.click",
+            "block.piston.extend",
+            "block.redstone_torch.burnout",
+        ] {
+            assert_eq!(sound_source(event), blocks, "{event}");
+        }
+        // Explicit Blocks source keeps custom event IDs on the Blocks slider.
+        let mut audio = crate::audio::Audio::silent(
+            &horizon_assets::resource_source::ResourceSource::directory(
+                Path::new("/nonexistent/sp39-audio").to_path_buf(),
+            ),
+        );
+        audio.capture = Some(Vec::new());
+        audio.play_on(blocks, "gates:custom.open", Some([1.0; 3]), 1.0, 1.0);
+        assert_eq!(
+            audio.capture.as_ref().unwrap().first().map(|s| s.source),
+            Some(blocks)
+        );
     }
 }

@@ -498,7 +498,8 @@ ends on `debian:bookworm-slim` as user `horizon`, with the server build as `hori
 no ALSA or udev. It uses volume `/data` for the server folder, takes the owner's prepared game files as a read-only
 mount on `/opt/horizon/.local/horizon-client/26.3`, exposes port `25565/tcp`, and keeps the control API and
 the panel on 127.0.0.1 inside the container: `docker exec <name> horizon-server status|cmd|backup`.
-On the first start, `HORIZON_EULA=true` and `HORIZON_WORLD`, `HORIZON_SEED`, `HORIZON_PORT`,
+On the first start, `HORIZON_EULA=true` and `HORIZON_WORLD`, `HORIZON_SEED`, `HORIZON_LEVEL_TYPE`,
+`HORIZON_GENERATOR_SETTINGS`, `HORIZON_PORT`,
 `HORIZON_WHITELIST`, `HORIZON_PLAYERS` and `HORIZON_OP` answer `init`'s questions; without the EULA answer
 the container exits and says why. `docker stop` sends SIGTERM, which saves and stops cleanly (give it
 `--stop-timeout 180`). The image is published only with Ludovic's OK (it's hosted infrastructure).
@@ -528,6 +529,9 @@ the container exits and says why. `docker stop` sends SIGTERM, which saves and s
 
 Every question has a flag (`--eula`, `--world`, `--seed`, `--port`, `--whitelist`/`--no-whitelist`,
 `--player NAME`, `--op NAME`, `--yes`) and an environment variable for Docker (`HORIZON_EULA`, …; flags win).
+A new world's preset is a flag only, never a question: `--level-type minecraft:flat` and
+`--generator-settings JSON` (or `@FILE` for the JSON in a file), `HORIZON_LEVEL_TYPE` and
+`HORIZON_GENERATOR_SETTINGS` in the environment.
 
 ## 4. One config file: `server.toml`
 
@@ -567,6 +571,9 @@ seed = ""                    # empty: a random seed on the first start
 game_mode = "survival"       # survival, creative, adventure or spectator
 difficulty = "easy"          # peaceful, easy, normal or hard
 hardcore = false
+level_type = "minecraft:normal" # a new world's preset: minecraft:flat, large_biomes, amplified, single_biome_surface
+generator_settings = "{}"    # a JSON object; minecraft:flat reads its layers and biome from it
+generate_structures = true   # villages, temples, strongholds and the like in a new world
 
 # Any other server.properties key, spelled as vanilla spells it, for example:
 # spawn-protection = 16
@@ -588,7 +595,8 @@ keep = 1                     # other releases kept by updates, besides the one i
 This is the file `init` writes today, and it also writes `[panel]` (`bind = "127.0.0.1:8130"` and
 `allow_public = false`, section 6), `[api]`, `[transfer]` (off; a proxy's hand-overs, section 2) and `[discord]`. `[entities]` (mob AI far from players, off) is written only when set ([hosting](hosting.md)). The defaults are vanilla 26.3's (a test checks
 each one). Unknown keys are errors, as are a typed key set again under `[properties]` and values vanilla would
-refuse. There is no `backups.before_update` setting: an update always backs up the world first (section 7).
+refuse. `level-type`, `generator-settings` and `generate-structures` were `[properties]` keys before they were
+typed: a file that sets one there and not under `[world]` still starts, the value read as the typed key's. There is no `backups.before_update` setting: an update always backs up the world first (section 7).
 
 - **`[entities]`: villagers that cannot move.** Not vanilla, so off. `villager_lobotomize = true` makes the
   engine skip the brain of a villager that is *stuck*, and `villager_lobotomize_check_interval = 100` (ticks)
@@ -698,9 +706,11 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   0.0.0.0 or a public IP, is refused unless `panel.allow_public = true` is set, and even then the panel logs
   a warning at every start.
 - **Who may act.** The API token in `.horizon/api.json` (file mode 0600) is what the CLI and MCP use. Browsers
-  get a one-time login link from `horizon-server panel`: a code good for 10 minutes, swapped for an
-  `HttpOnly; SameSite=Strict` session cookie. Anyone who can read the server folder can manage the server,
-  and no one else can. Sessions end when the supervisor stops.
+  get a one-time login link from `horizon-server panel`: a code good for 10 minutes, swapped for a session
+  that the page keeps for its tab and sends in the `X-Horizon-Session` header (no cookie: a new tab needs a
+  new link). Anyone who can read the server folder can manage the server, and no one else can. A session
+  ends on sign-out, after 12 hours unused (an open page polls every second, so this ends closed tabs and
+  machines left asleep), 7 days after sign-in however much it is used, or when the supervisor stops.
 - **Protection.** The `Host` header must name the panel itself: its address, `localhost` on loopback, or a
   tailnet name (a MagicDNS short name or `*.ts.net`); bound to every interface (`0.0.0.0` or `::`), any IP
   address with the panel's port. That stops DNS rebinding. Changes (POST, PATCH, DELETE) need
@@ -751,7 +761,8 @@ runtime or new dependency. Server-sent events can replace the polling later if a
   3. stops the game, backs up the world (`backups/<time>-before-<tag>.zip`), records the release in use in
      `<dir>/previous` and points `<dir>/current` at the new one;
   4. checks that the new game loads on this system (`--help`), then starts it;
-  5. waits until it has logged `Done` and answered a status request, for 300 s (`--timeout`).
+  5. waits for `Done` and a non-error status reply, for 300 s (`--timeout`). A legacy game without a control
+     endpoint (including No AI) is considered ready at `Done`.
 
   If the new game doesn't load, stops, or isn't up in time, the supervisor goes back by itself: `current`
   points at the release before, `previous` is left as it was, the world is put back from the backup (the
@@ -857,7 +868,10 @@ runtime or new dependency. Server-sent events can replace the polling later if a
     seconds and lost otherwise, as the monitor clears its flag whatever it did; and `server/status`, the
     heartbeat: every `status-heartbeat-interval` seconds (none at 0, the first after as many) the status
     `server/status` answers, up or not, to whoever is connected;
-  - planned: world-upgrade notifications, after the server-side `WorldUpgrader` exists.
+  - world-upgrade notifications, while a dedicated server upgrades an older world as it opens it:
+    `world/upgrade_started`, `world/upgrade_progress` (`progress` from 0 to 1, at most once a second),
+    `world/upgrade_finished` and `world/upgrade_failed` (a `reason` that names no server path). The
+    supervisor polls the starting server's events, so they arrive before the server is up.
 
 ## 9. Benchmark plan (bots against vanilla and Paper)
 

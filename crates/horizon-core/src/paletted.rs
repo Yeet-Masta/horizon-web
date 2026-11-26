@@ -8,7 +8,12 @@
 //! in index order, and the value that did not fit is added last. Palettes
 //! never shrink while resident; `pack` writes the canonical saved form.
 
+use crate::nbt::Tag;
 use crate::storage::{locate, mask};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -225,11 +230,30 @@ fn palette_ids(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
     }
     (palette, ids)
 }
-/// Words holding `ids` in `bits`-wide slots.
-fn pack_words(bits: u8, entries: usize, ids: impl Iterator<Item = u32>) -> Vec<u64> {
-    let mut words = vec![0u64; storage_len(bits, entries)];
-    for (i, id) in ids.enumerate() {
-        write(&mut words, bits, i, id);
+/// Words holding `ids` in `bits`-wide slots, assembled one 64-bit word at a
+/// time instead of locating and read-modify-writing each slot individually.
+fn pack_words(bits: u8, entries: usize, mut ids: impl Iterator<Item = u32>) -> Vec<u64> {
+    let word_count = storage_len(bits, entries);
+    if word_count == 0 {
+        return Vec::new();
+    }
+    let per = 64 / usize::from(bits);
+    let step = u32::from(bits);
+    let mut words = Vec::with_capacity(word_count);
+    let mut remaining = entries;
+    while remaining > 0 {
+        let count = remaining.min(per);
+        let mut word = 0u64;
+        let mut shift = 0u32;
+        for _ in 0..count {
+            let Some(id) = ids.next() else {
+                break;
+            };
+            word |= u64::from(id) << shift;
+            shift += step;
+        }
+        words.push(word);
+        remaining -= count;
     }
     words
 }
@@ -243,14 +267,105 @@ pub struct Packed {
     pub data: Option<Vec<u64>>,
 }
 
+/// A container's identity for a reader that remembers what it read: `uid` is unique among every
+/// container ever made (a clone, which is copy-on-write's way of editing a shared one, gets a new
+/// one), `edits` counts the `set` calls of this container since it was made. A reader that kept
+/// `(uid, edits)` and finds the same pair later knows the entries are the ones it read.
+#[derive(Debug)]
+struct Identity {
+    uid: u64,
+    edits: u32,
+}
+impl Default for Identity {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            uid: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            edits: 0,
+        }
+    }
+}
+impl Clone for Identity {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// Byte budget for cached canonical section palettes held by resident
+/// [`PalettedContainer`]s, shared by every save folder that holds the `Arc`.
+#[derive(Debug)]
+pub struct SavedPaletteBudget {
+    limit: usize,
+    used: AtomicUsize,
+}
+
+impl SavedPaletteBudget {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+        }
+    }
+
+    /// Bytes currently reserved by live cached section palettes.
+    pub fn used(&self) -> usize {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    /// Maximum bytes this budget admits.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    fn reserve(&self, charge: usize) -> bool {
+        let mut used = self.used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = used.checked_add(charge).filter(|&next| next <= self.limit) else {
+                return false;
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(actual) => used = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SavedNbt {
+    budget: Arc<SavedPaletteBudget>,
+    charge: usize,
+    ids: Box<[u32]>,
+    words: Box<[i64]>,
+}
+
+impl Drop for SavedNbt {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.charge, Ordering::Relaxed);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PalettedContainer {
     strategy: Strategy,
     bits: u8,
     palette: Palette,
     words: Vec<u64>,
+    /// Which container this is, and how many writes it has had (see [`Identity`]).
+    identity: Identity,
+    saved_nbt: OnceLock<Arc<SavedNbt>>,
 }
 impl PalettedContainer {
+    /// `(uid, edits)`: equal to an earlier answer only if this is the same container and none of
+    /// its entries was written since (`edits` wraps after 2^32 writes; a reader that keeps a
+    /// stamp for that long is not one this serves).
+    #[inline]
+    pub fn stamp(&self) -> (u64, u32) {
+        (self.identity.uid, self.identity.edits)
+    }
     /// `new PalettedContainer(initialValue, strategy)`.
     pub fn new(strategy: Strategy, value: u32) -> Self {
         Self {
@@ -258,6 +373,8 @@ impl PalettedContainer {
             bits: 0,
             palette: Palette::Single(value),
             words: Vec::new(),
+            identity: Identity::default(),
+            saved_nbt: OnceLock::new(),
         }
     }
     pub fn strategy(&self) -> Strategy {
@@ -305,6 +422,20 @@ impl PalettedContainer {
     /// `get` of the entries `start..start + out.len()`, the palette matched once.
     #[inline]
     pub fn get_run(&self, start: usize, out: &mut [u32]) {
+        match &self.palette {
+            Palette::Single(value) => {
+                out.fill(*value);
+                return;
+            }
+            Palette::List(list) if self.bits == 4 && out.len() == 16 && (start & 15) == 0 => {
+                let word = self.words[start >> 4];
+                for (k, cell) in out.iter_mut().enumerate() {
+                    *cell = list[((word >> (k * 4)) & 15) as usize];
+                }
+                return;
+            }
+            _ => {}
+        }
         if out.len() == 2 && !matches!(self.palette, Palette::Single(_)) {
             let bits = usize::from(self.bits);
             let per = 64 / bits;
@@ -398,6 +529,10 @@ impl PalettedContainer {
     }
     /// `getAndSet`: stores `value` and returns the previous one.
     pub fn set(&mut self, i: usize, value: u32) -> u32 {
+        self.identity.edits = self.identity.edits.wrapping_add(1);
+        if self.saved_nbt.get().is_some() && self.get(i) != value {
+            self.saved_nbt.take();
+        }
         let id = self.id_for(value);
         match &self.palette {
             Palette::Single(old) => *old,
@@ -487,32 +622,110 @@ impl PalettedContainer {
         self.words = words;
         id as usize
     }
+    #[inline(always)]
+    fn unpack_mapped_fixed<const BITS: u32, const PER: usize, T: Copy>(
+        words: &[u64],
+        out: &mut [T],
+        map: &[T],
+    ) {
+        let m = (1u64 << BITS) - 1;
+        let (chunks, tail) = out.as_chunks_mut::<PER>();
+        for (&word, chunk) in words.iter().zip(chunks.iter_mut()) {
+            let mut w = word;
+            for cell in chunk {
+                *cell = map[(w & m) as usize];
+                w >>= BITS;
+            }
+        }
+        if !tail.is_empty() {
+            let mut w = words[chunks.len()];
+            for cell in tail {
+                *cell = map[(w & m) as usize];
+                w >>= BITS;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn unpack_global_fixed<const BITS: u32, const PER: usize>(words: &[u64], out: &mut [u32]) {
+        let m = (1u64 << BITS) - 1;
+        let (chunks, tail) = out.as_chunks_mut::<PER>();
+        for (&word, chunk) in words.iter().zip(chunks.iter_mut()) {
+            let mut w = word;
+            for cell in chunk {
+                *cell = (w & m) as u32;
+                w >>= BITS;
+            }
+        }
+        if !tail.is_empty() {
+            let mut w = words[chunks.len()];
+            for cell in tail {
+                *cell = (w & m) as u32;
+                w >>= BITS;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn unpack_ids_fixed<const BITS: u32, const PER: usize>(words: &[u64], ids: &mut [u16]) {
+        let m = (1u64 << BITS) - 1;
+        let (chunks, tail) = ids.as_chunks_mut::<PER>();
+        for (&word, chunk) in words.iter().zip(chunks.iter_mut()) {
+            let mut w = word;
+            for cell in chunk {
+                *cell = (w & m) as u16;
+                w >>= BITS;
+            }
+        }
+        if !tail.is_empty() {
+            let mut w = words[chunks.len()];
+            for cell in tail {
+                *cell = (w & m) as u16;
+                w >>= BITS;
+            }
+        }
+    }
+
     /// All values in index order.
     pub fn unpack(&self, out: &mut [u32]) {
         assert_eq!(out.len(), self.strategy.entries());
         match &self.palette {
             Palette::Single(value) => out.fill(*value),
-            Palette::List(list) => {
-                let bits = usize::from(self.bits);
-                let per = 64 / bits;
-                let m = mask(self.bits);
-                for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
-                    for (slot, cell) in chunk.iter_mut().enumerate() {
-                        let id = ((word >> (slot * bits)) & m) as usize;
-                        *cell = list[id];
+            Palette::List(list) => match self.bits {
+                4 => Self::unpack_mapped_fixed::<4, 16, u32>(&self.words, out, list),
+                5 => Self::unpack_mapped_fixed::<5, 12, u32>(&self.words, out, list),
+                6 => Self::unpack_mapped_fixed::<6, 10, u32>(&self.words, out, list),
+                7 => Self::unpack_mapped_fixed::<7, 9, u32>(&self.words, out, list),
+                8 => Self::unpack_mapped_fixed::<8, 8, u32>(&self.words, out, list),
+                bits => {
+                    let per = 64 / usize::from(bits);
+                    let m = mask(bits);
+                    let shift = u32::from(bits);
+                    for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+                        let mut w = word;
+                        for cell in chunk {
+                            *cell = list[(w & m) as usize];
+                            w >>= shift;
+                        }
                     }
                 }
-            }
-            Palette::Global => {
-                let bits = usize::from(self.bits);
-                let per = 64 / bits;
-                let m = mask(self.bits);
-                for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
-                    for (slot, cell) in chunk.iter_mut().enumerate() {
-                        *cell = ((word >> (slot * bits)) & m) as u32;
+            },
+            Palette::Global => match self.bits {
+                15 => Self::unpack_global_fixed::<15, 4>(&self.words, out),
+                16 => Self::unpack_global_fixed::<16, 4>(&self.words, out),
+                bits => {
+                    let per = 64 / usize::from(bits);
+                    let m = mask(bits);
+                    let shift = u32::from(bits);
+                    for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+                        let mut w = word;
+                        for cell in chunk {
+                            *cell = (w & m) as u32;
+                            w >>= shift;
+                        }
                     }
                 }
-            }
+            },
         }
     }
     /// The stored ids through `map`: `out[i] = map[id of entry i]`, in index
@@ -521,27 +734,24 @@ impl PalettedContainer {
     /// stores no ids: `out` is left as it is.
     pub fn unpack_ids_mapped<T: Copy>(&self, out: &mut [T], map: &[T]) {
         assert_eq!(out.len(), self.strategy.entries());
-        // Four bits a linear palette's usual width: a whole word of them is a
-        // row of 16, and immediate shifts for the compiler to unroll.
-        if self.bits == 4 {
-            for (row, &word) in out.as_chunks_mut::<16>().0.iter_mut().zip(&self.words) {
-                for (x, cell) in row.iter_mut().enumerate() {
-                    *cell = map[((word >> (x * 4)) & 0xF) as usize];
+        match self.bits {
+            0 => {}
+            4 => Self::unpack_mapped_fixed::<4, 16, T>(&self.words, out, map),
+            5 => Self::unpack_mapped_fixed::<5, 12, T>(&self.words, out, map),
+            6 => Self::unpack_mapped_fixed::<6, 10, T>(&self.words, out, map),
+            7 => Self::unpack_mapped_fixed::<7, 9, T>(&self.words, out, map),
+            8 => Self::unpack_mapped_fixed::<8, 8, T>(&self.words, out, map),
+            bits => {
+                let per = 64 / usize::from(bits);
+                let m = mask(bits);
+                let shift = u32::from(bits);
+                for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
+                    let mut w = word;
+                    for cell in chunk {
+                        *cell = map[(w & m) as usize];
+                        w >>= shift;
+                    }
                 }
-            }
-            return;
-        }
-        if self.bits == 0 {
-            return;
-        }
-        let bits = usize::from(self.bits);
-        let per = 64 / bits;
-        let m = mask(self.bits);
-        for (chunk, &word) in out.chunks_mut(per).zip(&self.words) {
-            let mut shift = 0;
-            for cell in chunk {
-                *cell = map[((word >> shift) & m) as usize];
-                shift += bits;
             }
         }
     }
@@ -553,13 +763,23 @@ impl PalettedContainer {
             return None;
         };
         assert_eq!(ids.len(), self.strategy.entries());
-        let bits = usize::from(self.bits);
-        let per = 64 / bits;
-        let m = mask(self.bits);
-        for (chunk, &word) in ids.chunks_mut(per).zip(&self.words) {
-            for (slot, cell) in chunk.iter_mut().enumerate() {
-                // List palettes stay at a few bits (eight at most for blocks).
-                *cell = ((word >> (slot * bits)) & m) as u16;
+        match self.bits {
+            4 => Self::unpack_ids_fixed::<4, 16>(&self.words, ids),
+            5 => Self::unpack_ids_fixed::<5, 12>(&self.words, ids),
+            6 => Self::unpack_ids_fixed::<6, 10>(&self.words, ids),
+            7 => Self::unpack_ids_fixed::<7, 9>(&self.words, ids),
+            8 => Self::unpack_ids_fixed::<8, 8>(&self.words, ids),
+            bits => {
+                let per = 64 / usize::from(bits);
+                let m = mask(bits);
+                let shift = u32::from(bits);
+                for (chunk, &word) in ids.chunks_mut(per).zip(&self.words) {
+                    let mut w = word;
+                    for cell in chunk {
+                        *cell = (w & m) as u16;
+                        w >>= shift;
+                    }
+                }
             }
         }
         Some(list)
@@ -581,7 +801,9 @@ impl PalettedContainer {
                 strategy,
                 bits,
                 words: pack_words(bits, ids.len(), ids.iter().copied()),
+                identity: Identity::default(),
                 palette: Palette::List(palette),
+                saved_nbt: OnceLock::new(),
             },
             Config::Global => {
                 let bits = strategy.global_bits;
@@ -589,7 +811,9 @@ impl PalettedContainer {
                     strategy,
                     bits,
                     words: pack_words(bits, ids.len(), ids.iter().map(|&id| palette[id as usize])),
+                    identity: Identity::default(),
                     palette: Palette::Global,
+                    saved_nbt: OnceLock::new(),
                 }
             }
         }
@@ -628,6 +852,8 @@ impl PalettedContainer {
                     bits,
                     palette: Palette::List(palette),
                     words,
+                    identity: Identity::default(),
+                    saved_nbt: OnceLock::new(),
                 };
                 container.check_indices()?;
                 Ok(container)
@@ -637,6 +863,8 @@ impl PalettedContainer {
                 bits: storage_bits,
                 palette: Palette::Global,
                 words,
+                identity: Identity::default(),
+                saved_nbt: OnceLock::new(),
             }),
         }
     }
@@ -733,6 +961,64 @@ impl PalettedContainer {
             data,
         }
     }
+
+    fn pack_nbt_fields(
+        palette: &[u32],
+        data: Option<Vec<i64>>,
+        name: impl FnMut(u32) -> Tag,
+    ) -> Tag {
+        let mut fields = vec![(
+            "palette",
+            Tag::List(palette.iter().copied().map(name).collect()),
+        )];
+        if let Some(words) = data {
+            fields.push(("data", Tag::LongArray(words)));
+        }
+        Tag::compound(fields)
+    }
+
+    /// Canonical `palette` and `data` NBT compound for a saved section.
+    ///
+    /// When `budget` is `Some`, a non-uniform container caches its canonical
+    /// palette ids and packed `data` words lazily on the first save within the
+    /// budget's byte cap. Repeated saves of an unchanged container (or clones
+    /// sharing the entry) reuse those words and re-resolve `name` against the
+    /// caller's current registry. Mutating a cell via [`Self::set`] drops the
+    /// entry and releases its budget reservation when the last owner drops.
+    pub fn pack_nbt(
+        &self,
+        budget: Option<&Arc<SavedPaletteBudget>>,
+        name: impl FnMut(u32) -> Tag,
+    ) -> Tag {
+        if let Some(saved) = self.saved_nbt.get()
+            && budget.is_some_and(|budget| Arc::ptr_eq(budget, &saved.budget))
+        {
+            return Self::pack_nbt_fields(&saved.ids, Some(saved.words.to_vec()), name);
+        }
+        let Packed { palette, data, .. } = self.pack();
+        let data = data.map(|words| {
+            words
+                .into_iter()
+                .map(|word| word as i64)
+                .collect::<Vec<_>>()
+        });
+        if let (Some(budget), Some(words), None) = (budget, data.as_deref(), self.saved_nbt.get()) {
+            let charge = std::mem::size_of::<SavedNbt>()
+                + 2 * std::mem::size_of::<usize>()
+                + std::mem::size_of_val(palette.as_slice())
+                + std::mem::size_of_val(words);
+            if budget.reserve(charge) {
+                let _ = self.saved_nbt.set(Arc::new(SavedNbt {
+                    budget: Arc::clone(budget),
+                    charge,
+                    ids: palette.as_slice().into(),
+                    words: words.into(),
+                }));
+            }
+        }
+        Self::pack_nbt_fields(&palette, data, name)
+    }
+
     /// `PalettedContainer.unpack`: a container from the saved form.
     pub fn from_packed(
         strategy: Strategy,
@@ -767,7 +1053,9 @@ impl PalettedContainer {
                 strategy,
                 bits,
                 words: data.to_vec(),
+                identity: Identity::default(),
                 palette: Palette::List(palette),
+                saved_nbt: OnceLock::new(),
             };
             container.check_indices()?;
             return Ok(container);
@@ -835,8 +1123,19 @@ impl PalettedContainer {
         }
         (0..entries).any(|i| matching[self.raw(i)])
     }
-    /// Heap bytes held by the palette and the storage.
+    /// Heap bytes held by the palette, the storage, and this container's share
+    /// of any cached canonical saved palette: clones share one entry, and each
+    /// counts its charge divided by the number of containers holding it, so
+    /// summing them counts the entry once.
     pub fn heap_bytes(&self) -> usize {
+        self.storage_heap_bytes()
+            + self
+                .saved_nbt
+                .get()
+                .map_or(0, |saved| saved.charge / Arc::strong_count(saved))
+    }
+    /// Heap bytes held by the palette and the storage.
+    fn storage_heap_bytes(&self) -> usize {
         self.words.capacity() * 8
             + match &self.palette {
                 Palette::List(list) => list.capacity() * 4,
@@ -866,778 +1165,4 @@ impl PartialEq for PalettedContainer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    const BLOCKS: Strategy = Strategy::blocks(16);
-    const BIOMES: Strategy = Strategy::biomes(7);
-
-    #[test]
-    fn locate_matches_division_for_every_width() {
-        for bits in 1..=32u8 {
-            let per = 64 / usize::from(bits);
-            for i in 0..4096 {
-                let expected = (i / per, ((i % per) * usize::from(bits)) as u32);
-                assert_eq!(locate(bits, i), expected, "{bits} bits, entry {i}");
-            }
-        }
-    }
-    fn rng(state: &mut u64) -> u64 {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        *state
-    }
-    #[test]
-    fn runs_read_the_stored_values() {
-        let mut state = 0x9E37_79B9_7F4A_7C15;
-        // One value, a list palette, and the global palette.
-        for distinct in [1u64, 5, 3000] {
-            let values: Vec<u32> = (0..4096)
-                .map(|_| (rng(&mut state) % distinct) as u32)
-                .collect();
-            let container = PalettedContainer::from_values(BLOCKS, &values);
-            for start in 0..4095 {
-                let mut pair = [u32::MAX; 2];
-                container.get_run(start, &mut pair);
-                assert_eq!(pair, values[start..start + 2]);
-            }
-            for _ in 0..200 {
-                let start = (rng(&mut state) % 4096) as usize;
-                let len = (rng(&mut state) % 20) as usize;
-                let len = len.min(4096 - start);
-                let mut run = vec![u32::MAX; len];
-                container.get_run(start, &mut run);
-                assert_eq!(
-                    run,
-                    values[start..start + len],
-                    "{distinct} values, {start}+{len}"
-                );
-            }
-        }
-    }
-    #[test]
-    fn containers_stored_alike_are_the_same() {
-        let values: Vec<u32> = (0..4096).map(|i| (i % 7) as u32).collect();
-        let a = PalettedContainer::from_values(BLOCKS, &values);
-        assert!(a.same_storage(&a.clone()));
-        let mut b = a.clone();
-        b.set(100, 3);
-        assert!(!a.same_storage(&b));
-        // the same values stored another way are not found alike (the caller unpacks those)
-        let mut c = PalettedContainer::new(BLOCKS, 0);
-        for (i, &v) in values.iter().enumerate() {
-            c.set(i, v);
-        }
-        assert!(PalettedContainer::new(BLOCKS, 5).same_storage(&PalettedContainer::new(BLOCKS, 5)));
-        assert!(
-            !PalettedContainer::new(BLOCKS, 5).same_storage(&PalettedContainer::new(BLOCKS, 6))
-        );
-        let mut out = vec![0; 4096];
-        c.unpack(&mut out);
-        assert_eq!(out, values);
-    }
-    #[test]
-    fn grows_through_vanilla_widths() {
-        let mut c = PalettedContainer::new(BLOCKS, 0);
-        assert_eq!((c.bits(), c.palette_len()), (0, 1));
-        let mut expected = Vec::new();
-        for n in 1..=300u32 {
-            c.set(n as usize, n);
-            expected.push(match n + 1 {
-                2..=16 => 4,
-                17..=32 => 5,
-                33..=64 => 6,
-                65..=128 => 7,
-                129..=256 => 8,
-                _ => 16,
-            });
-            assert_eq!(c.bits(), *expected.last().unwrap(), "after {n} values");
-        }
-        assert!(c.is_global());
-        for n in 1..=300u32 {
-            assert_eq!(c.get(n as usize), n);
-        }
-        let mut b = PalettedContainer::new(BIOMES, 3);
-        for n in 1..=9u32 {
-            b.set(n as usize, n + 3);
-            let want = match n + 1 {
-                2 => 1,
-                3..=4 => 2,
-                5..=8 => 3,
-                _ => 7,
-            };
-            assert_eq!(b.bits(), want, "after {n} biomes");
-        }
-    }
-    #[test]
-    fn matches_a_plain_array_under_random_edits() {
-        for (strategy, distinct) in [(BLOCKS, 700u64), (BLOCKS, 12), (BIOMES, 9), (BIOMES, 3)] {
-            let entries = strategy.entries();
-            let mut state = 0x1234_5678_9ABC_DEF1u64;
-            let mut c = PalettedContainer::new(strategy, 5);
-            let mut plain = vec![5u32; entries];
-            for _ in 0..20_000 {
-                let r = rng(&mut state);
-                let i = (r % entries as u64) as usize;
-                let v = ((r >> 20) % distinct) as u32 * 7;
-                assert_eq!(c.set(i, v), plain[i]);
-                plain[i] = v;
-            }
-            let mut out = vec![0; entries];
-            c.unpack(&mut out);
-            assert_eq!(out, plain);
-            for (i, &v) in plain.iter().enumerate() {
-                assert_eq!(c.get(i), v);
-            }
-            let packed = c.pack();
-            let loaded = PalettedContainer::from_packed(
-                strategy,
-                packed.palette.clone(),
-                packed.data.as_deref(),
-            )
-            .unwrap();
-            assert_eq!(loaded, c);
-            assert_eq!(loaded.pack(), packed);
-            let again = PalettedContainer::from_values(strategy, &plain);
-            assert_eq!(again, c);
-            assert_eq!(again.pack(), packed);
-            let (bits, palette, words) = c.to_wire();
-            let wire =
-                PalettedContainer::from_wire(strategy, bits, palette, words.to_vec()).unwrap();
-            assert_eq!(wire, c);
-            for wanted in [0, 7, 14, 35, 7 * 699, 5] {
-                assert_eq!(
-                    c.has(|v| v == wanted || v == wanted + 7),
-                    plain.iter().any(|&v| v == wanted || v == wanted + 7),
-                    "has {wanted} in {distinct} values"
-                );
-            }
-        }
-    }
-    #[test]
-    fn has_matches_a_scan_at_every_width() {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        for (strategy, distinct) in [
-            (BLOCKS, 2u32),
-            (BLOCKS, 3),
-            (BLOCKS, 17),
-            (BLOCKS, 33),
-            (BLOCKS, 65),
-            (BLOCKS, 129),
-            (BIOMES, 2),
-            (BIOMES, 3),
-            (BIOMES, 5),
-        ] {
-            let entries = strategy.entries();
-            let mut c = PalettedContainer::new(strategy, 0);
-            let mut plain = vec![0u32; entries];
-            for i in 0..entries {
-                let v = (rng(&mut state) % u64::from(distinct)) as u32;
-                c.set(i, v);
-                plain[i] = v;
-            }
-            // Take some values away again (stale entries), the last index too.
-            for gone in [0, 1, distinct - 1] {
-                for i in 0..entries {
-                    if plain[i] == gone {
-                        c.set(i, distinct);
-                        plain[i] = distinct;
-                    }
-                }
-                for m in [3, 5, 7] {
-                    let hit = |v: u32| v % m == gone % m;
-                    assert_eq!(c.has(hit), plain.iter().any(|&v| hit(v)));
-                }
-                for wanted in 0..=distinct {
-                    for other in [wanted, wanted + 1, wanted + 2, wanted + 3, wanted + 4] {
-                        let hit = |v: u32| v == wanted || v == other;
-                        assert_eq!(
-                            c.has(hit),
-                            plain.iter().any(|&v| hit(v)),
-                            "{distinct} values, {wanted}/{other}, without {gone}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-    #[test]
-    fn has_ignores_stale_palette_entries() {
-        let mut c = PalettedContainer::new(BLOCKS, 0);
-        assert!(c.has(|v| v == 0) && !c.has(|v| v == 3));
-        c.set(4095, 3);
-        assert!(c.has(|v| v == 3));
-        c.set(4095, 0);
-        assert!(c.maybe_has(|v| v == 3) && !c.has(|v| v == 3));
-        for v in 1..=300 {
-            c.set(v as usize, v);
-        }
-        assert!(c.is_global() && c.has(|v| v == 300));
-        c.set(300, 0);
-        assert!(c.maybe_has(|v| v == 300) && !c.has(|v| v == 300));
-    }
-    #[test]
-    fn uniform_detection_ignores_stale_palette_entries() {
-        let mut c = PalettedContainer::new(BLOCKS, 0);
-        c.set(10, 3);
-        assert!(!c.is_uniform(0));
-        c.set(10, 0);
-        assert!(c.palette_len() == 2 && c.is_uniform(0) && c.uniform() == Some(0));
-        assert!(!c.is_uniform(3));
-        for i in 0..4096 {
-            c.set(i, 3);
-        }
-        assert_eq!(c.uniform(), Some(3));
-    }
-    #[test]
-    fn rejects_malformed_wire_data() {
-        assert!(PalettedContainer::from_wire(BLOCKS, 4, vec![1, 2], vec![0; 255]).is_err());
-        assert!(PalettedContainer::from_wire(BLOCKS, 4, vec![1, 2], vec![0x3333; 256]).is_err());
-        assert!(PalettedContainer::from_wire(BLOCKS, 4, vec![], vec![0; 256]).is_err());
-        assert!(PalettedContainer::from_wire(BLOCKS, 0, vec![1, 2], vec![]).is_err());
-        assert!(PalettedContainer::from_wire(BIOMES, 2, vec![1, 2, 3, 4, 5], vec![0; 4]).is_err());
-        assert!(PalettedContainer::from_wire(BLOCKS, 0, vec![9], vec![]).is_ok());
-    }
-    /// Every word of every width against the entry-at-a-time scan, over
-    /// valid data, a bad entry anywhere in a word, garbage only in a word's
-    /// padding fields, and the last word's padding set to all ones: the same
-    /// verdict, and the first offending entry named as before.
-    #[test]
-    #[ignore = "daily"]
-    fn index_check_matches_an_entry_by_entry_scan() {
-        fn scan(strategy: Strategy, bits: u8, len: usize, words: &[u64]) -> Result<(), u32> {
-            let per = 64 / usize::from(bits);
-            for i in 0..strategy.entries() {
-                if i / per >= words.len() {
-                    break;
-                }
-                let index = read(words, bits, i);
-                if index as usize >= len {
-                    return Err(index);
-                }
-            }
-            Ok(())
-        }
-        fn compare(strategy: Strategy, bits: u8, len: usize, words: &[u64], what: &str) {
-            let container = PalettedContainer {
-                strategy,
-                bits,
-                palette: Palette::List((0..len as u32).collect()),
-                words: words.to_vec(),
-            };
-            match (container.check_indices(), scan(strategy, bits, len, words)) {
-                (Ok(()), Ok(())) => {}
-                (Err(PaletteError::BadIndex { index, palette }), Err(first)) => {
-                    assert_eq!((index, palette), (first, len), "{what}");
-                }
-                (a, b) => panic!("{what}: {a:?} vs {b:?}"),
-            }
-        }
-        let mut state = 0x2545_F491_4F6C_DD1Du64;
-        for strategy in [BLOCKS, BIOMES] {
-            let entries = strategy.entries();
-            let max_len = match strategy.kind {
-                Kind::Blocks => 256,
-                Kind::Biomes => 8,
-            };
-            for len in 2..=max_len {
-                let bits = match strategy.config(ceil_log2(len)) {
-                    Config::List(bits) => bits,
-                    _ => unreachable!("{len} entries in a single-value palette"),
-                };
-                let per = 64 / usize::from(bits);
-                let words_len = storage_len(bits, entries);
-                let valid = pack_words(bits, entries, (0..entries).map(|i| (i % len) as u32));
-                let name = format!("{len} entries, {bits} bits");
-                compare(strategy, bits, len, &valid, &name);
-                if len == 1 << bits {
-                    // No field can hold an index past the palette.
-                    continue;
-                }
-                let top = mask(bits) as usize;
-                // A bad entry in the first, a middle and the last field of a
-                // word, and in the container's last entry.
-                for at in [0, per / 2, per - 1, entries / 2, entries - 1] {
-                    let mut bad = valid.clone();
-                    let index = (len + (rng(&mut state) % 7) as usize).min(top);
-                    write(&mut bad, bits, at, index as u32);
-                    compare(strategy, bits, len, &bad, &format!("{name}, bad at {at}"));
-                }
-                // Garbage in the last word's padding fields only.
-                let rest = entries - (words_len - 1) * per;
-                if rest < per {
-                    let mut padded = valid.clone();
-                    padded[words_len - 1] |= u64::MAX << (rest * usize::from(bits));
-                    compare(strategy, bits, len, &padded, &format!("{name}, padding"));
-                }
-                // A whole random word, every field drawn from `0..=len`.
-                for _ in 0..64 {
-                    let mut words = valid.clone();
-                    let word = (rng(&mut state) % words_len as u64) as usize;
-                    words[word] = 0;
-                    for field in 0..per {
-                        let index = (rng(&mut state) % (len as u64 + 1)).min(top as u64);
-                        words[word] |= index << (field * usize::from(bits));
-                    }
-                    compare(
-                        strategy,
-                        bits,
-                        len,
-                        &words,
-                        &format!("{name}, random word {word}"),
-                    );
-                }
-            }
-        }
-    }
-    #[test]
-    fn saved_validation_matches_entrywise_reference() {
-        // Keep the previous loader as an independent entry-at-a-time reference:
-        // errors, resident palette order and unused storage bits must all agree.
-        fn reference(
-            strategy: Strategy,
-            palette: Vec<u32>,
-            data: Option<&[u64]>,
-        ) -> Result<PalettedContainer, PaletteError> {
-            if palette.is_empty() {
-                return Err(PaletteError::BadPalette { len: 0 });
-            }
-            let config = strategy.config(ceil_log2(palette.len()));
-            let entries = strategy.entries();
-            let bits = match config {
-                Config::Single => return Ok(PalettedContainer::new(strategy, palette[0])),
-                Config::List(bits) => bits,
-                Config::Global => ceil_log2(palette.len()),
-            };
-            let expected = storage_len(bits, entries);
-            let data = data.ok_or(PaletteError::BadStorage {
-                expected,
-                actual: 0,
-            })?;
-            if data.len() != expected {
-                return Err(PaletteError::BadStorage {
-                    expected,
-                    actual: data.len(),
-                });
-            }
-            let mut ids = Vec::with_capacity(entries);
-            for i in 0..entries {
-                let index = read(data, bits, i);
-                if index as usize >= palette.len() {
-                    return Err(PaletteError::BadIndex {
-                        index,
-                        palette: palette.len(),
-                    });
-                }
-                ids.push(index);
-            }
-            Ok(match config {
-                Config::List(bits) => PalettedContainer {
-                    strategy,
-                    bits,
-                    palette: Palette::List(palette),
-                    words: data.to_vec(),
-                },
-                _ => PalettedContainer::build(strategy, palette, &ids),
-            })
-        }
-        fn compare(strategy: Strategy, palette: &[u32], data: Option<&[u64]>) {
-            let expected = reference(strategy, palette.to_vec(), data);
-            let actual = PalettedContainer::from_packed(strategy, palette.to_vec(), data);
-            match (actual, expected) {
-                (Ok(a), Ok(b)) => {
-                    assert_eq!(a.strategy, b.strategy);
-                    assert_eq!(a.bits, b.bits);
-                    assert_eq!(a.palette, b.palette);
-                    assert_eq!(a.words, b.words);
-                }
-                (Err(a), Err(b)) => assert_eq!(a, b),
-                (a, b) => panic!("loader disagreement: {a:?} vs {b:?}"),
-            }
-        }
-        for strategy in [BLOCKS, BIOMES] {
-            for len in [
-                0, 1, 2, 3, 4, 5, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255,
-                256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049, 4096, 4097,
-            ] {
-                let palette: Vec<u32> = (0..len).map(|i| (i as u32 * 7) % 127).collect();
-                compare(strategy, &palette, None);
-                compare(strategy, &palette, Some(&[]));
-                if len <= 1 {
-                    compare(strategy, &palette, Some(&[u64::MAX]));
-                    continue;
-                }
-                let bits = match strategy.config(ceil_log2(len)) {
-                    Config::List(bits) => bits,
-                    _ => ceil_log2(len),
-                };
-                let entries = strategy.entries();
-                let mut words = pack_words(bits, entries, (0..entries).map(|i| (i % len) as u32));
-                compare(strategy, &palette, Some(&words));
-                compare(strategy, &palette, Some(&words[..words.len() - 1]));
-                // Nonzero padding in every word and in the final partial word
-                // is legal and must be preserved by resident list palettes.
-                let per = 64 / usize::from(bits);
-                for (word, positions) in words.iter_mut().zip((0..entries).step_by(per)) {
-                    let used = (entries - positions).min(per) * usize::from(bits);
-                    if used < 64 {
-                        *word |= u64::MAX << used;
-                    }
-                }
-                compare(strategy, &palette, Some(&words));
-                if len < 1usize << bits {
-                    for i in [0, per - 1, per, entries / 2, entries - 1] {
-                        let mut invalid = words.clone();
-                        write(&mut invalid, bits, i, len as u32);
-                        // A second invalid entry verifies first-error ordering.
-                        write(&mut invalid, bits, entries - 1, mask(bits) as u32);
-                        compare(strategy, &palette, Some(&invalid));
-                    }
-                }
-            }
-        }
-    }
-    #[test]
-    fn division_magic_is_exact() {
-        for bits in 1..=32u8 {
-            let per = 64 / usize::from(bits);
-            for i in 0..4096usize {
-                assert_eq!(locate(bits, i).0, i / per, "bits {bits} index {i}");
-            }
-        }
-    }
-
-    /// The pre-optimization `unpack`, kept to compare against in the benchmark.
-    fn baseline_unpack(c: &PalettedContainer, out: &mut [u32]) {
-        match &c.palette {
-            Palette::Single(value) => out.fill(*value),
-            palette => {
-                let bits = usize::from(c.bits);
-                let per = 64 / bits;
-                let m = mask(c.bits);
-                for (chunk, &word) in out.chunks_mut(per).zip(&c.words) {
-                    for (slot, cell) in chunk.iter_mut().enumerate() {
-                        let id = ((word >> (slot * bits)) & m) as u32;
-                        *cell = match palette {
-                            Palette::List(list) => list[id as usize],
-                            _ => id,
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    /// `unpack` against the pre-optimization implementation, for a list palette
-    /// and the global palette. The result is checked before timing; 25 measured
-    /// rounds alternate order and report the median and best microsecond-per-call.
-    #[test]
-    #[ignore = "microbenchmark; run with --ignored --nocapture"]
-    fn benchmark_unpack() {
-        use horizon_std::time::Instant;
-        use std::hint::black_box;
-        let values: Vec<u32> = (0..4096).map(|i| (i % 12) as u32).collect();
-        let list = PalettedContainer::from_values(BLOCKS, &values);
-        let global = PalettedContainer::from_values(
-            BLOCKS,
-            &(0..4096).map(|i| (i * 3) as u32).collect::<Vec<_>>(),
-        );
-        for (name, container) in [("list", &list), ("global", &global)] {
-            let mut expected = vec![0u32; 4096];
-            baseline_unpack(container, &mut expected);
-            let mut out = vec![0u32; 4096];
-            container.unpack(&mut out);
-            assert_eq!(expected, out, "unpack {name} differs");
-            let mut times = [Vec::new(), Vec::new()];
-            for round in 0..25 {
-                for optimized in [round % 2 == 0, round % 2 != 0] {
-                    let started = Instant::now();
-                    for _ in 0..2000 {
-                        if optimized {
-                            container.unpack(black_box(&mut out));
-                        } else {
-                            baseline_unpack(black_box(container), black_box(&mut out));
-                        }
-                    }
-                    if round > 0 {
-                        times[usize::from(optimized)]
-                            .push(started.elapsed().as_secs_f64() * 1e6 / 2000.0);
-                    }
-                }
-            }
-            for values in &mut times {
-                values.sort_by(f64::total_cmp);
-            }
-            let median = |v: &[f64]| v[v.len() / 2];
-            println!(
-                "unpack {name} median: baseline {:.3} us optimized {:.3} us speedup {:.3}x",
-                median(&times[0]),
-                median(&times[1]),
-                median(&times[0]) / median(&times[1])
-            );
-            println!(
-                "unpack {name} best:   baseline {:.3} us optimized {:.3} us speedup {:.3}x",
-                times[0][0],
-                times[1][0],
-                times[0][0] / times[1][0]
-            );
-        }
-    }
-
-    /// The pre-optimization `palette_ids` (scan, then a SipHash map), kept to
-    /// compare against.
-    fn baseline_palette_ids(values: &[u32]) -> (Vec<u32>, Vec<u32>) {
-        let mut palette: Vec<u32> = Vec::new();
-        let mut small = true;
-        let mut lookup: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-        let mut ids = Vec::with_capacity(values.len());
-        for &value in values {
-            let id = if small {
-                match palette.iter().position(|&v| v == value) {
-                    Some(id) => id as u32,
-                    None => {
-                        palette.push(value);
-                        if palette.len() > 16 {
-                            small = false;
-                            lookup.extend(palette.iter().enumerate().map(|(i, &v)| (v, i as u32)));
-                        }
-                        palette.len() as u32 - 1
-                    }
-                }
-            } else {
-                *lookup.entry(value).or_insert_with(|| {
-                    palette.push(value);
-                    palette.len() as u32 - 1
-                })
-            };
-            ids.push(id);
-        }
-        (palette, ids)
-    }
-    /// Sections like the ones saved: stone, ores and caves under dirt, grass
-    /// and air; a mixed surface (plants, leaves, logs) in short runs; a
-    /// global palette; ids past the table; and biomes.
-    fn palette_cases() -> Vec<(&'static str, Vec<u32>)> {
-        let mut state = 0x9E37_79B9_7F4A_7C15u64;
-        let mut terrain = Vec::with_capacity(4096);
-        for i in 0..4096u32 {
-            let y = i >> 8;
-            let r = rng(&mut state);
-            terrain.push(match y {
-                0..=8 if r.is_multiple_of(40) => 2000 + (r >> 8) as u32 % 6,
-                0..=8 if r.is_multiple_of(13) => 0,
-                0..=8 => 1,
-                9..=10 => 10,
-                11 => 9,
-                _ => 0,
-            });
-        }
-        let mut surface = Vec::with_capacity(4096);
-        while surface.len() < 4096 {
-            let r = rng(&mut state);
-            let run = 1 + (r % 8) as usize;
-            let v = 100 + ((r >> 8) % 24) as u32 * 37;
-            surface.extend(std::iter::repeat_n(v, run.min(4096 - surface.len())));
-        }
-        let global: Vec<u32> = (0..4096)
-            .map(|_| (rng(&mut state) % 600) as u32 * 41)
-            .collect();
-        let large: Vec<u32> = (0..4096)
-            .map(|i| {
-                if i % 3 == 0 {
-                    70_000 + (rng(&mut state) % 40) as u32
-                } else {
-                    i as u32 % 20
-                }
-            })
-            .collect();
-        let biomes: Vec<u32> = (0..64).map(|i| [3, 3, 3, 7, 7, 12][i % 6]).collect();
-        vec![
-            ("terrain", terrain),
-            ("surface", surface),
-            ("global", global),
-            ("large ids", large),
-            ("biomes", biomes),
-            ("single", vec![5; 4096]),
-            ("seventeen", (0..4096).map(|i| (i % 17) as u32).collect()),
-        ]
-    }
-    #[test]
-    fn palette_ids_match_first_occurrence_order() {
-        for (name, values) in palette_cases() {
-            assert_eq!(
-                palette_ids(&values),
-                baseline_palette_ids(&values),
-                "{name}"
-            );
-            // The table is left clean for the next section.
-            assert_eq!(
-                palette_ids(&values),
-                baseline_palette_ids(&values),
-                "{name} again"
-            );
-        }
-        DENSE_IDS.with(|t| assert!(t.borrow().iter().all(|&slot| slot == 0)));
-    }
-    /// `palette_ids` against the pre-optimization implementation over the
-    /// cases above. 25 measured rounds alternate order and report the median
-    /// microseconds per call.
-    #[test]
-    #[ignore = "microbenchmark; run with --ignored --nocapture"]
-    fn benchmark_palette_ids() {
-        use horizon_std::time::Instant;
-        use std::hint::black_box;
-        for (name, values) in palette_cases() {
-            let mut times = [Vec::new(), Vec::new()];
-            for round in 0..25 {
-                for optimized in [round % 2 == 0, round % 2 != 0] {
-                    let started = Instant::now();
-                    for _ in 0..500 {
-                        if optimized {
-                            black_box(palette_ids(black_box(&values)));
-                        } else {
-                            black_box(baseline_palette_ids(black_box(&values)));
-                        }
-                    }
-                    if round > 0 {
-                        times[usize::from(optimized)]
-                            .push(started.elapsed().as_secs_f64() * 1e6 / 500.0);
-                    }
-                }
-            }
-            for t in &mut times {
-                t.sort_by(f64::total_cmp);
-            }
-            let (base, new) = (times[0][times[0].len() / 2], times[1][times[1].len() / 2]);
-            println!(
-                "palette_ids {name}: baseline {base:.2} us, new {new:.2} us, {:.2}x",
-                base / new
-            );
-        }
-    }
-    /// `pack` as it was before a section of one value was answered from its
-    /// words: every cell unpacked, then the distinct values found again.
-    fn baseline_pack(c: &PalettedContainer) -> Packed {
-        let entries = c.strategy.entries();
-        let mut values = vec![0u32; entries];
-        c.unpack(&mut values);
-        let (palette, ids) = palette_ids(&values);
-        let bits = match c.strategy.config(ceil_log2(palette.len())) {
-            Config::Single => 0,
-            Config::List(bits) => bits,
-            Config::Global => ceil_log2(palette.len()),
-        };
-        let data = (bits != 0).then(|| pack_words(bits, entries, ids.iter().copied()));
-        Packed {
-            palette,
-            bits,
-            data,
-        }
-    }
-    /// A container holding `value` in every cell while stored in the global
-    /// palette's width, which `set` keeps once a section has used it.
-    fn global_uniform(value: u32) -> PalettedContainer {
-        let bits = BLOCKS.global_bits;
-        let width = usize::from(bits);
-        let per = 64 / width;
-        let pattern = (0..per).fold(0u64, |word, slot| word | u64::from(value) << (slot * width));
-        PalettedContainer {
-            strategy: BLOCKS,
-            bits,
-            palette: Palette::Global,
-            words: vec![pattern; BLOCKS.entries().div_ceil(per)],
-        }
-    }
-    /// Sections saved from a column: one value (a single palette, and a list
-    /// palette whose other entry died), mixed terrain, the global palette
-    /// holding one value, and biomes.
-    fn pack_cases() -> Vec<(&'static str, PalettedContainer)> {
-        let mixed: Vec<u32> = (0..4096).map(|i| (i % 12) as u32).collect();
-        let mut dead = PalettedContainer::new(BLOCKS, 5);
-        dead.set(100, 9);
-        dead.set(100, 5);
-        let biomes: Vec<u32> = (0..64).map(|i| (i % 6) as u32 * 2).collect();
-        vec![
-            ("single", PalettedContainer::new(BLOCKS, 5)),
-            ("dead slot", dead),
-            ("mixed", PalettedContainer::from_values(BLOCKS, &mixed)),
-            (
-                "terrain",
-                PalettedContainer::from_values(BLOCKS, &palette_cases()[0].1),
-            ),
-            ("global uniform", global_uniform(3000)),
-            ("biomes", PalettedContainer::from_values(BIOMES, &biomes)),
-        ]
-    }
-    #[test]
-    fn pack_matches_unpacking_every_section() {
-        for (name, container) in pack_cases() {
-            assert_eq!(container.pack(), baseline_pack(&container), "{name}");
-        }
-    }
-    /// A section of one value saves as that value and no indices, whatever its
-    /// stored palette looks like: a single palette, a list whose other entry was
-    /// overwritten, or the global palette.
-    #[test]
-    fn uniform_sections_pack_as_one_entry() {
-        let mut dead = PalettedContainer::new(BLOCKS, 5);
-        dead.set(100, 9);
-        dead.set(100, 5);
-        for (name, container, value) in [
-            ("single", PalettedContainer::new(BLOCKS, 5), 5),
-            ("dead slot", dead, 5),
-            ("global", global_uniform(3000), 3000),
-        ] {
-            assert_eq!(
-                container.pack(),
-                Packed {
-                    palette: vec![value],
-                    bits: 0,
-                    data: None,
-                },
-                "{name}"
-            );
-        }
-    }
-    /// `pack` against the unpacking implementation, over the cases above. 25
-    /// measured rounds alternate order and report the median microseconds per
-    /// call.
-    #[test]
-    #[ignore = "microbenchmark; run with --ignored --nocapture"]
-    fn benchmark_pack() {
-        use horizon_std::time::Instant;
-        use std::hint::black_box;
-        for (name, container) in pack_cases() {
-            let reps = if container.uniform().is_some() {
-                2000
-            } else {
-                200
-            };
-            let mut times = [Vec::new(), Vec::new()];
-            for round in 0..25 {
-                for optimized in [round % 2 == 0, round % 2 != 0] {
-                    let started = Instant::now();
-                    for _ in 0..reps {
-                        if optimized {
-                            black_box(container.pack());
-                        } else {
-                            black_box(baseline_pack(black_box(&container)));
-                        }
-                    }
-                    if round > 0 {
-                        times[usize::from(optimized)]
-                            .push(started.elapsed().as_secs_f64() * 1e6 / f64::from(reps));
-                    }
-                }
-            }
-            for t in &mut times {
-                t.sort_by(f64::total_cmp);
-            }
-            let (base, new) = (times[0][times[0].len() / 2], times[1][times[1].len() / 2]);
-            println!(
-                "pack {name}: baseline {base:.2} us, new {new:.2} us, {:.2}x",
-                base / new
-            );
-        }
-    }
-}
+mod tests;

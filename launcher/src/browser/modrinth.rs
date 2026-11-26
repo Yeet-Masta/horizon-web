@@ -1,5 +1,5 @@
 //! Modrinth's public API (api.modrinth.com/v2): no key, files with SHA-512 and SHA-1.
-use super::{details, FileRef, Kind, Project, Query, Source, SourceId, Version, GAME};
+use super::{details, FileRef, Kind, Project, Query, SearchPage, Source, SourceId, Version, GAME};
 use serde_json::Value;
 
 const API: &str = "https://api.modrinth.com/v2";
@@ -18,13 +18,11 @@ fn project_type(kind: Kind) -> &'static str {
     }
 }
 
-/// The kind of a Modrinth project; its shader packs (the shaders/ format) are not offered. A
-/// data pack says it is a `mod` (most also ship a mod build): the search for data packs marks
-/// its hits, and an install into a world asks for its data pack files.
+/// Modrinth can return data packs as `mod` projects. The data pack search marks its hits so
+/// an install into a world asks for the data pack files.
 fn kind_of(project_type: &str) -> Option<Kind> {
     Kind::ALL
         .into_iter()
-        .filter(|k| !matches!(k, Kind::Shader | Kind::DataPack))
         .find(|k| self::project_type(*k) == project_type)
 }
 
@@ -32,14 +30,24 @@ fn kind_of(project_type: &str) -> Option<Kind> {
 pub(super) fn facets(query: &Query) -> String {
     let f = &query.filters;
     let mut all = vec![vec![format!("project_type:{}", project_type(query.kind))]];
+    let mut server_required = false;
     match &f.game_version {
         Some(v) => all.push(vec![format!("versions:{v}")]),
         None if !query.everything
             && matches!(query.kind, Kind::ResourcePack | Kind::Mod | Kind::DataPack) =>
         {
-            all.push(vec![format!("versions:{GAME}")])
+            all.push(vec![format!("versions:{GAME}")]);
+            // A mod that runs ships blocks, items, recipes, loot or worldgen, which the server
+            // must have: client-only mods (`optional`/`unsupported`) almost never run (#18616).
+            if query.kind == Kind::Mod {
+                all.push(vec!["server_side:required".into()]);
+                server_required = true;
+            }
         }
         None => {}
+    }
+    if query.kind == Kind::ResourcePack && !query.everything {
+        all.push(vec!["categories!=modded".into()]);
     }
     let loaders: Vec<String> = match &f.loader {
         // Quilt loads Fabric mods: what runs on Quilt.
@@ -58,6 +66,8 @@ pub(super) fn facets(query: &Query) -> String {
     }
     match f.environment {
         Some(details::Environment::Client) => all.push(vec!["client_side!=unsupported".into()]),
+        // `server_side:required` already implies it.
+        Some(details::Environment::Server) if server_required => {}
         Some(details::Environment::Server) => all.push(vec!["server_side!=unsupported".into()]),
         None => {}
     }
@@ -120,6 +130,11 @@ pub(super) fn parse_hit(hit: &Value) -> Option<Project> {
 pub(super) fn parse_project(p: &Value) -> Option<Project> {
     let kind = kind_of(p["project_type"].as_str()?)?;
     let slug = text(&p["slug"]);
+    let mut loaders = strings(&p["loaders"]);
+    if kind == Kind::ResourcePack {
+        loaders.extend(strings(&p["categories"]));
+        loaders.extend(strings(&p["additional_categories"]));
+    }
     Some(Project {
         source: SourceId::Modrinth,
         id: p["id"].as_str()?.to_owned(),
@@ -136,7 +151,7 @@ pub(super) fn parse_project(p: &Value) -> Option<Project> {
         license: text(&p["license"]["id"]),
         kind,
         game_versions: strings(&p["game_versions"]),
-        loaders: strings(&p["loaders"]),
+        loaders,
         blocked: None,
     })
 }
@@ -157,12 +172,40 @@ pub(super) fn parse_version(v: &Value) -> Option<Version> {
             })
         })
         .collect();
-    let required = v["dependencies"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|d| d["dependency_type"] == "required")
+    let dependencies = v["dependencies"].as_array().into_iter().flatten();
+    let required = dependencies
+        .clone()
+        .filter(|d| d["dependency_type"] == "required");
+    let blocked = required.clone().find_map(|d| {
+        use crate::i18n::tr;
+        if d["project_id"].as_str().is_none() {
+            Some(tr("This version has a required dependency without a project ID. It cannot be installed.").into())
+        } else if !d["version_id"].is_null() {
+            Some(tr("This version has a required dependency pinned to a specific version. The installer cannot honor that pin.").into())
+        } else {
+            None
+        }
+    });
+    let required = required
+        .filter(|d| d["version_id"].is_null())
         .filter_map(|d| d["project_id"].as_str().map(str::to_owned))
+        .collect();
+    let optional = dependencies
+        .filter(|d| d["dependency_type"] == "optional")
+        .filter_map(|d| {
+            if let Some(id) = d["project_id"].as_str() {
+                Some(OptionalDependency::Project(id.to_owned()))
+            } else if let Some(id) = d["version_id"].as_str() {
+                Some(OptionalDependency::Version(id.to_owned()))
+            } else if d["file_name"].as_str().is_some_and(|name| {
+                name.rsplit_once('.')
+                    .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("jar"))
+            }) {
+                Some(OptionalDependency::JavaFile)
+            } else {
+                None
+            }
+        })
         .collect();
     Some(Version {
         id: v["id"].as_str()?.to_owned(),
@@ -172,7 +215,8 @@ pub(super) fn parse_version(v: &Value) -> Option<Version> {
         loaders: strings(&v["loaders"]),
         files,
         required,
-        blocked: None,
+        optional,
+        blocked,
     })
 }
 
@@ -182,6 +226,38 @@ pub fn version_files(version: &str) -> Result<Vec<FileRef>, String> {
     parse_version(&v)
         .map(|v| v.files)
         .ok_or_else(|| format!("Modrinth: no version {version}."))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OptionalDependency {
+    Project(String),
+    Version(String),
+    JavaFile,
+}
+
+impl OptionalDependency {
+    pub(super) fn is_java_mod(&self, source: &dyn Source) -> Result<bool, String> {
+        let metadata;
+        let id = match self {
+            Self::JavaFile => return Ok(true),
+            Self::Project(id) => id,
+            Self::Version(id) => {
+                metadata = get(&format!("{API}/version/{}", encode(id)))?;
+                metadata["project_id"].as_str().ok_or_else(|| {
+                    crate::i18n::tr(
+                        "Modrinth did not identify the project for an optional dependency.",
+                    )
+                    .to_string()
+                })?
+            }
+        };
+        let project = source.project(id)?;
+        Ok(project.kind == Kind::Mod
+            && project
+                .loaders
+                .iter()
+                .any(|loader| super::java::LOADERS.contains(&loader.as_str())))
+    }
 }
 
 /// Projects' icons in one request (`GET /projects?ids=[…]`, at most 100 ids): id → icon URL, for
@@ -198,26 +274,41 @@ pub fn icons(ids: &[String]) -> Result<Vec<(String, String)>, String> {
         .collect())
 }
 
+fn parse_search_page(found: &Value, query: &Query) -> Result<SearchPage, String> {
+    let hits = found["hits"]
+        .as_array()
+        .ok_or_else(|| crate::i18n::tr("The search didn't go through.").to_string())?;
+    let offset = query.offset + hits.len();
+    let more = hits.len() == query.limit.clamp(1, 100)
+        && found["total_hits"]
+            .as_u64()
+            .is_none_or(|total| (offset as u64) < total);
+    let projects = hits
+        .iter()
+        .filter_map(parse_hit)
+        .map(|project| match query.kind {
+            Kind::DataPack => project.as_datapack(),
+            _ => project,
+        })
+        .collect();
+    Ok(SearchPage {
+        projects,
+        next_offset: more.then_some(offset),
+    })
+}
+
 impl Source for Modrinth {
     fn id(&self) -> SourceId {
         SourceId::Modrinth
     }
 
     fn search(&self, query: &Query) -> Result<Vec<Project>, String> {
-        if query.kind == Kind::Shader {
-            return Err(super::SHADERS_ON_HORIZON.into());
-        }
+        self.search_page(query).map(|page| page.projects)
+    }
+
+    fn search_page(&self, query: &Query) -> Result<SearchPage, String> {
         let found = get(&search_url(query))?;
-        Ok(found["hits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(parse_hit)
-            .map(|p| match query.kind {
-                Kind::DataPack => p.as_datapack(),
-                _ => p,
-            })
-            .collect())
+        parse_search_page(&found, query)
     }
 
     fn project(&self, id: &str) -> Result<Project, String> {
@@ -234,6 +325,22 @@ impl Source for Modrinth {
             .filter(|v| v["status"].as_str().is_none_or(|s| s == "listed"))
             .filter_map(parse_version)
             .collect();
+        if project.kind == Kind::Shader {
+            for version in &mut all {
+                version.files.retain(|file| {
+                    file.name
+                        .rsplit_once('.')
+                        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("zip"))
+                });
+            }
+            all.retain(|version| {
+                !version.files.is_empty()
+                    && version
+                        .loaders
+                        .iter()
+                        .any(|l| super::SHADER_LOADERS.contains(&l.as_str()))
+            });
+        }
         // Modrinth lists newest first already; ISO dates sort as text.
         all.sort_by(|a, b| b.published.cmp(&a.published));
         Ok(all)
@@ -262,8 +369,12 @@ impl Source for Modrinth {
             Kind::DataPack => details::modrinth_tags("mod", c, l, v),
             _ => details::modrinth_tags(project_type(kind), c, l, v),
         };
-        if kind == Kind::DataPack {
-            tags.loaders.clear();
+        match kind {
+            Kind::DataPack => tags.loaders.clear(),
+            Kind::Shader => tags
+                .loaders
+                .retain(|loader| super::SHADER_LOADERS.contains(&loader.as_str())),
+            _ => {}
         }
         Ok(tags)
     }
@@ -295,4 +406,38 @@ pub(super) fn encode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod search_page_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn skipped_hits_count_toward_the_modrinth_offset() {
+        let mut query = Query::new("", Kind::ResourcePack);
+        query.limit = 2;
+        let page = parse_search_page(
+            &json!({
+                "total_hits": 3,
+                "hits": [{"project_id": "unused", "project_type": "unsupported"}, {}]
+            }),
+            &query,
+        )
+        .unwrap();
+        assert!(page.projects.is_empty());
+        query.offset = page.next_offset.unwrap();
+        assert_eq!(query.offset, 2);
+        let last = parse_search_page(
+            &json!({
+                "total_hits": 3,
+                "hits": [{"project_id": "does-fit", "project_type": "resourcepack"}]
+            }),
+            &query,
+        )
+        .unwrap();
+        assert_eq!(last.projects[0].id, "does-fit");
+        assert_eq!(last.next_offset, None);
+        assert!(parse_search_page(&json!({}), &query).is_err());
+    }
 }

@@ -39,6 +39,45 @@ fn level_dat() -> Vec<u8> {
     gz.finish().unwrap()
 }
 
+/// servers.dat with `entries` as its list.
+fn servers_dat(entries: &[Tag]) -> Vec<u8> {
+    nbt::write_named(
+        &nbt::NamedTag {
+            name: "".into(),
+            tag: Tag::compound([("servers", Tag::List(entries.to_vec()))]),
+        },
+        Limits::default(),
+    )
+    .unwrap()
+}
+
+/// A server the player added to the list.
+fn shown_server() -> Tag {
+    Tag::compound([
+        ("name", Tag::String("Friends".into())),
+        ("ip", Tag::String("friends.example.net".into())),
+        ("acceptTextures", Tag::Byte(1)),
+        ("hidden", Tag::Byte(0)),
+    ])
+}
+
+/// A server joined through Direct Connection: the game keeps it hidden.
+fn joined_server() -> Tag {
+    Tag::compound([
+        ("name", Tag::String("Minecraft Server".into())),
+        ("ip", Tag::String("secret.example.net".into())),
+        ("hidden", Tag::Byte(1)),
+    ])
+}
+
+/// A hidden entry whose flag another tool wrote as a double, which the game reads as hidden.
+fn joined_double_server() -> Tag {
+    Tag::compound([
+        ("ip", Tag::String("double.example.net".into())),
+        ("hidden", Tag::Double(1.0f64.to_bits())),
+    ])
+}
+
 fn sha512(bytes: &[u8]) -> String {
     sha2::Sha512::digest(bytes)
         .iter()
@@ -49,9 +88,16 @@ fn sha512(bytes: &[u8]) -> String {
 /// A game folder with settings, packs, a mod, two worlds, and what never goes out.
 fn home(name: &str) -> PathBuf {
     let home = scratch(name);
-    put(&home.join("options.txt"), b"lang:fr_ch\n");
+    put(
+        &home.join("options.txt"),
+        // The game also ends a line at a lone CR.
+        b"lang:fr_ch\r\nlastServer:play.example.net:25570\r\nfov:0.5\rlastServer:typed.example.net\rgamma:1\n",
+    );
     put(&home.join("horizon-graphics.txt"), b"preset:high\n");
-    put(&home.join("servers.dat"), b"\x0a\x00\x00\x00");
+    put(
+        &home.join("servers.dat"),
+        &servers_dat(&[shown_server(), joined_server(), joined_double_server()]),
+    );
     put(&home.join("resourcepacks/Glass.zip"), b"glass pack");
     put(&home.join("resourcepacks/Own.zip"), b"own pack");
     put(
@@ -154,6 +200,13 @@ fn a_zip_has_the_instance_and_the_picked_world_and_nothing_private() {
     };
     assert!(player.get(&"UUID".into()).is_none());
     assert_eq!(player.get(&"XpLevel".into()), Some(&Tag::Int(7)));
+    // The options go without the servers typed in Direct Connection, every other byte kept; the
+    // server list without the hidden entry those joins left, the shown one whole.
+    assert_eq!(
+        read(&out, "options.txt"),
+        b"lang:fr_ch\r\nfov:0.5\rgamma:1\n"
+    );
+    assert_eq!(read(&out, "servers.dat"), servers_dat(&[shown_server()]));
     assert!(!out.with_extension("part").exists());
 
     assert!(export(&home, "Hardcore", Format::Zip, &["../x".into()], &[], &out).is_err());
@@ -165,6 +218,67 @@ fn a_zip_has_the_instance_and_the_picked_world_and_nothing_private() {
     );
     assert!(!empty.join("New.zip").exists());
     fs::remove_dir_all(&empty).unwrap();
+    fs::remove_dir_all(&home).unwrap();
+}
+
+/// A gzipped 26.3 level.dat: the single player is named by `Data.singleplayer_uuid`.
+fn level_dat_26_3() -> Vec<u8> {
+    let raw = nbt::write_named(
+        &nbt::NamedTag {
+            name: "".into(),
+            tag: Tag::compound([(
+                "Data",
+                Tag::compound([
+                    ("LevelName", Tag::String("Base".into())),
+                    ("singleplayer_uuid", Tag::IntArray(vec![1, 2, 3, 4])),
+                ]),
+            )]),
+        },
+        Limits::default(),
+    )
+    .unwrap();
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&raw).unwrap();
+    gz.finish().unwrap()
+}
+
+#[test]
+fn a_26_3_world_goes_without_its_players_folder_and_the_singleplayer_uuid() {
+    let home = scratch("26-3");
+    put(&home.join("saves/New/level.dat"), &level_dat_26_3());
+    put(&home.join("saves/New/level.dat_old"), &level_dat_26_3());
+    put(&home.join("saves/New/region/r.0.0.mca"), b"region");
+    put(&home.join("saves/New/players/data/0001.dat"), b"me");
+    put(&home.join("saves/New/players/stats/0001.json"), b"{}");
+    put(
+        &home.join("saves/New/players/advancements/0001.json"),
+        b"{}",
+    );
+    let out = home.join("out/New.zip");
+    export(&home, "New", Format::Zip, &["New".into()], &[], &out).unwrap();
+    assert_eq!(
+        names(&out),
+        [
+            "saves/New/level.dat",
+            "saves/New/level.dat_old",
+            "saves/New/region/r.0.0.mca",
+        ]
+    );
+    for level in ["saves/New/level.dat", "saves/New/level.dat_old"] {
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(&read(&out, level)[..])
+            .read_to_end(&mut raw)
+            .unwrap();
+        let (root, _) = nbt::read_named(&raw, Limits::default()).unwrap();
+        let Some(Tag::Compound(data)) = root.tag.get("Data") else {
+            panic!("no Data")
+        };
+        assert!(data.get(&"singleplayer_uuid".into()).is_none(), "{level}");
+        assert_eq!(
+            data.get(&"LevelName".into()),
+            Some(&Tag::String("Base".into()))
+        );
+    }
     fs::remove_dir_all(&home).unwrap();
 }
 

@@ -505,6 +505,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "horizon-addresses"
+version = "0.1.0"
+
+[[package]]
 name = "horizon-bench"
 version = "0.1.0"
 dependencies = [
@@ -551,7 +555,6 @@ version = "0.1.0"
 dependencies = [
  "heck",
  "horizon-game-discovery",
- "horizon-mod-point-shape",
  "horizon-mod-source",
  "horizon-mod-surface",
  "prettyplease 0.2.37",
@@ -569,7 +572,6 @@ dependencies = [
 name = "horizon-mod-api-macros"
 version = "0.1.0"
 dependencies = [
- "horizon-mod-point-shape",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -581,7 +583,6 @@ version = "0.1.0"
 dependencies = [
  "horizon-core",
  "horizon-mod-api-macros",
- "horizon-mod-point-shape",
  "horizon-mod-surface",
  "horizon-mod-vocab",
  "horizon-shader-api",
@@ -598,17 +599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "horizon-mod-point-shape"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "horizon-mod-registry"
 version = "0.1.0"
 dependencies = [
@@ -616,9 +606,11 @@ dependencies = [
  "base64",
  "getrandom 0.3.4",
  "hmac",
+ "horizon-addresses",
  "horizon-platform",
  "horizon-release-sign",
  "http-body-util",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

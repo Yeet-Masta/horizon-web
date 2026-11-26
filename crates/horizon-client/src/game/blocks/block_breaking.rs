@@ -28,7 +28,7 @@ impl Game<'_> {
     }
 
     pub(super) fn break_block(&mut self, pos: [i32; 3]) -> Result<()> {
-        self.carrier_break_block(pos)
+        self.with_player_block_edit(|g| g.carrier_break_block(pos))
     }
 
     /// The window's own player broke a block: the tutorial's counter and the pad's tick. It runs
@@ -47,6 +47,13 @@ impl Game<'_> {
         let outer = self.lan_break_pos.replace(pos);
         let broken = self.with_player_actor(|game| game.break_block_as_player(pos));
         self.lan_break_pos = outer;
+        if matches!(broken, Ok(true))
+            && let Some(conn) = self.lan_acting
+            && let Some(host) = self.lan.as_mut()
+        {
+            host.hub
+                .reveal_terrain_after_break(conn, &mut self.world, pos);
+        }
         broken
     }
 

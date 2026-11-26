@@ -181,7 +181,7 @@ impl Game<'_> {
         if target == Some(player) {
             return Err(err("commands.spectate.self", &[]));
         }
-        if !self.spectator() {
+        if !self.target_spectator(player) {
             return Err(tr_error(
                 "commands.spectate.not_spectator",
                 &[self.target_name(player)],
@@ -715,7 +715,7 @@ impl Game<'_> {
         };
         // EntityArgument.getPlayers runs before the published check.
         let host = self.entities(ctx, "targets", true).unwrap_or_default();
-        let guests: Vec<(u32, String)> = match (&self.lan, &selector) {
+        let guests: Vec<(u32, String, u128)> = match (&self.lan, &selector) {
             (Some(lan), Some(s)) => lan
                 .hub
                 .guests
@@ -728,7 +728,7 @@ impl Game<'_> {
                     Some(name) => g.name.eq_ignore_ascii_case(name),
                     None => s.kind == 'a' || s.kind == 'e',
                 })
-                .map(|g| (g.conn, g.name.clone()))
+                .map(|g| (g.conn, g.name.clone(), g.uuid))
                 .collect(),
             _ => Vec::new(),
         };
@@ -754,13 +754,14 @@ impl Game<'_> {
             )]),
         };
         let mut count = 0;
-        for (conn, name) in guests {
+        for (conn, name, uuid) in guests {
             if let Some(lan) = self.lan.as_mut() {
                 lan.hub.kick(conn, tag.clone());
             }
+            // `KickCommand.kickPlayers` names them by `Player.getDisplayName`.
             self.feedback(Text::translate(
                 "commands.kick.success",
-                &[Text::literal(name), reason.clone()],
+                &[self.player_text(&name, uuid), reason.clone()],
             ));
             count += 1;
         }
@@ -835,12 +836,12 @@ impl Game<'_> {
         self.cmds
             .profile_fetches
             .iter()
-            .any(|f| matches!(resolver.state(&f.key), Resolve::Pending))
+            .any(|f| matches!(resolver.state_for_game(&f.key), Resolve::Pending))
     }
     fn tick_profile_fetches(&mut self) {
         let fetches = std::mem::take(&mut self.cmds.profile_fetches);
         for fetch in fetches {
-            let state = self.skin_profiles.borrow_mut().state(&fetch.key);
+            let state = self.skin_profiles.borrow_mut().state_for_game(&fetch.key);
             match state {
                 Resolve::Pending => self.cmds.profile_fetches.push(fetch),
                 Resolve::Done(result) => {
@@ -860,6 +861,28 @@ impl Game<'_> {
                 }
             }
         }
+    }
+    /// `FetchProfileCommand.printForAvatar`: an avatar's own profile
+    /// (a player's `GameProfile`), reported as `reportResolvedProfile` does.
+    pub(in crate::game) fn report_avatar_profile(
+        &mut self,
+        id: u128,
+        name: &str,
+        properties: &[horizon_protocol::packets::login::Property],
+    ) {
+        let profile = ResolvedProfile {
+            id,
+            name: name.to_owned(),
+            properties: properties
+                .iter()
+                .map(|p| (p.name.clone(), p.value.clone(), p.signature.clone()))
+                .collect(),
+        };
+        self.report_resolved_profile(
+            "commands.fetchprofile.entity.success",
+            Text::literal(name),
+            &profile,
+        );
     }
     /// `FetchProfileCommand.reportResolvedProfile`: the profile as
     /// `ResolvableProfile.CODEC` encodes it (`id`, `name`, and `properties`
@@ -1109,7 +1132,11 @@ impl Game<'_> {
                 .ok()
                 .map(DialogHolder::Direct);
         }
-        // A registry id, written with or without its namespace.
+        self.registry_dialog(text)
+    }
+    /// An entry of the `minecraft:dialog` registry, by its id written with or
+    /// without its namespace.
+    pub(in crate::game) fn registry_dialog(&self, text: &str) -> Option<DialogHolder> {
         let id = if text.contains(':') {
             text.to_owned()
         } else {
@@ -1248,3 +1275,7 @@ mod waypoint_icon_save_tests {
         assert_eq!(Game::waypoint_icon_from_saved(Some(&no_style)), None);
     }
 }
+
+#[cfg(test)]
+#[path = "spectate_tests.rs"]
+mod spectate_tests;

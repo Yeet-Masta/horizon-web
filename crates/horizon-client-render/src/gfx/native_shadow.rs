@@ -65,7 +65,7 @@ fn horizon_shadow_terrain(c: HorizonCorner, origin: vec4<f32>, slot: u32, corner
     @location(0) position: vec3<f32>, @location(1) uv: vec2<u32>, @location(2) layer: u32,
     @location(3) color: vec4<f32>, @location(4) light: vec2<u32>
 ) -> HorizonShadowOut {
-    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 8u]];
+    let origin = horizon_terrain_slot_origins[horizon_terrain_block_slots[index >> 6u]];
     return horizon_shadow_terrain(HorizonCorner(position, uv, layer, color, light), origin, index,
         index & 3u);
 }
@@ -401,7 +401,7 @@ pub struct NativeShadow {
 fn entity_source() -> String {
     format!(
         "{}@group({GROUP}) @binding(0) var<uniform> frame: Frame;\n{}{ENTITY_ENTRIES}",
-        FrameInputs::declared_wgsl(true, true, false, false),
+        FrameInputs::declared_wgsl(true, true, false, false, false),
         horizon_shader_api::stages::SHADOW_HELPERS,
     )
 }
@@ -519,7 +519,7 @@ fn shader_source(
         (None, None) => (
             format!(
                 "{}@group({GROUP}) @binding(0) var<uniform> frame: Frame;\n{}{UNTAKEN}",
-                FrameInputs::declared_wgsl(true, true, false, false),
+                FrameInputs::declared_wgsl(true, true, false, false, false),
                 horizon_shader_api::stages::SHADOW_HELPERS,
             ),
             super::native_material::DISPLACE_VANILLA,
@@ -572,7 +572,8 @@ impl NativeShadow {
                 ("horizon_displace_steps", f64::from(u8::from(g.steps))),
             ]);
         }
-        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Native shader pack shadow"),
             source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
@@ -758,7 +759,8 @@ impl NativeShadow {
                 "horizon_shadow_fs_displaced",
             )
         });
-        if let Some(e) = horizon_std::block_on_or(scope.pop(), None) {
+        let internal = horizon_std::block_on_or(internal.pop(), None);
+        if let Some(e) = internal.or(horizon_std::block_on_or(validation.pop(), None)) {
             return Err(format!("shadow pass: {e}"));
         }
         Ok(Self {
@@ -899,7 +901,7 @@ mod tests {
     #[test]
     fn the_shadow_shaders_declare_the_frame_as_before() {
         use sha2::{Digest, Sha256};
-        let frame = FrameInputs::declared_wgsl(true, true, false, false);
+        let frame = FrameInputs::declared_wgsl(true, true, false, false, false);
         assert_eq!(
             format!("{:x}", Sha256::digest(&frame)),
             "88afec7c6709091383bffd26f431131ac68e2f6fd5d1079dd7febb591209211a"

@@ -104,6 +104,19 @@ impl Game<'_> {
         y: f32,
         count_text: Option<String>,
     ) {
+        self.paint_item_decorations(batch, stack, x, y, count_text);
+        self.native_item_decorations(stack, x, y, batch);
+    }
+
+    /// The stock decorations, shared by normal item draws and standalone redraws.
+    pub(super) fn paint_item_decorations(
+        &self,
+        batch: &mut HudBatch,
+        stack: &ItemStack,
+        x: f32,
+        y: f32,
+        count_text: Option<String>,
+    ) {
         // GuiGraphicsExtractor.itemDecorations, laid out at the origin and
         // moved to (x, y): the damage bar, the cooldown shade and the count.
         let info = self.items().get(&stack.item);
@@ -131,18 +144,8 @@ impl Game<'_> {
             bar,
             cooldown: self.cooldowns.percent(&cooldown, partial),
         };
-        let mut draws = vec![hud_layout::GuiDraw::Push(vec![
-            hud_layout::PoseOp::Translate(x, y),
-        ])];
-        draws.extend(hud_overlays::item_decorations(
-            0,
-            0,
-            &decorations,
-            &self.gui.atlas.font,
-        ));
-        draws.push(hud_layout::GuiDraw::Pop);
-        hud_layout::paint(batch, &self.gui.atlas, &draws);
-        self.native_item_decorations(stack, x, y, batch);
+        let draws = hud_overlays::item_decorations(0, 0, &decorations, &self.gui.atlas.font);
+        hud_layout::paint_translated(batch, &self.gui.atlas, &draws, [x, y]);
     }
     /// The open container screen's player-inventory origin (`getXOrigin`/
     /// `getYOrigin`): the build's, or the frame's own arithmetic with no
@@ -391,7 +394,13 @@ impl Game<'_> {
         let grid: Vec<Option<ItemStack>> = (0..n * n).map(|i| self.craft_grid[i].clone()).collect();
         let scale = |id: i32| self.maps.data.get(&id).map(|m| m.scale);
         self.recipes()
-            .find_with(&self.loop_context, &grid, n, &scale)
+            .find_for(
+                &self.loop_context,
+                horizon_client::crafting::Crafter::player(self.menu_env().player),
+                &grid,
+                n,
+                &scale,
+            )
             .map(|(name, result)| (name.to_owned(), result))
     }
     pub(super) fn draw_inventory_slots(&mut self, batch: &mut HudBatch, ox: f32, oy: f32) {
@@ -467,7 +476,8 @@ impl Game<'_> {
                             ("gui/container/smoker", "container.smoker", "Smoker")
                         }
                     };
-                    part(batch, tex, 0.0, 0.0, 176.0, 166.0, ox, oy);
+                    // `AbstractFurnaceScreen.extractBackground`: a standalone texture.
+                    batch.texture_blit_baked(atlas, tex, [ox, oy, 176.0, 166.0], [0.0; 2], [256.0; 2]);
                     self.draw_screen_phase(
                         batch,
                         horizon_client::screen_draw::RenderPhase::Background,
@@ -563,7 +573,14 @@ impl Game<'_> {
                     } else {
                         "gui/container/inventory"
                     };
-                    part(batch, texture, 0.0, 0.0, 176.0, 166.0, ox, oy);
+                    // `InventoryScreen.extractBackground` / `CraftingScreen.extractBackground`.
+                    batch.texture_blit_baked(
+                        atlas,
+                        texture,
+                        [ox, oy, 176.0, 166.0],
+                        [0.0; 2],
+                        [256.0; 2],
+                    );
                     self.draw_screen_phase(
                         batch,
                         horizon_client::screen_draw::RenderPhase::Background,

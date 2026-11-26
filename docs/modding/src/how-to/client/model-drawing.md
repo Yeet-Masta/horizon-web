@@ -47,6 +47,48 @@ forms rebake from current resources on every successful load. Resolve result ids
 `model_baking_completed`; reload invalidates old handles and failed reloads retain them.
 This API bakes quads only, not a mod-defined baked result type.
 
+## Wrapping already baked geometry
+
+Native client mods can implement `modify_baking_result` to inspect or reshape the block and
+standalone models of the candidate resource load, including native-loader faces. The hook runs on
+the resource loader after rotation and UV lock, before connected textures are derived and before
+the renderer receives the catalog. It runs at startup and on every rebake; a later stage can
+still fail. For a handle into a successfully published catalog, use `model_baking_completed`.
+
+```rust,ignore
+fn modify_baking_result(
+    &self,
+    _: &mod_api::RegistrationContext,
+    event: &mut mod_api::ModifyBakingResultEvent<'_, '_>,
+) {
+    use mod_api::{BakedModelKey, BakedQuadChange};
+
+    let key = BakedModelKey::Standalone("mymod:block/panel");
+    if event.models.model(key).is_none() {
+        return;
+    }
+    event.models.edit_quads(key, |quad| {
+        if quad.sprite == "mymod:block/temporary_cover" {
+            BakedQuadChange::Remove
+        } else {
+            BakedQuadChange::Keep
+        }
+    }).expect("the named panel exists");
+}
+```
+
+For block models, use `BakedModelKey::Variant` with the model's namespaced identifier, XYZ quarter
+turns and UV-lock flag. `visit_block_state` takes a block identifier and its full set of properties
+sorted by name; it visits every weighted alternative and each matching multipart part. The
+borrowed quads contain positions and sprite-relative UVs in vertex order, sprite ids, culling and
+shading metadata. The borrow cannot outlive the hook.
+
+Edits affect the shared bake, not just the state you used to find it. A replacement keeps the
+original quad's sprite, tint and lighting; it can change the positions, UVs and cull face. Invalid
+replacement geometry leaves the model untouched. Edits are visible to later listeners for that
+load and do not accumulate across reloads. This hook does not change item-stack model selection,
+add per-position ModelData or call a mod once models are drawing.
+
 
 ## Terrain materials in a block entity
 
@@ -154,11 +196,13 @@ Each mob and player in view gets the render hook pair once a frame, NeoForge's
 1. `render_player_pre(player, who, draw, hidden, canceled)`, for a player only (`who` is its
    profile name and whether it is this window's own);
 2. `render_living_pre(entity, draw, hidden, canceled)`, before the entity's model;
-3. the model and its vanilla layers, or in their place the renderer a mod registered for its type
+3. `render_worn_equipment(entity, equipment)`, when neither pre hook canceled
+   ([below](#a-living-entitys-armour-and-held-items));
+4. the model and its vanilla layers, or in their place the renderer a mod registered for its type
    ([entity renderers](entity-renderers.md)), then the layers mods added to its type
    ([entity layers](entity-layers.md));
-4. `render_living_post(entity, parts, draw)`;
-5. `render_player_post(player, who, parts, draw)`, for a player only.
+5. `render_living_post(entity, parts, draw)`;
+6. `render_player_post(player, who, parts, draw)`, for a player only.
 
 The order today: the model and the layers are drawn before the post hooks; the entity's name tag, leash, flames
 and shadow are drawn in the frame's later passes, after them. The reference draws the leash and the name tag
@@ -172,8 +216,8 @@ shadow, flames, leash and glowing outline, and the post hooks. A mod that draws 
 its own draws it in `render_living_pre` and cancels; one that draws every entity of a type registers
 a renderer for the type instead; one that wants the name tag or the shadow then draws them itself, or doesn't cancel.
 Canceling only `render_living_pre` of a player still asks its `render_player_post`. An entity the
-frame culls gets neither hook. The game asks once a frame whether any mod listens to the four, and
-with none builds nothing for them.
+frame culls gets neither hook. The game asks once a frame whether any mod listens to the four (and
+to `render_worn_equipment`), and with none builds nothing for them.
 
 ## A player's or humanoid's parts
 
@@ -197,6 +241,70 @@ Typed humanoid parts have separate storage, so all twelve fit alongside the eigh
 - The body loses the part, and so do the layers drawn on the body's own model, as vanilla's
   `getParentModel()` layers do: a villager's type, profession and level, a spider's eyes. The
   armour, held items and other layers keep every part, and the cape, a layer of its own, stays.
+- In `render_player_pre`, `hidden.hide_named("cape")` leaves out the player's cape instead (vanilla's
+  `showCape`): what a mod's armour over the back needs, as Mekanism's MekaSuit hides it.
+
+## A player's skin for your own model
+
+A mod that builds a player's model itself (a 3D map drawing every player from above, a
+portrait) textures it from the player's skin with `player_skin(entity)`. The answer says
+where the skin (64x64) and the cape (64x32, `None` without one) lie in the GUI atlas,
+the atlas entity quads sample (`WorldDrawn::atlas` in a native render mod), and whether
+the model is slim (3-pixel arms). It is the skin this client draws: the downloaded one
+once it is in the atlas, the profile's default until then, and for the local player the
+cape follows the Skin Customization option. Downloaded skins share a few atlas slots, so
+a region holds for the frame you ask in; ask each frame you draw. A mannequin answers
+like a player, and every other entity answers `None`.
+
+## Drawing the player's arms with a held item
+
+In `render_hand`, call `host.local_player_arm_skin()` to get `(sprite, slim)` for
+the local player. The key is the current first-person arm's atlas sprite: pass it
+directly to `event.draw.model_part(part, sprite, 0xFFFFFF)`. If the player's skin
+isn't in the atlas, the key uses the same Steve fallback as the ordinary arm
+without changing `slim`. Skip drawing if the call returns `None`; read it again
+when drawing rather than caching the key across frames.
+
+Bake `minecraft:player_slim#main` and `minecraft:player#main` once with `bake_layer`
+and choose the layer by `slim`. `event.render.hand` distinguishes the main and off
+hand; the main arm is left when `host.gui_options().main_hand_left` is true,
+and the off arm is the opposite. Pose the part in the draw context's hand space
+(blocks, +x right, +y up, -z away). Return `Flow::Continue` to keep the default
+held item in addition to the arm you drew.
+
+## A living entity's armour and held items
+
+`render_worn_equipment(entity, equipment)` comes right after `render_living_pre` for every mob
+and player in view whose pre hooks didn't cancel, this window's own player included. `equipment`
+(`EquipmentRender`) starts with everything shown and untinted; it changes what the entity wears and
+holds this frame without replacing its model, as a mod that hides armour or colours a shield by
+its state does:
+
+```rust,ignore
+fn render_worn_equipment(&self, _: &dyn ClientHost, event: &mut RenderWornEquipmentEvent<'_>) {
+    use mod_api::{EquipmentRenderPart as Part, EquipmentRenderSlot as Slot};
+    event.equipment.hide(Slot::Head, Part::Base);
+    event.equipment.tint(Slot::OffHand, 0xFF_4040);
+}
+```
+
+- The slots (`EquipmentRenderSlot`) are `Head`, `Chest`, `Legs` and `Feet`; `Body` (a wolf's,
+  horse's or nautilus's armour, a llama's carpet, a happy ghast's harness); `Elytra`, the wings,
+  a slot of its own though worn in the chest slot; and `MainHand` and `OffHand`. `Head` also
+  covers the item `CustomHeadLayer` draws on the head (a carved pumpkin, a skull).
+- `hide(slot, part)` leaves out `Part::Base`, the piece with all that is drawn over it (its dyed
+  and emissive layers, its glint and trim), or only its `Part::Glint` or its `Part::Trim`.
+- `tint(slot, rgb)` multiplies the colour the slot draws in by `0xRRGGBB`, channel by channel; the
+  high byte is ignored. It reaches the piece, its dyed and emissive layers and its trim, not its
+  glint. A second tint, from the same mod or the next, multiplies the first.
+- Only what Horizon draws for a slot changes: a mob's armour has no trim drawn and a body armour no
+  glint, so hiding those does nothing. The body, its other layers, the cape and the mods' layers
+  stay; hide model parts with `render_living_pre`.
+- It holds for this frame and this entity only. The screens' previews of the player (the
+  inventory's) are drawn as vanilla draws them.
+
+It is a hook of its own rather than a field of `RenderLivingPreEvent` so that wasm mods built
+before it keep loading.
 
 ## Text and animation in block entities
 
@@ -226,3 +334,18 @@ Multiply tinted faces by `block_tint_color(state, face.tint_index, pos)` at thei
 position. Untinted faces return `None`. Water faces use tint index 0 and the world's
 water colour, including resource-pack water colormaps; other water indices return
 `None`. This differs from `fluid_box`, whose colour comes from its fluid stack.
+
+## Texture pixels on the CPU
+
+A mod that colours things by the player's own textures without drawing them on the GPU
+(a map averaging each block's top, a software renderer) reads them with
+`sprite_pixels(&sprites)`. Find the sprites with `block_sprites` or `texture_sprites`;
+each answer is RGBA8, rows top to bottom, a square the arrays' edge on each side, so
+`rgba.len()` is edge × edge × 4. Resource packs are included. An animated sprite gives
+the frame it starts on. A sprite past the arrays' layers gives `None`, and so does every
+sprite on a client that loaded no pixels.
+
+The game keeps the pixels compressed once the GPU has them, and each call uncompresses
+the whole store once: ask for every sprite you need in one call, and again only when
+`block_sprites_version` changes. One call returns at most 256 MiB, the default texture
+budget, and returns `Err` without reading anything past that; ask in parts then.

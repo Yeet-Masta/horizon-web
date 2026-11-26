@@ -85,6 +85,30 @@ fn place_bed(game: &mut Game<'_>, x: i32, kind: &str) -> [i32; 3] {
     [x, 64, 2]
 }
 
+/// `ServerPlayer.bedBlocked` uses `Player.freeAt` (isSuffocating), not a
+/// full-collision check: soul sand above a bed is obstructing even though its
+/// shape is short, and glass is not.
+#[test]
+#[ignore = "daily"]
+fn a_suffocating_block_above_the_bed_obstructs_sleep() {
+    let mut resources = None;
+    let mut game = server_game(&mut resources);
+    game.world.day_time = 18000;
+    let head = place_bed(&mut game, 2, "minecraft:red_bed");
+    let registry = game.pack.assets.registry;
+    let soul_sand = registry.default_state("minecraft:soul_sand").unwrap();
+    let glass = registry.default_state("minecraft:glass").unwrap();
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 64.0, 3.5)).unwrap());
+
+    game.world.set(head[0], head[1] + 1, head[2], soul_sand).unwrap();
+    game.try_sleep(head);
+    assert!(game.sleeping.is_none(), "soul sand above the head blocks sleep");
+
+    game.world.set(head[0], head[1] + 1, head[2], glass).unwrap();
+    game.try_sleep(head);
+    assert_eq!(game.sleeping, Some(head), "glass does not block sleep");
+}
+
 /// `ServerPlayer.startSleepInBed` awards the bed's own statistic: a straw bed
 /// counts as `sleep_in_straw_bed` (`StrawBedBlock.getSleptInBedStatType`), and
 /// an ordinary bed still as `sleep_in_bed`.
@@ -113,4 +137,55 @@ fn sleeping_in_a_straw_bed_awards_its_own_statistic() {
     assert_eq!(game.sleeping, Some(red), "the player lay in the red bed");
     assert_eq!(game.stats.get("custom", "minecraft:sleep_in_bed"), 1);
     assert_eq!(game.stats.get("custom", "minecraft:sleep_in_straw_bed"), 1);
+}
+
+/// `ServerPlayer.startSleepInBed` fires `slept_in_bed` only when the bed's rule
+/// can set the respawn point (`canSetSpawn`). A straw bed never sets it, so the
+/// player sleeps there without the trigger; an ordinary bed fires it.
+#[test]
+#[ignore = "daily"]
+fn only_a_bed_that_can_set_the_spawn_triggers_slept_in_bed() {
+    use horizon_client::advancements::Tree;
+    use horizon_world::loot::PackOverlay;
+    use std::sync::Arc;
+
+    let mut resources = None;
+    let mut game = server_game(&mut resources);
+    game.options.dedicated = None;
+    let files = vec![(
+        "advancement/parity:slept".into(),
+        vec![br#"{"criteria":{"slept":{"trigger":"minecraft:slept_in_bed"}}}"#.to_vec()],
+    )];
+    game.adv.tree = Arc::new(Tree::load_with(
+        &game.options.resources.join("data"),
+        &PackOverlay {
+            files: &files,
+            ..PackOverlay::NONE
+        },
+    ));
+    game.adv.loaded = true;
+    let slept = game.adv.tree.by_id["parity:slept"];
+    // `Level.isDarkOutside`: midnight, so both beds may be slept in.
+    game.world.day_time = 18000;
+    let straw = place_bed(&mut game, 2, "minecraft:straw_bed");
+    game.player = Some(PlayerMotion::new(game.motion, Vec3::new(2.5, 64.0, 3.5)).unwrap());
+    game.try_sleep(straw);
+    assert_eq!(
+        game.sleeping,
+        Some(straw),
+        "the player lay in the straw bed"
+    );
+    assert!(
+        !game.adv.progress.done(&game.adv.tree.list[slept]),
+        "a straw bed can't set the spawn, so it doesn't fire slept_in_bed"
+    );
+    game.wake_up(true, true);
+    let red = place_bed(&mut game, 4, "minecraft:red_bed");
+    game.player.as_mut().unwrap().position = Vec3::new(4.5, 64.0, 3.5);
+    game.try_sleep(red);
+    assert_eq!(game.sleeping, Some(red), "the player lay in the red bed");
+    assert!(
+        game.adv.progress.done(&game.adv.tree.list[slept]),
+        "an ordinary bed fires slept_in_bed"
+    );
 }

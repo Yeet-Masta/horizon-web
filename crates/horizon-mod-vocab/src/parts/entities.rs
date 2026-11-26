@@ -194,6 +194,49 @@ impl dyn Registrar + '_ {
             EntityProviderOf::of(Arc::new(provider)),
         );
     }
+    /// Request that `entity_tick_pre` and `entity_tick_post` fire right around each ticking
+    /// entity of type `entity` (for example `"minecraft:zombie"` or `"minecraft:item"`),
+    /// matching NeoForge's `EntityTickEvent.Pre`/`.Post` ordering instead of the family-wide
+    /// batch order. Applies to entity families that deliver `entity_tick_pre`/`entity_tick_post`
+    /// (projectiles do not currently fire these hooks).
+    pub fn entity_tick_each(&mut self, entity: &str) {
+        self.request_entity_tick_each(entity);
+    }
+    /// Request that `entity_tick_pre` and `entity_tick_post` fire right around every ticking
+    /// entity's own tick across all entity families that deliver `entity_tick_pre`/`entity_tick_post`
+    /// (projectiles do not currently fire these hooks).
+    pub fn entity_tick_each_entity(&mut self) {
+        self.request_entity_tick_each_entity();
+    }
+}
+
+/// Whether any mod requested per-entity `entity_tick_pre`/`entity_tick_post` delivery for
+/// at least one entity type.
+// hidden: engine tick loop query, not part of the mod authoring surface.
+#[doc(hidden)]
+pub fn entity_tick_each_any() -> bool {
+    installed().is_some_and(|installed| !installed.entity_tick_each.is_empty())
+}
+
+/// Whether any mod requested per-entity `entity_tick_pre`/`entity_tick_post` delivery for
+/// every entity type.
+// hidden: engine tick loop query, not part of the mod authoring surface.
+#[doc(hidden)]
+pub fn entity_tick_each_all() -> bool {
+    installed().is_some_and(|installed| installed.entity_tick_each.iter().any(Option::is_none))
+}
+
+/// Whether any mod requested per-entity `entity_tick_pre`/`entity_tick_post` delivery for
+/// entity type `kind`.
+// hidden: engine tick loop query, not part of the mod authoring surface.
+#[doc(hidden)]
+pub fn entity_tick_each_for(kind: &str) -> bool {
+    installed().is_some_and(|installed| {
+        installed
+            .entity_tick_each
+            .iter()
+            .any(|entry| entry.as_deref().is_none_or(|listed| listed == kind))
+    })
 }
 
 /// Registrar operations for entities.
@@ -232,6 +275,16 @@ pub trait EntitiesRegistrar {
         before_game: bool,
         provider: EntityProviderOf,
     );
+
+    /// Record a request for per-entity `entity_tick_pre`/`entity_tick_post` delivery for
+    /// entity type `entity`; mods reach it through `entity_tick_each`.
+    fn request_entity_tick_each(&mut self, entity: &str) {
+        let _ = entity;
+    }
+
+    /// Record a request for per-entity `entity_tick_pre`/`entity_tick_post` delivery for
+    /// every entity type; mods reach it through `entity_tick_each_entity`.
+    fn request_entity_tick_each_entity(&mut self) {}
 }
 
 /// CapabilityProviders operations for entities.

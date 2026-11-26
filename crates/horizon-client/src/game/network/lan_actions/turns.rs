@@ -308,6 +308,7 @@ impl Game<'_> {
         self.right = play.using.is_some() || self.using.is_some();
         // The guest's vehicle (Entity.vehicle) for its turn.
         let riding = std::mem::replace(&mut self.riding, g.vehicle);
+        self.lan_outer_ridings.push(riding);
         // `Entity.isPassenger()` for that turn, from the same vehicle: the
         // guest's body keeps no swim (`Entity.updateSwimming` needs it false).
         // Taken from `g.vehicle` each turn, so boarding and getting out land.
@@ -360,7 +361,7 @@ impl Game<'_> {
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
         });
         let player_save_projection = (
-            self.level.player_impulse_grace.take(),
+            self.level.player_impulse.take(),
             self.level.player_fall_particles.take(),
         );
         let g = &host.hub.guests[i];
@@ -772,6 +773,7 @@ impl Game<'_> {
         self.level.spawn = respawn.1;
         // ServerPlayer.displayClientMessage(_, true): the guest's action bar.
         let guest_message = std::mem::replace(&mut self.message, message);
+        self.lan_outer_ridings.pop();
         let guest_vehicle = std::mem::replace(&mut self.riding, riding);
         self.left = left;
         self.right = right;
@@ -849,7 +851,7 @@ impl Game<'_> {
             std::mem::swap(&mut self.level.recipe_book, &mut g.recipe_book);
             std::mem::swap(&mut self.level.player_extra, &mut g.saved);
             std::mem::swap(&mut self.level.last_death, &mut g.last_death);
-            self.level.player_impulse_grace = player_save_projection.0;
+            self.level.player_impulse = player_save_projection.0;
             self.level.player_fall_particles = player_save_projection.1;
             std::mem::swap(&mut self.stats, &mut play.stats);
             std::mem::swap(&mut self.hook, &mut play.hook);

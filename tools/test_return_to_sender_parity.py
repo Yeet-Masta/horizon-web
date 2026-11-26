@@ -28,11 +28,13 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fast_bins  # noqa: E402
 import lab  # noqa: E402
 from test_world_reopen_parity import game_env  # noqa: E402
+import lab  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-RESOURCES = ROOT / '.local' / 'horizon-client' / '26.3'
+RESOURCES = lab.RESOURCES
 RUN = ROOT / '.local' / 'return-to-sender'
 MODES = {'server thread': []}
 TITLE = 'advancements.nether.return_to_sender.title'
@@ -45,7 +47,7 @@ def main():
     args = parser.parse_args()
     bin_dir = Path(args.bin_dir).resolve() if args.bin_dir else None
     if bin_dir is None:
-        subprocess.run(['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'horizon-game', '-p', 'horizon-client-lib', '--bins'], cwd=ROOT, check=True)
+        subprocess.run(fast_bins.command('horizon-client', 'horizon-ctl'), cwd=ROOT, check=True)
         bin_dir = ROOT / os.environ.get('CARGO_TARGET_DIR', 'target') / 'fast'
     shutil.rmtree(RUN, ignore_errors=True)
     RUN.mkdir(parents=True)

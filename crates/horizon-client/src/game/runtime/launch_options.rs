@@ -94,7 +94,7 @@ impl Options {
     /// The name to join servers with: the one given, else the offline name kept
     /// next to options.txt (created on first use).
     pub(super) fn player_name(&self) -> String {
-        self.player_name.clone().unwrap_or_else(|| {
+        let name = self.player_name.clone().unwrap_or_else(|| {
             horizon_std::env::current_dir().map_or_else(
                 |_| horizon_client::offline_name::generate(0),
                 |_| {
@@ -103,7 +103,10 @@ impl Options {
                     )
                 },
             )
-        })
+        });
+        // A name that could not be saved still has to stay out of a crash report.
+        horizon_client::telemetry::note_player(&name);
+        name
     }
     /// The command line, then what it asks of the process: the game folder, the account.
     /// A bad command line is a [`launch_api::UsageError`] (exit code 2, no crash report).
@@ -137,6 +140,9 @@ impl Options {
             }
             Ok(None) => {}
             Err(e) => eprintln!("Horizon: not signed in: {e}"),
+        }
+        if let Some(name) = &o.player_name {
+            horizon_client::telemetry::note_player(name);
         }
         if !o.developer_single_player {
             split::launcher::read_now();
@@ -180,6 +186,7 @@ impl Options {
     }
     pub(super) fn from_launch(launch: LaunchArguments) -> Result<Option<Self>> {
         let installation_side = launch.installation_side();
+        let jar_side = launch.jar_side();
         let LaunchArguments { context, rest } = launch;
         let sibling = horizon_std::env::current_exe()?
             .parent()
@@ -230,6 +237,7 @@ impl Options {
             benchmark_profile: false,
             mods: mods::ModsState {
                 installation_side,
+                jar_side,
                 overrides_dir: context.game_dir.join(horizon_mod_package::mod_list::DIR),
                 dev: context.dev_mods,
                 ..Default::default()

@@ -3,7 +3,11 @@
 use super::Game;
 use horizon_client::block_sprites::{BlockSprites, Lookup, SpriteRef};
 use horizon_world::registry::BlockStateId;
-use mod_api::{AtlasRegion, Identifier};
+use mod_api::{AtlasRegion, EntityRef, Identifier, PlayerSkin};
+
+/// The most pixel bytes one `sprite_pixels` call returns: the default texture budget
+/// (`sprites::DEFAULT_TEXTURE_BUDGET`), so with it every layer of the arrays fits in one call.
+pub(super) const MAX_SPRITE_PIXEL_BYTES: u64 = 256 << 20;
 
 #[allow(dead_code)]
 impl Game<'_> {
@@ -34,6 +38,23 @@ impl Game<'_> {
             .iter()
             .map(|texture| lookup.texture(texture))
             .collect()
+    }
+    /// For a client mod: each sprite's RGBA8 as the resources loaded it, square at the arrays' edge; none for a
+    /// sprite past the layers or a client that loaded no pixels. `Err`, reading nothing, for more than
+    /// `MAX_SPRITE_PIXEL_BYTES` in one call.
+    pub(super) fn sprite_pixels(
+        &self,
+        sprites: &[SpriteRef],
+    ) -> Result<Vec<Option<Vec<u8>>>, String> {
+        let size = u64::from(self.pack.context.render.sprite_size);
+        let asked = (sprites.len() as u64).saturating_mul(size * size * 4);
+        if asked > MAX_SPRITE_PIXEL_BYTES {
+            return Err(format!(
+                "{} sprites of {size} px are {asked} bytes, more than {MAX_SPRITE_PIXEL_BYTES} a call",
+                sprites.len()
+            ));
+        }
+        Ok(self.native_sprite_lookup().pixels(sprites))
     }
     /// For a client mod drawing a block's faces itself (a copycat drawing its material's, from
     /// `block_sprites`): the 0xRRGGBB colour a face of `state` with tint index `tint_index` is
@@ -101,6 +122,22 @@ impl Game<'_> {
             self.gui.atlas.sprites.get(&sprite.to_string())
         }?;
         Some(AtlasRegion::new([r.u0, r.v0, r.u1, r.v1], [r.w, r.h]))
+    }
+    /// For a client mod: the player's or mannequin's skin and cape in the GUI atlas and its model,
+    /// as this client draws it (`Mob::skin`, `slim`, `cape`, set each frame by `update_remote_skins`).
+    pub(super) fn player_skin(&self, entity: EntityRef) -> Option<PlayerSkin> {
+        use super::commands::Target;
+        let mob = match self.native_client_entity_target(entity)? {
+            Target::Player => self.player_model.as_ref()?,
+            Target::Mob(id) => self.mobs.iter().find(|m| m.id == id && !m.removed)?,
+            _ => return None,
+        };
+        skin_regions(
+            &self.gui.atlas.sprites,
+            mob.skin.as_deref()?,
+            mob.slim,
+            mob.cape.as_deref(),
+        )
     }
     fn native_sprite_lookup(&self) -> Lookup<'_> {
         // (no renderer, no arrays: every layer counts as array 0's)
@@ -346,6 +383,53 @@ mod quad_on_tests {
     }
 }
 
+/// `sprite_pixels`, a texture's pixels as a client mod reads them on the CPU.
+#[cfg(test)]
+mod sprite_pixels_tests {
+    /// A mod reads a texture's pixels through the host: stone's are opaque and not one flat colour, and an oak
+    /// leaf's have holes; a call past the byte cap reads nothing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_client_mod_reads_a_textures_pixels() {
+        super::super::native_entity_refs::tests::with_client_game(|game| {
+            let sprites: Vec<_> = game
+                .texture_sprites(&["block/stone", "minecraft:block/oak_leaves"])
+                .into_iter()
+                .map(|s| s.expect("a vanilla texture"))
+                .collect();
+            let edge = game.pack.context.render.sprite_size as usize;
+            let got = game.sprite_pixels(&sprites).unwrap();
+            let [Some(stone), Some(leaves)] = &got[..] else {
+                panic!("both textures have pixels: {got:?}");
+            };
+            assert_eq!(stone.len(), edge * edge * 4);
+            assert_eq!(leaves.len(), edge * edge * 4);
+            assert!(
+                stone.as_chunks::<4>().0.iter().all(|p| p[3] == 255),
+                "stone is opaque"
+            );
+            assert!(
+                stone.as_chunks::<4>().0.iter().any(|p| p[..3] != stone[..3]),
+                "stone is not one flat colour"
+            );
+            assert!(
+                leaves.as_chunks::<4>().0.iter().any(|p| p[3] == 0),
+                "leaves have holes"
+            );
+            let past = horizon_client::block_sprites::SpriteRef {
+                array: 7,
+                layer: u32::MAX - 1,
+                animated: false,
+                cutout: false,
+            };
+            assert_eq!(game.sprite_pixels(&[past]).unwrap(), [None]);
+            let per = (edge * edge * 4) as u64;
+            let many = vec![sprites[0]; (super::MAX_SPRITE_PIXEL_BYTES / per + 1) as usize];
+            assert!(game.sprite_pixels(&many).is_err());
+        });
+    }
+}
+
 /// `block_tint_color`, the colour a copycat multiplies its material's tinted faces by.
 #[cfg(test)]
 mod block_tint_color_tests {
@@ -472,5 +556,63 @@ mod block_tint_color_tests {
             }
             horizon_std::fs::remove_dir_all(root).unwrap();
         });
+    }
+}
+
+/// A skin and cape by their atlas names, as [`PlayerSkin`]: none when the skin is not in the atlas
+/// (its slot taken since it was set), and no cape when the cape's is not.
+fn skin_regions(
+    sprites: &std::collections::HashMap<String, horizon_client::hud::Rect>,
+    skin: &str,
+    slim: bool,
+    cape: Option<&str>,
+) -> Option<PlayerSkin> {
+    let region = |name: &str| {
+        let r = sprites.get(name)?;
+        Some(AtlasRegion::new([r.u0, r.v0, r.u1, r.v1], [r.w, r.h]))
+    };
+    Some(PlayerSkin::new(region(skin)?, slim, cape.and_then(region)))
+}
+
+#[cfg(test)]
+mod player_skin_tests {
+    use super::*;
+    use horizon_client::hud::Rect;
+
+    fn rect(u0: f32, v0: f32) -> Rect {
+        Rect {
+            u0,
+            v0,
+            u1: u0 + 0.25,
+            v1: v0 + 0.25,
+            w: 64,
+            h: 64,
+        }
+    }
+
+    #[test]
+    fn a_skin_reads_its_and_its_capes_atlas_regions() {
+        let sprites = std::collections::HashMap::from([
+            ("skins/abc".to_owned(), rect(0.5, 0.0)),
+            ("capes/def".to_owned(), rect(0.0, 0.5)),
+        ]);
+        let skin = skin_regions(&sprites, "skins/abc", true, Some("capes/def")).unwrap();
+        assert_eq!(
+            skin.skin,
+            AtlasRegion::new([0.5, 0.0, 0.75, 0.25], [64, 64])
+        );
+        assert!(skin.slim);
+        assert_eq!(
+            skin.cape,
+            Some(AtlasRegion::new([0.0, 0.5, 0.25, 0.75], [64, 64]))
+        );
+        // A cape whose slot was taken is left out; a skin whose slot was taken answers none.
+        assert_eq!(
+            skin_regions(&sprites, "skins/abc", false, Some("capes/x"))
+                .unwrap()
+                .cape,
+            None
+        );
+        assert_eq!(skin_regions(&sprites, "skins/gone", false, None), None);
     }
 }

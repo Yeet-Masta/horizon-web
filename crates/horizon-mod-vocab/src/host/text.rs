@@ -30,4 +30,26 @@ pub trait TextHost {
     #[access(Metadata)]
     #[raw_text]
     fn text_to_nbt(&self, text: &Text) -> Result<Tag, TextFormError>;
+    /// Side: both.
+    /// The text an item component or a block entity stores (`ComponentSerialization` from
+    /// NBT): what `text_to_nbt` writes, read back, so a `minecraft:custom_name` or a
+    /// `minecraft:lore` line comes out as a `Text` with its colours and styles. See
+    /// `ItemStack::display_name` and `ItemStack::lore`. A plain string is a literal text;
+    /// anything that is not one component (an empty list, an object with no content key, a
+    /// number) is `Ok(None)`; nesting past the game's limit is `TooDeep`.
+    #[access(Metadata)]
+    fn text_from_nbt(&self, tag: &Tag) -> Result<Option<Text>, TextFormError>;
+}
+
+/// The server host's methods of the `text` area, implemented by the game and reached through [`ServerHost`].
+#[horizon_mod_api_macros::host_area]
+pub trait TextServerHost {
+    /// Side: server.
+    /// `Component.getString()`: resolve a component to its plain characters,
+    /// including translations, arguments, key names and siblings. Styles do not
+    /// contribute characters; literal legacy formatting codes remain in the string,
+    /// as in vanilla. Mirrors [`ClientTextClientHost::text_string`] so server hooks
+    /// can read plain text from components too.
+    #[access(Metadata)]
+    fn text_string(&self, text: &Text) -> Result<String, TextFormError>;
 }

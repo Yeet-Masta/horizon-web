@@ -1,0 +1,5 @@
+# The daily tests of horizon-client: each is #[ignore = "daily"] in its source and runs once a day in the daily run,
+# where it must pass (README.md). Rows: PACKAGE TEST TARGET daily REASON, sorted; tools/ci/move_to_daily.py writes them.
+horizon-client game::commands::world_cmds::playsound_command_tests::a_sound_packet_picks_its_variant_from_the_packet_s_seed lib daily resources
+horizon-client game::commands::world_cmds::playsound_command_tests::a_source_without_a_player_fails_and_plays_nothing lib daily resources
+horizon-client game::commands::world_cmds::playsound_command_tests::a_targeted_guest_hears_a_played_sound_once lib daily resources

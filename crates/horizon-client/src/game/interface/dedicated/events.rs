@@ -20,6 +20,10 @@ static EVENTS: Mutex<Events> = Mutex::new(Events {
     kept: VecDeque::new(),
 });
 
+/// The event store is process-wide; tests that write it must not overlap.
+#[cfg(test)]
+pub(super) static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
 /// Records one event: its kind, the player's name and UUID, and what else it says.
 pub(in crate::game) fn record(kind: &str, name: &str, uuid: u128, mut fields: Value) {
     fields["name"] = name.into();
@@ -66,6 +70,9 @@ mod tests {
     // One test: the events are one process-wide list, so two tests recording at once would count each other's.
     #[test]
     fn events_are_numbered_and_read_from_a_number() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let first = since(u64::MAX)["next"].as_u64().unwrap();
         record("join", "Kim0", 1, json!({}));
         record("chat", "Kim0", 1, json!({ "message": "hi" }));

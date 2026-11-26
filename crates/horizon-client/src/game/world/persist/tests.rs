@@ -484,7 +484,12 @@ fn deferred_zombie_finalization_keeps_unknown_profession_through_save_and_cure()
             restored.position,
             0.0,
         );
-        super::super::zombie_villagers::convert_to_villager(&restored, &mut cured, false);
+        super::super::zombie_villagers::convert_to_villager(
+            &restored,
+            &mut cured,
+            false,
+            &world_stations!(game).enchantments,
+        );
         assert_eq!(cured.extra.profession.id(), "example:engineer");
     });
 }
@@ -1006,4 +1011,57 @@ fn anger_at_a_mob_not_saved_yet_names_it() {
         Some(named.as_slice()),
         game.persist.uuid_of(2).as_ref().map(|u| &u[..])
     );
+}
+
+/// An orb loaded with repeated names keeps the set in the copy the save overlays,
+/// so the saved compound has one of each.
+#[test]
+#[ignore = "daily"]
+fn a_loaded_orbs_duplicate_tags_save_once() {
+    super::super::native_entity_refs::tests::with_game(|game| {
+        game.world
+            .chunks
+            .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+        let tag = Tag::compound([
+            ("id", Tag::String("minecraft:experience_orb".into())),
+            (
+                "Pos",
+                Tag::List(vec![
+                    Tag::Double(4.5f64.to_bits()),
+                    Tag::Double(70.0f64.to_bits()),
+                    Tag::Double(4.5f64.to_bits()),
+                ]),
+            ),
+            ("UUID", Tag::IntArray(vec![9, 0, 0, 2])),
+            (
+                "Tags",
+                Tag::List(
+                    ["b", "a", "a", "b", "c"]
+                        .map(|tag| Tag::String(tag.into()))
+                        .to_vec(),
+                ),
+            ),
+            ("Value", Tag::Short(1)),
+        ]);
+        game.spawn_loaded_entity((0, 0), tag, None);
+        let index = game
+            .orbs
+            .iter()
+            .position(|o| game.persist.uuids.get(&o.id) == Some(&[9, 0, 0, 2]))
+            .expect("the orb loaded");
+        let keys = HashSet::from([(0, 0)]);
+        let (_, saved) = game.save_orb(index, &keys).expect("the orb saves");
+        let Some(Tag::List(tags)) = saved.get("Tags") else {
+            panic!("no Tags list in the saved orb: {saved:?}");
+        };
+        let mut tags: Vec<String> = tags
+            .iter()
+            .map(|tag| match tag {
+                Tag::String(s) => s.to_string_lossy(),
+                other => panic!("a tag that is not a string: {other:?}"),
+            })
+            .collect();
+        tags.sort();
+        assert_eq!(tags, ["a", "b", "c"]);
+    });
 }

@@ -1,0 +1,5 @@
+# Prepared-resource daily test: PACKAGE TEST TARGET daily REASON; exact logical libtest identities, sorted.
+horizon-client game::storage::container_open_stat_tests::a_copper_chest_counts_as_a_chest_opened lib daily resources
+horizon-client game::storage::container_open_stat_tests::a_locked_shulker_box_with_no_room_for_its_lid_says_nothing lib daily resources
+horizon-client game::storage::container_open_stat_tests::a_refused_locked_chest_angers_the_piglins_that_see_it lib daily resources
+horizon-client game::storage::container_open_stat_tests::a_refused_locked_container_still_awards_its_open_stat lib daily resources

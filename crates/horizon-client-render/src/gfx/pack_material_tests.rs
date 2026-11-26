@@ -170,7 +170,7 @@ void main() {
         }
         let maps_expected = case == 0;
         pass.groups.clear();
-        post.resize(&device, [15, 1]);
+        post.resize(&device, &queue, [15, 1]);
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 256,
@@ -250,7 +250,7 @@ void main() {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut encoder = device.create_command_encoder(&Default::default());
     let _invalid_group = post.bind(&device, &queue, &mut encoder, &mut pass, [15, 1]);
-    let error = pollster::block_on(validation.pop())
+    let error = horizon_std::block_on_or(validation.pop(), None)
         .expect("production material binding must reject a filtering sampler");
     assert!(
         error.to_string().to_ascii_lowercase().contains("filtering"),

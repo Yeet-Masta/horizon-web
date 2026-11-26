@@ -228,6 +228,258 @@ fn nonempty_and_file_destinations_preserve_pointer_and_contents() {
     assert_eq!(fs::read(file).unwrap(), b"keep file contents");
 }
 
+fn reusable(target: &Path) -> bool {
+    staging_only(target).unwrap()
+}
+
+/// Fails a move into `target` after its copy, which leaves its stage behind. The new stage.
+fn stopped_move(f: &Fixture, target: &Path) -> (String, PathBuf) {
+    let before = kept_copies(target, None);
+    let error = migrate_with_prepare(
+        &f.source,
+        target,
+        &f.bootstrap,
+        |_| {},
+        |_, _| Err("fixture stop".into()),
+    )
+    .unwrap_err();
+    assert!(error.contains("fixture stop"), "{error}");
+    assert!(error.contains("Retry with the same folder"), "{error}");
+    f.old_pointer();
+    let new: Vec<_> = kept_copies(target, None)
+        .into_iter()
+        .filter(|stage| !before.contains(stage))
+        .collect();
+    assert_eq!(new.len(), 1, "{new:?}");
+    assert!(new[0].join("launcher/accounts.json").is_file());
+    assert!(reusable(target));
+    (error, new[0].clone())
+}
+
+#[test]
+fn a_retry_leaves_an_earlier_stage_alone() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let (_, old) = stopped_move(&f, &target);
+    let staged = snapshot(&old);
+    let moved = migrate(&f.source, &target, &f.bootstrap, |_| {}).unwrap();
+    f.migrated(&moved);
+    assert_eq!(snapshot(&old), staged);
+    assert_eq!(kept_copies(&target, None), std::slice::from_ref(&old));
+    assert!(kept_note(&target, None)
+        .unwrap()
+        .contains(&old.display().to_string()));
+}
+
+#[test]
+fn two_earlier_stages_stay() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let (_, first) = stopped_move(&f, &target);
+    let (error, second) = stopped_move(&f, &target);
+    assert!(error.contains("as they were"), "{error}");
+    assert!(error.contains(&first.display().to_string()), "{error}");
+    assert!(!error.contains(&second.display().to_string()), "{error}");
+    let before = [snapshot(&first), snapshot(&second)];
+    let moved = migrate(&f.source, &target, &f.bootstrap, |_| {}).unwrap();
+    f.migrated(&moved);
+    assert_eq!([snapshot(&first), snapshot(&second)], before);
+    assert_eq!(kept_copies(&target, None).len(), 2);
+}
+
+#[test]
+fn a_retry_leaves_reserved_build_folders_alone() {
+    let f = Fixture::new("build");
+    // On Windows this name reserves a horizon-build-* sibling, which the stopped move keeps.
+    let target = f.temp.0.join("Игры");
+    let planted = f.temp.0.join("horizon-build-planted/build");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("compiled.bin"), b"other location").unwrap();
+    stopped_move(&f, &target);
+    let reserved = || {
+        fs::read_dir(&f.temp.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("horizon-build-")
+            })
+            .map(|path| (snapshot(&path), path))
+            .collect::<Vec<_>>()
+    };
+    let before = reserved();
+    #[cfg(windows)]
+    assert_eq!(before.len(), 2, "{before:?}");
+    let moved = migrate(&f.source, &target, &f.bootstrap, |_| {}).unwrap();
+    f.migrated(&moved);
+    for (files, path) in &before {
+        assert_eq!(&snapshot(path), files, "{}", path.display());
+    }
+    assert_eq!(
+        fs::read(planted.join("compiled.bin")).unwrap(),
+        b"other location"
+    );
+}
+
+#[test]
+fn a_stage_beside_other_entries_is_refused() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    stopped_move(&f, &target);
+    fs::write(target.join("sentinel"), b"keep").unwrap();
+    let before = snapshot(&target);
+    assert!(!reusable(&target));
+    assert!(f.refuse(&target).contains("empty folder"));
+    assert_eq!(snapshot(&target), before);
+}
+
+#[test]
+fn a_stage_that_is_a_file_is_refused() {
+    let f = Fixture::new("build");
+    for name in [STAGING.to_owned(), format!("{STAGING}-old")] {
+        let target = f.temp.0.join(format!("file{}", name.len()));
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join(&name), b"not a folder").unwrap();
+        assert!(!reusable(&target));
+        assert!(f.refuse(&target).contains("empty folder"));
+        assert_eq!(fs::read(target.join(&name)).unwrap(), b"not a folder");
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn a_linked_stage_is_refused_without_touching_its_target() {
+    let f = Fixture::new("build");
+    let outside = Temp::new();
+    fs::write(outside.0.join("sentinel"), b"untouched").unwrap();
+    for name in [STAGING.to_owned(), format!("{STAGING}-old")] {
+        let target = f.temp.0.join(format!("linked{}", name.len()));
+        fs::create_dir(&target).unwrap();
+        dir_link(&outside.0, &target.join(&name));
+        assert!(!reusable(&target));
+        assert!(f.refuse(&target).contains("empty folder"));
+        assert!(fs::symlink_metadata(target.join(&name)).is_ok());
+    }
+    assert_eq!(fs::read(outside.0.join("sentinel")).unwrap(), b"untouched");
+}
+
+#[test]
+fn a_destination_inside_a_staging_folder_is_refused() {
+    let f = Fixture::new("build");
+    for target in [
+        f.temp.0.join(STAGING),
+        f.temp.0.join(STAGING).join("data"),
+        f.temp.0.join("data").join(STAGING),
+        f.temp.0.join(format!("{STAGING}-old")).join("data"),
+    ] {
+        let error = f.refuse(&target);
+        assert!(error.contains("in its path"), "{error}");
+        assert!(!target.exists());
+    }
+}
+
+#[test]
+fn a_held_destination_lock_stops_the_move_before_its_stage() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    fs::create_dir(&target).unwrap();
+    let held = File::create(target.join(LOCK)).unwrap();
+    held.try_lock().unwrap();
+    let error = f.refuse(&target);
+    assert!(error.contains("Another move"), "{error}");
+    assert!(kept_copies(&target, None).is_empty());
+    drop(held);
+    // Released, the file left behind is accepted.
+    assert!(reusable(&target));
+    let moved = migrate(&f.source, &target, &f.bootstrap, |_| {}).unwrap();
+    f.migrated(&moved);
+    assert!(target.join(LOCK).is_file());
+    assert!(kept_note(&target, None).is_none());
+}
+
+#[test]
+fn a_lock_that_is_a_folder_is_refused() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    fs::create_dir_all(target.join(LOCK)).unwrap();
+    assert!(!reusable(&target));
+    assert!(f.refuse(&target).contains("empty folder"));
+    assert!(target.join(LOCK).is_dir());
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn a_linked_lock_is_refused() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let outside = Temp::new();
+    fs::create_dir(&target).unwrap();
+    dir_link(&outside.0, &target.join(LOCK));
+    assert!(!reusable(&target));
+    assert!(f.refuse(&target).contains("empty folder"));
+    assert!(fs::read_dir(&outside.0).unwrap().next().is_none());
+}
+
+#[test]
+fn a_claim_beside_another_moves_data_is_given_up() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    fs::create_dir(&target).unwrap();
+    // Another bootstrap's move puts its data there between the check and the claim.
+    fs::write(target.join("theirs"), b"keep").unwrap();
+    let error = claim_stage(&target).unwrap_err();
+    assert!(error.contains("Another move"), "{error}");
+    assert!(kept_copies(&target, None).is_empty());
+    assert_eq!(fs::read(target.join("theirs")).unwrap(), b"keep");
+}
+
+#[test]
+fn a_stage_without_its_game_folder_is_not_committed() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let error = migrate_with_prepare(
+        &f.source,
+        &target,
+        &f.bootstrap,
+        |_| {},
+        |stage, _| fs::remove_dir_all(&stage.game).map_err(|e| e.to_string()),
+    )
+    .unwrap_err();
+    f.old_pointer();
+    // The launcher folder was renamed out of the stage, so the same folder no longer works.
+    assert!(target.join("launcher").is_dir());
+    assert!(error.contains("choose an empty folder to retry"), "{error}");
+    assert!(!reusable(&target));
+}
+
+#[test]
+fn a_folder_already_at_the_destination_is_not_replaced() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let error = migrate_with_prepare(
+        &f.source,
+        &target,
+        &f.bootstrap,
+        |_| {},
+        |_, destination| {
+            // Another move publishes its launcher folder there before this one renames.
+            fs::create_dir(&destination.launcher).unwrap();
+            fs::write(destination.launcher.join("theirs"), b"keep").unwrap();
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("already exists"), "{error}");
+    f.old_pointer();
+    assert_eq!(fs::read(target.join("launcher/theirs")).unwrap(), b"keep");
+    let [stage] = &kept_copies(&target, None)[..] else {
+        panic!("one stage");
+    };
+    assert!(stage.join("launcher/accounts.json").is_file());
+}
+
 #[test]
 fn nested_same_and_ancestor_destinations_preserve_pointer() {
     let f = Fixture::new("build");
@@ -277,6 +529,347 @@ fn source_entry_link_is_rejected_without_touching_its_target() {
     );
     f.old_pointer();
     assert_eq!(fs::read(outside.0.join("sentinel")).unwrap(), b"untouched");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn game_cache_links_are_left_out_of_the_move() {
+    let f = Fixture::new("build");
+    let assets = f.source.launcher.join("versions/x/assets");
+    fs::create_dir_all(&assets).unwrap();
+    fs::write(assets.join("sentinel"), b"untouched").unwrap();
+    struct Link(PathBuf);
+    impl Drop for Link {
+        fn drop(&mut self) {
+            #[cfg(unix)]
+            let _ = fs::remove_file(&self.0);
+            #[cfg(windows)]
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+    let mut links = Vec::new();
+    for instance in [
+        f.source.game.clone(),
+        f.source.game.join("instances/a"),
+        f.source.game.join("ports/p/home"),
+    ] {
+        let stamp = instance.join(".horizon-cache/mod-content/0123456789abcdef");
+        fs::create_dir_all(&stamp).unwrap();
+        fs::write(stamp.join("STAMP"), b"stamp").unwrap();
+        let link = stamp.join("assets");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&assets, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link.to_string_lossy().replace('/', "\\"))
+                .arg(assets.to_string_lossy().replace('/', "\\"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "junction setup: {output:?}");
+        }
+        links.push(Link(link));
+    }
+    fs::write(f.source.game.join("instances/a/options.txt"), b"options").unwrap();
+    // A world may carry the cache's name; only the game's own caches are left out.
+    let world = f.source.game.join("saves/.horizon-cache");
+    fs::create_dir_all(&world).unwrap();
+    fs::write(world.join("level.dat"), b"world").unwrap();
+    let roots = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    drop(links);
+    assert!(!roots.game.join(".horizon-cache").exists());
+    assert!(!roots.game.join("instances/a/.horizon-cache").exists());
+    assert!(!roots.game.join("ports/p/home/.horizon-cache").exists());
+    assert_eq!(
+        fs::read(roots.game.join("saves/.horizon-cache/level.dat")).unwrap(),
+        b"world"
+    );
+    assert_eq!(
+        fs::read(roots.game.join("instances/a/options.txt")).unwrap(),
+        b"options"
+    );
+    assert_eq!(
+        fs::read(roots.game.join("saves/dummy/level.dat")).unwrap(),
+        b"\0\xff\x80world\0"
+    );
+    assert_eq!(fs::read(assets.join("sentinel")).unwrap(), b"untouched");
+    assert_eq!(
+        fs::read(roots.launcher.join("versions/x/assets/sentinel")).unwrap(),
+        b"untouched"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn other_launchers_links_are_left_out_of_the_move() {
+    let f = Fixture::new("build");
+    let outside = Temp::new();
+    for dir in ["libraries", "assets"] {
+        fs::create_dir(outside.0.join(dir)).unwrap();
+        fs::write(outside.0.join(dir).join("sentinel"), b"untouched").unwrap();
+    }
+    fs::write(outside.0.join("client.jar"), b"jar").unwrap();
+    struct Link(PathBuf);
+    impl Drop for Link {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+            #[cfg(windows)]
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+    let linked = f.source.launcher.join("linked-minecraft");
+    let version = linked.join("versions/1.0");
+    fs::create_dir_all(&version).unwrap();
+    fs::write(version.join("1.0.json"), b"{}").unwrap();
+    let mut links = Vec::new();
+    for dir in ["libraries", "assets"] {
+        let link = linked.join(dir);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.0.join(dir), &link).unwrap();
+        #[cfg(windows)]
+        {
+            let output = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link.to_string_lossy().replace('/', "\\"))
+                .arg(outside.0.join(dir).to_string_lossy().replace('/', "\\"))
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "junction setup: {output:?}");
+        }
+        links.push(Link(link));
+    }
+    #[cfg(unix)]
+    {
+        let jar = version.join("1.0.jar");
+        std::os::unix::fs::symlink(outside.0.join("client.jar"), &jar).unwrap();
+        links.push(Link(jar));
+    }
+    let roots = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    drop(links);
+    let moved = roots.launcher.join("linked-minecraft");
+    for path in ["libraries", "assets", "versions/1.0/1.0.jar"] {
+        assert!(fs::symlink_metadata(moved.join(path)).is_err(), "{path}");
+    }
+    assert_eq!(
+        fs::read(moved.join("versions/1.0/1.0.json")).unwrap(),
+        b"{}"
+    );
+    assert_eq!(
+        fs::read(roots.launcher.join("accounts.json")).unwrap(),
+        b"{\"accounts\":[]}"
+    );
+    for dir in ["libraries", "assets"] {
+        assert_eq!(
+            fs::read(outside.0.join(dir).join("sentinel")).unwrap(),
+            b"untouched"
+        );
+    }
+    assert_eq!(fs::read(outside.0.join("client.jar")).unwrap(), b"jar");
+}
+
+/// Links the folder `link` to `target`: a symlink on Unix, a junction on Windows.
+#[cfg(any(unix, windows))]
+fn dir_link(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link.to_string_lossy().replace('/', "\\"))
+            .arg(target.to_string_lossy().replace('/', "\\"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "junction setup: {output:?}");
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn server_runtime_moves_with_its_release() {
+    let f = Fixture::new("build");
+    let root = f.source.launcher.join("server-runtime");
+    let files = root.join("game-files/horizon-client");
+    fs::create_dir_all(files.join("1.0")).unwrap();
+    fs::write(files.join("1.0/data"), b"files").unwrap();
+    // Two releases with their links; `current` picks the first, which is not the newest.
+    for tag in ["v1", "v2"] {
+        let release = root.join("releases").join(tag);
+        fs::create_dir_all(release.join(".local")).unwrap();
+        fs::write(release.join("horizon-server"), tag).unwrap();
+        dir_link(&files, &release.join(".local/horizon-client"));
+    }
+    fs::create_dir_all(root.join("releases/v3/.local")).unwrap();
+    fs::write(root.join("current.switching"), b"mine").unwrap();
+    dir_link(&root.join("releases/v1"), &root.join("current"));
+    let roots = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    let moved = roots.launcher.join("server-runtime");
+    let canonical = |path: PathBuf| fs::canonicalize(path).unwrap();
+    assert_eq!(
+        canonical(moved.join("current")),
+        canonical(moved.join("releases/v1"))
+    );
+    assert_eq!(
+        fs::read(moved.join("current/horizon-server")).unwrap(),
+        b"v1"
+    );
+    for tag in ["v1", "v2"] {
+        let local = moved
+            .join("releases")
+            .join(tag)
+            .join(".local/horizon-client");
+        assert_eq!(fs::read(local.join("1.0/data")).unwrap(), b"files");
+        assert_eq!(
+            canonical(local),
+            canonical(moved.join("game-files/horizon-client"))
+        );
+    }
+    assert_eq!(
+        canonical(root.join("current")),
+        canonical(root.join("releases/v1"))
+    );
+    // A release with a plain `.local` gets no link, and a player's own `.switching` file moves.
+    assert!(fs::read_dir(moved.join("releases/v3/.local"))
+        .unwrap()
+        .next()
+        .is_none());
+    assert_eq!(fs::read(moved.join("current.switching")).unwrap(), b"mine");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn server_runtime_current_elsewhere_is_refused() {
+    let f = Fixture::new("build");
+    let outside = Temp::new();
+    fs::write(outside.0.join("sentinel"), b"untouched").unwrap();
+    // No `releases` folder: `current` is still checked on its own.
+    let root = f.source.launcher.join("server-runtime");
+    fs::create_dir_all(&root).unwrap();
+    dir_link(&outside.0, &root.join("current"));
+    let error = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap_err();
+    assert!(error.contains("a link Horizon did not make"), "{error}");
+    assert_eq!(fs::read(&f.bootstrap).unwrap(), f.pointer);
+    assert_eq!(fs::read(outside.0.join("sentinel")).unwrap(), b"untouched");
+    #[cfg(unix)]
+    fs::remove_file(root.join("current")).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(root.join("current")).unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn a_linked_server_runtime_is_refused() {
+    let f = Fixture::new("build");
+    let elsewhere = f.source.launcher.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    dir_link(&elsewhere, &f.source.launcher.join("server-runtime"));
+    let error = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap_err();
+    assert!(error.contains("a link Horizon did not make"), "{error}");
+    assert_eq!(fs::read(&f.bootstrap).unwrap(), f.pointer);
+}
+
+#[cfg(unix)]
+#[test]
+fn server_game_files_through_a_linked_folder_are_refused() {
+    let f = Fixture::new("build");
+    let root = f.source.launcher.join("server-runtime");
+    fs::create_dir_all(root.join("releases/v1/.local")).unwrap();
+    fs::create_dir_all(f.source.launcher.join("elsewhere/horizon-client")).unwrap();
+    // A relative link the copy would keep, so the game files would end outside the runtime.
+    std::os::unix::fs::symlink("../elsewhere", root.join("game-files")).unwrap();
+    dir_link(
+        &root.join("game-files/horizon-client"),
+        &root.join("releases/v1/.local/horizon-client"),
+    );
+    let error = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap_err();
+    assert!(error.contains("a link Horizon did not make"), "{error}");
+    assert_eq!(fs::read(&f.bootstrap).unwrap(), f.pointer);
+}
+
+#[cfg(unix)]
+#[test]
+fn server_links_spelled_through_a_linked_parent_move() {
+    let f = Fixture::new("build");
+    // The launcher spelled its folder through a link above it, as `~/.local/share` can be.
+    let alias = f.temp.0.join("alias");
+    std::os::unix::fs::symlink(f.temp.0.join("source"), &alias).unwrap();
+    let spelled = Roots {
+        launcher: alias.join("launcher"),
+        ..f.source.clone()
+    };
+    let root = spelled.launcher.join("server-runtime");
+    fs::create_dir_all(root.join("releases/v1/.local")).unwrap();
+    fs::create_dir_all(root.join("game-files/horizon-client")).unwrap();
+    dir_link(
+        &root.join("game-files/horizon-client"),
+        &root.join("releases/v1/.local/horizon-client"),
+    );
+    dir_link(&root.join("releases/v1"), &root.join("current"));
+    let roots = migrate(&spelled, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    let moved = roots.launcher.join("server-runtime");
+    assert_eq!(
+        fs::read_link(moved.join("current")).unwrap(),
+        moved.join("releases/v1")
+    );
+}
+
+#[test]
+fn real_files_where_other_launchers_links_go_are_moved() {
+    let f = Fixture::new("build");
+    let linked = f.source.launcher.join("linked-minecraft");
+    for (path, bytes) in [
+        ("assets/indexes/1.json", &b"assets"[..]),
+        ("libraries/a.jar", b"library"),
+        ("versions/1.0/1.0.jar", b"jar"),
+    ] {
+        fs::create_dir_all(linked.join(path).parent().unwrap()).unwrap();
+        fs::write(linked.join(path), bytes).unwrap();
+    }
+    let roots = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    assert_eq!(snapshot(&f.source.launcher), snapshot(&roots.launcher));
+    assert_eq!(snapshot(&linked).len(), 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_link_inside_the_root_is_made_again() {
+    let f = Fixture::new("build");
+    let runtime = f.source.launcher.join("runtime");
+    fs::create_dir_all(runtime.join("lib")).unwrap();
+    fs::create_dir_all(runtime.join("bin")).unwrap();
+    fs::write(runtime.join("lib/libjvm.so"), b"jvm").unwrap();
+    std::os::unix::fs::symlink("../lib/libjvm.so", runtime.join("bin/libjvm.so")).unwrap();
+    let roots = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap();
+    let link = roots.launcher.join("runtime/bin/libjvm.so");
+    assert_eq!(fs::read_link(&link).unwrap(), Path::new("../lib/libjvm.so"));
+    assert_eq!(fs::read(link).unwrap(), b"jvm");
+}
+
+#[cfg(unix)]
+#[test]
+fn relative_link_leaving_the_root_is_still_refused() {
+    for target in [
+        "../../outside",
+        "lib/../../outside",
+        "./lib",
+        "lib/./a",
+        "lib//a",
+        "lib/",
+        "/etc",
+        "../..",
+    ] {
+        let f = Fixture::new("build");
+        let folder = f.source.launcher.join("runtime");
+        fs::create_dir_all(folder.join("lib")).unwrap();
+        std::os::unix::fs::symlink(target, folder.join("link")).unwrap();
+        let error = migrate(&f.source, &f.target(), &f.bootstrap, |_| {}).unwrap_err();
+        assert!(
+            error.contains("Symbolic links and reparse points"),
+            "{target}: {error}"
+        );
+        assert_eq!(fs::read(&f.bootstrap).unwrap(), f.pointer);
+    }
 }
 
 #[cfg(unix)]
@@ -476,6 +1069,41 @@ fn using_the_default_folder_keeps_the_pointer_beside_it() {
 
 #[cfg(unix)]
 #[test]
+fn use_real_folder_rewrites_shared_linked_launcher_and_build_roots() {
+    let temp = Temp::new();
+    let target = temp.0.join("relocated-data");
+    fs::create_dir_all(target.join("cache")).unwrap();
+    fs::write(target.join("accounts.json"), b"accounts").unwrap();
+    fs::write(target.join("cache/build.bin"), b"build").unwrap();
+    let before = snapshot(&target);
+    let link = temp.0.join("data-link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let game = temp.0.join("game");
+    fs::create_dir_all(&game).unwrap();
+    let roots = Roots {
+        launcher: link.clone(),
+        game,
+        build: link.clone(),
+    };
+    let bootstrap = temp.0.join("bootstrap/location.json");
+    fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+    fs::write(
+        &bootstrap,
+        serde_json::to_vec(&Location { version: 1, roots }).unwrap(),
+    )
+    .unwrap();
+
+    use_real_at(&bootstrap).unwrap();
+
+    let committed = stored_roots_at(&bootstrap).unwrap().unwrap();
+    assert_eq!(committed.launcher, target);
+    assert_eq!(committed.build, target);
+    assert_eq!(fs::read_link(&link).unwrap(), committed.launcher);
+    assert_eq!(snapshot(&committed.launcher), before);
+}
+
+#[cfg(unix)]
+#[test]
 fn a_config_folder_behind_a_link_still_opens() {
     // A dotfiles-managed ~/.config is a link: players who never moved their data must start
     // without an error, and a pointer kept there must still resolve and lock.
@@ -660,4 +1288,73 @@ fn separate_build_is_staged_without_publishing_until_preparation_succeeds() {
     assert!(resolve_at(&f.bootstrap).unwrap_err().contains("missing"));
     fs::rename(offline, &moved.build).unwrap();
     assert_eq!(resolve_at(&f.bootstrap).unwrap(), Some(moved));
+}
+
+#[test]
+fn a_move_stopped_between_files_keeps_everything() {
+    let f = Fixture::new("build");
+    let target = f.target();
+    let lease = MigrationLease::take(&f.bootstrap).unwrap();
+    let mut files = 0;
+    let error = migrate_locked(
+        &f.source,
+        &target,
+        &f.bootstrap,
+        |message| {
+            files += usize::from(message == progress::FILE);
+            if files == 1 {
+                return Err("fixture window closed".into());
+            }
+            Ok(())
+        },
+        |_, _| Ok(()),
+        &lease,
+    )
+    .unwrap_err();
+    drop(lease);
+    assert!(error.contains("fixture window closed"), "{error}");
+    assert_eq!(files, 1);
+    f.old_pointer();
+    assert_eq!(kept_copies(&target, None).len(), 1);
+    assert!(reusable(&target));
+}
+
+/// A stop asked for while `prepare` runs is honoured before the first rename; one asked for
+/// after that is not, and the move commits.
+#[test]
+fn a_stop_is_honoured_only_before_the_renames() {
+    for late in [false, true] {
+        let f = Fixture::new("build");
+        let target = f.target();
+        let lease = MigrationLease::take(&f.bootstrap).unwrap();
+        let stop = std::cell::Cell::new(false);
+        let result = migrate_locked(
+            &f.source,
+            &target,
+            &f.bootstrap,
+            |message| {
+                if stop.get() {
+                    return Err("fixture window closed".into());
+                }
+                // The last report: a stop asked for now is already past the last stop point.
+                stop.set(late && message == progress::COMMIT);
+                Ok(())
+            },
+            |_, _| {
+                stop.set(!late);
+                Ok(())
+            },
+            &lease,
+        );
+        drop(lease);
+        if late {
+            f.migrated(&result.unwrap());
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("fixture window closed"), "{error}");
+            f.old_pointer();
+            assert!(!target.join("launcher").exists());
+            assert!(reusable(&target));
+        }
+    }
 }

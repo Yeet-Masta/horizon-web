@@ -1422,7 +1422,7 @@ impl Menu {
             return false;
         }
         if let Some(result) = self.state.containers[RESULT][0].as_mut() {
-            result.data_mut().custom_name = (!name.trim().is_empty())
+            result.data_mut().custom_name = (!horizon_core::java_character::is_blank(&name))
                 .then(|| horizon_core::nbt::Tag::String(name.as_str().into()));
             result.tidy();
         }
@@ -1726,9 +1726,20 @@ impl Menu {
     /// How many of `stack` slot `s` holds: `Slot.getMaxStackSize(stack)` where `Slot.mayPlace`
     /// takes it, else none.
     pub fn slot_holds(&self, env: &Env, s: usize, stack: &ItemStack) -> u32 {
-        match self.may_place(env, s, stack) {
-            true => self.slot_max(env, s, stack),
-            false => 0,
+        if self.state.slots[s].role == Role::Hidden {
+            return 0;
+        }
+        let (allowed, max) = self.slot_rules(
+            env,
+            s,
+            stack,
+            self.vanilla_may_place(env, s, stack),
+            self.vanilla_slot_max(s, stack),
+        );
+        if allowed {
+            self.limit_slot_max(s, max)
+        } else {
+            0
         }
     }
 
@@ -2046,8 +2057,9 @@ impl Menu {
         }
         let result = env
             .recipes
-            .find_with(
+            .find_for(
                 env.loop_context,
+                crate::crafting::Crafter::player(env.player),
                 &self.state.containers[GRID],
                 self.state.grid_size,
                 &|id| {
@@ -2222,7 +2234,7 @@ pub(crate) fn inventory_add(
     items: &Items,
     stack: &mut ItemStack,
 ) -> bool {
-    if stack.count == 0 {
+    if stack.count == 0 || &*stack.item == "minecraft:air" {
         return false;
     }
     if items.get(&stack.item).is_some_and(|i| i.max_damage > 0) && stack.damage > 0 {
@@ -2679,7 +2691,8 @@ impl Menu {
                         .merchant_remove_count
                         .wrapping_add((clicked.count - stack.count) as i32);
                     self.merchant_check_take_achievements(&clicked);
-                    if let Some(m) = self.state.merchant.as_mut() {
+                    // MerchantMenu.playTradeSound: not for a client's merchant.
+                    if let Some(m) = self.state.merchant.as_mut().filter(|m| !m.client_side) {
                         m.events.push(crate::merchant::Event::TradeSound);
                     }
                 } else if index != 0 && index != 1 {
@@ -3186,6 +3199,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn inventory_add_rejects_air_and_empty_stacks() {
+        let items = Items::for_tests(Default::default());
+        for mut stack in [
+            ItemStack::new("minecraft:air", 1),
+            ItemStack::new("minecraft:stone", 0),
+        ] {
+            let mut inventory = [const { None }; 41];
+            let count = stack.count;
+            assert!(!super::inventory_add(
+                &mut inventory,
+                0,
+                false,
+                &items,
+                &mut stack
+            ));
+            assert!(inventory.iter().all(Option::is_none));
+            assert_eq!(stack.count, count);
+        }
+    }
+
+    #[test]
     fn swap_self_does_not_duplicate_and_container_slot_is_distinct() {
         with_menu(Kind::Crafting, |env, menu| {
             menu.set_player_item(0, stack("minecraft:stone", 8));
@@ -3350,6 +3384,72 @@ pub(crate) mod tests {
             assert_eq!(menu.merchant.as_ref().unwrap().offers[0].uses, 2);
             assert!(menu.slot(0).is_none());
             assert!(menu.slot(2).is_none());
+        }
+    }
+
+    /// A server's merchant on its client: the payment the server sets picks the
+    /// active offer (`MerchantContainer.setItem`), so a take uses the last trade up
+    /// at once and adds its xp (`ClientSideMerchant.notifyTrade`, `overrideXp`).
+    /// The level-up, orb, voice and trade sound stay the server's.
+    #[test]
+    fn a_client_merchant_uses_up_a_taken_trade() {
+        let items = Items::for_tests(Default::default());
+        let recipes = Recipes::empty();
+        let brewing = Brewing::load(std::path::Path::new(""), &items, &PackOverlay::NONE);
+        let banners = Banners::default();
+        let station_recipes = crate::stations::StationRecipes::default();
+        let enchantments = crate::enchant::Enchantments::default();
+        let names = crate::creative::Names::default();
+        let env = Env {
+            crafting_remainder: None,
+            player: None,
+            player_entity_id: None,
+            loop_context: &crate::test_resources::loop_context(LoopSide::Client),
+            items: &items,
+            recipes: &recipes,
+            brewing: &brewing,
+            banners: &banners,
+            station_recipes: &station_recipes,
+            enchantments: &enchantments,
+            names: &names,
+            trade: None,
+            maps: None,
+            limited_crafting: false,
+            can_equip: None,
+            known_recipes: None,
+            slot_rules: None,
+        };
+        for input in [Input::Pickup, Input::QuickMove] {
+            let offer = crate::merchant::MerchantOffer {
+                base_cost_a: crate::merchant::ItemCost {
+                    stack: ItemStack::new("minecraft:emerald", 4),
+                },
+                cost_b: None,
+                result: ItemStack::new("minecraft:glass", 3),
+                uses: 11,
+                max_uses: 12,
+                reward_exp: true,
+                special_price_diff: 0,
+                demand: 0,
+                price_multiplier: 0.0,
+                xp: 5,
+            };
+            let mut session = crate::merchant::Session::new(vec![offer], true);
+            session.client_side = true;
+            // 8 + 5 reaches level 2's 10 xp on a server's villager.
+            session.xp = 8;
+            let mut menu = Menu::new(Kind::Merchant);
+            menu.merchant = Some(Box::new(session));
+            // ClientboundContainerSetSlotPacket for the payment.
+            menu.set_slot(&env, 0, stack("emerald", 8));
+            assert_eq!(menu.slot(2).map(|s| s.count), Some(3));
+            menu.click(&env, 2, 0, input).unwrap();
+            assert_eq!(menu.slot(0).map(|s| s.count), Some(4));
+            assert!(menu.slot(2).is_none(), "no result once out of stock");
+            let m = menu.merchant.as_ref().unwrap();
+            assert!(m.offers[0].out_of_stock());
+            assert_eq!((m.xp, m.level), (13, 1));
+            assert!(m.events.is_empty(), "{input:?}: {:?}", m.events);
         }
     }
 
@@ -4862,6 +4962,7 @@ pub(crate) mod tests {
     }
 
     mod crafted_stat_tests;
+    mod hook_result_tests;
     mod mod_grid_tests;
 
     /// Extra sources (`native_recipe_sources`) count as more inventory: the

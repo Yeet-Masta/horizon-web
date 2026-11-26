@@ -41,6 +41,24 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
 
 ## The extras
 
+### Spyglass look at the poles (`spyglassPolarLook`, default off)
+- Looking up or down with a spyglass, the two axes of the look no longer cross the
+  screen at the same rate: a small yaw turn of `d` degrees moves the picture sideways
+  by about `d·cos(pitch)` and rolls it around the centre by `d·sin(pitch)` (exactly
+  `atan2(sin d·cos p, cos d)`), so near the poles the picture barely moves sideways
+  while the roll grows. Vanilla turns both axes at the same rate, which is why the
+  horizontal look slows down as the pitch climbs.
+- On, a scoped first-person yaw is multiplied by `1/cos(pitch)`
+  (`spyglass_polar_look::yaw_scale`), which puts the sideways motion back; the pitch
+  keeps vanilla's rate (`degrees_per_count`).
+- The factor is held at 8×, so it stops growing at 82.8°: at the pole itself `1/cos`
+  would be an infinity, and the roll the turn adds grows with the factor, so a bounded
+  factor keeps that roll bounded too (still noticeably faster than at the horizon).
+- Off — the default — the turn is vanilla's, bit for bit. The switch stays on this
+  client; the server sees the turns it makes like any other turn. The maintainer
+  decides whether vanilla's slow horizontal look near the poles should ever stop being
+  the default.
+
 ### Chunk pregeneration (`pregen`, default off)
 - Makes `/pregen` available in single-player and hosted LAN worlds, with the existing cheat and
   permission checks. It does not start generation: run `/pregen start` explicitly.
@@ -57,6 +75,9 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
   lightmap and the graphics screen hides the row, while the saved choice stays for the next world. Single
   player, a LAN host, a splitscreen seat in P1's world and Replay Studio keep it (`fullbright_held`,
   `game/options.rs`).
+- Its own key, `key.fullbright` (Controls, unbound by default, saved in `horizon-extras.txt` as
+  `fullbrightKey`), toggles it in play; client mods read and set it through the host's `fullbright` and
+  `set_fullbright` (area `client_options`). Both change nothing while it is held off.
 
 ### Dynamic lights (`dynamicLights`, default off)
 - A light source held by a player or mob (main or off hand), dropped as an item, or an entity on
@@ -76,11 +97,12 @@ in Controls, and adding one would put a non-vanilla mapping into `options.txt`.
 ### Moved to native mods
 
 The **FPS counter**, **Keystrokes**, **Zoom** and the **Minimap** are official native mods now (in
-horizon-rust/horizon-mods under `native/<name>/`, [mods.md](modding/src/start/installing.md#horizons-official-mods)), with the same look and
+horizon-rust/horizon-mods under `native/<name>/`, [installing.md](modding/src/start/installing.md#horizons-own-mods)), with the same look and
 options. Players install them from the launcher's Mods page, and the launcher builds them into the game
 ([modding/src/how-to/native-mods.md](modding/src/how-to/native-mods.md)). The game keeps
 the hook points they use (`crates/horizon-client/src/game/native_hooks/`), and `horizon-extras.txt` keeps the old
-keys and `movedToMods`. The Extras page keeps a **Zoom** row: the mod's switch and Settings button when
+keys and `movedToMods`. A port reads its extra's old keys once through the mod API's `official_extra_settings`
+(the keys of each mod id are `MOVED_KEYS` in `crates/horizon-client-render/src/extras.rs`). The Extras page keeps a **Zoom** row: the mod's switch and Settings button when
 it is built in, else a note saying to install it from the Mods page.
 
 The game still draws the minimap, for the native mod (`native_minimap` in `native_hooks/`, [mods.md](modding/src/how-to/content-mods.md)):
@@ -101,6 +123,10 @@ The game still draws the minimap, for the native mod (`native_minimap` in `nativ
 - Hidden in first person, while sleeping, in spectator mode, while invisible, and
   whenever the team's name tag visibility would hide it, exactly as the other
   players' tags (`game/interface/names.rs`, `own_name_tag`). Client-only: nothing is sent.
+- A Horizon crate, `horizon-name-tag`, registered by `horizon-official`: its switch per
+  splitscreen player, its line in `horizon-extras.txt` (same key) and its row in the Extras
+  page's Third person group. The engine asks `horizon_hooks::Hooks::own_name_tag` each frame;
+  the plain executable has no own name tag.
 
 ### Hide block-break particles (`hideBlockParticles`, default off)
 - Hides the debris particles that burst from a block when it breaks

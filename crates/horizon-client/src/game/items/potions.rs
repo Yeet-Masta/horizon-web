@@ -891,7 +891,7 @@ impl Game<'_> {
             self.particles.add(&options, at, [0.0; 3]);
             self.lan_send_particles(super::lan_particles::QueuedParticle {
                 dimension: self.dim.id(),
-                options,
+                options: options.into(),
                 state: None,
                 at,
                 spread: [0.0; 3],
@@ -1096,6 +1096,14 @@ impl Game<'_> {
                                 let new = !m.has_effect(name);
                                 m.add_effect(name, duration, amp);
                                 self.mod_effect_added(name, Some(id as i32), amp, new);
+                                self.effect_added_detail(
+                                    name,
+                                    Some(id as i32),
+                                    amp,
+                                    duration,
+                                    new,
+                                    "unknown",
+                                );
                             }
                         }
                     }
@@ -1117,6 +1125,12 @@ impl Game<'_> {
                     if cancel {
                         return;
                     }
+                    horizon_client::hunger::native_living_heal_cause(
+                        &self.loop_context,
+                        player.entity_id as u32,
+                        "magic",
+                        amount,
+                    );
                 }
                 EffectAction::Heal(amount)
             }
@@ -1255,6 +1269,11 @@ impl Game<'_> {
         } else {
             Vec::new()
         };
+        let active_effects: Vec<mod_api::EffectKey> = effects
+            .list
+            .iter()
+            .filter_map(|e| e.registry_index.and_then(mod_api::__private::effect_key_by_index))
+            .collect();
         let (actions, raid_omen_added) = effects.tick_with(
             &mut |e, t, actions, dispatch| {
                 for action in actions.drain(..) {
@@ -1294,6 +1313,7 @@ impl Game<'_> {
                         health,
                         max_health,
                         food,
+                        &active_effects,
                     );
                     let registry = &self.motion.health.damage;
                     actions.extend(changes.into_iter().filter_map(|change| {
@@ -1399,6 +1419,10 @@ impl Game<'_> {
         }
     }
     pub(super) fn add_player_effect(&mut self, effect: EffectInstance) -> bool {
+        self.add_player_effect_by(effect, "unknown")
+    }
+    /// `add_player_effect` with the cause the added-effect detail hook reports.
+    pub(super) fn add_player_effect_by(&mut self, effect: EffectInstance, cause: &str) -> bool {
         // `LivingEntity.addEffect` refuses what cannot affect the entity;
         // players pass the tag check, but the `mob_effect_applicable` hook
         // is asked for every add.
@@ -1410,6 +1434,7 @@ impl Game<'_> {
         }
         let id = effect.id;
         let amp = effect.amplifier;
+        let ticks = effect.duration;
         let new = self.potions.effects.get(id).is_none();
         let changed = self.potions.effects.add(effect);
         self.apply_effect_status();
@@ -1433,6 +1458,7 @@ impl Game<'_> {
         if let Some(key) = key {
             self.mod_effect_added_resolved(key, None, amp, new);
         }
+        self.effect_added_detail(id, None, amp, ticks, new, cause);
         changed
     }
     /// Removes one effect, or all effects, and refreshes the player's derived state.
@@ -1523,12 +1549,20 @@ impl Game<'_> {
         health: f32,
         max_health: f32,
         food: Option<PlayerFood>,
+        active_effects: &[mod_api::EffectKey],
     ) -> (bool, Vec<EffectTickChange>) {
         let mut apply = false;
         self.native_should_apply_effect_tick_this_tick(effect, tick_count, amplifier, &mut apply);
         let mut keep = true;
         let mut changes = Vec::new();
         if apply {
+            if let Some(owner) = mod_api::__private::effect_index(effect)
+                .and_then(horizon_client_core::potions::effect_by_index)
+                .and_then(|def| def.owner)
+            {
+                mod_api::__private::set_effect_owner(effect, owner);
+            }
+            let _active = mod_api::__private::scope_active_tick_effects(active_effects);
             self.native_apply_effect_tick(mod_api::__private::ApplyEffectTickCall {
                 effect,
                 dimension: self.dim.id(),
@@ -2168,6 +2202,14 @@ impl Game<'_> {
                                     !hidden.contains(id),
                                 );
                                 self.mod_effect_added(name, Some(mob as i32), *amp, new);
+                                self.effect_added_detail(
+                                    name,
+                                    Some(mob as i32),
+                                    *amp,
+                                    scaled(*duration),
+                                    new,
+                                    "unknown",
+                                );
                             }
                         }
                     }
@@ -2503,7 +2545,18 @@ impl Game<'_> {
                         if d > 20
                             && let Some(name) = mob_effect_id(id)
                         {
+                            let mob = self.mobs[i].id;
+                            let new = !self.mobs[i].has_effect(name);
                             self.mobs[i].add_effect(name, d, *amp);
+                            self.mod_effect_added(name, Some(mob as i32), *amp, new);
+                            self.effect_added_detail(
+                                name,
+                                Some(mob as i32),
+                                *amp,
+                                d,
+                                new,
+                                "unknown",
+                            );
                         }
                         continue;
                     }
@@ -2734,6 +2787,16 @@ impl horizon_client::mobs::ModEffectTicks for Game<'_> {
         let Some(effect) = mod_api::__private::effect_key_by_index(effect) else {
             return true;
         };
+        let active_effects: Vec<mod_api::EffectKey> = mob
+            .extra
+            .effects
+            .iter()
+            .filter_map(|e| {
+                e.registry_index
+                    .and_then(mod_api::__private::effect_key_by_index)
+                    .or_else(|| mod_api::__private::effect_key(e.id))
+            })
+            .collect();
         let (keep, changes) = self.mod_effect_tick(
             effect,
             Some(mob.id as i32),
@@ -2743,6 +2806,7 @@ impl horizon_client::mobs::ModEffectTicks for Game<'_> {
             mob.health,
             mob.attrs.max_health,
             None,
+            &active_effects,
         );
         for change in changes {
             match change {
@@ -2976,7 +3040,8 @@ mod tests {
             "test-potions",
             Box::new(TestMod),
         )]));
-        assert!(brewing::register_mod_effects([(
+        assert!(brewing::register_mod_effects_owned([(
+            "test-potions".into(),
             "test:effect".into(),
             0,
             brewing::Category::Neutral,

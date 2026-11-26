@@ -133,8 +133,8 @@ pub(super) fn reach(item: &ItemEntity) -> Aabb {
 }
 
 /// An item's move as its turn makes it: without physics (inside a block), alive, discarded, its
-/// splashes, and where it landed.
-pub(super) type Moved = (bool, bool, bool, Vec<ItemSplash>, Landed);
+/// splashes, where it landed, and the original displacement of a physics move.
+pub(super) type Moved = (bool, bool, bool, Vec<ItemSplash>, Landed, Option<Vec3>);
 
 /// `Entity.checkFallDamage`'s landing: the fall, the item's position and box, and how many of the
 /// tick's splashes came before it (`Entity.baseTick`'s; the water entry after the move comes
@@ -169,10 +169,24 @@ fn move_alone(
     let mut splashes = Vec::new();
     let (step, landed) = tables.move_item(item, escape_speed, near, &mut |s| splashes.push(s));
     if step.vertical_contact.is_some() && item.stack.count == 0 {
-        return (no_physics, false, true, splashes, landed);
+        return (
+            no_physics,
+            false,
+            true,
+            splashes,
+            landed,
+            step.original_movement(),
+        );
     }
     let alive = tables.settle_item(item, no_physics, step, &mut |s| splashes.push(s));
-    (no_physics, alive, false, splashes, landed)
+    (
+        no_physics,
+        alive,
+        false,
+        splashes,
+        landed,
+        step.original_movement(),
+    )
 }
 
 #[cfg(test)]
@@ -326,18 +340,21 @@ mod tests {
                 match (x + z) % 5 {
                     0 => {
                         game.world.set(x, 65, z, stone).unwrap();
-                        game.spawn_item(stack(1), [fx, 65.3, fz], [0.0; 3], 10);
-                        escaping.push(game.dropped.last().unwrap().id);
+                        if let Some(id) = game.spawn_item(stack(1), [fx, 65.3, fz], [0.0; 3], 10) {
+                            escaping.push(id);
+                        }
                     }
                     1 => {
                         game.world.set(x, 65, z, water).unwrap();
-                        game.spawn_item(stack(1), [fx, 65.5, fz], [0.0; 3], 10);
+                        let _ = game.spawn_item(stack(1), [fx, 65.5, fz], [0.0; 3], 10);
                     }
                     2 => {
-                        game.spawn_item(stack(1), [fx, 66.0, fz], [0.0; 3], 0);
-                        game.spawn_item(stack(5), [fx, 66.0, fz], [0.0; 3], 0);
+                        let _ = game.spawn_item(stack(1), [fx, 66.0, fz], [0.0; 3], 0);
+                        let _ = game.spawn_item(stack(5), [fx, 66.0, fz], [0.0; 3], 0);
                     }
-                    _ => game.spawn_item(stack(1), [fx, 67.0, fz], [0.1, 0.2, -0.1], 10),
+                    _ => {
+                        let _ = game.spawn_item(stack(1), [fx, 67.0, fz], [0.1, 0.2, -0.1], 10);
+                    }
                 }
             }
         }
@@ -352,29 +369,32 @@ mod tests {
         );
         let boat_top = boat.bounds().max_position().y;
         game.boats.push(boat);
-        game.spawn_item(
-            ItemStack::new("minecraft:iron_ingot", 1),
-            [8.5, 80.2, 8.5],
-            [0.0; 3],
-            10,
-        );
-        let caught = game.dropped.last().unwrap().id;
+        let caught = game
+            .spawn_item(
+                ItemStack::new("minecraft:iron_ingot", 1),
+                [8.5, 80.2, 8.5],
+                [0.0; 3],
+                10,
+            )
+            .expect("spawned iron ingot");
         escaping.push(caught);
-        game.spawn_item(
-            ItemStack::new("minecraft:gold_ingot", 1),
-            [8.5, 81.0, 8.5],
-            [0.0, -1.0, 0.0],
-            10,
-        );
-        let landing = game.dropped.last().unwrap().id;
+        let landing = game
+            .spawn_item(
+                ItemStack::new("minecraft:gold_ingot", 1),
+                [8.5, 81.0, 8.5],
+                [0.0, -1.0, 0.0],
+                10,
+            )
+            .expect("spawned gold ingot");
         // The border cuts the box even though the centre is still inside it.
-        game.spawn_item(
-            ItemStack::new("minecraft:diamond", 1),
-            [15.99, 80.0, 8.5],
-            [0.0; 3],
-            10,
-        );
-        let border = game.dropped.last().unwrap().id;
+        let border = game
+            .spawn_item(
+                ItemStack::new("minecraft:diamond", 1),
+                [15.99, 80.0, 8.5],
+                [0.0; 3],
+                10,
+            )
+            .expect("spawned diamond");
         escaping.push(border);
         let boxes = game.item_entity_collisions();
         for id in [caught, border] {
@@ -509,7 +529,7 @@ mod tests {
             for z in 0..16 {
                 game.world.set(x, 65, z, farmland).unwrap();
                 let at = [f64::from(x) + 0.5, 66.0, f64::from(z) + 0.5];
-                game.spawn_item(
+                let _ = game.spawn_item(
                     ItemStack::new("minecraft:stone", 1),
                     at,
                     [0.0, -0.5, 0.0],

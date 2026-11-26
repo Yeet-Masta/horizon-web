@@ -403,7 +403,7 @@ impl Game<'_> {
         } else {
             let held = self.held().cloned();
             let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-            let secondary = self.keys.held(Action::Sneak) && hands_full;
+            let secondary = self.pad_guide_click_sneaks() && hands_full;
             let ender_chest = &*self
                 .res
                 .facts()
@@ -417,7 +417,9 @@ impl Game<'_> {
             } else if !secondary && ender_chest && !self.pad_guide_block_covered(&hit) {
                 // EnderChestBlock has no menu provider but opens one: nothing solid on top.
                 Some(Verb::Open)
-            } else if self.block_takes_click(&hit, held.as_ref()) {
+            } else if !secondary && self.block_takes_click(&hit, held.as_ref()) {
+                // Sneaking with something in a hand skips the block, as the click itself does
+                // (Player.isSecondaryUseActive): a door stays shut and the item is used instead.
                 Some(Verb::Use)
             } else {
                 None
@@ -445,13 +447,24 @@ impl Game<'_> {
     /// The block keeps the click and nothing happens, so neither it nor the item gets a row:
     /// `InteractionResult.CONSUME`, which an empty lectern also returns for anything but a book
     /// (`LecternBlock.useWithoutItem`; `ItemTags.LECTERN_BOOKS`).
+    /// Whether a click on a block now would count as sneaking: the sneak bit the server last
+    /// heard, as the click itself reads it (`interaction_prediction.rs`), so the row matches LT
+    /// even in the tick a sneak starts or ends.
+    fn pad_guide_click_sneaks(&self) -> bool {
+        if self.remote.is_some() {
+            self.remote_shift_down()
+        } else {
+            self.keys.held(Action::Sneak)
+        }
+    }
+
     fn pad_guide_click_swallowed(
         &mut self,
         hit: &super::super::Hit,
         held: Option<&ItemStack>,
     ) -> bool {
         let hands_full = self.stack_in(self.selected).is_some() || self.offhand.is_some();
-        if self.keys.held(Action::Sneak) && hands_full {
+        if self.pad_guide_click_sneaks() && hands_full {
             return false;
         }
         let book = held.is_some_and(|s| {
@@ -484,6 +497,11 @@ impl Game<'_> {
     /// What a boat, minecart or frame takes (`remote_use_entity`): a cart whose interact passes
     /// leaves the click to the item, and so does a painting.
     fn pad_guide_object(&self, id: i32, distance: f64) -> Option<Verb> {
+        // Primed TNT inherits Entity.interact's default PASS. The held item
+        // can still offer its own action.
+        if self.tnts.iter().any(|tnt| tnt.id as i32 == id) {
+            return None;
+        }
         let sneaking = self.keys.held(Action::Sneak);
         if let Some(cart) = self.carts.iter().find(|c| c.id as i32 == id) {
             use super::super::minecarts::CartKind;
@@ -691,6 +709,33 @@ impl Game<'_> {
     fn pad_guide_has_ammo(&self, weapon: &str) -> Option<()> {
         let weapon = format!("minecraft:{weapon}");
         (self.creative || self.projectile_slot(&weapon).is_some()).then_some(())
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::Target;
+    use crate::game::native_entity_refs::tests::with_client_game;
+    use horizon_client::motion::PlayerMotion;
+    use horizon_core::{geometry::Vec3, position::BlockPos};
+
+    #[test]
+    #[ignore = "daily"]
+    fn primed_tnt_prompts_to_attack_without_an_entity_use() {
+        with_client_game(|game| {
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 3.5)).unwrap());
+            game.entity_reach = 3.0;
+            game.yaw = 0.0;
+            game.pitch = 0.0;
+            game.add_primed_tnt(BlockPos::new(0, 65, 5), 0.0, 80, None, None);
+            assert!(matches!(
+                game.pad_guide_target(false).0,
+                Target::Entity {
+                    attackable: true,
+                    takes: None
+                }
+            ));
+        });
     }
 }
 

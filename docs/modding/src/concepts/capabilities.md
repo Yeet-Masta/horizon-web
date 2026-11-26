@@ -26,6 +26,7 @@ This registration corresponds to NeoForge's `RegisterCapabilitiesEvent`.
 | `r.is_block_capability_registered(&KEY, &block)` | Whether any game or mod provider registered so far covers this block type. |
 | `r.is_entity_capability_registered(&KEY, &entity_type)` | The same type-coverage query for an `EntityTypeKey`, obtained with `r.entity_type_key("minecraft:pig")`. |
 | `r.is_item_capability_registered(&KEY, &item)` | The same query for an `ItemKey`, obtained with `r.item_key("minecraft:stick")`. |
+| `ITEM_ENERGY.covers(host, item)` | After startup, on either side and with a read-only `Host`: whether an enabled mod's provider, or the game's own by item type, answers the item capability for this item type. A menu slot rule (`menu_slot_rules`) uses it on the client, where no place or transaction exists; a provider may still give nothing for one stack. |
 
 A block provider can expose a trash can that voids items or forward a multiblock port to its controller.
 A block with a block entity can have both kinds of provider.
@@ -59,6 +60,13 @@ The three block-storage declarations accept mod blocks only, not `minecraft` blo
 `block_capability` to expose storage on a vanilla block. The first enabled declaration for a block
 type supplies its default storage. Item-container declarations may target vanilla items too, and
 their callbacks run in registration order until one returns `Some`.
+A declared container's stacks scatter when its block entity goes, as a vanilla container's do
+(`Containers.dropContents`). `block_container_keeps_contents(&block)` keeps them instead, as a Java
+block entity that isn't a `Container` keeps its own (Mekanism's machines carry theirs in their item):
+the mod puts them in its drop from the entity's saved `Items` in `block_drops`, and a removal that
+drops nothing (a command, a replacing write) loses them, as in vanilla. It applies while its mod is on.
+So does a block entity that removes or replaces its own block during its own `block_entity_tick`: it is
+out of the level for that call, so a mod that wants the stacks kept takes them out in the tick itself.
 
 One capability supports at most 65,535 providers per block or block entity type. The next registration
 is refused at load with a message naming the mod, capability and target and stating that the target

@@ -579,17 +579,20 @@ impl PlayerEffects {
         }
         out
     }
-    /// `Player.getDestroySpeed` effect factors (haste/conduit, mining fatigue).
-    pub fn mining_speed_factor(&self) -> f32 {
-        let mut f = 1.0;
+    /// `Player.getDestroySpeed`'s haste factor: `1 + (amplifier + 1) * 0.2`
+    /// for the higher of haste and conduit power
+    /// (`MobEffectUtil.getDigSpeedAmplification`), 1 without either.
+    pub fn haste_mining_factor(&self) -> f32 {
         let haste = self.amplifier("haste").max(self.amplifier("conduit_power"));
-        if let Some(a) = haste {
-            f *= 1.0 + (a + 1) as f32 * 0.2;
-        }
-        if let Some(a) = self.amplifier("mining_fatigue") {
-            f *= horizon_core::jmath::pow(0.3, f64::from(a + 1)) as f32;
-        }
-        f
+        haste.map_or(1.0, |a| 1.0 + (a + 1) as f32 * 0.2)
+    }
+    /// `Player.getDestroySpeed`'s mining fatigue scale:
+    /// `(float) Math.pow(0.3, amplifier + 1)`, 1 without it. Vanilla applies it
+    /// to the speed after the haste factor, not multiplied into it.
+    pub fn mining_fatigue_scale(&self) -> f32 {
+        self.amplifier("mining_fatigue").map_or(1.0, |a| {
+            horizon_core::jmath::pow(0.3, f64::from(a + 1)) as f32
+        })
     }
 }
 /// Effect and equipment facts the movement and damage kernels query.
@@ -686,6 +689,14 @@ pub fn effect_modifier(effect: &str) -> Option<(&'static str, &'static str, f64,
             "minecraft:effect.unluck",
             -1.0,
             "add_value",
+        )),
+        // MobEffects.INVISIBILITY: MobEffects.java:58-67. -1.0 multiplied
+        // total drops waypoint_transmit_range to zero (+1 per level).
+        "invisibility" => Some((
+            "minecraft:waypoint_transmit_range",
+            "minecraft:effect.waypoint_transmit_range_hide",
+            -1.0,
+            "add_multiplied_total",
         )),
         _ => None,
     }
@@ -966,7 +977,7 @@ mod tests {
         assert_eq!(lasting.len(), 2);
         let mut fx = PlayerEffects::default();
         fx.add(EffectInstance::new("haste", 100, 1));
-        assert!((fx.mining_speed_factor() - 1.4).abs() < 1e-6);
+        assert!((fx.haste_mining_factor() - 1.4).abs() < 1e-6);
         assert_eq!(fx.modifiers().len(), 1);
     }
 
@@ -993,5 +1004,25 @@ mod tests {
                 "add_value",
             )]
         );
+    }
+
+    /// `MobEffects.INVISIBILITY` hides the player from locator bars through a
+    /// -1.0 multiplied-total modifier on waypoint_transmit_range, scaled by
+    /// amplifier + 1 (`MobEffect.AttributeTemplate.create`).
+    #[test]
+    fn invisibility_modifier_hides_the_waypoint_transmit_range() {
+        let mut fx = PlayerEffects::default();
+        fx.add(EffectInstance::new("invisibility", 600, 0));
+        assert_eq!(
+            fx.modifiers(),
+            vec![(
+                "minecraft:waypoint_transmit_range",
+                "minecraft:effect.waypoint_transmit_range_hide",
+                -1.0,
+                "add_multiplied_total",
+            )]
+        );
+        fx.add(EffectInstance::new("invisibility", 600, 2));
+        assert_eq!(fx.modifiers()[0].2, -3.0);
     }
 }

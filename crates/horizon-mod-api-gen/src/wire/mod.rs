@@ -41,6 +41,7 @@ pub(super) const IMPORTS: &[&str] = &[
     "Levels",
     "Messages",
     "Players",
+    "Profiles",
     "RuntimeLevels",
     "ClientSession",
     "RenderAssets",
@@ -87,6 +88,7 @@ pub(super) const REACHED: &[(&str, &str, &str)] = &[
     ("Levels", "server_host", "Ok(h.levels())"),
     ("Messages", "server_host", "Ok(h.messages())"),
     ("Players", "server_host", "Ok(h.players())"),
+    ("Profiles", "server_host_mut", "Ok(h.profiles())"),
     ("RuntimeLevels", "server_host_mut", "Ok(h.runtime_levels())"),
     ("ClientSession", "client_host", "Ok(h.client_session())"),
     ("RenderAssets", "client_host", "Ok(h.render_assets())"),
@@ -344,13 +346,25 @@ pub(super) fn surface<'a>(
     surface_reading(root, included, None)
 }
 
+/// Half-open private record ranges first allocated while resolving native-only hooks.
+pub(super) type NativeHookRecords = std::collections::BTreeMap<String, Vec<(usize, usize)>>;
+
 /// [`surface`]; with `missing`, a listed boundary trait the tree does not have is pushed there
 /// instead of refusing the tree (the surface export reads older trees whose API predates a
 /// listed trait; the build never does).
 pub(super) fn surface_reading<'a>(
     root: &'a Path,
     included: &'a [(&'a str, &'a str)],
+    missing: Option<&mut Vec<String>>,
+) -> Result<Surface<'a>, String> {
+    surface_with_records(root, included, missing, None)
+}
+
+fn surface_with_records<'a>(
+    root: &'a Path,
+    included: &'a [(&'a str, &'a str)],
     mut missing: Option<&mut Vec<String>>,
+    mut native_records: Option<&mut NativeHookRecords>,
 ) -> Result<Surface<'a>, String> {
     let mut types = Types::new(Index::new(root, included))?;
     let api = types.index.module("mod_api", &[])?;
@@ -430,15 +444,29 @@ pub(super) fn surface_reading<'a>(
             if hidden(&function.attrs) && !subscription {
                 continue;
             }
-            if not_on_wasm(&function.attrs) {
+            let native_only = not_on_wasm(&function.attrs);
+            if native_only {
                 excused.push((*owner, name.clone()));
             }
+            let record_hook = native_only
+                && native_records.is_some()
+                && exports().contains(owner)
+                && hooks.iter().any(|(_, hook_name)| hook_name == &name);
+            let first_record = types.defs.len();
             match method(&mut types, *module, owner, function, &subst) {
                 Ok(mut method) => {
                     method.via = via.clone();
                     methods.push(method);
                 }
                 Err(why) => unbound.push(Unbound { owner, name, why }),
+            }
+            if let Some(records) = native_records.as_deref_mut()
+                && record_hook
+            {
+                records
+                    .entry(function.sig.ident.to_string())
+                    .or_default()
+                    .push((first_record, types.defs.len()));
             }
         }
     }
@@ -636,10 +664,18 @@ pub struct Generated {
 }
 
 pub fn generate(root: &Path, included: &[(&str, &str)]) -> Result<Generated, String> {
+    generate_with_records(root, included, None)
+}
+
+pub(super) fn generate_with_records(
+    root: &Path,
+    included: &[(&str, &str)],
+    native_records: Option<&mut NativeHookRecords>,
+) -> Result<Generated, String> {
     let providers = crate::capability_providers::generate(root, included)?.0;
     let mut with_providers = included.to_vec();
     with_providers.push(("capability_providers_generated.rs", providers.as_str()));
-    let surface = surface(root, &with_providers)?;
+    let surface = surface_with_records(root, &with_providers, None, native_records)?;
     coverage(&surface)?;
     names::check_names(&surface.methods)?;
     let mut wire = borrowed::calls(&surface.types);
@@ -704,168 +740,85 @@ pub fn generate(root: &Path, included: &[(&str, &str)]) -> Result<Generated, Str
     })
 }
 
-/// Public owned API values available to point records, without inspecting their fields.
-/// The generated record's Wire bounds check its members; Clone permits copying a borrowed
-/// argument, while a live capability such as Transaction remains non-copyable.
-pub(crate) fn owned_types(
-    root: &Path,
-    included: &[(&str, &str)],
-) -> Result<std::collections::BTreeSet<String>, String> {
-    let providers = crate::capability_providers::generate(root, included)?.0;
-    let mut with_providers = included.to_vec();
-    with_providers.push(("capability_providers_generated.rs", providers.as_str()));
-    let mut surface = surface(root, &with_providers)?;
-    // Every owned signature def appears in generated WIRE_LAYOUT with a Wire bound.
-    // That compile-time guarantee covers macro-generated slot keys/handle codecs too;
-    // no owned field traversal or second Wire-implementation discovery is needed.
-    let mut clones = std::collections::HashSet::new();
-    let implementations = surface
-        .types
-        .index
-        .modules
+/// The owned types the transport's control payloads reach, which no call names: `InitInput`, what
+/// a mod's start receives, is a list of `PackageInfo`. The core hash mixes in their layouts.
+const CONTROL_OWNED: &[&str] = &["mod_api::PackageInfo"];
+
+/// The owned types the core reaches, by the path the glue names them by: the control payloads'
+/// and those of the prepared hooks' entries (`reads:Vec<crate::EquipReadRow>`), sorted.
+fn core_owned(abis: &[prepared::Abi]) -> Vec<String> {
+    let mut paths: std::collections::BTreeSet<String> = CONTROL_OWNED
         .iter()
-        .enumerate()
-        .flat_map(|(module, source)| {
-            source.items.iter().filter_map(move |item| match item {
-                Item::Impl(item)
-                    if item.trait_.as_ref().is_some_and(|(_, path, _)| {
-                        path.segments.last().is_some_and(|s| s.ident == "Clone")
-                    }) =>
-                {
-                    Some((module, item.self_ty.clone()))
-                }
-                _ => None,
-            })
-        })
-        .collect::<Vec<_>>();
-    for (module, ty) in implementations {
-        let syn::Type::Path(path) = *ty else {
-            continue;
-        };
-        let path = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>();
-        if let Ok(Found::Item(id)) = surface.types.index.resolve_path(module, &path) {
-            clones.insert(id);
-        }
-    }
-    let cloned =
-        |index: &Index<'_>, id| ty::derives(index.item(id), "Clone") || clones.contains(&id);
-    let mut allowed = std::collections::BTreeSet::new();
-    for (def, value) in surface
-        .types
-        .defs
-        .iter()
-        .enumerate()
-        .filter(|(_, value)| value.lifetimes == 0)
-    {
-        let item = surface
-            .types
-            .by_item
-            .iter()
-            .find_map(|(item, d)| (*d == def).then_some(*item));
-        if item.map_or(value.rust.starts_with("serde_json::"), |id| {
-            cloned(&surface.types.index, id)
-        }) {
-            allowed.insert(value.rust.replace(' ', ""));
-        }
-    }
-    // Index both the public boundary reexports and checked codec declarations.
-    // These lookups load source files; they do not classify any owned fields.
-    surface.types.index.module("mod_api", &["wire".into()])?;
-    let codec = surface
-        .types
-        .index
-        .module("mod_api", &["wire".into(), "wire_types".into()])?;
-    let mut codecs = std::collections::HashSet::new();
-    for item in surface.types.index.modules[codec].items.clone() {
-        let Item::Impl(item) = item else {
-            continue;
-        };
-        // wire_types imports precisely crate::wire::Wire. Its direct impl targets
-        // include foreign reexports such as ConnectionKind, which cannot derive here.
-        if !item
-            .trait_
-            .as_ref()
-            .is_some_and(|(_, p, _)| p.segments.last().is_some_and(|s| s.ident == "Wire"))
-        {
-            continue;
-        }
-        let syn::Type::Path(path) = &*item.self_ty else {
-            continue;
-        };
-        let path = path
-            .path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect::<Vec<_>>();
-        if let Ok(Found::Item(id)) = surface.types.index.resolve_path(codec, &path) {
-            codecs.insert(id);
-        }
-    }
-    // Reuse the parsed module inventory. Extra declarations need an explicit
-    // derive or checked codec; Clone alone (or a no-Wire reason) is never proof.
-    let modules = surface
-        .types
-        .index
-        .modules
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.krate == "mod_api")
-        .map(|(module, m)| (module, m.path.clone(), m.items.clone()))
-        .collect::<Vec<_>>();
-    for (module, prefix, items) in modules {
-        for item in items {
-            let names = match item {
-                Item::Use(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                    crate::capability_providers::use_names(&item.tree)
-                }
-                Item::Struct(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                    vec![item.ident.to_string()]
-                }
-                Item::Enum(item) if matches!(item.vis, syn::Visibility::Public(_)) => {
-                    vec![item.ident.to_string()]
-                }
-                _ => continue,
-            };
-            for name in names {
-                let Ok(Found::Item(id)) = surface.types.index.resolve(module, &name) else {
-                    continue;
-                };
-                let declaration = surface.types.index.item(id);
-                let generics = match declaration {
-                    Item::Struct(item) => &item.generics,
-                    Item::Enum(item) => &item.generics,
-                    _ => continue,
-                };
-                if generics.params.is_empty()
-                    && (ty::derives(declaration, "Wire") || codecs.contains(&id))
-                    && cloned(&surface.types.index, id)
-                {
-                    let path = std::iter::once("mod_api")
-                        .chain(prefix.iter().map(String::as_str))
-                        .chain(std::iter::once(name.as_str()))
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    if public_path(&surface.types.index, &path) {
-                        allowed.insert(path);
-                    }
-                }
+        .map(|path| (*path).to_owned())
+        .collect();
+    for entry in abis.iter().flat_map(|abi| &abi.entries) {
+        for argument in entry.input.iter().chain(&entry.output) {
+            let ty = argument.split_once(':').map_or(*argument, |(_, ty)| ty);
+            let ty = ty
+                .strip_prefix("Vec<")
+                .and_then(|ty| ty.strip_suffix('>'))
+                .unwrap_or(ty);
+            // `crate::wire::Id` is a transport value; scalars and tuples have no owned type.
+            if let Some(name) = ty.strip_prefix("crate::")
+                && !name.starts_with("wire::")
+            {
+                paths.insert(format!("mod_api::{name}"));
             }
         }
     }
-    Ok(allowed)
+    paths.into_iter().collect()
 }
 
-/// A defining path is usable by generated records only through public modules.
-fn public_path(index: &Index<'_>, path: &str) -> bool {
-    let segments = path.split("::").skip(1).collect::<Vec<_>>();
-    (0..segments.len().saturating_sub(1)).all(|depth| {
-        index.modules.iter().find(|m| m.krate == "mod_api" && m.path.iter().map(String::as_str).eq(segments[..depth].iter().copied())).is_some_and(|m| m.items.iter().any(|item| matches!(item, Item::Mod(child) if child.ident == segments[depth] && matches!(child.vis, syn::Visibility::Public(_)))))
+/// What a wasm mod and the game check each other by when it loads (`mod_surface::boundary`):
+/// every call's key, signature hash and the owned types it reaches, as `call_layouts` mixes them,
+/// a fingerprint of the core hash's inputs that the source holds (the hand-written codecs and
+/// the transport values `codecs` reads, and the prepared hooks' ABI) and the owned types the
+/// core reaches: the control payloads' and the prepared hooks' entries' (`prepared_abi_layout`
+/// mixes in each entry type's layout). The owned types' shapes are left for the surface export
+/// to fill in.
+pub(crate) fn boundary(
+    root: &Path,
+    surface: &Surface<'_>,
+) -> Result<mod_surface::boundary::Boundary, String> {
+    let prepared = crate::Catalog::load(root)?
+        .hooks
+        .into_iter()
+        .filter_map(|hook| hook.prepared.map(|field| (hook.name, field)))
+        .collect::<Vec<_>>();
+    let abis = prepared::describe(&surface.methods, &prepared)?;
+    let (codecs, _) = codecs(root)?;
+    let core = names::fnv(&format!(
+        "{:#x};{:#x};{:#x};{}",
+        core(codecs, FILE_ROOTS),
+        prepared::PREPARE,
+        prepared::RELEASE,
+        prepared::layout_code(&abis)
+    ));
+    let calls = names::calls(&surface.types, &surface.methods, &surface.dropped)
+        .into_iter()
+        .map(
+            |(key, signature, found, export)| mod_surface::boundary::Call {
+                key,
+                signature: format!("{signature:016x}"),
+                export,
+                owned: found
+                    .iter()
+                    .map(|def| mod_surface::boundary::Owned {
+                        path: surface.types.defs[*def].rust.clone(),
+                        shape: None,
+                    })
+                    .collect(),
+            },
+        )
+        .collect();
+    Ok(mod_surface::boundary::Boundary {
+        schema: mod_surface::boundary::SCHEMA,
+        core: format!("{core:016x}"),
+        core_owned: core_owned(&abis)
+            .into_iter()
+            .map(|path| mod_surface::boundary::Owned { path, shape: None })
+            .collect(),
+        calls,
     })
 }
 

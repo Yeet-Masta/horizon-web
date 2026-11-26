@@ -170,9 +170,12 @@ impl WorldRequest {
             )
             .into());
         }
-        horizon_client::save::upgrade_older_world_with(&save_root, upgrade)?;
+        upgrade_world(&save_root, options, upgrade)?;
         horizon_client::save::migrate_legacy(&save_root)?;
         let session_lock = horizon_client::save::SessionLock::acquire(&save_root)?;
+        // A world Paper saved keeps the seed, rules, weather and clocks under the Overworld only.
+        horizon_world::datafix::files::adopt_dimension_saved_data(&save_root)
+            .map_err(|e| format!("reading {}'s saved data: {e}", save_root.display()))?;
         // RandomSequences: the world's data/minecraft/random_sequences.dat.
         let rand_sequences = super::trading::read_random_sequences(&save_root);
         let existing = Level::read_with_registry(&save_root, rule_registry.clone());
@@ -333,6 +336,7 @@ impl WorldRequest {
             &level.enabled_features,
             biomes.clone(),
             None,
+            None,
         )?;
         drop(streaming_step);
         set_open_progress(0.85);
@@ -394,6 +398,76 @@ pub(super) fn set_open_progress(progress: f32) {
 }
 pub(super) fn open_progress() -> f32 {
     f32::from_bits(OPEN_PROGRESS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Opens an old dedicated-server world while reporting the management protocol's world-upgrade
+/// lifecycle. Integrated worlds keep their existing progress path because there is no supervisor
+/// management server to notify.
+pub(in crate::game) fn upgrade_world(
+    save_root: &std::path::Path,
+    options: &Options,
+    upgrade: &horizon_world::datafix::progress::UpgradeProgress,
+) -> Result<()> {
+    let notify = options.execution_role.is_dedicated_server()
+        && horizon_client::save::needs_world_upgrade(save_root);
+    if !notify {
+        return horizon_client::save::upgrade_older_world_with(save_root, upgrade);
+    }
+
+    crate::game::dedicated::record_world_upgrade("world_upgrade_started", serde_json::json!({}));
+    crate::game::dedicated::record_world_upgrade(
+        "world_upgrade_progress",
+        serde_json::json!({ "progress": 0.0 }),
+    );
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let result = horizon_std::thread::scope(|scope| {
+        let _stop_on_panic = crate::game::dedicated::StopUpgradeWatcher::new(&stop);
+        let watcher = horizon_guest_stack::builder()
+            .spawn_scoped(scope, || {
+                let mut last_progress = 0.0;
+                let mut last_sent = horizon_std::time::Instant::now();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    horizon_std::thread::sleep(horizon_std::time::Duration::from_millis(100));
+                    let progress = upgrade.total_file_fix_stats().progress();
+                    let now = horizon_std::time::Instant::now();
+                    if progress > last_progress
+                        && now.duration_since(last_sent)
+                            >= horizon_std::time::Duration::from_secs(1)
+                    {
+                        crate::game::dedicated::record_world_upgrade(
+                            "world_upgrade_progress",
+                            serde_json::json!({ "progress": progress }),
+                        );
+                        last_progress = progress;
+                        last_sent = now;
+                    }
+                }
+            })
+            .expect("world upgrade progress watcher");
+        let result = horizon_client::save::upgrade_older_world_with(save_root, upgrade);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().expect("world upgrade progress watcher");
+        result
+    });
+
+    match result {
+        Ok(()) => {
+            crate::game::dedicated::record_world_upgrade(
+                "world_upgrade_finished",
+                serde_json::json!({}),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            // Do not expose the server's filesystem path through the management protocol.
+            log::error!("dedicated world upgrade failed: {error}");
+            crate::game::dedicated::record_world_upgrade(
+                "world_upgrade_failed",
+                serde_json::json!({ "reason": "World upgrade failed" }),
+            );
+            Err(error)
+        }
+    }
 }
 
 pub(super) struct WorldLoader {
@@ -1046,12 +1120,27 @@ pub(super) fn make_streaming(
     enabled_features: &[String],
     biomes: Arc<Biomes>,
     runtime: Option<&super::runtime_levels::Generate>,
+    same_world: Option<&SaveDir>,
 ) -> Result<(Streaming, Arc<SaveDir>, Option<Arc<VanillaTerrain>>)> {
     let mut save = SaveDir::new(
         horizon_client::save::dimension_dir(world_root, dim.id()),
         shape,
     );
     save.enable_trusted_fluid_load();
+    if let Some(tables) = same_world.and_then(|open| open.tables.get()) {
+        let _ = save.tables.set(Arc::clone(tables));
+    } else if let Some(registry) =
+        super::chat::command_export(&options.resources, options.dedicated.is_none())
+    {
+        let pack_items = res.core.item_data.defaults().entries().keys().cloned();
+        let tables = horizon_client::save::SaveTables::new(&pack.assets)
+            .with_component_registry(registry, pack_items);
+        let _ = save.tables.set(Arc::new(tables));
+    }
+    // One section palette budget per world, not one per level.
+    if let Some(open) = same_world {
+        save.share_section_palettes(open);
+    }
     let save = Arc::new(save);
     if dim == Dim::End {
         // Migrate before any chunk reader can cache the old block entities. A side file it
@@ -1290,8 +1379,19 @@ pub(super) fn make_streaming(
         let saved_stem = horizon_client::save::world_gen_settings(world_root)
             .and_then(|s| s.get("dimensions")?.get(dim.id()).cloned())
             .map(|stem| horizon_client::scoreboard::tag_to_json(&stem));
-        let regions = horizon_client::save::biome_regions::layout(world_root, dim.id())
-            .map_err(|e| format!("Failed to read the world's biome regions: {e}"))?;
+        // Region declarations and saves use multi-noise preset keys:
+        // MultiNoiseBiomeSourceParameterLists.NETHER is "minecraft:nether", not the level id.
+        let region_key = match dim {
+            Dim::Overworld => Some("minecraft:overworld"),
+            Dim::Nether => Some("minecraft:nether"),
+            Dim::End | Dim::Extra(_) => None,
+        };
+        let regions = if let Some(key) = region_key {
+            horizon_client::save::biome_regions::layout(world_root, key)
+                .map_err(|e| format!("Failed to read the world's biome regions: {e}"))?
+        } else {
+            None
+        };
         let mut inner = VanillaTerrain::for_world_with_settings(terrain_resources, &overrides, seed, preset, dim.id(), structures, saved_stem.as_ref(), regions).map_err(|e| {
                 if overrides.is_empty() {
                     format!("{e}\nPrepare the worldgen bundle with the launcher, or: horizon-prepare --prepare")
@@ -1347,6 +1447,7 @@ pub(super) fn make_streaming(
     streaming.biome_blend = settings.biome_blend;
     streaming.smooth_lighting = settings.smooth_lighting;
     streaming.cutout_leaves = settings.cutout_leaves;
+    streaming.better_grass_mode = settings.better_grass_mode();
     streaming.opaque_ice = settings.horizon.opaque_ice;
     streaming.leaf_culling = settings
         .horizon
@@ -1876,6 +1977,26 @@ mod tests {
         mod_platform::__private::initialize().unwrap();
         use super::super::native_entity_refs::tests::with_game_role;
         use execution_role::ExecutionRole::{DedicatedServer, IntegratedServer};
+        use horizon_client::streaming::ChunkGenerator as _;
+
+        // Use biomes absent from the corresponding vanilla presets so a bare
+        // generator cannot satisfy the chunk assertions.
+        const REGIONS: [(Dim, &str, &str, &str); 2] = [
+            (
+                Dim::Overworld,
+                "minecraft:overworld",
+                "forest",
+                "minecraft:warped_forest",
+            ),
+            (
+                Dim::Nether,
+                "minecraft:nether",
+                "ice",
+                "minecraft:ice_spikes",
+            ),
+        ];
+        const WEIGHT: u32 = mod_api::BiomeRegion::MAX_WEIGHT;
+
         struct Regions;
         #[mod_api::__subscriptions]
         impl mod_api::Hooks for Regions {
@@ -1884,25 +2005,27 @@ mod tests {
                 registrar: &mut dyn mod_api::Registrar,
                 _: &mod_api::RegistrationContext,
             ) {
-                registrar
-                    .declare_biome_region(
-                        "ice",
-                        mod_api::BiomeRegion::new(
-                            "minecraft:overworld".into(),
-                            3,
-                            vec![mod_api::BiomePoint {
-                                biome: "minecraft:ice_spikes".into(),
-                                temperature: (-2., 2.),
-                                humidity: (-2., 2.),
-                                continentalness: (-2., 2.),
-                                erosion: (-2., 2.),
-                                depth: (-2., 2.),
-                                weirdness: (-2., 2.),
-                                offset: 0.,
-                            }],
-                        ),
-                    )
-                    .unwrap();
+                for (_, preset, id, biome) in REGIONS {
+                    registrar
+                        .declare_biome_region(
+                            id,
+                            mod_api::BiomeRegion::new(
+                                preset.into(),
+                                WEIGHT,
+                                vec![mod_api::BiomePoint {
+                                    biome: biome.into(),
+                                    temperature: (-2., 2.),
+                                    humidity: (-2., 2.),
+                                    continentalness: (-2., 2.),
+                                    erosion: (-2., 2.),
+                                    depth: (-2., 2.),
+                                    weirdness: (-2., 2.),
+                                    offset: 0.,
+                                }],
+                            ),
+                        )
+                        .unwrap();
+                }
             }
         }
         let root = PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
@@ -1924,16 +2047,38 @@ mod tests {
                             rule_registry: Level::default().rule_registry,
                         };
                         game.load_world(request).unwrap();
-                        let layout = horizon_client::save::biome_regions::layout(
-                            &world,
-                            "minecraft:overworld",
-                        )
-                        .unwrap()
-                        .unwrap();
-                        assert_eq!(layout.regions.len(), 1, "{role:?}");
-                        assert_eq!(layout.regions[0].id, "region_fixture:ice");
-                        assert_eq!(layout.regions[0].weight, 3);
-                        assert_eq!(layout.regions[0].points[0].biome, "minecraft:ice_spikes");
+                        for (dim, preset, id, biome) in REGIONS {
+                            let layout =
+                                horizon_client::save::biome_regions::layout(&world, preset)
+                                    .unwrap()
+                                    .unwrap();
+                            assert_eq!(layout.regions.len(), 1, "{role:?} {dim:?}");
+                            assert_eq!(layout.regions[0].id, format!("region_fixture:{id}"));
+                            assert_eq!(layout.regions[0].weight, WEIGHT);
+                            assert_eq!(layout.regions[0].points[0].biome, biome);
+
+                            game.enter_level(dim).unwrap();
+                            let terrain = game.end.locator().unwrap();
+                            // Find a chunk origin owned by the region, then generate
+                            // the column with the terrain installed by world loading.
+                            let probes: [[i32; 3]; 16] =
+                                std::array::from_fn(|i| [i as i32 * 128, 16, 0]);
+                            let index = terrain
+                                .noise_biomes(&probes)
+                                .iter()
+                                .position(|sample| sample.as_deref() == Some(biome))
+                                .unwrap_or_else(|| {
+                                    panic!("{role:?} {dim:?} never selects {biome}")
+                                });
+                            let [qx, qy, qz] = probes[index];
+                            let chunk = terrain.finish(terrain.proto(
+                                &mut terrain.worker(),
+                                qx / 4,
+                                qz / 4,
+                            ));
+                            let biomes = game.world_biomes.as_ref().unwrap();
+                            assert_eq!(biomes.name(chunk.biome(0, qy * 4, 0)), biome);
+                        }
                     });
                 },
             );

@@ -5,10 +5,20 @@
 //! its armour stand.
 use super::Game;
 use super::native_block_entity_draw::{BlockEntityDraw, place_turning};
-use glam::{Mat4, Vec3};
-use horizon_client::{block_entity_render::diffuse_lights, hud::HudBatch, mesher::Vertex};
+use super::native_scene_live::LiveBlockEntity;
+use glam::{Affine3A, EulerRot, Mat4, Quat, Vec3};
+use horizon_client::{
+    block_entity_render::diffuse_lights,
+    hud::{HudAtlas, HudBatch, OverlayDepth},
+    hud_layout::abgr,
+    mesher::Vertex,
+};
 use horizon_world::level::data::state_flags;
-use mod_api::SceneView;
+use mod_api::{
+    SCENE_MAX_OVERLAYS, SCENE_MAX_TEXTURED_QUADS, SceneDepth, SceneError, SceneOverlay,
+    SceneOverlayError, SceneSection, SceneSectionError, SceneTexturedQuad, SceneView,
+    SceneWithQuadsError,
+};
 /// Prepared scene data. Entity fields remain borrowed for the duration of the draw.
 pub(super) struct SceneBlock<'a> {
     pub pos: [i32; 3],
@@ -16,13 +26,251 @@ pub(super) struct SceneBlock<'a> {
     pub entity: Option<&'a mod_api::SceneBlockEntity>,
 }
 
-/// A quad in the scene's blocks, before it is seen: its corners, UVs in the
-/// atlas, ABGR colour, and its outward normal.
+struct SectionPose {
+    range: std::ops::Range<usize>,
+    transform: Affine3A,
+}
+
+pub(super) struct SceneBlocks<'a, 'b> {
+    pub(super) cells: &'a [SceneBlock<'b>],
+    poses: Vec<SectionPose>,
+}
+
+impl<'a, 'b> SceneBlocks<'a, 'b> {
+    pub(super) fn stationary(cells: &'a [SceneBlock<'b>]) -> Self {
+        Self {
+            cells,
+            poses: Vec::new(),
+        }
+    }
+
+    pub(super) fn posed(
+        cells: &'a [SceneBlock<'b>],
+        sections: &[SceneSection],
+    ) -> Result<Self, SceneSectionError> {
+        let mut poses = Vec::with_capacity(sections.len().min(cells.len()));
+        let mut previous_end = 0;
+        for (index, section) in (0u32..).zip(sections) {
+            let invalid = SceneSectionError::BadSection { index };
+            let start = section.first as usize;
+            let end = start.checked_add(section.count as usize).ok_or(invalid)?;
+            if start < previous_end || start == end || end > cells.len() {
+                return Err(invalid);
+            }
+            let [x, y, z] = section.rotation.map(f32::to_radians);
+            let pivot = Vec3::from_array(section.pivot);
+            let translation = Vec3::from_array(section.translation);
+            if ![x, y, z].into_iter().all(f32::is_finite)
+                || !pivot.is_finite()
+                || !translation.is_finite()
+            {
+                return Err(invalid);
+            }
+            let rotation = Quat::from_euler(EulerRot::ZYX, z, y, x);
+            let transform = Affine3A::from_rotation_translation(
+                rotation,
+                translation + (pivot - rotation * pivot),
+            );
+            if !transform.is_finite() {
+                return Err(invalid);
+            }
+            poses.push(SectionPose {
+                range: start..end,
+                transform,
+            });
+            previous_end = end;
+        }
+        Ok(Self { cells, poses })
+    }
+
+    /// Blocks and their culling group, in the original order; group 0 is stationary.
+    fn iter(&self) -> impl Iterator<Item = (&SceneBlock<'b>, usize, Option<&Affine3A>)> {
+        let mut sections = self.poses.iter().enumerate().peekable();
+        self.cells.iter().enumerate().map(move |(index, block)| {
+            if sections
+                .peek()
+                .is_some_and(|(_, pose)| pose.range.end <= index)
+            {
+                sections.next();
+            }
+            match sections.peek() {
+                Some((group, pose)) if pose.range.contains(&index) => {
+                    (block, group + 1, Some(&pose.transform))
+                }
+                _ => (block, 0, None),
+            }
+        })
+    }
+}
+
+/// A scene quad projected into GUI coordinates, with atlas UVs and ABGR colour.
 struct ProjectedQuad {
     depth: f32,
     corners: [[f32; 3]; 4],
     uv: [[f32; 2]; 4],
     color: u32,
+}
+
+impl ProjectedQuad {
+    fn new(m: Mat4, corners: [Vec3; 4], uv: [[f32; 2]; 4], color: u32) -> Self {
+        let pos = corners.map(|c| m.transform_point3(c));
+        Self {
+            depth: pos.iter().map(|v| v.z).sum::<f32>() / 4.0,
+            corners: pos.map(|v| v.to_array()),
+            uv,
+            color,
+        }
+    }
+
+    fn finite(&self) -> bool {
+        self.depth.is_finite() && self.corners.iter().flatten().all(|v| v.is_finite())
+    }
+}
+
+/// An overlay projected into GUI coordinates, with its ABGR colour.
+struct ProjectedOverlay {
+    corners: [[f32; 3]; 4],
+    color: u32,
+    depth: OverlayDepth,
+}
+
+/// The view for one draw, with any textured faces and overlays already resolved
+/// and projected.
+pub(super) struct SceneFrame {
+    pub(super) rect: [f32; 4],
+    pub(super) view: SceneView,
+    matrix: Mat4,
+    projected: Vec<ProjectedQuad>,
+    overlays: Vec<ProjectedOverlay>,
+}
+
+impl SceneFrame {
+    pub(super) fn new(rect: [f32; 4], view: SceneView) -> Self {
+        Self {
+            rect,
+            view,
+            matrix: scene_matrix(rect, view),
+            projected: Vec::new(),
+            overlays: Vec::new(),
+        }
+    }
+
+    /// Project the entire overlay list before a living scene advances or any
+    /// geometry is emitted.
+    pub(super) fn with_overlays(
+        mut self,
+        overlays: &[SceneOverlay],
+    ) -> Result<Self, SceneOverlayError> {
+        if !self.view.scale.is_finite() || self.view.scale <= 0.0 {
+            return Err(SceneError::BadView.into());
+        }
+        if overlays.len() > SCENE_MAX_OVERLAYS {
+            return Err(SceneOverlayError::TooManyOverlays);
+        }
+        let m = self.matrix;
+        self.overlays.reserve_exact(overlays.len());
+        let point = |p| m.transform_point3(Vec3::from_array(p));
+        for (index, overlay) in (0u32..).zip(overlays) {
+            let bad = SceneOverlayError::BadOverlay { index };
+            let (corners, argb, depth) = match *overlay {
+                SceneOverlay::Line {
+                    from,
+                    to,
+                    width,
+                    argb,
+                    depth,
+                } => {
+                    let (from, to) = (point(from), point(to));
+                    if !from.is_finite() || !to.is_finite() || !width.is_finite() || width <= 0.0 {
+                        return Err(bad);
+                    }
+                    // The screen-space perpendicular expands each endpoint without changing
+                    // its depth. Use f64 for the direction so large finite deltas don't overflow.
+                    let delta = (to.as_dvec3() - from.as_dvec3()).truncate();
+                    let length = delta.length();
+                    if length == 0.0 {
+                        continue;
+                    }
+                    let offset = (delta.perp() * (f64::from(width) * 0.5 / length))
+                        .as_vec2()
+                        .extend(0.0);
+                    (
+                        [from + offset, from - offset, to - offset, to + offset],
+                        argb,
+                        depth,
+                    )
+                }
+                SceneOverlay::Quad {
+                    corners,
+                    argb,
+                    depth,
+                } => (corners.map(point), argb, depth),
+                _ => return Err(bad),
+            };
+            if !corners.iter().all(|p| p.is_finite()) {
+                return Err(bad);
+            }
+            self.overlays.push(ProjectedOverlay {
+                corners: corners.map(|p| p.to_array()),
+                color: abgr(argb),
+                depth: match depth {
+                    SceneDepth::Tested => OverlayDepth::Tested,
+                    SceneDepth::ThroughWalls => OverlayDepth::ThroughWalls,
+                    _ => return Err(bad),
+                },
+            });
+        }
+        Ok(self)
+    }
+
+    /// Resolve and validate the caller's faces before any draw or live scene work.
+    pub(super) fn with_textured_quads(
+        mut self,
+        atlas: &HudAtlas,
+        quads: &[SceneTexturedQuad],
+    ) -> Result<Self, SceneWithQuadsError> {
+        if quads.len() > SCENE_MAX_TEXTURED_QUADS {
+            return Err(SceneWithQuadsError::TooManyTexturedQuads);
+        }
+        if !self.view.scale.is_finite()
+            || self.view.scale <= 0.0
+            || !self.matrix.is_finite()
+            || !self.rect.iter().all(|v| v.is_finite())
+        {
+            return Err(SceneWithQuadsError::Scene(SceneError::BadView));
+        }
+        self.projected.reserve_exact(quads.len());
+        for (index, q) in (0u32..).zip(quads) {
+            if !q.corners.iter().flatten().all(|v| v.abs() <= 30_000_000.0)
+                || !q.uv.iter().flatten().all(|v| (0.0..=1.0).contains(v))
+            {
+                return Err(SceneWithQuadsError::BadTexturedQuad { index });
+            }
+            // The atlas packs Minecraft textures by their path and other namespaces verbatim.
+            let name = q.sprite.strip_prefix("minecraft:").unwrap_or(&q.sprite);
+            let sprite = atlas
+                .sprites
+                .get(name)
+                .ok_or(SceneWithQuadsError::UnknownSprite { index })?;
+            let uv = q.uv.map(|[u, v]| {
+                [
+                    sprite.u0 + u * (sprite.u1 - sprite.u0),
+                    sprite.v0 + v * (sprite.v1 - sprite.v0),
+                ]
+            });
+            let quad = ProjectedQuad::new(
+                self.matrix,
+                q.corners.map(Vec3::from_array),
+                uv,
+                abgr(q.tint),
+            );
+            if !quad.finite() {
+                return Err(SceneWithQuadsError::Scene(SceneError::BadView));
+            }
+            self.projected.push(quad);
+        }
+        Ok(self)
+    }
 }
 
 pub(super) struct SceneQuad {
@@ -78,21 +326,29 @@ impl Game<'_> {
     /// block is drawn with its model, full bright and shaded by face, a face
     /// against a solid neighbour in the scene left out; a block with an
     /// `entity` (a mod's) is drawn by `native_block_entity_submit` as in the
-    /// world too, its `spin` parts turning with the game time. What lies
-    /// outside the box is cut off, and the scene has a depth of its own, so
+    /// world too. Its animation follows the scene clock for a kept ticking copy,
+    /// and otherwise the client clock. What lies outside the box is cut off, and
+    /// the scene has a depth of its own, so
     /// it never covers the screen's other drawing or is covered by it but in
     /// the order drawn. `extra` adds quads in the scene's coordinates before
     /// the scene is seen and sorted (a living scene's entities and particles,
-    /// `native_scene_live`); a scene of blocks alone passes none. Nothing is
-    /// drawn when a quad seen through the view isn't finite. API 422.
+    /// `native_scene_live`). Nothing is drawn when a quad seen through the
+    /// view isn't finite. API 422.
     pub(super) fn draw_scene_quads(
         &self,
         batch: &mut HudBatch,
-        rect: [f32; 4],
-        blocks: &[SceneBlock<'_>],
-        view: SceneView,
+        blocks: &SceneBlocks<'_, '_>,
+        frame: SceneFrame,
+        animation: Option<(u64, f32, &[LiveBlockEntity])>,
         extra: impl FnOnce(&mut Vec<SceneQuad>),
     ) -> Result<(), mod_api::SceneError> {
+        let SceneFrame {
+            rect,
+            view,
+            matrix: m,
+            projected: mut seen,
+            overlays,
+        } = frame;
         if !self.native_window() {
             return Err(mod_api::SceneError::Unavailable);
         }
@@ -100,17 +356,29 @@ impl Game<'_> {
             return Err(mod_api::SceneError::BadView);
         }
         // The Game boundary prepared every state before any drawing began.
-        let occupied: std::collections::HashMap<[i32; 3], _> =
-            blocks.iter().map(|b| (b.pos, b.state)).collect();
-        let solid = |pos: [i32; 3]| {
-            occupied.get(&pos).is_some_and(|&state| {
+        let occupied: std::collections::HashMap<_, _> = blocks
+            .iter()
+            .map(|(block, group, _)| ((group, block.pos), block.state))
+            .collect();
+        let solid = |group, pos| {
+            occupied.get(&(group, pos)).is_some_and(|&state| {
                 self.res.behaviours().facts(state).flags & state_flags::SOLID_RENDER != 0
             })
         };
         let grass = self.pack.item_renderer.grass_color(0.5, 1.0) as u32;
         let tables = &self.pack.context.tables;
         let mut quads = Vec::new();
-        for block in blocks {
+        let (tick, partial, kept) = animation.unwrap_or((0, 0.0, &[]));
+        let mut kept = kept.iter().peekable();
+        for (i, (block, group, transform)) in blocks.iter().enumerate() {
+            let ticking = if kept.peek().is_some_and(|entry| entry.index == i) {
+                kept.next().and_then(|entry| entry.ticking.as_ref())
+            } else {
+                None
+            };
+            let point = |pos| transform.map_or(pos, |pose| pose.transform_point3(pos));
+            let direction =
+                |normal| transform.map_or(normal, |pose| pose.transform_vector3(normal));
             let at = Vec3::new(
                 block.pos[0] as f32,
                 block.pos[1] as f32,
@@ -127,7 +395,10 @@ impl Game<'_> {
             for face in models.iter().flat_map(|(_, model)| &model.faces) {
                 if let Some(cull) = face.quad.cull {
                     let [dx, dy, dz] = step(cull);
-                    if solid([block.pos[0] + dx, block.pos[1] + dy, block.pos[2] + dz]) {
+                    if solid(
+                        group,
+                        [block.pos[0] + dx, block.pos[1] + dy, block.pos[2] + dz],
+                    ) {
                         continue;
                     }
                 }
@@ -140,7 +411,7 @@ impl Game<'_> {
                     continue;
                 };
                 let [nx, ny, nz] = step(face.quad.facing);
-                let normal = Vec3::new(nx as f32, ny as f32, nz as f32);
+                let normal = direction(Vec3::new(nx as f32, ny as f32, nz as f32));
                 let mut color = shaded(0xFFFF_FFFF, face_shade(normal));
                 if let Some(t) = tables.default_tint(block.state, face.quad.tint_index, grass) {
                     color = horizon_client::hud_layout::multiply(
@@ -149,7 +420,7 @@ impl Game<'_> {
                     );
                 }
                 quads.push(SceneQuad {
-                    corners: face.quad.positions.map(|p| at + Vec3::from_array(p)),
+                    corners: face.quad.positions.map(|p| point(at + Vec3::from_array(p))),
                     uv: face.quad.uv.map(|uv| {
                         [
                             sprite.u0 + uv[0] * (sprite.u1 - sprite.u0),
@@ -161,21 +432,38 @@ impl Game<'_> {
                     cull: true,
                 });
             }
-            if let Some(entity) = &block.entity {
-                let entity =
-                    mod_api::ModBlockEntity::new(entity.id.to_string(), entity.fields.clone());
+            if let Some(seed) = block.entity {
+                let original;
+                let (entity, partial, game_time, animation_time) =
+                    if let Some((_, entity)) = ticking {
+                        (
+                            entity,
+                            partial,
+                            i64::try_from(tick).unwrap_or(i64::MAX),
+                            tick as f64 + f64::from(partial),
+                        )
+                    } else {
+                        original =
+                            mod_api::ModBlockEntity::new(seed.id.to_string(), seed.fields.clone());
+                        (
+                            &original,
+                            self.clock.fraction() as f32,
+                            self.world.game_time,
+                            self.animation_time(),
+                        )
+                    };
                 let name = &*self.res.facts().get(block.state).name;
                 let mut draw = BlockEntityDraw::posed(
-                    self.clock.fraction() as f32,
-                    self.world.game_time,
+                    partial,
+                    game_time,
                     240 | 240 << 8,
                     block.pos,
                     Mat4::IDENTITY,
                     diffuse_lights(false),
                     Vec::new(),
                 )
-                .animated(self.animation_time());
-                self.native_block_entity_submit(block.pos, name, block.state, &entity, &mut draw);
+                .animated(animation_time);
+                self.native_block_entity_submit(block.pos, name, block.state, entity, &mut draw);
                 // Its text's new glyphs upload with this screen's batch.
                 batch.patches.append(&mut self.text_patches.borrow_mut());
                 let time = draw.animation();
@@ -192,11 +480,12 @@ impl Game<'_> {
                         normal = Vec3::new(f32::from(nx), f32::from(ny), f32::from(nz))
                             .normalize_or_zero();
                     }
+                    let normal = direction(normal);
                     // `entity.wgsl`: |w| >= 0.5 is shaded by the normal; smaller
                     // keeps the colour baked in (quads, cubes, items, text).
                     let unbaked = w.unsigned_abs() >= 64;
                     quads.push(SceneQuad {
-                        corners,
+                        corners: corners.map(point),
                         uv: q.each_ref().map(|v| v.uv),
                         color: if unbaked {
                             shaded(q[0].color, face_shade(normal))
@@ -204,33 +493,25 @@ impl Game<'_> {
                             q[0].color
                         },
                         normal,
-                        cull: (1..64).contains(&w) || (-126..0).contains(&w),
+                        cull: horizon_client::mesher::culls_back(q[0].normal),
                     });
                 }
             }
         }
         extra(&mut quads);
-        let m = scene_matrix(rect, view);
-        let mut seen: Vec<ProjectedQuad> = quads
+        let projected = quads
             .into_iter()
             .filter(|q| !q.cull || m.transform_vector3(q.normal).z > 0.0)
-            .map(|q| {
-                let p = q.corners.map(|c| m.transform_point3(c));
-                let depth = p.iter().map(|v| v.z).sum::<f32>() / 4.0;
-                ProjectedQuad {
-                    depth,
-                    corners: p.map(|v| v.to_array()),
-                    uv: q.uv,
-                    color: q.color,
-                }
-            })
-            .collect();
-        // Mod-chosen views and positions may overflow: refuse before any vertex.
-        let finite = |q: &ProjectedQuad| {
-            q.depth.is_finite() && q.corners.iter().flatten().all(|v| v.is_finite())
-        };
-        if !seen.iter().all(finite) {
-            return Err(mod_api::SceneError::BadView);
+            .map(|q| ProjectedQuad::new(m, q.corners, q.uv, q.color));
+        let textured_count = seen.len();
+        if textured_count == 0 {
+            seen = projected.collect();
+        } else {
+            seen.extend(projected);
+        }
+        // Textured faces were checked before the live scene could advance.
+        if !seen[textured_count..].iter().all(ProjectedQuad::finite) {
+            return Err(SceneError::BadView);
         }
         // Far to near, for the faces that let others show through.
         seen.sort_by(|a, b| a.depth.total_cmp(&b.depth));
@@ -238,8 +519,35 @@ impl Game<'_> {
         for face in seen {
             batch.quad_3d(face.corners, face.uv, face.color);
         }
-        batch.depth_since(start, rect);
+        self.finish_scene(batch, start, rect, &overlays);
         Ok(())
+    }
+
+    /// Submits the scene's depth and clip, drawing `overlays` after its geometry
+    /// in the same isolated depth pass.
+    fn finish_scene(
+        &self,
+        batch: &mut HudBatch,
+        start: usize,
+        rect: [f32; 4],
+        overlays: &[ProjectedOverlay],
+    ) {
+        if overlays.is_empty() {
+            batch.depth_since(start, rect);
+            return;
+        }
+        let overlay_start = batch.vertices.len();
+        let uv = horizon_client::gfx::lightning::white_uv(&self.gui.atlas.font.white());
+        for overlay in overlays {
+            batch.quad_3d(overlay.corners, [uv; 4], overlay.color);
+        }
+        let runs = overlays
+            .chunk_by(|a, b| a.depth == b.depth)
+            .scan(overlay_start, |end, run| {
+                *end += run.len() * 6;
+                Some((*end, run[0].depth))
+            });
+        batch.depth_overlays_since(start, overlay_start, rect, runs);
     }
 }
 

@@ -7,7 +7,7 @@
 //! Also `/stop`, `/save-all`, `/save-off` and `/save-on` (StopCommand,
 //! SaveAllCommand, SaveOffCommand, SaveOnCommand), on the switches the lists
 //! share.
-use super::{Arg, Context, Game, R, Target, command_host::profiles::ListsTarget, err};
+use super::{Arg, Context, DeferredSaveAll, Game, R, Target, command_host::profiles::ListsTarget, err};
 use horizon_client::{
     server::user_lists::{BanEntry, NameAndId, OpEntry},
     text::Text,
@@ -32,8 +32,20 @@ impl Game<'_> {
         horizon_gameplay::commands::profiles::stop(&mut ListsTarget { game: self, lists })
     }
 
-    /// SaveAllCommand. Every save waits for the chunks to be written, so
-    /// `flush` changes nothing.
+    pub(super) fn cmd_restart(&mut self) -> R<i32> {
+        let lists = self.dedicated_lists()?;
+        let reply = super::super::dedicated::request_restart(
+            super::super::dedicated::supervised(),
+            &mut lists.lock().unwrap().stop,
+        );
+        self.feedback(reply);
+        Ok(1)
+    }
+
+    /// SaveAllCommand.saveAll: `commands.save.saving` to the source, then
+    /// `commands.save.success` to it and the other operators, or the
+    /// `ERROR_FAILED` it throws (result 0) when the save did not go through.
+    /// `flush` changes nothing: every save waits for the chunks to be written.
     pub(super) fn cmd_save_all(&mut self) -> R<i32> {
         let lists = self.dedicated_lists()?;
         horizon_gameplay::commands::profiles::save_all(&mut ListsTarget { game: self, lists })
@@ -48,6 +60,45 @@ impl Game<'_> {
                 Text::translate("commands.save.failed", &[]).with_color(horizon_client::text::RED)
             }
         }
+    }
+
+    /// `cmd_save_all` for a guest, once their turn ended and their own state
+    /// is back in their record (`run_guest_command`): the success line to each
+    /// source and to the other operators, or the `ERROR_FAILED` only to them.
+    /// The turn's one save answers every `/save-all` that ran in it, each with
+    /// the feedback it decided when it ran. Returns the command's result.
+    pub(in crate::game) fn finish_deferred_save_all(
+        &mut self,
+        deferred: Vec<DeferredSaveAll>,
+        lines: &mut Vec<Text>,
+    ) -> bool {
+        let reply = self.save_all_reply();
+        let saved = reply.translation_key() == Some("commands.save.success");
+        for run in deferred {
+            // sendSuccess(line, true): a silent source sends nothing; else the
+            // source hears it when it takes success feedback
+            // (`send_command_feedback`), the operators always, and a dedicated
+            // server's console logs it (`log_admin_commands`).
+            if run.silent {
+                continue;
+            }
+            if saved {
+                if run.to_source {
+                    lines.push(reply.clone());
+                }
+                // The guest's source is a player's, not the server's.
+                self.broadcast_to_admins_read(
+                    run.who,
+                    run.to_operators,
+                    run.to_console,
+                    reply.clone(),
+                );
+            } else {
+                // sendFailure: the source alone, always (`acceptsFailure`).
+                lines.push(reply.clone());
+            }
+        }
+        saved
     }
 
     /// SaveOffCommand and SaveOnCommand.
@@ -248,7 +299,9 @@ impl Game<'_> {
             }
             let removed = {
                 let mut l = lists.lock().unwrap();
-                l.ip_bans.get(&target).is_some() && l.ip_bans.remove(&target)
+                // `IpBanList.isBanned` is `StoredUserList.contains`: an entry that has
+                // expired still counts until it is removed here.
+                l.ip_bans.contains(&target) && l.ip_bans.remove(&target)
             };
             if !removed {
                 return Err(err("commands.pardonip.failed", &[]));
@@ -274,7 +327,7 @@ impl Game<'_> {
         let Some(ip) = ip else {
             return Err(err("commands.banip.invalid", &[]));
         };
-        if lists.lock().unwrap().ip_bans.get(&ip).is_some() {
+        if lists.lock().unwrap().ip_bans.contains(&ip) {
             return Err(err("commands.banip.failed", &[]));
         }
         let players: Vec<(u128, String)> = self
@@ -307,10 +360,18 @@ impl Game<'_> {
             &[lit(&ip), Self::reason_message(reason.as_deref())],
         ));
         if !players.is_empty() {
-            let names: Vec<&str> = players.iter().map(|(_, n)| n.as_str()).collect();
+            // `EntitySelector.joinNames`: `ComponentUtils.formatList(players,
+            // Entity::getDisplayName)`, the gray ", " between them.
+            let names = players
+                .iter()
+                .map(|(uuid, name)| self.player_text(name, *uuid))
+                .collect();
             self.feedback(Text::translate(
                 "commands.banip.info",
-                &[lit(&players.len().to_string()), lit(&names.join(", "))],
+                &[
+                    lit(&players.len().to_string()),
+                    horizon_client::scoreboard_cmd::format_list(names),
+                ],
             ));
         }
         for (uuid, _) in &players {
@@ -412,3 +473,11 @@ impl Game<'_> {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "kick_ban_names_tests.rs"]
+mod kick_ban_names_tests;
+
+#[cfg(test)]
+#[path = "save_all_command_tests.rs"]
+mod save_all_command_tests;

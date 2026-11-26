@@ -4,6 +4,9 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+/// The only vanilla block eligible for a native-owned position holder.
+pub const WATER_CAULDRON: &str = "minecraft:water_cauldron";
+
 /// A block's factory and accepted entity types, frozen together at startup.
 #[derive(Debug, PartialEq, Eq)]
 struct BlockMembership {

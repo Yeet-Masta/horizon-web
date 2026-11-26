@@ -45,7 +45,7 @@ use horizon_shader_api::stages::{RAY_ENTITY, RAY_SOLID, RAY_TRANSLUCENT};
 
 use crate::block_entity_render::StaticSectionSnapshot;
 use crate::fast_hash::{FxHashMap, FxHashSet};
-use crate::gfx::{Renderer, SectionGpu, SectionKey, arena::Arena, resident::Resident};
+use crate::gfx::{Renderer, SectionGpu, SectionKey, arena::Arena, resident::Resident, submit};
 use crate::mesher::{QuadLook, TerrainVertex, Vertex};
 use retained::Retained;
 
@@ -98,8 +98,11 @@ impl Renderer {
         // A frame still on the submit thread binds the kept resources `take_over` or `retire`
         // destroys: its submission would fail on them.
         self.land_frame();
+        let capabilities = pack.as_ref().and_then(|p| p.capabilities());
         // The size the pack's frames draw at (`NativePack::start_frame`), before its first.
-        let size = (self.world_post).pack_render_size([self.config.width, self.config.height]);
+        let window = [self.config.width, self.config.height];
+        let upscaled = capabilities.is_some_and(|c| c.engine_upscale);
+        let size = (self.world_post).pack_render_size(window, upscaled);
         let taken = match (&mut pack, &mut self.external) {
             (Some(new), old) => new.take_over(&self.device, old.as_deref_mut(), size),
             (None, Some(old)) => {
@@ -114,13 +117,20 @@ impl Renderer {
             }
             return Some(refused.why);
         }
-        let capabilities = pack.as_ref().and_then(|p| p.capabilities());
         let traces = capabilities.is_some_and(|c| c.ray_scene);
         follow(
             &mut self.ray_scene,
             &self.device,
-            super::query::wanted(super::query::switch(), traces),
+            super::query::wanted(super::query::switch_with(self.ray_tracing_mode), traces),
         );
+        // TAA's history holds what the pipeline that ran drew (rule 6 of docs/hdr-passes.md).
+        if pack.is_some() || self.external.is_some() {
+            self.world_post.forget_history();
+        }
+        // A pack the renderer resolves gets TAA at its world's size from its first frame on,
+        // unless TAA may upscale it.
+        (self.world_post)
+            .hold_upscale(capabilities.is_some_and(|c| c.engine_resolve && !c.engine_upscale));
         // The arenas' looks follow before the next frame (`follow_terrain_looks`).
         self.external = pack;
         self.executor = capabilities;
@@ -168,9 +178,20 @@ impl Renderer {
         // the shared indices cover them.
         let retained = frame.static_block_entities;
         let most = || (self.entity_batch.ray_ranges[2].1).max(Retained::most_quads(retained));
-        if entities && most() > self.index_quads {
-            self.index_quads = most().next_power_of_two();
-            self.indices = Self::quad_indices(&self.device, self.index_quads);
+        let quads = most().next_power_of_two();
+        if entities
+            && !grown_for_ray_prep(
+                &self.device,
+                &self.queue,
+                &mut self.index_quads,
+                &mut self.indices,
+                quads,
+            )
+        {
+            // The old buffer is too small for this frame's BLAS builds (`Entities::fit` cuts
+            // the ranges to the vertex binding only, `Retained::update` is not bounded), so
+            // the frame builds none of them; a later frame tries again (#15464).
+            return;
         }
         let stream = entities.then_some(Stream {
             buffer: &self.entity_buffer,
@@ -231,6 +252,32 @@ impl Renderer {
             true => usage | ENTITY_INPUT,
             false => usage,
         }
+    }
+}
+
+/// Grows the shared quad indices to `quads`, which this frame's ray preparation needs more of
+/// than they hold: `false` where the device would not take the bigger buffer, and nothing
+/// changes — the frame traces with the scene it had, as a TLAS that can't grow keeps it
+/// (#15464).
+fn grown_for_ray_prep(
+    device: &wgpu::Device,
+    queue: &submit::Queue,
+    index_quads: &mut u32,
+    indices: &mut wgpu::Buffer,
+    quads: u32,
+) -> bool {
+    if quads <= *index_quads {
+        return true;
+    }
+    // `None` answers only a lost device or one out of video memory: `frame_targets::made`
+    // panics on a validation error without an out-of-memory one this frame.
+    match Renderer::grown_quad_indices(device, queue, quads) {
+        Some(grown) => {
+            *index_quads = quads;
+            *indices = grown;
+            true
+        }
+        None => false,
     }
 }
 
@@ -558,10 +605,13 @@ impl RayScene {
         })
     }
 
-    /// The scene a renderer starts with: one only when `HORIZON_RAY_TRACING=1` asks for it with
-    /// any pack or none; otherwise the pack that loads brings it (`Renderer::replace_executor`).
-    pub(in crate::gfx) fn forced(device: &wgpu::Device) -> Option<Self> {
-        super::query::wanted(super::query::switch(), false)
+    /// The scene a renderer starts with: one when `HORIZON_RAY_TRACING=1` or `RayTracingMode::On`
+    /// asks for it with any pack or none; otherwise the pack that loads brings it (`Renderer::replace_executor`).
+    pub(in crate::gfx) fn forced(
+        device: &wgpu::Device,
+        mode: crate::graphics::RayTracingMode,
+    ) -> Option<Self> {
+        super::query::wanted(super::query::switch_with(mode), false)
             .then(|| Self::new(device))
             .flatten()
     }
@@ -972,7 +1022,7 @@ impl RayScene {
 }
 
 /// `scene` for a pack that `wants` one: the one there is, or a new one; none otherwise.
-fn follow(scene: &mut Option<RayScene>, device: &wgpu::Device, wants: bool) {
+pub(in crate::gfx) fn follow(scene: &mut Option<RayScene>, device: &wgpu::Device, wants: bool) {
     if !wants {
         *scene = None;
     } else if scene.is_none() {
@@ -1606,7 +1656,7 @@ mod retained;
 
 #[cfg(test)]
 #[path = "entity_tests.rs"]
-mod entity_tests;
+pub(in crate::gfx) mod entity_tests;
 
 #[cfg(test)]
 #[path = "terrain_tests.rs"]
@@ -1947,5 +1997,60 @@ mod tests {
         assert!(scene.is_none());
         follow(&mut scene, &device, wanted(Switch::On, false));
         assert!(scene.is_some());
+    }
+
+    /// #15464: where the device refuses the bigger index buffer, the old one — too small for
+    /// this frame's BLAS builds — stays untouched, so the frame skips tracing the
+    /// entity/retained layer instead of dying on a validation error.
+    #[test]
+    fn ray_index_growth_keeps_the_old_buffer_where_the_device_refuses() {
+        let _gpu = crate::gfx::test_gpu::lock();
+        let Some((_, device, queue)) = crate::gfx::test_gpu::optional_device() else {
+            eprintln!("no GPU device: skipped");
+            return;
+        };
+        let queue = crate::gfx::submit::Queue::new(queue, false);
+        let mut index_quads = 1 << 10;
+        let mut indices =
+            crate::gfx::rt::query::quad_indices(&device, 1 << 10).expect("quad indices");
+        let old = indices.size();
+
+        // What the buffer holds is enough: nothing is made (the unspent `NO_ROOM` proves
+        // `made` never ran), and nothing changes.
+        crate::gfx::frame_targets::NO_ROOM.set(1);
+        assert!(grown_for_ray_prep(
+            &device,
+            &queue,
+            &mut index_quads,
+            &mut indices,
+            1 << 8
+        ));
+        assert_eq!(crate::gfx::frame_targets::NO_ROOM.get(), 1);
+        assert_eq!(index_quads, 1 << 10);
+        assert_eq!(indices.size(), old);
+
+        // No room for the bigger buffer: refused, and the old one is kept as it was.
+        crate::gfx::frame_targets::NO_ROOM.set(1);
+        assert!(!grown_for_ray_prep(
+            &device,
+            &queue,
+            &mut index_quads,
+            &mut indices,
+            1 << 16
+        ));
+        assert_eq!(index_quads, 1 << 10);
+        assert_eq!(indices.size(), old);
+        crate::gfx::frame_targets::NO_ROOM.set(0);
+
+        // Room for it: the buffer grows to the wanted quads.
+        assert!(grown_for_ray_prep(
+            &device,
+            &queue,
+            &mut index_quads,
+            &mut indices,
+            1 << 16
+        ));
+        assert_eq!(index_quads, 1 << 16);
+        assert_eq!(indices.size(), (1 << 16) * 6 * 4);
     }
 }

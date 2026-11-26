@@ -22,8 +22,7 @@ fn run() {
     let root =
         std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
     let path = std::path::PathBuf::from(horizon_std::env::var_os("HORIZON_WASM_FIXTURE").unwrap());
-    let mut manifest = Package::read(&path).unwrap().manifest;
-    manifest.inject.clear();
+    let manifest = Package::read(&path).unwrap().manifest;
     let inventory = [
         PackageInfo::new(
             manifest.id.clone(),

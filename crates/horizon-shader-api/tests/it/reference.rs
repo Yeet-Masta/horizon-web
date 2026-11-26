@@ -120,8 +120,11 @@ fn every_stage_compiles_under_ray_tracing() {
         let scene = kind.prelude_traced(Tracing::Scene);
         let text = format!("{scene}{own}{}", entries_of(kind));
         validate_for(&text, Capabilities::default() | Capabilities::RAY_QUERY);
-        // Only the post and material stages' modules need the device's ray queries.
-        let rays = matches!(kind, StageKind::Post | StageKind::Material);
+        // Only the post, material and entity stages' modules need the device's ray queries.
+        let rays = matches!(
+            kind,
+            StageKind::Post | StageKind::Material | StageKind::Entity
+        );
         assert_eq!(scene.contains("ray_query"), rays, "{kind:?}");
         assert!(!stub.contains("ray_query") && !stub.contains("acceleration_structure"));
     }
@@ -175,7 +178,7 @@ const PINNED_0_2: [(StageKind, &str, &str); 6] = [
     ),
     (
         StageKind::Post,
-        "de8725d1bd09091439222978f5c5c8f73d16c18c61125f5be395cb1104105993",
+        "91136ab9fc8e7ca1bc57d9be9f0ece1873f54288a8bb254e78af9385ab99a61f",
         "f1ffc3c9e0692e1d1f49de4a34ae90b93f7f2eda2eaa42ce936f630139cc4648",
     ),
     (
@@ -201,24 +204,26 @@ fn the_wgsl_of_a_pack_without_ray_tracing_is_unchanged() {
     assert_eq!(
         // As the repository holds the files: a Windows checkout may give them CRLF.
         sha256_hex(glow.text.replace('\r', "").as_bytes()),
-        "e0de176db0fbae5c564406678c7f0142b1d679e1a8dc443a969f7abf2cd7828f"
+        "70929dec94bdf0652d5fd3fd5e324d7d670e724838803d87cb6ccbcf5b5587ef"
     );
 }
 
 /// The `Frame` struct a prelude declares, for a pack with `[ray_tracing]` or without, with
-/// `[[resource]]` or without, and whose files name `moon_phase` or not and `full_lightmap` or
-/// not, as (name, offset) and its span.
+/// `[[resource]]` or without, and whose files name `moon_phase` or not, `full_lightmap` or not
+/// and `jitter` or `previous_jitter` or neither, as (name, offset) and its span.
 fn frame_layout(
     ray_tracing: bool,
     kept: bool,
     moon_phase: bool,
     full_lightmap: bool,
+    jitter: bool,
 ) -> (Vec<(String, usize)>, usize) {
     let module = validate(&Frame::declared_wgsl(
         ray_tracing,
         kept,
         moon_phase,
         full_lightmap,
+        jitter,
     ));
     let (_, ty) = module
         .types
@@ -246,37 +251,38 @@ fn the_frame_s_wgsl_layout_is_the_uploaded_struct_s() {
     let size = std::mem::size_of::<Frame>();
     // Every field a pack may declare sits where the uploaded struct has it, whichever of the
     // keys bringing fields it sets: a field it doesn't declare is a gap, or the end.
-    for ray_tracing in [false, true] {
-        for kept in [false, true] {
-            for moon_phase in [false, true] {
-                for full_lightmap in [false, true] {
-                    let mut want = rust.clone();
-                    let left = |range: std::ops::Range<usize>, on: bool| (!on).then_some(range);
-                    for range in [
-                        left(Frame::FULL_LIGHTMAP_FIELDS, full_lightmap),
-                        left(Frame::MOON_FIELDS, moon_phase),
-                        left(Frame::KEPT_FIELDS, kept),
-                        left(Frame::RAY_FIELDS, ray_tracing),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        want.drain(range);
-                    }
-                    let keys = format!(
-                        "ray tracing {ray_tracing}, kept {kept}, moon phase {moon_phase}, \
-                         full lightmap {full_lightmap}"
-                    );
-                    let (wgsl, span) = frame_layout(ray_tracing, kept, moon_phase, full_lightmap);
-                    assert_eq!(wgsl, want, "{keys}");
-                    // The fog's fields are every pack's, and the moon's phase is in the padding
-                    // of the 16 bytes before the full light's: without that the struct ends
-                    // there, as it did before it, and with it it is the buffer's size.
-                    let end = if full_lightmap { size } else { size - 16 };
-                    assert_eq!(span, end, "{keys}");
-                }
-            }
+    for keys in 0..32u8 {
+        let [ray_tracing, kept, moon_phase, full_lightmap, jitter] =
+            [0, 1, 2, 3, 4].map(|b| keys & (1 << b) != 0);
+        let mut want = rust.clone();
+        let left = |range: std::ops::Range<usize>, on: bool| (!on).then_some(range);
+        for range in [
+            left(Frame::JITTER_FIELDS, jitter),
+            left(Frame::FULL_LIGHTMAP_FIELDS, full_lightmap),
+            left(Frame::MOON_FIELDS, moon_phase),
+            left(Frame::KEPT_FIELDS, kept),
+            left(Frame::RAY_FIELDS, ray_tracing),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            want.drain(range);
         }
+        let keys = format!(
+            "ray tracing {ray_tracing}, kept {kept}, moon phase {moon_phase},              full lightmap {full_lightmap}, jitter {jitter}"
+        );
+        let (wgsl, span) = frame_layout(ray_tracing, kept, moon_phase, full_lightmap, jitter);
+        assert_eq!(wgsl, want, "{keys}");
+        // The fog's fields are every pack's, and the moon's phase is in the padding of the 16
+        // bytes before the full light's: without the jitters the struct ends where it did
+        // before them, without the full light too where it did before that, and with the
+        // jitters it is the buffer's size.
+        let end = match (full_lightmap, jitter) {
+            (_, true) => size,
+            (true, false) => size - 16,
+            (false, false) => size - 32,
+        };
+        assert_eq!(span, end, "{keys}");
     }
 }
 

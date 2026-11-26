@@ -1,4 +1,5 @@
 //! STRUCTURE_STARTS / STRUCTURE_REFERENCES for the chunk generator.
+use super::structure_terrain::{Answer, LandContext, Request};
 use super::{
     biome::BiomeId,
     block_feature::FeatureBlockBindings,
@@ -54,6 +55,8 @@ pub(super) struct StructureState {
     pub(super) fixed_biome: bool,
     /// `StructureRegistry::zone_reach`.
     zone_reach: i32,
+    /// The biome registry by name, for a `structure_terrain` provider's terrain.
+    biome_names: super::structure_terrain::BiomeNames,
 }
 
 /// generateRingPositions' biome searches, shared out. Vanilla runs each as
@@ -339,8 +342,10 @@ impl StructureState {
         }
         let bindings = data.structure_block_bindings()?;
         let zone_reach = registry.zone_reach();
+        let biome_names = super::structure_terrain::BiomeNames::new(data.biome_names());
         Ok(Some(Self {
             zone_reach,
+            biome_names,
             registry,
             resources: resources.clone(),
             bindings,
@@ -488,6 +493,11 @@ impl StructureState {
     ) -> Starts {
         self.build_starts(context, chunk, true)
             .expect("waits for another worker's build")
+    }
+    /// The starts a chunk owns when they are cached already, else None: nothing is read from
+    /// the save and nothing is built, for a read that may load no chunk.
+    pub(super) fn cached_starts_at(&self, chunk: ChunkPos) -> Option<Starts> {
+        self.starts.get((chunk.x, chunk.z))
     }
     /// The starts a chunk saved (`structures.starts`), which vanilla loads with their pieces
     /// (`StructureStart.loadStaticStart`) so that the neighbours place the parts that cross
@@ -662,9 +672,66 @@ impl StructureState {
             let starts = self.saved_starts_at(context, chunk);
             return Some(self.starts.insert_first((chunk.x, chunk.z), starts));
         }
+        match self.terrain_answer(context, chunk, None) {
+            Answer::Vanilla => self.build_new_starts(context, chunk, wait, true),
+            // Starts the chunk saved stay, as they do for the other answers: only
+            // new ones are dropped.
+            Answer::NoStructures => self.build_new_starts(context, chunk, wait, false),
+            Answer::Terrain(terrain) => {
+                let mut land = LandContext::new(context, terrain, &self.biome_names);
+                self.build_new_starts(&mut land, chunk, wait, true)
+            }
+        }
+    }
+    /// What the `structure_terrain` providers answer for `chunk`.
+    fn terrain_answer(
+        &self,
+        context: &impl StartContext,
+        chunk: ChunkPos,
+        placing: Option<&str>,
+    ) -> Answer {
+        if !super::structure_terrain::any_registered() {
+            return Answer::Vanilla;
+        }
+        let structures = self.possible_sets.iter().flat_map(|&set| {
+            (self.registry.sets[set].structures.iter())
+                .map(|&(structure, _)| self.registry.structures[structure].name.as_str())
+        });
+        let mut names: Vec<&str> = Vec::new();
+        for name in structures {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let request = Request::new(
+            context.seed(),
+            chunk,
+            placing,
+            context.generation(),
+            names,
+            Some(&self.biome_names),
+        );
+        super::structure_terrain::answer(&request)
+    }
+    /// `build_starts` for a chunk with no starts built or saved: they are
+    /// built now, on `context`'s biomes and heights. With `new` false only the
+    /// starts the chunk saved are kept and no other is made.
+    fn build_new_starts(
+        &self,
+        context: &mut impl super::structure::start::StartContext,
+        chunk: ChunkPos,
+        wait: bool,
+        new: bool,
+    ) -> Option<Starts> {
+        static NONE: Rings = Rings::new();
         // Ring searches enlist other workers and wait for them: never hold a
         // chunk-work lock while helping, even when this chunk has no starts.
-        let rings = self.rings_for(context, chunk);
+        let rings = if new {
+            self.rings_for(context, chunk)
+        } else {
+            &NONE
+        };
+        let possible: &[usize] = if new { &self.possible_sets } else { &[] };
         let work = self.start_work.at((chunk.x, chunk.z));
         let _work = match work.try_lock() {
             Ok(guard) => guard,
@@ -701,7 +768,7 @@ impl StructureState {
                 &self.resources,
                 &self.bindings,
                 context,
-                &self.possible_sets,
+                possible,
                 rings,
                 chunk,
                 saved,
@@ -724,15 +791,27 @@ impl StructureState {
         chunk: ChunkPos,
     ) -> Option<StructureStart> {
         let index = (self.registry.structures.iter()).position(|s| s.name == structure)?;
-        try_generate(
-            &self.registry,
-            &self.resources,
-            &self.bindings,
-            context,
-            index,
-            chunk,
-            true,
-        )
+        match self.terrain_answer(context, chunk, Some(structure)) {
+            Answer::Vanilla => try_generate(
+                &self.registry,
+                &self.resources,
+                &self.bindings,
+                context,
+                index,
+                chunk,
+                true,
+            ),
+            Answer::NoStructures => None,
+            Answer::Terrain(terrain) => try_generate(
+                &self.registry,
+                &self.resources,
+                &self.bindings,
+                &mut LandContext::new(context, terrain, &self.biome_names),
+                index,
+                chunk,
+                true,
+            ),
+        }
     }
     /// Puts a saved start of `structure` in `chunk`, in place of the one
     /// this generator builds there from the same structure sets (a set
@@ -914,25 +993,62 @@ impl StructureState {
         chunk: ChunkPos,
     ) -> Vec<Arc<StructureStart>> {
         let (bx, bz) = (chunk.x * 16, chunk.z * 16);
-        let around: Vec<ChunkPos> = (chunk.x - 8..=chunk.x + 8)
-            .flat_map(|sx| (chunk.z - 8..=chunk.z + 8).map(move |sz| ChunkPos::new(sx, sz)))
-            .collect();
-        // Workers generating neighbouring chunks ask for the same starts in the
-        // same order: build those no other worker is building first, and wait
-        // for the others only then, rather than all queueing behind each one.
-        let found: Vec<Option<Starts>> = around
-            .iter()
-            .map(|&at| self.build_starts(context, at, false))
-            .collect();
         let mut out = Vec::new();
-        for (&at, found) in around.iter().zip(found) {
-            let starts = found.unwrap_or_else(|| self.starts_at(context, at));
-            for start in starts.iter() {
+        let push_intersecting = |out: &mut Vec<Arc<StructureStart>>,
+                                 starts: &[Arc<StructureStart>]| {
+            for start in starts {
                 let b = start.bounding_box;
                 if b.max[0] >= bx && b.min[0] <= bx + 15 && b.max[2] >= bz && b.min[2] <= bz + 15 {
                     out.push(start.clone());
                 }
             }
+        };
+        // Workers generating neighbouring chunks ask for the same starts in the
+        // same order: build those no other worker is building first, and wait
+        // for the others only then, rather than all queueing behind each one.
+        let mut busy = [ChunkPos::new(0, 0); 289];
+        let mut busy_count = 0usize;
+        let mut deferred: [Option<Starts>; 289] = [const { None }; 289];
+        let mut idx = 0usize;
+        for sx in chunk.x - 8..=chunk.x + 8 {
+            for sz in chunk.z - 8..=chunk.z + 8 {
+                let at = ChunkPos::new(sx, sz);
+                match self.build_starts(context, at, false) {
+                    Some(starts) if !starts.is_empty() => {
+                        if busy_count == 0 {
+                            push_intersecting(&mut out, starts.as_slice());
+                        } else {
+                            deferred[idx] = Some(starts);
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        busy[busy_count] = at;
+                        busy_count += 1;
+                    }
+                }
+                idx += 1;
+            }
+        }
+        if busy_count > 0 {
+            let mut bi = 0usize;
+            let mut slot_idx = 0usize;
+            for sx in chunk.x - 8..=chunk.x + 8 {
+                for sz in chunk.z - 8..=chunk.z + 8 {
+                    let at = ChunkPos::new(sx, sz);
+                    if bi < busy_count && busy[bi] == at {
+                        bi += 1;
+                        let starts = self.starts_at(context, at);
+                        push_intersecting(&mut out, starts.as_slice());
+                    } else if let Some(starts) = deferred[slot_idx].take() {
+                        push_intersecting(&mut out, starts.as_slice());
+                    }
+                    slot_idx += 1;
+                }
+            }
+        }
+        if out.len() <= 1 {
+            return out;
         }
         // Vanilla keeps each structure's references in a LongOpenHashSet and
         // places the starts in its iteration order; reorder each structure's
@@ -1295,6 +1411,7 @@ mod tests {
             ring_seed: None,
             fixed_biome: false,
             zone_reach: 0,
+            biome_names: crate::worldgen::structure_terrain::BiomeNames::new(&[]),
         };
         let mut context = SavedChunk(vec![SavedStart {
             name: "minecraft:monument".into(),
@@ -1385,6 +1502,161 @@ mod tests {
                 unimplemented!("not on the monument path")
             }
         }
+    }
+
+    /// A provider that starts answering `NoStructures` (a mod update, a changed setting) leaves
+    /// the starts a chunk already saved alone: the neighbours still get the pieces that reach
+    /// into it. A chunk with none saved gets no start.
+    #[test]
+    fn no_structures_keeps_the_starts_a_chunk_saved() {
+        use crate::heightmap::HeightmapType;
+        use crate::registry::BlockRegistry;
+        use crate::worldgen::anchor::WorldGenerationContext;
+        use crate::worldgen::structure::{
+            StateTransforms, jigsaw::JigsawContext, mod_types::mod_structure_types,
+            start::NoiseColumnTarget,
+        };
+        use crate::worldgen::structure_terrain::{Provider, register, unregister};
+        use horizon_core::nbt::Tag;
+
+        const SEED: i64 = 5_117_204_463;
+        struct Silent;
+        impl Provider for Silent {
+            fn answer(&self, request: &Request<'_>) -> Answer {
+                if request.seed() == SEED {
+                    Answer::NoStructures
+                } else {
+                    Answer::Vanilla
+                }
+            }
+        }
+        struct Context;
+        impl JigsawContext for Context {
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn max_y(&self) -> i32 {
+                320
+            }
+            fn base_height(&mut self, _: i32, _: i32, _: HeightmapType) -> i32 {
+                63
+            }
+            fn column_has_valid_biome(&mut self, _: i32, _: i32, _: i32, _: i32) -> bool {
+                true
+            }
+        }
+        impl StartContext for Context {
+            fn seed(&self) -> i64 {
+                SEED
+            }
+            fn sea_level(&self) -> i32 {
+                63
+            }
+            fn base_column(&mut self, _: i32, _: i32, _: HeightmapType) -> Vec<bool> {
+                unimplemented!("no start is built")
+            }
+            fn base_columns_by(
+                &mut self,
+                _: i32,
+                _: i32,
+                _: usize,
+                _: &dyn Fn(usize) -> HeightmapType,
+            ) -> Vec<Vec<bool>> {
+                unimplemented!("no start is built")
+            }
+            fn noise_column_into(&mut self, _: i32, _: i32, _: &mut dyn NoiseColumnTarget) {
+                unimplemented!("no start is built")
+            }
+            fn cold_enough_to_snow(&mut self, _: BiomeId, _: [i32; 3]) -> bool {
+                unimplemented!("no start is built")
+            }
+            fn generation(&self) -> WorldGenerationContext {
+                WorldGenerationContext::new(-64, 384, 63)
+            }
+            fn noise_biome(&mut self, _: [i32; 3]) -> BiomeId {
+                unimplemented!("no start is built")
+            }
+            fn noise_biomes(&mut self, _: &[[i32; 3]]) -> Vec<BiomeId> {
+                unimplemented!("no start is built")
+            }
+            fn set_valid_biomes(&mut self, _: Option<&BTreeSet<BiomeId>>) {}
+        }
+
+        let def = r#"{"type":"minecraft:ocean_monument"}"#.to_owned();
+        let registry = StructureRegistry::new(
+            &BTreeMap::from([("minecraft:monument".to_owned(), def)]),
+            &BTreeMap::new(),
+            BTreeMap::new(),
+            &|_| Ok(BTreeSet::new()),
+            mod_structure_types(),
+        )
+        .unwrap();
+        let (mut tag, _) = horizon_core::nbt::parse_snbt(
+            r#"{DataVersion:0,states:[{id:"minecraft:air"},{id:"minecraft:cave_air"},
+            {id:"minecraft:void_air"},{id:"minecraft:water",properties:{level:"0"}},
+            {id:"minecraft:prismarine"},{id:"minecraft:prismarine_bricks"},
+            {id:"minecraft:dark_prismarine"},{id:"minecraft:sea_lantern"}],defaults:{
+            "minecraft:air":0,"minecraft:cave_air":1,"minecraft:void_air":2,
+            "minecraft:water":3,"minecraft:prismarine":4,
+            "minecraft:prismarine_bricks":5,"minecraft:dark_prismarine":6,
+            "minecraft:sea_lantern":7}}"#,
+        )
+        .unwrap();
+        *tag.get_mut("DataVersion").unwrap() = Tag::Int(crate::DATA_VERSION);
+        let blocks: &'static _ = Box::leak(Box::new(BlockRegistry::from_nbt(&tag).unwrap()));
+        let resources = StructureResources::new(
+            blocks,
+            StateTransforms::default(),
+            std::path::Path::new("unused"),
+            BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let bindings = FeatureBlockBindings::new(blocks, BTreeSet::new()).unwrap();
+        let (saved_chunk, empty_chunk) = (ChunkPos::new(-2, 3), ChunkPos::new(5, 5));
+        let monument = Tag::compound([
+            ("id", Tag::String("minecraft:monument".into())),
+            ("ChunkX", Tag::Int(saved_chunk.x)),
+            ("ChunkZ", Tag::Int(saved_chunk.z)),
+            ("references", Tag::Int(1)),
+            (
+                "Children",
+                Tag::List(vec![Tag::compound([
+                    ("id", Tag::String("minecraft:omb".into())),
+                    ("BB", Tag::IntArray(vec![100, 20, -300, 157, 42, -243])),
+                    ("O", Tag::Int(1)),
+                ])]),
+            ),
+        ]);
+        let Tag::Compound(on_disk) = Tag::compound([("minecraft:monument", monument)]) else {
+            unreachable!()
+        };
+        let state = StructureState {
+            registry,
+            resources: Arc::new(resources),
+            bindings,
+            possible_sets: Vec::new(),
+            by_step: vec![Vec::new(); crate::worldgen::structure::start::STEPS.len()],
+            starts: StartCache::new(),
+            saved: OnceLock::new(),
+            start_work: ChunkWork::new(),
+            rings: Arc::new(OnceLock::new()),
+            ring_work: OnceLock::new(),
+            ring_seed: None,
+            fixed_biome: false,
+            zone_reach: 0,
+            biome_names: crate::worldgen::structure_terrain::BiomeNames::new(&[]),
+        };
+        state.set_saved_starts(Arc::new(move |chunk| {
+            (chunk == saved_chunk).then(|| on_disk.clone())
+        }));
+
+        register("test:silent-over-saved-starts", Arc::new(Silent));
+        let kept = state.build_starts(&mut Context, saved_chunk, true).unwrap();
+        let none = state.build_starts(&mut Context, empty_chunk, true).unwrap();
+        unregister("test:silent-over-saved-starts");
+        assert_eq!(kept.len(), 1, "the saved monument survives NoStructures");
+        assert_eq!(kept[0].name, "minecraft:monument");
+        assert!(none.is_empty(), "a chunk with nothing saved gets no start");
     }
 
     #[test]
@@ -1985,5 +2257,338 @@ mod tests {
                 serial(seed.wrapping_add(1), 20, 5, 40, &preferred)
             );
         }
+    }
+
+    /// When one or more chunks in the 17×17 reference window are being built by
+    /// another worker, the two-pass `deferred` path emits starts in the exact
+    /// same grid order as the uncontended single-pass path (before the
+    /// `LongOpenHashSet` per-structure reorder step runs).
+    #[test]
+    fn references_preserves_grid_order_across_busy_and_deferred_chunks() {
+        use crate::heightmap::HeightmapType;
+        use crate::registry::BlockRegistry;
+        use crate::worldgen::anchor::WorldGenerationContext;
+        use crate::worldgen::structure::{
+            StateTransforms, jigsaw::JigsawContext, mod_types::mod_structure_types,
+            start::NoiseColumnTarget,
+        };
+        use horizon_core::{bounding_box::BoundingBox, nbt::Tag};
+        use std::sync::mpsc;
+
+        struct ReleaseOnTrigger {
+            trigger: ChunkPos,
+            queried: Mutex<Vec<ChunkPos>>,
+            release: Mutex<Option<mpsc::Sender<()>>>,
+        }
+        impl JigsawContext for ReleaseOnTrigger {
+            fn min_y(&self) -> i32 {
+                -64
+            }
+            fn max_y(&self) -> i32 {
+                320
+            }
+            fn base_height(&mut self, _x: i32, _z: i32, _kind: HeightmapType) -> i32 {
+                63
+            }
+            fn column_has_valid_biome(
+                &mut self,
+                _x: i32,
+                _z: i32,
+                _min_y: i32,
+                _max_y: i32,
+            ) -> bool {
+                true
+            }
+        }
+        impl StartContext for ReleaseOnTrigger {
+            fn is_old_chunk(&self, chunk: ChunkPos) -> bool {
+                self.queried.lock().unwrap().push(chunk);
+                if chunk == self.trigger
+                    && let Some(tx) = self.release.lock().unwrap().take()
+                {
+                    let _ = tx.send(());
+                }
+                false
+            }
+            fn seed(&self) -> i64 {
+                12345
+            }
+            fn sea_level(&self) -> i32 {
+                63
+            }
+            fn base_column(&mut self, _x: i32, _z: i32, _kind: HeightmapType) -> Vec<bool> {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn base_columns_by(
+                &mut self,
+                _x: i32,
+                _z: i32,
+                _count: usize,
+                _kind: &dyn Fn(usize) -> HeightmapType,
+            ) -> Vec<Vec<bool>> {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn noise_column_into(&mut self, _x: i32, _z: i32, _column: &mut dyn NoiseColumnTarget) {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn cold_enough_to_snow(&mut self, _biome: BiomeId, _pos: [i32; 3]) -> bool {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn generation(&self) -> WorldGenerationContext {
+                WorldGenerationContext::new(-64, 384, 63)
+            }
+            fn noise_biome(&mut self, _quart: [i32; 3]) -> BiomeId {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn noise_biomes(&mut self, _quarts: &[[i32; 3]]) -> Vec<BiomeId> {
+                unimplemented!("not called when possible_sets is empty")
+            }
+            fn set_valid_biomes(&mut self, _biomes: Option<&BTreeSet<BiomeId>>) {
+                unimplemented!("not called when possible_sets is empty")
+            }
+        }
+
+        type CaseEntry<'a> = (ChunkPos, &'a [(usize, BoundingBox)]);
+
+        let names = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
+        let blocks: &'static BlockRegistry = Box::leak(Box::new(
+            BlockRegistry::from_nbt(&Tag::compound([
+                ("DataVersion", Tag::Int(crate::DATA_VERSION)),
+                (
+                    "states",
+                    Tag::List(
+                        names
+                            .iter()
+                            .map(|n| Tag::compound([("id", Tag::String((*n).into()))]))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "defaults",
+                    Tag::Compound(
+                        names
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| ((*n).into(), Tag::Int(i as i32)))
+                            .collect(),
+                    ),
+                ),
+            ]))
+            .unwrap(),
+        ));
+        let make_state = || {
+            let registry = StructureRegistry::new(
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                BTreeMap::new(),
+                &|_| Ok(BTreeSet::new()),
+                mod_structure_types(),
+            )
+            .unwrap();
+            let resources = StructureResources::new(
+                blocks,
+                StateTransforms::default(),
+                std::path::Path::new("unused"),
+                BTreeMap::new(),
+                &BTreeMap::new(),
+            );
+            let bindings = FeatureBlockBindings::new(blocks, BTreeSet::new()).unwrap();
+            let rings = Arc::new(OnceLock::new());
+            rings.set(Rings::new()).unwrap();
+            StructureState {
+                registry,
+                resources: Arc::new(resources),
+                bindings,
+                possible_sets: Vec::new(),
+                by_step: vec![Vec::new(); crate::worldgen::structure::start::STEPS.len()],
+                starts: StartCache::new(),
+                saved: OnceLock::new(),
+                start_work: ChunkWork::new(),
+                rings,
+                ring_work: OnceLock::new(),
+                ring_seed: None,
+                fixed_biome: false,
+                zone_reach: 0,
+                biome_names: crate::worldgen::structure_terrain::BiomeNames::new(&[]),
+            }
+        };
+
+        let hit = BoundingBox::new([0, 0, 0], [15, 10, 15]);
+        let miss = BoundingBox::new([100, 0, 100], [115, 10, 115]);
+        let make_starts = |chunk: ChunkPos, specs: &[(usize, BoundingBox)]| -> Starts {
+            Arc::new(
+                specs
+                    .iter()
+                    .map(|&(structure, bounding_box)| {
+                        Arc::new(StructureStart {
+                            structure,
+                            name: format!("test:s{structure}"),
+                            chunk,
+                            references: 0,
+                            pieces: Vec::new(),
+                            bounding_box,
+                            has_piece_beardifier: false,
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        let summary = |starts: &[Arc<StructureStart>]| -> Vec<(usize, ChunkPos)> {
+            starts.iter().map(|s| (s.structure, s.chunk)).collect()
+        };
+
+        let target = ChunkPos::new(0, 0);
+        let trigger = ChunkPos::new(8, 8);
+
+        let run_case = |precached: &[CaseEntry<'_>],
+                        busy: &[CaseEntry<'_>],
+                        expected: &[(usize, ChunkPos)]| {
+            let state = make_state();
+            for &(chunk, specs) in precached {
+                state
+                    .starts
+                    .insert_first((chunk.x, chunk.z), make_starts(chunk, specs));
+            }
+            let busy_entries: Vec<(ChunkPos, Starts)> = busy
+                .iter()
+                .map(|&(chunk, specs)| (chunk, make_starts(chunk, specs)))
+                .collect();
+
+            let (tx_ready, rx_ready) = mpsc::channel();
+            let (tx_release, rx_release) = mpsc::channel();
+            let state_ref = &state;
+            let busy_ref = &busy_entries;
+
+            let (contended, queried) = horizon_std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let locks: Vec<Arc<Mutex<()>>> = busy_ref
+                        .iter()
+                        .map(|(chunk, _)| state_ref.start_work.at((chunk.x, chunk.z)))
+                        .collect();
+                    let guards: Vec<_> = locks.iter().map(|lock| lock.lock().unwrap()).collect();
+                    let _ = tx_ready.send(());
+                    if rx_release.recv().is_ok() {
+                        for (chunk, starts) in busy_ref {
+                            state_ref
+                                .starts
+                                .insert_first((chunk.x, chunk.z), starts.clone());
+                        }
+                    }
+                    drop(guards);
+                });
+                let mut context = ReleaseOnTrigger {
+                    trigger,
+                    queried: Mutex::new(Vec::new()),
+                    release: Mutex::new(Some(tx_release)),
+                };
+                rx_ready.recv().unwrap();
+                let out = state.references(&mut context, target);
+                (out, context.queried.into_inner().unwrap())
+            });
+
+            // Every busy chunk was queried before the trigger chunk released its lock,
+            // proving Pass 1 observed `WouldBlock` and entered the two-pass `deferred` path.
+            let trigger_pos = queried
+                .iter()
+                .position(|&c| c == trigger)
+                .expect("trigger chunk must be queried during pass one");
+            for &(chunk, _) in busy {
+                let busy_pos = queried
+                    .iter()
+                    .position(|&c| c == chunk)
+                    .expect("busy chunk must be queried during pass one");
+                assert!(
+                    busy_pos < trigger_pos,
+                    "busy chunk {chunk:?} must hit pass one before locks are released"
+                );
+            }
+
+            // Now all 289 chunks are cached and uncontended: the single-pass fast path
+            // must produce the exact same order.
+            let mut idle = ReleaseOnTrigger {
+                trigger,
+                queried: Mutex::new(Vec::new()),
+                release: Mutex::new(None),
+            };
+            let uncontended = state.references(&mut idle, target);
+            assert!(
+                idle.queried.into_inner().unwrap().is_empty(),
+                "uncontended pass must hit cached starts for all 289 chunks"
+            );
+
+            let contended_summary = summary(&contended);
+            let uncontended_summary = summary(&uncontended);
+            assert_eq!(contended_summary, uncontended_summary);
+            assert_eq!(contended_summary.as_slice(), expected);
+        };
+
+        // Case 1: slots before the first busy chunk (emitted in pass one),
+        // multiple busy chunks (with multiple starts and an empty busy chunk),
+        // deferred slots between and after busy chunks (including `(0, 0)`),
+        // non-intersecting boxes before and after busy chunks, and 5 starts of
+        // structure 0 whose chunk keys all collide in bucket 0 of `LongOpenHashSet`
+        // so that out-of-order emission changes the reordered output.
+        run_case(
+            &[
+                (ChunkPos::new(-8, -8), &[(1, hit)]),
+                (ChunkPos::new(-6, -3), &[(0, hit)]),
+                (ChunkPos::new(-4, 5), &[(2, hit)]),
+                (ChunkPos::new(-3, 2), &[(3, miss)]),
+                (ChunkPos::new(-2, -7), &[(0, hit)]),
+                (ChunkPos::new(0, 0), &[(6, hit)]),
+                (ChunkPos::new(0, 3), &[(3, miss)]),
+                (ChunkPos::new(2, -4), &[(7, hit)]),
+                (ChunkPos::new(6, -1), &[(9, hit)]),
+                (ChunkPos::new(8, 7), &[(0, hit)]),
+            ],
+            &[
+                (ChunkPos::new(-2, -8), &[(0, hit), (4, hit)]),
+                (ChunkPos::new(1, 1), &[]),
+                (ChunkPos::new(4, 2), &[(0, hit), (8, hit)]),
+            ],
+            &[
+                (1, ChunkPos::new(-8, -8)),
+                (0, ChunkPos::new(8, 7)),
+                (2, ChunkPos::new(-4, 5)),
+                (0, ChunkPos::new(4, 2)),
+                (4, ChunkPos::new(-2, -8)),
+                (0, ChunkPos::new(-2, -7)),
+                (6, ChunkPos::new(0, 0)),
+                (7, ChunkPos::new(2, -4)),
+                (0, ChunkPos::new(-2, -8)),
+                (8, ChunkPos::new(4, 2)),
+                (9, ChunkPos::new(6, -1)),
+                (0, ChunkPos::new(-6, -3)),
+            ],
+        );
+
+        // Case 2: the very first slot `(-8, -8)` and `(0, 0)` (which matches
+        // `busy`'s zero-initialized sentinel and `LongOpenHashSet`'s zero key)
+        // are busy, so every non-busy start is deferred to pass two.
+        run_case(
+            &[
+                (ChunkPos::new(-6, -3), &[(0, hit)]),
+                (ChunkPos::new(-2, -8), &[(0, hit), (1, hit)]),
+                (ChunkPos::new(-2, -7), &[(0, hit)]),
+                (ChunkPos::new(4, 2), &[(0, hit)]),
+                (ChunkPos::new(8, 7), &[(0, hit), (2, hit)]),
+            ],
+            &[
+                (ChunkPos::new(-8, -8), &[(3, hit)]),
+                (ChunkPos::new(0, 0), &[(0, hit), (4, hit)]),
+            ],
+            &[
+                (3, ChunkPos::new(-8, -8)),
+                (0, ChunkPos::new(0, 0)),
+                (0, ChunkPos::new(8, 7)),
+                (1, ChunkPos::new(-2, -8)),
+                (0, ChunkPos::new(4, 2)),
+                (0, ChunkPos::new(-2, -7)),
+                (4, ChunkPos::new(0, 0)),
+                (0, ChunkPos::new(-2, -8)),
+                (0, ChunkPos::new(-6, -3)),
+                (2, ChunkPos::new(8, 7)),
+            ],
+        );
     }
 }

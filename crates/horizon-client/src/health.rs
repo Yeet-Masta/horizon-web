@@ -187,6 +187,34 @@ impl<'a> DamageLevel<'a> {
             knock_entry: mod_api::KnockbackEntry::Full,
         }
     }
+    /// A hookless level over `world` using `random`, for parallel mob lanes that run only while
+    /// no native mods are loaded.
+    pub fn hookless(
+        world: &'a crate::world::World,
+        registry: &'a horizon_world::registry::BlockRegistry,
+        tags: Option<&'a crate::items::Items>,
+        random: &'a mut horizon_core::random::LevelRandom,
+        attachments: &'a mut horizon_mod_runtime::attachments::Attachments,
+        attachment_syncs: &'a mut crate::fast_hash::FxHashSet<
+            horizon_mod_runtime::attachments::Holder,
+        >,
+    ) -> Self {
+        Self {
+            shape: world.shape,
+            chunks: &world.chunks,
+            air: world.air,
+            registry,
+            tags,
+            block_registries: None,
+            random,
+            attachments,
+            attachment_syncs,
+            hooks: &DamageHooks::NONE,
+            attack: &NO_ATTACK,
+            client_side: false,
+            knock_entry: mod_api::KnockbackEntry::Full,
+        }
+    }
     /// The same level, for a shorter borrow.
     pub fn reborrow(&mut self) -> DamageLevel<'_> {
         DamageLevel {
@@ -261,7 +289,7 @@ impl<'a> DamageLevel<'a> {
         self.attack
     }
     /// The authoritative world's merged tag tables, if available.
-    pub fn tags(&self) -> Option<&crate::items::Items> {
+    pub fn tags(&self) -> Option<&'a crate::items::Items> {
         self.tags
     }
     /// The cached block parser context, if available.
@@ -414,6 +442,16 @@ impl TestLevel {
     }
     pub fn level(&mut self) -> DamageLevel<'_> {
         DamageLevel::of(&mut self.world, &self.registry, None, None, &self.hooks)
+    }
+    /// [`Self::level`] whose hits read the tags and registries of `items` (its enchantments).
+    pub fn level_with<'a>(&'a mut self, items: &'a crate::items::Items) -> DamageLevel<'a> {
+        DamageLevel::of(
+            &mut self.world,
+            &self.registry,
+            Some(items),
+            None,
+            &self.hooks,
+        )
     }
     /// The level's random, for a probe that draws from it outside a hit.
     pub fn random(&mut self) -> &mut horizon_core::random::LevelRandom {

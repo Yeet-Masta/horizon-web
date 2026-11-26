@@ -1,0 +1,430 @@
+import contextlib
+import io
+import json
+import tempfile
+import unittest
+from unittest import mock
+from pathlib import Path
+
+from tools import crowdin_import, lang_coverage
+
+ENGLISH = {
+    "horizon.a": "Apple",
+    "horizon.b": "Banana %s",
+    "horizon.c": "Cherry",
+}
+
+
+def write(folder: Path, name: str, entries: dict[str, str]) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def run(*arguments: str) -> tuple[int, str, str]:
+    """The tool's exit code and its two streams."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = crowdin_import.main([str(argument) for argument in arguments])
+        except SystemExit as exit_code:
+            code = exit_code.code
+    return code, out.getvalue(), err.getvalue()
+
+
+class TableTests(unittest.TestCase):
+    def test_every_lang_file_has_a_crowdin_language_and_the_other_way_round(self):
+        self.assertEqual(crowdin_import.check(), [],
+                         "a lang file without a Crowdin language, or a Crowdin language without "
+                         "a lang file, is an error: docs/translations.md")
+        codes = {path.stem for path in crowdin_import.LANG.glob("*.json")} - {"en_us"}
+        self.assertEqual(codes, set(crowdin_import.LOCALES) | set(crowdin_import.NOT_IN_CROWDIN))
+
+    def test_a_lang_file_no_one_has_placed_complains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            write(folder, "en_us.json", ENGLISH)
+            for code in crowdin_import.LOCALES | crowdin_import.NOT_IN_CROWDIN:
+                write(folder, f"{code}.json", {})
+            write(folder, "xx_yy.json", {"horizon.a": "Manzana"})
+            problems = crowdin_import.check(folder)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("xx_yy", problems[0])
+
+    def test_crowdin_writes_a_locale_with_underscores(self):
+        table = crowdin_import.index()
+        for locale, code in [("sv_SE", "sv_se"), ("pt_BR", "pt_br"), ("zh_CN", "zh_cn")]:
+            with self.subTest(locale=locale):
+                self.assertEqual(crowdin_import.language(locale, table), code)
+
+    def test_a_locale_with_a_region_the_project_does_not_name_resolves_by_its_subtag(self):
+        table = crowdin_import.index()
+        for locale, code in [("uk_UA", "uk_ua"), ("de_DE", "de_de"), ("ru_RU", "ru_ru")]:
+            with self.subTest(locale=locale):
+                self.assertEqual(crowdin_import.language(locale, table), code)
+
+    def test_a_language_without_its_region_resolves_by_its_subtag(self):
+        table = crowdin_import.index()
+        self.assertEqual(crowdin_import.language("fr", table), "fr_fr")
+        self.assertEqual(crowdin_import.language("de", table), "de_de")
+
+    def test_a_subtag_two_codes_claim_is_not_resolved_by_the_subtag(self):
+        table = crowdin_import.index()
+        self.assertNotIn("pt", table)
+        self.assertEqual(table["sr"], "sr_sp")  # Serbian (Cyrillic) names the locale `sr` outright
+        self.assertEqual(crowdin_import.language("sr-CS", table), "sr_cs")
+        self.assertEqual(crowdin_import.language("sr", table), "sr_sp")
+
+
+class MergeTests(unittest.TestCase):
+    def test_the_file_keeps_its_order_and_gains_new_keys_in_english_order(self):
+        existing = {"horizon.c": "Cereza", "horizon.a": "Manzana"}
+        incoming = {"horizon.a": "Manzana", "horizon.c": "Cereza", "horizon.b": "Plátano %s"}
+        merged, added, changed = crowdin_import.merge(existing, incoming, list(ENGLISH))
+        self.assertEqual(list(merged), ["horizon.c", "horizon.a", "horizon.b"])
+        self.assertEqual(added, ["horizon.b"])
+        self.assertEqual(changed, 0)
+
+    def test_a_key_english_dropped_keeps_its_text_and_a_changed_one_counts(self):
+        existing = {"horizon.a": "Manzana", "horizon.gone": "Vieja"}
+        merged, added, changed = crowdin_import.merge(
+            existing, {"horizon.a": "Pera"}, list(ENGLISH))
+        self.assertEqual(merged["horizon.gone"], "Vieja")
+        self.assertEqual(merged["horizon.a"], "Pera")
+        self.assertEqual(changed, 1)
+        self.assertEqual(added, [])
+
+
+class SyncTests(unittest.TestCase):
+    def fixture(self, tmp: str) -> tuple[Path, Path, Path, Path]:
+        root = Path(tmp)
+        lang, review = root / "lang", root / "review"
+        write(lang, "en_us.json", ENGLISH)
+        write(lang, "es_es.json", {"horizon.a": "Manzana", "horizon.b": "Plátano %s",
+                                   "horizon.c": "Cereza"})
+        return root, lang, review, root / "export"
+
+    def test_an_approval_is_recorded_with_the_text_the_file_has(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.a": "Manzana", "horizon.b": "Plátano %s",
+                                         "horizon.c": "Picota"})
+            approved = write(root / "approved", "es-ES.json", {"horizon.c": "Picota"})
+            code, out, _ = run("--translations", export, "--approved", approved.parent,
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(json.loads((lang / "es_es.json").read_text(encoding="utf-8"))["horizon.c"],
+                             "Picota")
+            self.assertEqual(json.loads((review / "es_es.json").read_text(encoding="utf-8")),
+                             {"horizon.c": "Picota"})
+            self.assertIn("1 recorded as reviewed", out)
+
+    def test_a_later_edit_without_a_proofread_takes_the_mark_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(review, "es_es.json", {"horizon.c": "Picota"})
+            write(export, "es-ES.json", {"horizon.c": "Guinda"})
+            (root / "approved").mkdir()
+            run("--translations", export, "--approved", root / "approved", "--lang", lang,
+                "--review", review)
+            rows = lang_coverage.game_rows(lang, set(), review)[1]
+            row = next(row for row in rows if row["code"] == "es_es")
+            self.assertIn("horizon.c", row["unreviewed"])
+
+    def test_a_translation_that_changes_a_placeholder_is_dropped_and_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.b": "Plátano %d"})
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 0)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries["horizon.b"], "Plátano %s")
+            self.assertIn("horizon.b", err)
+
+    def test_a_translation_the_game_cannot_format_or_with_a_control_character_is_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.a": "Manzana\x1b[0m", "horizon.b": "%s %q",
+                                         "horizon.c": "Cereza \u202eazerec"})
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 0)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries, {"horizon.a": "Manzana", "horizon.b": "Plátano %s",
+                                       "horizon.c": "Cereza"})
+            self.assertIn("3 translations", err)
+
+    def test_a_translation_with_codes_breaks_or_length_english_lacks_is_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.a": "§kManzana", "horizon.b": "Plátano\n%s",
+                                         "horizon.c": "Cereza " * 20})
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 0)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries, {"horizon.a": "Manzana", "horizon.b": "Plátano %s",
+                                       "horizon.c": "Cereza"})
+            self.assertIn("3 translations", err)
+
+    def test_a_broken_export_fails_the_run_naming_its_language_and_writes_nothing(self):
+        bounds = {"MAX_EXPORT_BYTES": 64, "MAX_TEXT_CHARS": 8}
+        good = json.dumps({"horizon.a": "Manzana"}).encode()
+        cases = {  # (translations export, approved export, what the message says)
+            "not a map": (b'["Manzana"]', None, "export/es-ES.json): not a flat map"),
+            "a repeated key": (b'{"horizon.a": "Manzana", "horizon.a": "Pera"}', None, "repeats"),
+            "a broken approved export": (good, b'{"horizon.a": ', "approved/es-ES.json): not JSON"),
+            "a lone surrogate": (b'{"horizon.a": "\\ud800"}', None, "lone surrogate"),
+            # Not UTF-8 either: the size is refused before the file is read.
+            "larger than the bound": (b"\xff" * 65, None, "more than the 64"),
+            "a string longer than the bound": (json.dumps({"horizon.a": "M" * 9}).encode(), None,
+                                               "more than the 8"),
+        }
+        for name, (body, approved, message) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                write(export, "de-DE.json", {"horizon.a": "Apfel"})  # read first, never written
+                (export / "es-ES.json").write_bytes(body)
+                (root / "approved").mkdir()
+                if approved is not None:
+                    (root / "approved/es-ES.json").write_bytes(approved)
+                before = {path.name: path.read_bytes() for path in lang.iterdir()}
+                with mock.patch.multiple(crowdin_import, **bounds):
+                    code, _, err = run("--translations", export, "--approved", root / "approved",
+                                       "--lang", lang, "--review", review)
+                self.assertEqual(code, 1)
+                self.assertIn("es_es (", err)
+                self.assertIn(message, err)
+                self.assertEqual({path.name: path.read_bytes() for path in lang.iterdir()}, before)
+                self.assertFalse(review.exists())
+
+    def test_a_broken_proofread_export_without_translations_fails_before_anything_is_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "de-DE.json", {"horizon.a": "Apfel"})
+            (root / "approved").mkdir()
+            (root / "approved/es-ES.json").write_bytes(b'{"horizon.a": ')
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 1)
+            self.assertIn("es_es (approved/es-ES.json): not JSON", err)
+            self.assertFalse((lang / "de_de.json").exists())
+            self.assertFalse(review.exists())
+
+    def test_an_export_nested_too_deep_for_the_tool_fails_naming_its_language(self):
+        # Valid JSON past the tool's own limit, and the unterminated brackets `json` used to run out of stack on:
+        # both are the tool's refusal, not the interpreter's.
+        depth = crowdin_import.MAX_NESTING + 1
+        for body in (b"[" * depth + b"]" * depth, b"[" * 100_000):
+            with self.subTest(bytes=len(body)), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                export.mkdir()
+                (export / "es-ES.json").write_bytes(body)
+                code, _, err = run("--translations", export, "--approved", root / "approved",
+                                   "--lang", lang, "--review", review)
+                self.assertEqual(code, 1)
+                self.assertIn("es_es (export/es-ES.json): not JSON: nested too deep", err)
+
+    def test_a_bracket_in_a_translation_is_not_nesting(self):
+        # At a limit of 1 the flat map is still taken, while a scanner that counted the brackets inside the
+        # translation would measure 2 and refuse it.
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.a": "Manzana [1]", "horizon.b": "Plátano %s",
+                                         "horizon.c": "Cereza"})
+            with mock.patch.object(crowdin_import, "MAX_NESTING", 1):
+                code, _, err = run("--translations", export, "--approved", root / "approved",
+                                   "--lang", lang, "--review", review)
+            self.assertEqual(code, 0, err)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries["horizon.a"], "Manzana [1]")
+
+    def test_an_unknown_or_doubled_language_in_either_folder_fails_before_anything_is_written(self):
+        cases = {  # file name, folder, what the message says
+            "unknown, proofread only": ("klingon.json", "approved", "approved/klingon.json"),
+            "doubled": ("es.json", "export", "es-ES.json and es.json are both es_es"),
+            "doubled, proofread only": ("es.json", "approved", "es-ES.json and es.json are both"),
+        }
+        for name, (stray, folder, message) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                write(export, "de-DE.json", {"horizon.a": "Apfel"})  # mapped, never written
+                write(export, "es-ES.json", {"horizon.c": "Picota"})
+                write(root / "approved", "es-ES.json", {"horizon.c": "Picota"})
+                write(root / folder, stray, {"horizon.c": "Guinda"})
+                before = {path.name: path.read_bytes() for path in lang.iterdir()}
+                code, _, err = run("--translations", export, "--approved", root / "approved",
+                                   "--lang", lang, "--review", review)
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertEqual({path.name: path.read_bytes() for path in lang.iterdir()}, before)
+                self.assertFalse(review.exists())
+
+    def test_an_export_with_nothing_in_it_is_an_empty_language(self):
+        for body in (b"", b"[]\n", b"{}"):
+            with self.subTest(body), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                export.mkdir()
+                (export / "es-ES.json").write_bytes(body)
+                (root / "approved").mkdir()
+                (root / "approved/es-ES.json").write_bytes(body)
+                before = (lang / "es_es.json").read_text(encoding="utf-8")
+                code, out, err = run("--translations", export, "--approved", root / "approved",
+                                     "--lang", lang, "--review", review)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(json.loads((lang / "es_es.json").read_text(encoding="utf-8")),
+                                 json.loads(before))
+
+    def test_a_language_the_table_does_not_name_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.a": "Manzana"})
+            write(export, "klingon.json", {"horizon.a": "…"})
+            before = (lang / "es_es.json").read_text(encoding="utf-8")
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 1)
+            self.assertIn("klingon", err)
+            self.assertEqual((lang / "es_es.json").read_text(encoding="utf-8"), before)
+
+    def test_a_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(export, "es-ES.json", {"horizon.c": "Picota"})
+            before = (lang / "es_es.json").read_text(encoding="utf-8")
+            code, out, _ = run("--dry-run", "--translations", export, "--approved",
+                               root / "approved", "--lang", lang, "--review", review)
+            self.assertEqual(code, 0, out)
+            self.assertEqual((lang / "es_es.json").read_text(encoding="utf-8"), before)
+            self.assertFalse((review / "es_es.json").exists())
+
+    def test_the_written_file_is_one_entry_per_line_with_the_newline_it_had(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            (lang / "es_es.json").write_bytes(
+                '{\r\n  "horizon.a": "Manzana"\r\n}\r\n'.encode("utf-8"))
+            write(export, "es-ES.json", {"horizon.a": "Manzana"})
+            run("--translations", export, "--approved", root / "approved", "--lang", lang,
+                "--review", review)
+            raw = (lang / "es_es.json").read_bytes()
+            self.assertIn(b"\r\n", raw)
+            self.assertEqual(lang_coverage.LangFile(lang / "es_es.json").problem, "")
+            entries = json.loads(raw.decode("utf-8"))
+            self.assertEqual(list(entries), ["horizon.a"])
+
+    def test_a_string_crowdin_left_untranslated_does_not_replace_a_translation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            # Crowdin's default export writes the English sentence into an untranslated string.
+            write(export, "es-ES.json", {"horizon.a": "Manzana", "horizon.b": "Banana %s"})
+            code, _, err = run("--translations", export, "--approved", root / "approved",
+                               "--lang", lang, "--review", review)
+            self.assertEqual(code, 0, err)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries["horizon.b"], "Plátano %s")
+            self.assertIn("horizon.b", err)
+
+    def test_english_is_kept_where_the_language_really_writes_the_english_word(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            (lang / "es_es.json").write_bytes(
+                json.dumps({"horizon.a": "Apple"}, ensure_ascii=False, indent=2).encode("utf-8"))
+            write(export, "es-ES.json", {"horizon.a": "Apple"})
+            run("--translations", export, "--approved", root / "approved", "--lang", lang,
+                "--review", review)
+            entries = json.loads((lang / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(entries["horizon.a"], "Apple")
+
+    def test_a_withdrawn_approval_takes_its_mark_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            approved = root / "approved"
+            write(export, "es-ES.json", {"horizon.a": "Manzana", "horizon.c": "Picota"})
+            write(approved, "es-ES.json", {"horizon.a": "Manzana", "horizon.c": "Picota"})
+            run("--translations", export, "--approved", approved, "--lang", lang, "--review", review)
+            record = json.loads((review / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(record, {"horizon.a": "Manzana", "horizon.c": "Picota"})
+
+            # one proofread is withdrawn in Crowdin, the text stays what it was
+            write(approved, "es-ES.json", {"horizon.a": "Manzana"})
+            run("--translations", export, "--approved", approved, "--lang", lang, "--review", review)
+            record = json.loads((review / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(record, {"horizon.a": "Manzana"})
+            rows = lang_coverage.game_rows(lang, set(), review)[1]
+            row = next(row for row in rows if row["code"] == "es_es")
+            self.assertIn("horizon.c", row["unreviewed"])
+
+    def test_a_last_approval_withdrawn_takes_its_mark_back(self):
+        for body in (None, b"", b"{}"):
+            with self.subTest(body), tempfile.TemporaryDirectory() as tmp:
+                root, lang, review, export = self.fixture(tmp)
+                approved = root / "approved"
+                write(export, "es-ES.json", {"horizon.c": "Picota"})
+                write(approved, "es-ES.json", {"horizon.c": "Picota"})
+                run("--translations", export, "--approved", approved, "--lang", lang,
+                    "--review", review)
+                if body is None:
+                    (approved / "es-ES.json").unlink()
+                else:
+                    (approved / "es-ES.json").write_bytes(body)
+                code, _, err = run("--translations", export, "--approved", approved, "--lang", lang,
+                                   "--review", review)
+                self.assertEqual(code, 0, err)
+                self.assertFalse((review / "es_es.json").exists())
+
+    def test_more_withdrawals_than_one_run_may_fail_unless_allowed(self):
+        english = {f"horizon.k{n}": f"Key {n}" for n in range(40)}
+        spanish = {name: f"Clave {name[-2:]}" for name in english}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lang, review, export, approved = (root / "lang", root / "review", root / "export",
+                                              root / "approved")
+            write(lang, "en_us.json", english)
+            write(lang, "es_es.json", spanish)
+            write(export, "es-ES.json", spanish)
+            write(approved, "es-ES.json", spanish)
+            arguments = ("--translations", export, "--approved", approved, "--lang", lang,
+                         "--review", review)
+            self.assertEqual(run(*arguments)[0], 0)
+            # 40 recorded marks: max(3, 10% of 40) = 4 may go in one run. A partial export keeps 35.
+            write(approved, "es-ES.json", dict(list(spanish.items())[:35]))
+            before = {path: path.read_bytes() for path in [*lang.iterdir(), *review.iterdir()]}
+            code, _, err = run(*arguments)
+            self.assertEqual(code, 1)
+            self.assertIn("es_es (approved): would take back 5 of its 40 proofread marks, more than "
+                          "the 4", err)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            # Four is within the cap; five with the flag a run by hand passes.
+            write(approved, "es-ES.json", dict(list(spanish.items())[:36]))
+            self.assertEqual(run(*arguments)[0], 0)
+            write(approved, "es-ES.json", dict(list(spanish.items())[:30]))
+            self.assertEqual(run(*arguments, "--allow-withdrawals")[0], 0)
+            self.assertEqual(len(json.loads((review / "es_es.json").read_text(encoding="utf-8"))), 30)
+
+    def test_a_persons_own_entry_survives_the_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(review, "es_es.json", {"horizon.a": "Manzana"})  # marked by hand, from a report
+            write(export, "es-ES.json", {"horizon.c": "Picota"})
+            run("--translations", export, "--approved", root / "approved", "--lang", lang,
+                "--review", review)
+            record = json.loads((review / "es_es.json").read_text(encoding="utf-8"))
+            self.assertEqual(record, {"horizon.a": "Manzana"})
+
+    def test_staging_writes_the_names_crowdin_reads_and_leaves_the_hand_kept_languages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root, lang, review, export = self.fixture(tmp)
+            write(lang, "lmo.json", {"horizon.a": "Poma"})
+            folder = root / "stage"
+            rows, hand_kept = crowdin_import.stage(lang, folder)
+            self.assertEqual({row["code"] for row in rows}, {"es_es"})
+            self.assertEqual(hand_kept, ["lmo"])
+            self.assertTrue((folder / "es_ES.json").exists())
+            self.assertEqual(list(json.loads((folder / "es_ES.json").read_text(encoding="utf-8"))),
+                             list(ENGLISH))
+
+
+if __name__ == "__main__":
+    unittest.main()

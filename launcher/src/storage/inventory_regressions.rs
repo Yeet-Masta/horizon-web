@@ -178,7 +178,7 @@ fn capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_res
         let alias = root.path().join("alias");
         std::os::unix::fs::symlink(&real, &alias).unwrap();
         let mut actor = Command::new(std::env::current_exe().unwrap());
-        actor.args(["--exact", "storage::inventory::regressions::capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_residual"])
+        actor.args(["--include-ignored", "--exact", "storage::inventory::regressions::capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_residual"])
             .env("CLASSIFICATION_ROOT", &alias).env("HORIZON_LAUNCHER_HOME", alias.join("data"))
             .env("HORIZON_HOME", alias.join("data/cache"))
             .env("XDG_DATA_HOME", alias.join("xdg-data")).env("XDG_CONFIG_HOME", alias.join("xdg-config"))
@@ -262,6 +262,8 @@ fn capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_res
     fs::remove_dir_all(&old).unwrap();
     let command = || {
         let mut game = Command::new(&image);
+        // reexec_include_ignored: skip, the child reads these as launch arguments (`--key value` pairs), where a
+        // lone `--include-ignored` would leave the test name without a value
         game.args(["--exact", "storage::inventory::regressions::capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_residual"])
             .env("CLASSIFICATION_GAME", "1")
             .env("RUST_TEST_NOCAPTURE", "1")
@@ -298,4 +300,107 @@ fn capable_units_delete_only_after_the_last_game_lease_and_mixed_builds_stay_res
             .any(|entry| entry.path == install),
         "incomplete installs must stay visible for residual reporting and retry"
     );
+}
+
+#[test]
+fn storage_protects_a_held_selection_and_a_native_build_pinned_after_inventory() {
+    use std::process::Command;
+    if std::env::var_os("HORIZON_TEST_STORAGE_PIN").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new(std::env::current_exe().unwrap())
+            .args(["--include-ignored", "--exact", "storage::inventory::regressions::storage_protects_a_held_selection_and_a_native_build_pinned_after_inventory"])
+            .env("HORIZON_TEST_STORAGE_PIN", "1")
+            .env("HORIZON_LAUNCHER_HOME", root.path().join("launcher"))
+            .env("HORIZON_HOME", root.path().join("game"))
+            .env("HORIZON_LAUNCHER_LOCATION_FILE", root.path().join("location.json"))
+            .status().unwrap().success());
+        return;
+    }
+    let native = "native-storage-race";
+    let latest = "nightly-2026-11-22-aaaaaaa";
+    for tag in [native, latest] {
+        let dir = backend::version_dir(tag);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(backend::COMPLETE), "").unwrap();
+    }
+    let native_dir = backend::version_dir(native);
+    fs::write(
+        native_dir.join(backend::CLIENT),
+        horizon_platform::mod_package::holder::CAPABILITY,
+    )
+    .unwrap();
+    crate::run_leases::publish(&native_dir).unwrap();
+    let storage = Storage::open().unwrap();
+    let listed = || {
+        storage
+            .entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == native_dir.canonicalize().unwrap())
+            .unwrap()
+    };
+    let mut settings = backend::Settings {
+        selected: Some(native.into()),
+        ..backend::Settings::default()
+    };
+    settings.save().unwrap();
+    assert!(matches!(listed().clear(), Err(Error::InstanceVersion(_))));
+    assert!(backend::remove_version(native)
+        .unwrap_err()
+        .contains("Horizon"));
+    assert!(native_dir.join(backend::COMPLETE).is_file());
+
+    settings.instance_versions_migrated = true;
+    settings.save().unwrap();
+    let entry = listed();
+    assert_eq!(entry.category, Category::SpareGameBuilds);
+
+    instances::use_version_for(instances::DEFAULT, native).unwrap();
+    let report = storage
+        .apply_retaining(vec![entry], Some(Category::SpareGameBuilds), false, true)
+        .unwrap();
+    let row = report
+        .rows
+        .into_iter()
+        .find(|row| row.category == Category::SpareGameBuilds)
+        .unwrap();
+    assert!(row.kept.iter().any(|kept| kept.reason.contains("Horizon")));
+    assert!(native_dir.join(backend::COMPLETE).is_file());
+
+    instances::use_version_for(instances::DEFAULT, latest).unwrap();
+    listed().clear().unwrap();
+    assert!(!native_dir.exists());
+}
+
+#[test]
+fn a_survey_is_summed_again_without_walking_the_folder_again() {
+    let home = Home::new();
+    home.seed("a/one");
+    home.seed("a/deep/two");
+    home.seed("b/three");
+    let root = Root::open(&home.0).unwrap();
+    let entries = vec![
+        Entry::fixed(&root, Path::new("a"), Category::OtherCaches).unwrap(),
+        Entry::fixed(&root, Path::new("b"), Category::OtherCaches).unwrap(),
+    ];
+    crate::storage::SURVEYS.with(|s| s.borrow_mut().clear());
+    let surveyed: Vec<_> = entries
+        .iter()
+        .map(Entry::survey)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // The row sum, the per-unit sum and the per-unit "alone" sum, as the cleanup pass takes them.
+    let row = allocated_of(&entries, &surveyed, Category::OtherCaches);
+    let mut seen = HashSet::new();
+    let units: u64 = surveyed.iter().map(|items| sum_new(items, &mut seen)).sum();
+    let alone: u64 = surveyed
+        .iter()
+        .map(|items| sum_new(items, &mut HashSet::new()))
+        .sum();
+    let walked = crate::storage::SURVEYS.with(|s| s.borrow().clone());
+    assert_eq!(walked.len(), entries.len(), "{walked:?}");
+    assert_eq!(row, units);
+    assert_eq!(row, alone);
+    assert_eq!(row, allocated(&entries, Category::OtherCaches).unwrap());
+    assert!(row > 0);
 }

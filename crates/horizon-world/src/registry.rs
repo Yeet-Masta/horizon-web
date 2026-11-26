@@ -27,6 +27,9 @@ pub struct BlockRegistry {
     /// Game-owned, immutable mod worker metadata for this numeric registry snapshot.
     /// Filled at resource resolution before any worker can use it; never shared across registries.
     pub mod_worker_resource: std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+    /// Game-owned: per block state, the index of the installed code mod whose content it is
+    /// (`u16::MAX`: none). Set once from this registry's own mod list, before its world ticks.
+    pub code_block_owners: std::sync::OnceLock<Box<[u16]>>,
     /// Optional higher-layer template data transform, frozen before placement workers start.
     pub structure_block_entity_transform: std::sync::OnceLock<
         std::sync::Arc<
@@ -82,9 +85,19 @@ fn cacheable_saved_state(tag: &Tag) -> bool {
 /// The hash [`BlockRegistry`] indexes states by (fixed keys: the same in
 /// every process).
 fn state_key(state: &BlockState) -> u64 {
+    named_state_key(
+        &state.name,
+        state
+            .properties
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )
+}
+
+fn named_state_key<'a>(name: &str, properties: impl Iterator<Item = (&'a str, &'a str)>) -> u64 {
     let mut hasher = DefaultHasher::new();
-    state.name.hash(&mut hasher);
-    for (key, value) in &state.properties {
+    name.hash(&mut hasher);
+    for (key, value) in properties {
         key.hash(&mut hasher);
         value.hash(&mut hasher);
     }
@@ -207,6 +220,7 @@ impl BlockRegistry {
         Ok(Self {
             data: std::sync::Arc::new(result),
             mod_worker_resource: std::sync::OnceLock::new(),
+            code_block_owners: std::sync::OnceLock::new(),
             structure_block_entity_transform: std::sync::OnceLock::new(),
             saved_states: RwLock::new(FxHashMap::default()),
         })
@@ -222,6 +236,14 @@ impl BlockRegistry {
     }
     pub fn id(&self, state: &BlockState) -> Option<BlockStateId> {
         self.data.id(state)
+    }
+    /// Look up an exact state by name and all properties in name order, without copying them.
+    pub fn id_by_properties(
+        &self,
+        name: &str,
+        properties: &[(&str, &str)],
+    ) -> Option<BlockStateId> {
+        self.data.id_by_properties(name, properties)
     }
 
     /// The id a saved palette entry resolves to, with `decode_column`'s rules:

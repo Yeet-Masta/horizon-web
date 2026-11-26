@@ -4,6 +4,8 @@ use crate::{BlockState, Identifier, item::containers::ModBlockEntityFields};
 
 /// A mod block entity's type and public fields supplied to a screen's drawing Part.
 /// This is not a live entity: internal cache and revision identities never cross the API.
+/// With a scene clock and a native scene ticker registered for this type, these values
+/// seed the ticking copy. Changes to the inputs or a clock rewind reset that copy.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
@@ -135,17 +137,13 @@ impl SceneParticle {
     }
 }
 
-/// A scene's own clock. The scene keeps its live particles from one draw to the next
-/// under `id` and the calling mod (one id per scene a mod's screens show; two mods'
-/// id 1 are two scenes). When `tick` is ahead of the tick the scene last ran, it runs
-/// the ticks in between: the blocks' animate ticks when `animate_blocks` is set
-/// ([`SCENE_ANIMATE_PICKS`] picks a tick among the scene's own blocks), then the
-/// particles'. A jump of more than [`SCENE_CATCH_UP`] ticks (a page resumed) starts the
-/// scene over from no particles and runs only the last [`SCENE_CATCH_UP`] ticks. The
-/// same tick again is a paused scene: nothing is added and nothing moves. A tick behind
-/// the last one, or a scene whose blocks or entities changed, starts the scene over with
-/// no particles. Each tick's randomness is seeded from `id` and the tick, so the same
-/// ticks give the same picture.
+/// A scene's own clock, kept under `id` and the calling mod (give each scene its own id).
+/// When `tick` advances, the scene runs the ticks in between: the blocks' animate ticks
+/// when `animate_blocks` is set, any registered native scene-only block entity tickers,
+/// then the particles' ticks. A jump of more than [`SCENE_CATCH_UP`] ticks resets the
+/// ticking copies, clears particles and runs only the last [`SCENE_CATCH_UP`] ticks. The
+/// same tick again does not run anything. A tick behind the last one, or changed scene
+/// inputs, starts the scene over. Each tick's randomness is seeded from `id` and `tick`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
@@ -191,14 +189,77 @@ pub const SCENE_MAX_ENTITIES: usize = 16;
 /// together: past it no new particle is added, and more than this many to add at once
 /// is [`SceneError::TooManyParticles`].
 pub const SCENE_MAX_PARTICLES: usize = 512;
-/// The most scenes with entities or particles that animate in one frame
+/// The most living scenes that animate in one frame
 /// ([`SceneError::TooManyScenes`]).
 pub const SCENE_MAX_ANIMATING: usize = 4;
+/// The most overlays one scene draw takes ([`SceneOverlayError::TooManyOverlays`]).
+pub const SCENE_MAX_OVERLAYS: usize = 4096;
+
+/// How an overlay is occluded by the scene. Neither mode writes depth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum SceneDepth {
+    /// Visible where it is at or in front of the scene's geometry.
+    Tested,
+    /// Visible even behind the scene's geometry.
+    ThroughWalls,
+}
+
+/// A solid annotation in the scene's block coordinates, with a packed ARGB color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum SceneOverlay {
+    /// A line whose thickness is measured in GUI pixels, independent of the view scale.
+    Line {
+        /// Starting point in scene coordinates.
+        from: [f32; 3],
+        /// Ending point in scene coordinates.
+        to: [f32; 3],
+        /// Finite, positive width in GUI pixels.
+        width: f32,
+        /// Packed ARGB color, including alpha.
+        argb: u32,
+        /// Occlusion by the scene.
+        depth: SceneDepth,
+    },
+    /// A filled, double-sided quad.
+    Quad {
+        /// Four corners in order around the quad, in scene coordinates.
+        corners: [[f32; 3]; 4],
+        /// Packed ARGB color, including alpha.
+        argb: u32,
+        /// Occlusion by the scene.
+        depth: SceneDepth,
+    },
+}
+
+impl SceneOverlay {
+    /// Describes a solid line. A line seen end-on draws nothing.
+    pub fn line(from: [f32; 3], to: [f32; 3], width: f32, argb: u32, depth: SceneDepth) -> Self {
+        Self::Line {
+            from,
+            to,
+            width,
+            argb,
+            depth,
+        }
+    }
+
+    /// Describes a solid quad. Give the corners in order around its perimeter.
+    pub fn quad(corners: [[f32; 3]; 4], argb: u32, depth: SceneDepth) -> Self {
+        Self::Quad {
+            corners,
+            argb,
+            depth,
+        }
+    }
+}
 
 /// A scene `DrawContext::draw_scene` draws: its blocks, and optionally the entities
-/// standing in it, the particles the mod adds and the clock that ticks them. A scene of
-/// blocks alone (no entities, no particles, and no clock or one with `animate_blocks`
-/// off) keeps no state and reads no clock. Keep one and change its clock each frame.
+/// standing in it, the particles the mod adds and the clock that ticks them and any
+/// registered native scene block entity copies. Blocks without a clock do not tick;
+/// disabling [`SceneClock::animate_blocks`] only stops the blocks' animate ticks.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 #[derive(horizon_mod_api_macros::Wire)]
@@ -237,6 +298,62 @@ impl Scene {
     pub fn with_particles(mut self, particles: Vec<SceneParticle>) -> Self {
         self.particles = particles;
         self
+    }
+}
+
+/// A rigid pose for a consecutive group in [`Scene::blocks`], without moving
+/// the scene camera or rounding its blocks to different cells.
+#[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct SceneSection {
+    /// Index of the first block in the section.
+    pub first: u32,
+    /// Number of blocks in the section, at least one.
+    pub count: u32,
+    /// Translation in scene axes, in blocks, applied after rotation.
+    pub translation: [f32; 3],
+    /// Angles in degrees, applied about the scene's X, Y, then Z axes.
+    pub rotation: [f32; 3],
+    /// Rotation center in the original scene coordinates, in blocks.
+    pub pivot: [f32; 3],
+}
+
+impl SceneSection {
+    /// Pose `count` blocks starting at `first` around `pivot`, then translate them.
+    pub fn new(
+        first: u32,
+        count: u32,
+        translation: [f32; 3],
+        rotation: [f32; 3],
+        pivot: [f32; 3],
+    ) -> Self {
+        Self {
+            first,
+            count,
+            translation,
+            rotation,
+            pivot,
+        }
+    }
+}
+
+/// Why a draw with posed sections was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum SceneSectionError {
+    /// The same refusal as an ordinary `DrawContext::draw_scene`.
+    Scene(SceneError),
+    /// The section had an empty, overlapping, unsorted or out-of-range block
+    /// span, or a pose that could not be represented.
+    BadSection {
+        /// Index in the caller's section list.
+        index: u32,
+    },
+}
+
+impl From<SceneError> for SceneSectionError {
+    fn from(error: SceneError) -> Self {
+        Self::Scene(error)
     }
 }
 
@@ -297,4 +414,88 @@ pub enum SceneError {
     BadClock,
     /// Entities or particles without a clock.
     NoClock,
+}
+
+/// Why `draw_scene_with_overlays` refused a scene or its overlays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum SceneOverlayError {
+    /// The base scene was refused. If the animation budget was exceeded, the scene's
+    /// blocks, last state and overlays were still drawn.
+    Scene(SceneError),
+    /// More than [`SCENE_MAX_OVERLAYS`] overlays.
+    TooManyOverlays,
+    /// Nonfinite overlay coordinates, nonfinite projected coordinates, or a nonfinite
+    /// or nonpositive line width.
+    BadOverlay {
+        /// The overlay's index in `overlays`.
+        index: u32,
+    },
+}
+
+impl From<SceneError> for SceneOverlayError {
+    fn from(error: SceneError) -> Self {
+        Self::Scene(error)
+    }
+}
+
+/// The most textured quads one scene draw takes.
+pub const SCENE_MAX_TEXTURED_QUADS: usize = 4096;
+
+/// A two-sided textured face in the scene, drawn at its own depth and clipped with
+/// the blocks. Draw with [`DrawContext::draw_scene_with_quads`](crate::DrawContext::draw_scene_with_quads).
+#[derive(Clone, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct SceneTexturedQuad {
+    /// An existing sprite in the GUI/scene atlas, e.g. `minecraft:block/water_still`
+    /// (also `block/water_still`) or `mymod:gui/panel`.
+    pub sprite: String,
+    /// Scene-local corners in order around the face, in blocks.
+    pub corners: [[f32; 3]; 4],
+    /// One `[u, v]` per corner, each component in `0..=1` relative to the sprite;
+    /// `[0, 0]` is its top left.
+    pub uv: [[f32; 2]; 4],
+    /// Sprite multiplier, including alpha, in `0xAARRGGBB` (opaque white leaves it unchanged).
+    pub tint: u32,
+}
+
+impl SceneTexturedQuad {
+    /// A face with its four corners and matching sprite coordinates, and an ARGB tint.
+    pub fn new(
+        sprite: impl Into<String>,
+        corners: [[f32; 3]; 4],
+        uv: [[f32; 2]; 4],
+        tint: u32,
+    ) -> Self {
+        Self {
+            sprite: sprite.into(),
+            corners,
+            uv,
+            tint,
+        }
+    }
+}
+
+/// Why [`DrawContext::draw_scene_with_quads`](crate::DrawContext::draw_scene_with_quads)
+/// refused a scene. Invalid quads leave the drawing and scene's clock unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub enum SceneWithQuadsError {
+    /// The underlying scene draw's result. [`SceneError::TooManyScenes`] still draws
+    /// the blocks, textured quads and last state without advancing the clock.
+    Scene(SceneError),
+    /// More than [`SCENE_MAX_TEXTURED_QUADS`] textured quads.
+    TooManyTexturedQuads,
+    /// One of the quad's coordinates isn't finite or is more than 30 million blocks
+    /// from the origin on an axis, or a UV component is not in `0..=1`.
+    BadTexturedQuad {
+        /// The quad's index in `quads`.
+        index: u32,
+    },
+    /// The quad's sprite isn't in the GUI/scene atlas.
+    UnknownSprite {
+        /// The quad's index in `quads`.
+        index: u32,
+    },
 }

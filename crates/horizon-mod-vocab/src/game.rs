@@ -93,8 +93,25 @@ pub struct ColumnBlocks {
     pub blocks: Vec<u16>,
     pub tints: Vec<u32>,
 }
+/// The surface of a loaded client column as selected by a [`Heightmap`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct SurfaceColumn {
+    /// The first free Y according to the heightmap, as in `client_surface_heights`.
+    pub height: i32,
+    /// The complete state at `height - 1`, or air if that Y is outside the build height.
+    pub block: BlockState,
+    /// The stored, unblended biome at `height - 1`, clamped to the build height.
+    pub biome: String,
+    /// Stored sky light (0–15) at the same position as `biome`.
+    pub sky_light: u8,
+    /// Stored block light (0–15) at the same position as `biome`.
+    pub block_light: u8,
+}
 /// What `terrain_surface` found at one column of terrain nobody has loaded: the level's generator before its
-/// features (trees, ores, lava pools, cacti) are placed.
+/// features (trees, ores, lava pools, cacti) are placed. `client_far_surface` gives the same fields for a
+/// client's far terrain, the surface its finest far tile holds there.
 /// Mods receive this snapshot from the game; they do not construct it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -111,6 +128,36 @@ pub struct TerrainColumn {
     /// The biome, such as `minecraft:plains`.
     pub biome: String,
 }
+
+/// The topmost material footprint in one retained LOD cell. It can be a
+/// solid, a fluid, or a reduced footprint covering many world columns.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct LodColumnFootprint {
+    /// The lowest Y in this material run, inclusive.
+    pub min_y: i16,
+    /// The top face of the run (its upper Y, exclusive).
+    pub top_y: i16,
+    /// The retained material as a state ID in the current game's registry.
+    pub state: BlockStateId,
+    /// The biome used to tint this run.
+    pub biome: String,
+    /// Retained sky light (0–15).
+    pub sky_light: u8,
+    /// Retained block light, including material emission (0–15).
+    pub block_light: u8,
+}
+
+/// An exact retained far-terrain tile read by `ClientHost::client_lod_columns`.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct LodTileFootprint {
+    /// The width of a cell in world blocks (`1 << level`).
+    pub cell_width: i32,
+    /// The tile's 256 cells in order `z * 16 + x`; `None` is an empty cell.
+    pub columns: Vec<Option<LodColumnFootprint>>,
+}
+
 /// Why `upgrade_block_entity_nbt` or `upgrade_entity_nbt` gave no upgraded value. Depth is counted as the data is
 /// encoded (the root compound at 0): the compound the NBT writer puts around an element of a mixed list is a level
 /// of its own. There is no size refusal.
@@ -130,6 +177,38 @@ pub enum NbtUpgradeError {
     /// included, could take it back. Nothing is returned.
     UpgradedTooDeep,
 }
+/// The saved data kinds `data_fix` upgrades: the same three the upgrade methods take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum DataKind {
+    /// A block state, `{Name, Properties}`, as `upgrade_block_state_nbt` takes it.
+    BlockState,
+    /// A block entity, as `upgrade_block_entity_nbt` takes it.
+    BlockEntity,
+    /// An entity, its passengers included, as `upgrade_entity_nbt` takes it.
+    Entity,
+}
+/// Why `data_fix` gave no upgraded value: the target version, or the refusal the upgrade gave.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum DataFixError {
+    /// The target version is not the game's DataVersion. This build upgrades only up to it. Refused
+    /// before any fix runs.
+    TargetNotCurrent(i32),
+    /// The upgrade itself was refused, by name.
+    Upgrade(NbtUpgradeError),
+}
+impl std::fmt::Display for DataFixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TargetNotCurrent(v) => write!(f, "target data version {v} is not the game's"),
+            Self::Upgrade(e) => e.fmt(f),
+        }
+    }
+}
+impl std::error::Error for DataFixError {}
 impl std::fmt::Display for NbtUpgradeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

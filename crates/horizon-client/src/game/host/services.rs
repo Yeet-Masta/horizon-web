@@ -31,6 +31,27 @@ impl ClientSession for Game<'_> {
         );
         self.native_client_tab_list()
     }
+    fn client_waypoints(&self) -> Option<ClientWaypoints> {
+        mod_api::__private::check_access(
+            "client_waypoints",
+            mod_api::__private::LoadAccess::ClientSetup,
+        );
+        self.native_client_waypoints()
+    }
+    fn client_titles(&self) -> Option<ClientTitles> {
+        mod_api::__private::check_access(
+            "client_titles",
+            mod_api::__private::LoadAccess::ClientSetup,
+        );
+        self.native_client_titles()
+    }
+    fn client_boss_bars(&self) -> Option<Vec<ClientBossBarEntry>> {
+        mod_api::__private::check_access(
+            "client_boss_bars",
+            mod_api::__private::LoadAccess::ClientSetup,
+        );
+        self.native_client_boss_bars()
+    }
     fn client_frame_stats(&self) -> Option<ClientFrameStats> {
         mod_api::__private::check_access(
             "client_frame_stats",
@@ -63,6 +84,17 @@ impl Commands for Game<'_> {
         );
         self.native_run_command_with_output(line)
     }
+    fn command_info(&mut self, label: &str) -> Option<mod_api::CommandInfo> {
+        mod_api::__private::check_access("command_info", mod_api::__private::LoadAccess::WorldOnly);
+        self.native_command_info(label)
+    }
+    fn command_names(&mut self) -> Vec<String> {
+        mod_api::__private::check_access(
+            "command_names",
+            mod_api::__private::LoadAccess::WorldOnly,
+        );
+        self.native_command_names()
+    }
 }
 impl Levels for Game<'_> {
     fn list_levels(&self) -> Vec<LevelRef> {
@@ -74,6 +106,15 @@ impl Messages for Game<'_> {
     fn text_allowed(&self, text: &str) -> Option<bool> {
         mod_api::__private::check_access("text_allowed", mod_api::__private::LoadAccess::WorldOnly);
         self.native_text_allowed(text)
+    }
+    fn console_log(
+        &self,
+        mod_id: &str,
+        level: ConsoleLevel,
+        line: &str,
+    ) -> Result<(), ConsoleLogRefusal> {
+        mod_api::__private::check_access("console_log", mod_api::__private::LoadAccess::WorldOnly);
+        self.native_console_log(mod_id, level, line)
     }
     fn broadcast(&self, line: Text) -> Result<(), mod_api::text::TextFormError> {
         mod_api::__private::check_access("broadcast", mod_api::__private::LoadAccess::WorldOnly);
@@ -104,6 +145,47 @@ impl Players for Game<'_> {
         self.native_acting_player()
     }
 }
+impl Profiles for Game<'_> {
+    fn resolve_name(&mut self, name: &str) -> ProfileResolution {
+        mod_api::__private::check_access("resolve_name", mod_api::__private::LoadAccess::WorldOnly);
+        profile_resolution(
+            self.skin_profiles
+                .borrow_mut()
+                .state(&horizon_client::skins::NameOrId::Name(name.to_owned())),
+        )
+    }
+    fn resolve_id(&mut self, id: u128) -> ProfileResolution {
+        mod_api::__private::check_access("resolve_id", mod_api::__private::LoadAccess::WorldOnly);
+        profile_resolution(
+            self.skin_profiles
+                .borrow_mut()
+                .state(&horizon_client::skins::NameOrId::Id(id)),
+        )
+    }
+}
+
+/// The game's resolver answer as the API's: its properties become the profile's.
+fn profile_resolution(resolve: horizon_client::skins::Resolve) -> ProfileResolution {
+    match resolve {
+        horizon_client::skins::Resolve::Pending => ProfileResolution::Pending,
+        horizon_client::skins::Resolve::Done(profile) => {
+            ProfileResolution::Done(profile.map(|profile| {
+                GameProfile::new(
+                    profile.id,
+                    profile.name,
+                    profile
+                        .properties
+                        .into_iter()
+                        .map(|(name, value, signature)| {
+                            ProfileProperty::new(name, value, signature)
+                        })
+                        .collect(),
+                )
+            }))
+        }
+    }
+}
+
 impl RuntimeLevels for Game<'_> {
     fn open(&mut self, id: &str, level: RuntimeLevel) -> Result<LevelRef, RuntimeLevelError> {
         mod_api::__private::check_access("open", mod_api::__private::LoadAccess::WorldOnly);
@@ -120,6 +202,13 @@ impl RuntimeLevels for Game<'_> {
     fn is_open(&mut self, id: &str) -> bool {
         mod_api::__private::check_access("is_open", mod_api::__private::LoadAccess::WorldOnly);
         self.runtime_level_is_open(id)
+    }
+    fn reset_vanilla(&mut self, seed: i64) -> Result<(), LevelResetError> {
+        mod_api::__private::check_access(
+            "reset_vanilla",
+            mod_api::__private::LoadAccess::WorldOnly,
+        );
+        self.queue_level_reset(seed)
     }
 }
 impl RenderAssets for Game<'_> {
@@ -143,5 +232,40 @@ impl RenderAssets for Game<'_> {
             mod_api::__private::LoadAccess::PublishedResources,
         );
         self.pack.render.animation(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use horizon_client::skins::{Resolve, ResolvedProfile};
+
+    #[test]
+    fn a_resolver_answer_becomes_the_apis_profile() {
+        let answer = profile_resolution(Resolve::Done(Some(ResolvedProfile {
+            id: 7,
+            name: "Notch".into(),
+            properties: vec![("textures".into(), "value".into(), Some("signature".into()))],
+        })));
+        assert_eq!(
+            answer,
+            ProfileResolution::Done(Some(GameProfile::new(
+                7,
+                "Notch".into(),
+                vec![ProfileProperty::new(
+                    "textures".into(),
+                    "value".into(),
+                    Some("signature".into())
+                )]
+            )))
+        );
+        assert_eq!(
+            profile_resolution(Resolve::Pending),
+            ProfileResolution::Pending
+        );
+        assert_eq!(
+            profile_resolution(Resolve::Done(None)),
+            ProfileResolution::Done(None)
+        );
     }
 }

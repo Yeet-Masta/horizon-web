@@ -9,6 +9,8 @@ description = "The game as the platform runs it: the engine's entry with the pla
 [dependencies]
 horizon-guest-stack = { path = "../horizon-guest-stack" }
 horizon-client = { path = "../horizon-client", default-features = false }
+horizon-std = { path = "../horizon-std" }
+horizon-theme = { path = "../horizon-theme" }
 horizon-mod-package = { path = "../horizon-mod-package", default-features = false, features = ["index"] }
 
 # Native mods load into a native process: the web build has none.
@@ -30,7 +32,8 @@ path = "src/main.rs"
 test = false
 
 [features]
-default = ["audio", "controllers", "horizon-extras"]
+# horizon-client/client-lib-default: one build of the game whether or not horizon-client-lib is also named.
+default = ["audio", "controllers", "horizon-extras", "horizon-client/client-lib-default"]
 audio = ["horizon-client/audio"]
 controllers = ["horizon-client/controllers"]
 horizon-extras = ["horizon-client/horizon-extras"]

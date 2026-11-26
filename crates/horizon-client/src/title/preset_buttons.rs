@@ -14,6 +14,7 @@ impl Title {
             label: label.into(),
             enabled,
             id,
+            agent_id: None,
             icon: None,
             trailing: None,
             action: None,
@@ -30,7 +31,8 @@ impl Title {
                         &lang::get_or("menu.singleplayer", "Singleplayer"),
                         true,
                         1,
-                    ),
+                    )
+                    .identified("singleplayer"),
                     b(
                         cx - 100.0,
                         y + 24.0,
@@ -38,7 +40,8 @@ impl Title {
                         &lang::get_or("menu.multiplayer", "Multiplayer"),
                         self.allows_multiplayer,
                         4,
-                    ),
+                    )
+                    .identified("multiplayer"),
                     b(
                         cx - 100.0,
                         y + 48.0,
@@ -48,7 +51,8 @@ impl Title {
                         // multiplayer is.
                         self.allows_multiplayer,
                         8,
-                    ),
+                    )
+                    .identified("minecraft-realms"),
                     b(
                         cx - 100.0,
                         y + 96.0,
@@ -57,6 +61,7 @@ impl Title {
                         true,
                         3,
                     )
+                    .identified("options")
                     .does(crate::widgets::Action::Options),
                     b(
                         cx + 2.0,
@@ -66,17 +71,31 @@ impl Title {
                         true,
                         2,
                     )
+                    .identified("quit-game")
                     .does(crate::widgets::Action::Exit),
                 ];
                 // CommonButtons' icon buttons; Horizon's Join a Friend (an
                 // invite code) sits behind vanilla's Friends button.
-                for (i, (key, plain, id, icon)) in [
-                    ("horizon.mods.screen.title", "Mods", 9, "icon/mods"),
-                    ("gui.friends.open", "Friends", 5, "friends/friends"),
-                    ("options.language", "Language...", 6, "icon/language"),
+                for (i, (key, plain, agent_id, id, icon)) in [
+                    ("horizon.mods.screen.title", "Mods", "mods", 9, "icon/mods"),
+                    (
+                        "gui.friends.open",
+                        "Friends",
+                        "friends",
+                        5,
+                        "friends/friends",
+                    ),
+                    (
+                        "options.language",
+                        "Language...",
+                        "language",
+                        6,
+                        "icon/language",
+                    ),
                     (
                         "options.accessibility",
                         "Accessibility Settings...",
+                        "accessibility-settings",
                         7,
                         "icon/accessibility",
                     ),
@@ -91,7 +110,8 @@ impl Title {
                         &lang::get_or(key, plain),
                         id != 5 || crate::net::joins_friends(),
                         id,
-                    );
+                    )
+                    .identified(agent_id);
                     button.icon = Some((icon, 15.0));
                     buttons.push(button);
                 }
@@ -102,12 +122,21 @@ impl Title {
                 // SelectWorldScreen.updateButtonStatus: primaryActionMessage, canEdit, canRecreate.
                 let corrupted = world.is_some_and(|w| w.corrupted);
                 let editable = world.is_some_and(WorldEntry::can_edit);
-                let play = if corrupted {
-                    lang::get_or("recover_world.button", "Attempt to Recover")
+                let (play, play_id) = if corrupted {
+                    (
+                        lang::get_or("recover_world.button", "Attempt to Recover"),
+                        "attempt-to-recover",
+                    )
                 } else if world.is_some_and(|w| w.file_fixing) {
-                    lang::get_or("selectWorld.upgrade_and_play", "Upgrade and Play")
+                    (
+                        lang::get_or("selectWorld.upgrade_and_play", "Upgrade and Play"),
+                        "upgrade-and-play",
+                    )
                 } else {
-                    lang::get_or("selectWorld.select", "Play Selected World")
+                    (
+                        lang::get_or("selectWorld.select", "Play Selected World"),
+                        "play-selected-world",
+                    )
                 };
                 vec![
                     b(
@@ -117,7 +146,8 @@ impl Title {
                         &play,
                         world.is_some_and(WorldEntry::can_play),
                         10,
-                    ),
+                    )
+                    .identified(play_id),
                     b(
                         (w / 2.0).floor() + 4.0,
                         h - 52.0,
@@ -125,7 +155,8 @@ impl Title {
                         &lang::get_or("selectWorld.create", "Create New World"),
                         true,
                         11,
-                    ),
+                    )
+                    .identified("create-new-world"),
                     b(
                         (w / 2.0).floor() - 154.0,
                         h - 28.0,
@@ -133,7 +164,8 @@ impl Title {
                         &lang::get_or("selectWorld.edit", "Edit"),
                         editable,
                         13,
-                    ),
+                    )
+                    .identified("edit"),
                     b(
                         (w / 2.0).floor() - 75.0,
                         h - 28.0,
@@ -141,7 +173,8 @@ impl Title {
                         &lang::get_or("selectWorld.delete", "Delete"),
                         selected.is_some(),
                         14,
-                    ),
+                    )
+                    .identified("delete"),
                     b(
                         (w / 2.0).floor() + 4.0,
                         h - 28.0,
@@ -149,7 +182,8 @@ impl Title {
                         &lang::get_or("selectWorld.recreate", "Re-Create"),
                         editable,
                         15,
-                    ),
+                    )
+                    .identified("re-create"),
                     b(
                         (w / 2.0).floor() + 83.0,
                         h - 28.0,
@@ -158,6 +192,7 @@ impl Title {
                         true,
                         12,
                     )
+                    .identified("back")
                     .does(crate::widgets::Action::Back),
                 ]
             }
@@ -175,6 +210,7 @@ impl Title {
                     true,
                     94,
                 )
+                .identified("done")
                 .does(crate::widgets::Action::Done),
                 b(
                     w / 2.0 + 5.0,
@@ -184,6 +220,7 @@ impl Title {
                     true,
                     95,
                 )
+                .identified("cancel")
                 .does(crate::widgets::Action::Back),
             ],
             Mode::Edit {
@@ -240,7 +277,8 @@ impl Title {
                         top + 214.0,
                         98.0,
                         &lang::get_or("selectWorld.edit.save", "Save"),
-                        !name.trim().is_empty(),
+                        // EditWorldScreen: `renameButton.active = !StringUtil.isBlank(name)`.
+                        !horizon_core::java_character::is_blank(name),
                         35,
                     ),
                     b(

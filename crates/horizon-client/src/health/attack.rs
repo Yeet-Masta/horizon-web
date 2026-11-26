@@ -61,6 +61,7 @@ pub fn damage_type(kind: DamageKind, caused: bool) -> &'static str {
         K::MobAttack => "minecraft:mob_attack",
         K::MobAttackNoAggro => "minecraft:mob_attack_no_aggro",
         K::Arrow => "minecraft:arrow",
+        K::Trident => "minecraft:trident",
         K::Thrown => "minecraft:thrown",
         K::Fireball => "minecraft:fireball",
         K::Explosion if caused => "minecraft:player_explosion",

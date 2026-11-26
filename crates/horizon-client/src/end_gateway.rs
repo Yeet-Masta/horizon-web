@@ -54,6 +54,41 @@ impl Traveller {
     }
 }
 
+/// `EndPortalBlock.entityInside` and `EndGatewayBlock.entityInside` for one
+/// move (`Entity.checkInsideBlocks`): whether the `width` by `height` box at
+/// `to` is inside an End portal (its entity-inside shape), and the End gateway
+/// block the box swept from `from` to `to` through. Neither block has a
+/// dimension test, so a gateway outside the End takes an entity in too.
+pub fn end_portals_inside(
+    from: Vec3,
+    to: Vec3,
+    width: f64,
+    height: f64,
+    mut block_name: impl FnMut(BlockPos) -> std::sync::Arc<str>,
+) -> (bool, Option<BlockPos>) {
+    let w = width / 2.0;
+    let lo = [to.x - w, to.y, to.z - w];
+    let hi = [to.x + w, to.y + height, to.z + w];
+    let mut portal = false;
+    for x in lo[0].floor() as i32..=hi[0].floor() as i32 {
+        for y in lo[1].floor() as i32..=hi[1].floor() as i32 {
+            for z in lo[2].floor() as i32..=hi[2].floor() as i32 {
+                // EndPortalBlock entity-inside shape: y 6/16..12/16.
+                if &*block_name(BlockPos::new(x, y, z)) == "minecraft:end_portal"
+                    && lo[1] < f64::from(y) + 0.75
+                    && hi[1] > f64::from(y) + 0.375
+                {
+                    portal = true;
+                }
+            }
+        }
+    }
+    let gateway = swept_gateway(from, to, width as f32, height as f32, |p| {
+        &*block_name(p) == "minecraft:end_gateway"
+    });
+    (portal, gateway)
+}
+
 /// The End gateway block an entity's box swept through
 /// (`Entity.checkInsideBlocks`, which calls `EndGatewayBlock.entityInside`).
 pub fn swept_gateway(

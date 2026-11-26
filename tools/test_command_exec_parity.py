@@ -30,11 +30,12 @@ import sys
 import zipfile
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .integration_env import run_game
     from . import command_exec_corpus as corpus_module
     from . import seed_agent
 except ImportError:
+    import fast_bins
     import lab
     import seed_agent
     from integration_env import run_game
@@ -143,6 +144,7 @@ def main():
     parser.add_argument('--item-contents-fixture', action='store_true')
     parser.add_argument('--item-contents-provider-empty-control', action='store_true')
     parser.add_argument("--boat-item-hit-fixture", action="store_true")
+    parser.add_argument("--boat-void-fixture", action="store_true")
     parser.add_argument("--stand-entity-collision-fixture", action="store_true")
     parser.add_argument("--reference-only", action="store_true")
     parser.add_argument("--boat-leash-view-fixture", action="store_true")
@@ -195,6 +197,7 @@ def main():
     parser.add_argument('--mob-absorption-infinite-fixture', action='store_true', help='infinite Absorption used up, kept, and beside another infinite effect')
     parser.add_argument('--mob-absorption-raw-diagnostic', action='store_true', help='add each mob\'s whole entity data')
     parser.add_argument("--mob-pickup-save-fixture", action="store_true")
+    parser.add_argument('--merchant-restock-fixture', action='store_true')
     parser.add_argument('--merchant-crafted-fixture', action='store_true')
     parser.add_argument('--mob-name-presentation-diagnostic', action='store_true',
                         help='retain all 312 mob-name records, including ten separate name/saved-text presentation observations')
@@ -461,6 +464,9 @@ def main():
     if args.selector_bounds_fixture:
         from selector_bounds_corpus import selector_bounds
         groups = [("setup", corpus_module.group_setup()), ("selector entity bounds", selector_bounds())]
+    if args.merchant_restock_fixture:
+        from merchant_restock_corpus import cases
+        groups = [('merchant live restock', cases())]
     if args.baby_modifier_fixture:
         from baby_modifier_corpus import baby_modifier
         groups = [('setup', corpus_module.group_setup()), ('baby modifier mutation', baby_modifier(args.baby_modifier_raw_diagnostic))]
@@ -515,6 +521,9 @@ def main():
     if args.merchant_gate_fixture:
         from merchant_gate_corpus import cases
         groups = [('setup', [corpus_module.cmd('/tick freeze', False), *corpus_module.group_setup()]), ('merchant reputation AI gate', cases())]
+    if args.boat_void_fixture:
+        from test_boat_void_parity import program as boat_void_program
+        groups = [('Boat load and void removal', boat_void_program())]
     if args.groups_file:
         # Generated scripts (tools/parity_fuzz.py): the common setup, then the file's [name, ops] groups only.
         groups = [('setup', corpus_module.group_setup()),
@@ -549,11 +558,24 @@ def main():
         from pufferfish_contact_corpus import advancements as contact_advancements
         advancements.update(contact_advancements())
 
+    try:
+        from .command_exec_groups.crossbow_effects import ENCHANTMENT, GROUP
+    except ImportError:
+        from command_exec_groups.crossbow_effects import ENCHANTMENT, GROUP
+
+    def install_world_fixtures(world):
+        if any(name == GROUP for name, _ in groups):
+            functions['crossbow_test:ready'] = 'return 1\n'
+            path = world / 'datapacks/command-selector-fixture/data/crossbow_test/enchantment/volley.json'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(ENCHANTMENT), encoding='utf-8')
+        install_datapack_fixtures(world, predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+
     run(['javac', '--release', lock['minecraft']['java_major'], '-proc:none', '-cp', str(jars['server']) + os.pathsep + dependency_path, '-d', classes, oracle], 'compile-java')
     vanilla_dir = build / 'vanilla'
     shutil.rmtree(vanilla_dir, ignore_errors=True)
     vanilla_dir.mkdir()
-    install_datapack_fixtures(vanilla_dir / 'universe/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    install_world_fixtures(vanilla_dir / 'universe/harness')
     java_options = ['-DMC_DEBUG_ENABLED=true', '-DMC_DEBUG_DEV_COMMANDS=true'] if args.raid_village_fixture else []
     if args.merchant_gate_fixture:
         java_options.append('-Dhorizon.merchantFixture=true')
@@ -564,6 +586,8 @@ def main():
         direct_input = build / 'orb-water-inputs.json'
         direct_input.write_text(json.dumps(arithmetic_inputs()), encoding='utf-8')
         java_options = ['-Dhorizon.orbWaterArithmetic=' + str(direct_input)]
+    if args.merchant_restock_fixture:
+        java_options += ['-Dhorizon.merchantFixture=true']
     if args.function_admission_fixture:
         java_options.append('-Dhorizon.functionAdmissionFixture=true')
     if synced:
@@ -606,13 +630,13 @@ def main():
     if args.binary:
         binary = args.binary.resolve(strict=True)
     else:
-        run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], 'compile-rust', cwd=lab.ROOT)
+        run(fast_bins.command('horizon-client'), 'compile-rust', cwd=lab.ROOT)
         metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'], cwd=lab.ROOT, text=True))
         binary = Path(metadata['target_directory']) / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     rust_dir = build / 'rust'
     shutil.rmtree(rust_dir, ignore_errors=True)
     rust_dir.mkdir()
-    install_datapack_fixtures(rust_dir / 'saves/harness', predicates, functions, jars['server'], advancements, loot_tables, recipes=recipes)
+    install_world_fixtures(rust_dir / 'saves/harness')
     if any(op['op'] == 'crafter_max_map_fixture' for op in script):
         source = vanilla_dir / 'universe/harness/data/minecraft/maps/31.dat'
         target = rust_dir / 'saves/harness/data/minecraft/maps/31.dat'
@@ -631,7 +655,7 @@ def main():
     if args.loaded_fixture:
         env['HORIZON_HARNESS_LOADED_FIXTURE'] = '1'
         env['HORIZON_HARNESS_CLIENT_CONFIG'] = str(build / 'rust-client-config.json')
-    run([binary, '--resources', lab.RESOURCES, '--world', 'harness', '--seed', SEED, '--radius', 2 if args.loaded_fixture else 4], 'rust', game=True, cwd=rust_dir, env=env)
+    run([binary, '--resources', Path(os.environ.get('HORIZON_TEST_RESOURCES', lab.RESOURCES)), '--world', 'harness', '--seed', SEED, '--radius', 2 if args.loaded_fixture else 4], 'rust', game=True, cwd=rust_dir, env=env)
 
     if any(op['op'] == 'raid_state' for op in script):
         from raid_village_corpus import validate_native_inputs
@@ -648,7 +672,7 @@ def main():
         java = json.loads((build / 'client_config.json').read_text())
         if java.get('server_view') != 2 or java.get('server_simulation') != 2 or not java.get('client_loaded'):
             sys.exit(f'Java server/client-loaded prerequisite failed: {java}')
-        if not args.merchant_gate_fixture:
+        if any(name == 'loaded ticket removal' for name, _ in groups):
             for name in ['java.log', 'rust.log']:
                 waits = re.findall(r'harness paced wait: (\d+) ticks, (\d+) ms', (build / name).read_text())
                 if len(waits) != 2 or any(int(n) != ticks or not ticks * 50 <= int(ms) <= upper
@@ -696,7 +720,7 @@ def main():
     failed_positions = set()
     for position, (v, r) in enumerate(zip(vanilla, rust)):
         assert v['cmd'] == r['cmd'], (v['cmd'], r['cmd'])
-        kind = ('strict_record' if v != r else None) if args.merchant_gate_fixture or args.merchant_crafted_fixture else compare(v, r, recorded_ops[position].get('comparison'))
+        kind = ('strict_record' if v != r else None) if args.merchant_gate_fixture or args.merchant_crafted_fixture or args.merchant_restock_fixture else compare(v, r, recorded_ops[position].get('comparison'))
         if kind:
             failed_positions.add(position)
             mismatches.append({'kind': kind, 'cmd': v['cmd'], 'vanilla': v, 'rust': r})

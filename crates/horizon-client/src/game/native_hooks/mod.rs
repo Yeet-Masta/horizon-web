@@ -68,6 +68,7 @@ use horizon_core::{
 use horizon_std::{fs, time::Duration};
 use horizon_world::level::{BonemealCheck, PlaceContext};
 use mod_api::CommandSource;
+use mod_api::ExportState;
 use mod_api::GameMode;
 use mod_api::GameTests;
 pub use mod_api::game::{PhantomSpawnResult, Shake, SleepProblem};
@@ -123,6 +124,7 @@ pub(in crate::game) use add_attribute_tooltips::HookedAttributeTooltips;
 pub(in crate::game) use bounce_restitution::install_block_contact_hooks;
 pub(in crate::game) use fishing_medium::NativeFishingMedium;
 pub(in crate::game) use living_change_target::NativeHookHost;
+pub(in crate::game) use living_death::death_listened;
 include!("shared.rs");
 
 use mod_api::ModBlockEntity;

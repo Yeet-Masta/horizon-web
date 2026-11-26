@@ -132,14 +132,7 @@ fn run(mode: Option<u8>) -> (Vec<(String, u32)>, usize, i32, u32, i64, bool) {
                 .into();
             let before_items = game.dropped.len();
             let before_orbs = game.orbs.len();
-            let stat = |game: &Game<'_>| {
-                game.stats
-                    .values
-                    .get("minecraft:custom")
-                    .and_then(|v| v.get("minecraft:fish_caught"))
-                    .copied()
-                    .unwrap_or(0)
-            };
+            let stat = |game: &Game<'_>| game.stats.get("custom", "minecraft:fish_caught");
             let before_stat = stat(game);
             let damage = mod_platform::testing::with_mods(mods, || {
                 game.retrieve_hook_extracted(&ItemStack::new("minecraft:fishing_rod", 1), &mut hook)
@@ -160,6 +153,58 @@ fn run(mode: Option<u8>) -> (Vec<(String, u32)>, usize, i32, u32, i64, bool) {
     });
     result.unwrap()
 }
+/// `FishingRodItem.use` damages the rod with `hand.asEquipmentSlot()`: a rod
+/// broken in the off hand must report slot 48, not the main hand's 47.
+#[test]
+#[ignore = "daily"]
+fn an_offhand_fishing_rod_break_is_reported_in_the_offhand_slot() {
+    use horizon_client::first_person::Hand;
+    mod_platform::testing::with_mods(Default::default(), || {
+        crate::game::native_entity_refs::tests::with_game(|game| {
+            game.player =
+                Some(PlayerMotion::new(game.motion, Vec3::new(0.5, 64.0, 0.5)).unwrap());
+            game.lan_acting = Some(7);
+            game.next_entity = 1000;
+            game.hand = Hand::Off;
+            let mut rod = ItemStack::new("minecraft:fishing_rod", 1);
+            rod.damage = 63;
+            game.offhand = Some(rod.clone());
+            let hook = Hook {
+                uuid: [0; 4],
+                attachment_lifetime: Default::default(),
+                join: horizon_client::join_seq::JoinSeq::UNJOINED,
+                caster: None,
+                caster_generation: horizon_client::join_seq::JoinSeq::UNJOINED,
+                id: 999,
+                position: Vec3::new(0.5, 64.0, 1.5),
+                previous: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                state: State::Hooked(999),
+                last_deflected_by: None,
+                needs_sync: false,
+                tick_count: 0,
+                life: 0,
+                on_ground: false,
+                nibble: 0,
+                time_until_lured: 0,
+                time_until_hooked: 0,
+                fish_angle: 0.0,
+                out_of_water: 0,
+                open_water: true,
+                luck: 0,
+                lure: 0,
+                medium: None,
+                lerp: HookLerp::default(),
+                random: EntityRandom::own(LegacyRandom::new(42)),
+            };
+            game.hook.put_back(hook);
+            game.use_fishing_rod(&rod);
+            assert_eq!(game.guest_equipment_breaks, [48]);
+            assert!(game.offhand.is_none(), "the off-hand rod broke");
+        });
+    });
+}
+
 #[test]
 #[ignore = "daily"]
 fn fishing_catch_replaces_rolled_stack() {

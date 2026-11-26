@@ -586,6 +586,21 @@ fn registration_and_attribute_records_have_declared_field_bytes() {
             id("minecraft:generic.attack_damage"),
             modifier,
             EquipmentSlotGroup::MainHand,
+            Option::<NamedSlotGroup>::None,
+        ),
+    );
+    let named = ItemAttributeModifier::named(
+        id("minecraft:luck"),
+        AttributeModifier::new(id("example:ring"), 1.0, AttributeOperation::AddValue),
+        NamedSlotGroup::new("curios:ring").unwrap(),
+    );
+    fields(
+        named.clone(),
+        (
+            id("minecraft:luck"),
+            AttributeModifier::new(id("example:ring"), 1.0, AttributeOperation::AddValue),
+            EquipmentSlotGroup::Any,
+            Some(NamedSlotGroup::new("curios:ring").unwrap()),
         ),
     );
     fields(
@@ -1073,7 +1088,10 @@ fn a_manual_codec_carries_a_nested_types_layout_change() {
 
 /// Decodes `parts` (literal fields) to `value` (built from its raw fields), and encodes `value`
 /// back to `parts`: a codec in a hashed file whose parts come from a helper outside it.
-fn both_ways<T: Wire + Clone + std::fmt::Debug + PartialEq, F: Wire + std::fmt::Debug + PartialEq>(
+fn both_ways<
+    T: Wire + Clone + std::fmt::Debug + PartialEq,
+    F: Wire + std::fmt::Debug + PartialEq,
+>(
     value: T,
     parts: F,
 ) {
@@ -1110,7 +1128,10 @@ fn out_of_scan_projections_keep_their_fields_both_ways() {
     })
     .unwrap();
     assert_eq!((gear.namespace(), gear.path()), ("example", "gear"));
-    both_ways(id("example:gear"), ("example".to_owned(), "gear".to_owned()));
+    both_ways(
+        id("example:gear"),
+        ("example".to_owned(), "gear".to_owned()),
+    );
 
     both_ways(ModelRef(31, 7), (31u64, 7u32));
     both_ways(RenderPipelineRef(41, 5), (41u64, 5u32));
@@ -1123,11 +1144,17 @@ fn out_of_scan_projections_keep_their_fields_both_ways() {
     let mut out = Writer::new();
     out.put(&EntityTypeKey(1));
     assert_eq!(out.bytes(), 1u32.to_le_bytes());
-    assert_eq!(Reader::decode::<EntityTypeKey>(out.bytes()), Ok(EntityTypeKey(1)));
+    assert_eq!(
+        Reader::decode::<EntityTypeKey>(out.bytes()),
+        Ok(EntityTypeKey(1))
+    );
 
     let mut stack = ItemStack::new(ItemKey(1), 7).unwrap();
     stack.set_damage(11);
-    both_ways(stack.clone(), (ItemKey(1), 7u32, Some(11u32), None::<Components>));
+    both_ways(
+        stack.clone(),
+        (ItemKey(1), 7u32, Some(11u32), None::<Components>),
+    );
     let mut out = Writer::new();
     out.put(&(ItemKey(1), 7u32, Some(11u32), None::<Components>));
     let decoded = Reader::decode::<ItemStack>(out.bytes()).unwrap();
@@ -1175,3 +1202,115 @@ fn out_of_scan_projections_keep_their_fields_both_ways() {
     assert_eq!((identity, generation), (holder, 71));
 }
 
+/// The derive's types as a mod writes them, in a module that keeps the prelude.
+mod plain {
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    pub(super) struct Record {
+        pub(super) a: u32,
+        pub(super) b: u8,
+    }
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    pub(super) enum Choice {
+        A,
+        B(u32),
+        C { x: u8 },
+    }
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    #[wire(via = u32)]
+    pub(super) struct Via(pub(super) u32);
+    impl From<&Via> for u32 {
+        fn from(via: &Via) -> Self {
+            via.0
+        }
+    }
+    impl From<u32> for Via {
+        fn from(value: u32) -> Self {
+            Self(value)
+        }
+    }
+}
+
+/// The same types in a module that defines its own prelude names: a bare path in the derive's
+/// expansion would reach these and fail to compile.
+#[allow(dead_code, unused_macros, non_camel_case_types)]
+mod shadowed {
+    macro_rules! stringify {
+        ($($t:tt)*) => {
+            compile_error!("the Wire derive wrote a bare `stringify!`")
+        };
+    }
+    macro_rules! unreachable {
+        ($($t:tt)*) => {
+            compile_error!("the Wire derive wrote a bare `unreachable!`")
+        };
+    }
+    struct Option;
+    struct Some;
+    struct None;
+    struct Result;
+    struct Ok;
+    struct Err;
+    struct Vec;
+    struct String;
+    struct From;
+    struct TryFrom;
+    struct u8;
+    struct u32;
+    struct u64;
+    struct usize;
+    struct str;
+
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    pub(super) struct Record {
+        pub(super) a: ::core::primitive::u32,
+        pub(super) b: ::core::primitive::u8,
+    }
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    pub(super) enum Choice {
+        A,
+        B(::core::primitive::u32),
+        C { x: ::core::primitive::u8 },
+    }
+    #[derive(Debug, PartialEq, horizon_mod_api_macros::Wire)]
+    #[wire(via = ::core::primitive::u32)]
+    pub(super) struct Via(pub(super) ::core::primitive::u32);
+    impl ::core::convert::From<&Via> for ::core::primitive::u32 {
+        fn from(via: &Via) -> Self {
+            via.0
+        }
+    }
+    impl ::core::convert::From<::core::primitive::u32> for Via {
+        fn from(value: ::core::primitive::u32) -> Self {
+            Self(value)
+        }
+    }
+}
+
+#[test]
+fn the_derive_compiles_where_prelude_names_are_shadowed_and_means_the_same() {
+    fn same<P: Wire, S: Wire + std::fmt::Debug + PartialEq>(plain: P, shadowed: S) {
+        assert_eq!(P::LAYOUT_SEED, S::LAYOUT_SEED);
+        assert_eq!(P::MIN, S::MIN);
+        assert_eq!(P::layout(&mut Vec::new()), S::layout(&mut Vec::new()));
+        let (mut p, mut s) = (Writer::new(), Writer::new());
+        p.put(&plain);
+        s.put(&shadowed);
+        assert_eq!(p.bytes(), s.bytes());
+        assert_eq!(Reader::decode::<S>(s.bytes()).unwrap(), shadowed);
+    }
+    same(
+        plain::Record { a: 7, b: 9 },
+        shadowed::Record { a: 7, b: 9 },
+    );
+    same(plain::Choice::A, shadowed::Choice::A);
+    same(plain::Choice::B(11), shadowed::Choice::B(11));
+    same(plain::Choice::C { x: 3 }, shadowed::Choice::C { x: 3 });
+    same(plain::Via(5), shadowed::Via(5));
+    // A tag no case has is refused the same way.
+    let mut out = Writer::new();
+    out.put(&9u32);
+    assert_eq!(
+        Reader::decode::<plain::Choice>(out.bytes()).unwrap_err(),
+        Reader::decode::<shadowed::Choice>(out.bytes()).unwrap_err()
+    );
+}

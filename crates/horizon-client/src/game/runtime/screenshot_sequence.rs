@@ -52,7 +52,72 @@ fn parse(args: &str) -> Result<(u32, f64, PathBuf)> {
     Ok((frames, step_ms, path.trim().into()))
 }
 
+fn capture_terrain_loading(
+    streaming_busy: bool,
+    replaying: bool,
+    view: &horizon_client::streaming::ViewArrival,
+    has_column: impl Fn((i32, i32)) -> bool,
+) -> bool {
+    // Replay and lockstep columns can only arrive as the capture clock advances.
+    streaming_busy || (!replaying && view.arrival_incomplete(has_column))
+}
+
+// The capture clock drives future columns, but the loading screen must retire locally.
+pub(super) fn capture_level_loading(
+    tracker: Option<&horizon_client::level_loading::LevelLoadTracker>,
+    lockstep: bool,
+    chunks_empty: bool,
+) -> bool {
+    tracker.is_some_and(horizon_client::level_loading::LevelLoadTracker::is_active)
+        || (!lockstep && chunks_empty)
+}
+
+pub(super) enum CaptureMode {
+    Sequence,
+    Export,
+}
+
+impl CaptureMode {
+    fn blocked(self, screen: Screen, terrain_loading: impl FnOnce() -> bool) -> bool {
+        (matches!(self, Self::Sequence) && screen != Screen::Playing) || terrain_loading()
+    }
+}
+
 impl Game<'_> {
+    pub(super) fn scene_loading(&self, mode: CaptureMode) -> bool {
+        mode.blocked(self.screen, || self.capture_terrain_loading())
+    }
+
+    /// The drawn world still has terrain or resources to put in place.
+    fn capture_terrain_loading(&self) -> bool {
+        let lockstep = self.export.as_ref().is_some_and(|s| s.server_clock);
+        self.title.is_some()
+            || self.player.is_none()
+            || self.integrated_starting.is_some()
+            || self.pending_entry.is_some()
+            || self.pack_reload.is_some()
+            || self.pending_save.is_some()
+            || capture_level_loading(
+                self.remote.as_ref().map(|r| &r.level_load),
+                lockstep,
+                self.world.chunks.is_empty(),
+            )
+            || capture_terrain_loading(
+                self.streaming.busy(),
+                self.replay.playing() || lockstep,
+                &self.view_arrival,
+                |column| self.world.chunks.contains_key(&column),
+            )
+            || !self.pending_uploads.is_empty()
+            || self.remote_backlog_delays_frame()
+            || !self.world.dirty_light.is_empty()
+            || !self.world.dirty_sections.is_empty()
+            || self
+                .renderer
+                .as_ref()
+                .is_some_and(|r| r.native_pack_loading())
+    }
+
     /// Why a sequence can't start (or go on) now, if it can't.
     fn sequence_refusal(&self) -> Option<&'static str> {
         let g = &self.settings.horizon;
@@ -60,25 +125,7 @@ impl Game<'_> {
             Some("screenshot-sequence needs HORIZON_STILL=1")
         } else if !self.clock.frozen() || self.clock.stepping() || self.clock.sprinting() {
             Some("screenshot-sequence needs the world frozen (/tick freeze), not stepping")
-        } else if self.title.is_some()
-            || self.screen != Screen::Playing
-            || self.player.is_none()
-            || self.integrated_starting.is_some()
-            || self.pending_entry.is_some()
-            || self.pack_reload.is_some()
-            || self.pending_save.is_some()
-            || self
-                .remote
-                .as_ref()
-                .is_some_and(|r| r.level_load.is_active())
-            || self.flight.is_some()
-            || self.world.chunks.is_empty()
-            || self.streaming.pending() != 0
-            || !self.pending_uploads.is_empty()
-            || self.remote_backlog() != 0
-            || !self.world.dirty_light.is_empty()
-            || !self.world.dirty_sections.is_empty()
-        {
+        } else if self.flight.is_some() || self.scene_loading(CaptureMode::Sequence) {
             Some("screenshot-sequence needs a loaded world in play, with nothing left to load")
         } else if self.lod.is_some() || self.far_terrain_choice().0 > 0 {
             // Far tiles load and fade in on the wall clock.
@@ -94,10 +141,26 @@ impl Game<'_> {
     }
 
     /// What a sequence's frames must share: the world, the camera, the settings, the pack and
-    /// the window's size.
+    /// the window's size. Before the first frame the roll is the last drawn frame's. For a frame
+    /// about to be drawn (`sequence_frame_asks`: whether mods are asked for its roll, else
+    /// level) it is that frame's, kept for it in `sequence_frame_roll`, and asked after the pose:
+    /// a mod hears `camera_pose` before `camera_roll`, as on every frame.
     fn sequence_scene(&mut self) -> Result<String> {
+        let frame = self.sequence_frame_asks.take();
         let view = self.camera_view(1.0).ok_or("no camera")?;
         let (position, yaw, pitch) = self.native_camera_pose_now(1.0, view);
+        let roll = match frame {
+            None => self.posed_roll,
+            Some(asks) => {
+                let roll = if asks {
+                    self.native_camera_roll_now(self.clock.camera_fraction() as f32)
+                } else {
+                    0.0
+                };
+                self.sequence_frame_roll = Some(roll);
+                roll
+            }
+        };
         let renderer = self.renderer.as_ref().ok_or("no renderer")?;
         Ok(format!(
             "{:?}",
@@ -108,7 +171,8 @@ impl Game<'_> {
                 (
                     position.to_array().map(f64::to_bits),
                     yaw.to_bits(),
-                    pitch.to_bits()
+                    pitch.to_bits(),
+                    roll.to_bits()
                 ),
                 format!("{:?}", self.camera_type),
                 format!("{:?}", self.settings),
@@ -134,9 +198,12 @@ impl Game<'_> {
             return Ok(Some(json!({ "ok": true, "cancelled": running })));
         }
         let (frames, step_ms, path) = parse(args)?;
-        if self.screenshot_sequence.is_some() {
-            return Err("a screenshot sequence is already running".into());
+        if self.screenshot_sequence.is_some() || self.export.is_some() {
+            return Err("a capture is already running".into());
         }
+        // Reconcile any newly picked pack, saved options, or in-flight async native build before
+        // snapshotting the scene so the sequence never captures a stale or half-applied pack.
+        self.settle_native_shader_pack();
         let renderer = self.renderer.as_ref().ok_or("no renderer yet")?;
         if self.pending_screenshot.is_some() || renderer.screenshot.is_some() {
             return Err("a screenshot is already pending".into());
@@ -215,9 +282,16 @@ impl Game<'_> {
             sequence.scene.clone(),
         );
         let refusal = self.sequence_refusal();
-        match (refusal, self.sequence_scene()) {
+        // Read once: the check and the frame both use this roll.
+        self.sequence_frame_asks =
+            Some(refusal.is_none() && !self.shows_panorama() && !self.studio.flying());
+        let now = self.sequence_scene();
+        // A mod's replacement of `sequence_scene` doesn't take it.
+        self.sequence_frame_asks = None;
+        match (refusal, now) {
             (None, Ok(now)) if now == scene => {}
             (refusal, _) => {
+                self.sequence_frame_roll = None;
                 let reason = refusal.unwrap_or(
                     "the camera, world, settings, shader pack or window size changed while it ran",
                 );
@@ -235,6 +309,7 @@ impl Game<'_> {
             renderer.screenshot_result = None;
         }
         let drawn = self.render_frame();
+        self.sequence_frame_roll = None;
         let renderer = self.renderer.as_mut().ok_or("no renderer")?;
         // Still queued when the frame wasn't drawn, or when the PNG is to be taken
         // again smaller (out of memory): not this sequence's frame.
@@ -291,8 +366,60 @@ impl Game<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    #[test]
+    fn a_recorded_inventory_does_not_block_export_after_terrain_loads() {
+        use super::{CaptureMode, Screen};
+
+        assert!(CaptureMode::Export.blocked(Screen::Inventory, || true));
+        assert!(!CaptureMode::Export.blocked(Screen::Inventory, || false));
+        assert!(CaptureMode::Sequence.blocked(Screen::Inventory, || false));
+    }
+
+    use super::{capture_terrain_loading, parse};
     use std::path::PathBuf;
+
+    #[test]
+    fn capture_waits_for_streaming_work_and_an_arriving_live_view() {
+        use horizon_client::streaming::ViewArrival;
+        let mut arrival = ViewArrival::default();
+        let now = horizon_std::time::Instant::now();
+        let view = ((0, 0), 2);
+
+        let missing = |_| false;
+        let all = |_| true;
+        assert!(arrival.arriving(view, now, missing));
+        assert!(capture_terrain_loading(false, false, &arrival, missing));
+        assert!(!capture_terrain_loading(false, true, &arrival, missing));
+
+        let expired = now + horizon_std::time::Duration::from_secs(31);
+        assert!(!arrival.arriving(view, expired, missing));
+        assert!(capture_terrain_loading(false, false, &arrival, missing));
+        assert!(capture_terrain_loading(true, false, &arrival, all));
+        assert!(capture_terrain_loading(true, true, &arrival, all));
+        assert!(!capture_terrain_loading(false, false, &arrival, all));
+    }
+
+    #[test]
+    fn capture_checks_the_replacement_columns_for_the_same_view() {
+        use horizon_client::streaming::ViewArrival;
+        let mut arrival = ViewArrival::default();
+        let now = horizon_std::time::Instant::now();
+        let view = ((0, 0), 2);
+        let mut columns: std::collections::HashSet<_> = (-2..=2)
+            .flat_map(|x| (-2..=2).map(move |z| (x, z)))
+            .collect();
+        assert!(!arrival.arriving(view, now, |column| columns.contains(&column)));
+        assert!(!capture_terrain_loading(false, false, &arrival, |column| {
+            columns.contains(&column)
+        }));
+
+        columns.clear();
+        columns.insert((0, 0));
+        assert!(!arrival.arriving(view, now, |column| columns.contains(&column)));
+        assert!(capture_terrain_loading(false, false, &arrival, |column| {
+            columns.contains(&column)
+        }));
+    }
 
     #[test]
     fn the_path_is_the_rest_of_the_line_and_the_counts_are_bounded() {

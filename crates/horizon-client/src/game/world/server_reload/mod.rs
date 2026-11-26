@@ -49,6 +49,16 @@ impl PackStack {
 }
 
 impl Game<'_> {
+    /// `RegistryDataLoader.load`: a slot source that does not decode with
+    /// `SlotSources.TYPED_CODEC` fails the whole load, before anything is published.
+    fn check_slot_sources(&self, store: &DataStore) -> Result<(), ReloadStageError> {
+        self.candidate_slot_source_registries(store)
+            .map(|_| ())
+            .map_err(|line| {
+                log::error!("{line}");
+                ReloadStageError::DataSource(line)
+            })
+    }
     pub(super) fn prepare_server_reload(
         &self,
         stack: &PackStack,
@@ -61,6 +71,7 @@ impl Game<'_> {
         horizon_client::mod_content::check_jars(
             &self.options.resources,
             &horizon_client::logging::game_home().join("jars"),
+            self.options.mods.jar_side,
         )
         .map_err(|error| {
             ReloadStageError::OriginalJars(
@@ -70,7 +81,7 @@ impl Game<'_> {
         let inventory = horizon_mod_package::enabled::EnabledMods::read(resources)
             .map_err(|error| ReloadStageError::DataSource(error.to_string()))?;
         let conditions = self
-            .registered_load_conditions(&inventory)
+            .registered_load_conditions(&inventory, stack)
             .map_err(ReloadStageError::DataSource)?;
         // Nobody listens: no registration graph, only the vanilla function library.
         if !mod_api::__private::listened(mod_api::HookId::AddServerReloadListeners) {
@@ -78,6 +89,7 @@ impl Game<'_> {
             conditions
                 .check_errors()
                 .map_err(ReloadStageError::DataSource)?;
+            self.check_slot_sources(&store)?;
             return Ok(PreparedServerReload {
                 steps: vec![PreparedStep::Vanilla(Box::new(store))],
                 resources: mod_api::RetainedListeners::default(),
@@ -101,6 +113,11 @@ impl Game<'_> {
         conditions
             .check_errors()
             .map_err(ReloadStageError::DataSource)?;
+        for step in &steps {
+            if let PreparedStep::Vanilla(store) = step {
+                self.check_slot_sources(store)?;
+            }
+        }
         Ok(PreparedServerReload { steps, resources })
     }
     pub(super) fn apply_server_reload_callbacks(
@@ -134,6 +151,7 @@ impl Game<'_> {
         });
         self.reload_resources = prepared.resources;
         self.structure_templates.clear();
+        self.forget_stand_rests();
     }
     /// The retained server reload listeners of the last successful reload.
     pub(super) fn reload_resources(&self) -> &dyn ServerReloadResources {

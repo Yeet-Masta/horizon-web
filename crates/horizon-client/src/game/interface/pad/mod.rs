@@ -23,6 +23,21 @@ use serde_json::{Value, json};
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
 
+/// Only answers from mods are validated here. Widen before measuring so even very large finite
+/// axes keep their ratio instead of overflowing to infinity.
+fn bounded_move_override(direction: [f32; 2]) -> Option<[f32; 2]> {
+    let [left, forward] = direction.map(f64::from);
+    if !left.is_finite() || !forward.is_finite() {
+        return None;
+    }
+    let length_squared = left * left + forward * forward;
+    if length_squared <= 1.0 {
+        return Some(direction);
+    }
+    let length = length_squared.sqrt();
+    Some([(left / length) as f32, (forward / length) as f32])
+}
+
 pub(super) const HELP: &[&str] = &[
     "pad BUTTON down|up|tap         a virtual controller button (south east west north lb rb lt rt select start ls rs up down left right)",
     "pad stick left|right X Y       tilt a virtual stick (-1..1, up positive); 0 0 centres it",
@@ -147,6 +162,8 @@ mod hardware;
 #[cfg(test)]
 mod parity_tests;
 mod radial_play;
+#[cfg(test)]
+mod source_tests;
 pub(super) use hardware::{PadId, PadRouter};
 
 /// How many of the radial menu's last actions `pad status` lists.
@@ -385,7 +402,10 @@ impl Game<'_> {
             self.pad_cancel_inputs(event_loop);
         }
         self.pad.context = Some(context);
-        if !self.settings.controller.enabled {
+        // A registered input source drives in the pad modules' place: they read no pad and act on
+        // nothing, as when controllers are off, so a pad's events can't disagree with what the
+        // source answers.
+        if !self.settings.controller.enabled || self.input_source.is_some() {
             self.pad_output_off();
             self.pad_cancel_inputs(event_loop);
             // The radial menu closed with the pad: its overlay fades out, as for a cancel.
@@ -395,7 +415,9 @@ impl Game<'_> {
             self.pad.state = PadState::default();
             self.pad.in_use = false;
             // The keyboard's menu focus follows its widget all the same.
-            self.pad_menu_frame(event_loop);
+            if !self.loading_overlay_preview_active() {
+                self.pad_menu_frame(event_loop);
+            }
             return;
         }
         let hardware = match self.pad.feed {
@@ -432,6 +454,25 @@ impl Game<'_> {
         self.ui.options.pad_glyphs = Glyphs::of(&self.settings.controller, self.pad.style);
         self.ui.options.pad_driving = self.pad.in_use && self.pad_focus_mode();
         let mut state = hardware.merge(&self.pad.injected);
+        for button in std::mem::take(&mut self.pad.taps) {
+            self.pad.injected.set(button, false);
+        }
+        let threshold = self.settings.controller.trigger_threshold;
+        if self.loading_overlay_preview_active() {
+            self.pad.state = state;
+            self.pad_cancel_inputs(event_loop);
+            let edges = self.pad.edges.update(&state, threshold);
+            // A press that began here must not act when the underlying screen returns.
+            self.pad.edges.cancel();
+            if self.pad_focused()
+                && edges
+                    .into_iter()
+                    .any(|(button, down)| down && matches!(button, Button::East | Button::Start))
+            {
+                self.dismiss_loading_overlay_preview();
+            }
+            return;
+        }
         let activity = self.pad.activity.observe(&state, &self.settings.controller);
         for (i, (stick, deadzone)) in [
             (&mut state.left, self.settings.controller.move_deadzone),
@@ -440,7 +481,7 @@ impl Game<'_> {
         .into_iter()
         .enumerate()
         {
-            if gamepad::radial(*stick, deadzone) == [0.0; 2] {
+            if !self.pad_stick_held(i, *stick, deadzone) {
                 self.pad.blocked_sticks[i] = false;
             }
             if self.pad.blocked_sticks[i] || !self.pad_focused() {
@@ -448,10 +489,6 @@ impl Game<'_> {
                 self.pad.peaks[i] = [0.0; 2];
             }
         }
-        for button in std::mem::take(&mut self.pad.taps) {
-            self.pad.injected.set(button, false);
-        }
-        let threshold = self.settings.controller.trigger_threshold;
         let edges = self.pad.edges.update(&state, threshold);
         if activity && self.pad_focused() {
             self.last_input = Instant::now();
@@ -492,6 +529,10 @@ impl Game<'_> {
                 radial_play::PollStep::Edge(button, down) => (button, down),
             };
             self.pad_edge(event_loop, button, down);
+            if self.loading_overlay_preview_active() {
+                self.pad_cancel_inputs(event_loop);
+                return;
+            }
             let context = self.pad_context();
             if let Some(old) = self.pad.context.filter(|old| *old != context) {
                 if old.screen != context.screen {
@@ -521,6 +562,18 @@ impl Game<'_> {
         self.pad_button_logged(event_loop, button, down);
     }
 
+    fn pad_stick_held(&self, stick: usize, axes: [f32; 2], deadzone: f32) -> bool {
+        if gamepad::radial(axes, deadzone) != [0.0; 2] {
+            return true;
+        }
+        let hook_active = match stick {
+            0 => mod_api::__private::enabled_listened(mod_api::HookId::ControllerMove),
+            1 => mod_api::__private::enabled_listened(mod_api::HookId::ControllerLook),
+            _ => false,
+        };
+        hook_active && axes != [0.0; 2]
+    }
+
     /// End held actions and captures before another context receives input.
     fn pad_cancel_inputs(&mut self, event_loop: &dyn EventLoopCtl) {
         // Before the releases below: a cancelled press must not click, a cancelled trigger
@@ -531,10 +584,12 @@ impl Game<'_> {
         self.pad.radial.cancel();
         self.direct_craft_stop();
         let held_sticks = [
-            gamepad::radial(self.pad.state.left, self.settings.controller.move_deadzone)
-                != [0.0; 2],
-            gamepad::radial(self.pad.state.right, self.settings.controller.look_deadzone)
-                != [0.0; 2],
+            self.pad_stick_held(0, self.pad.state.left, self.settings.controller.move_deadzone),
+            self.pad_stick_held(
+                1,
+                self.pad.state.right,
+                self.settings.controller.look_deadzone,
+            ),
         ];
         for (blocked, held) in self.pad.blocked_sticks.iter_mut().zip(held_sticks) {
             *blocked |= held;
@@ -790,12 +845,10 @@ impl Game<'_> {
             self.save_title_options();
             return Ok(());
         }
-        if self.sign_edit.is_some() {
-            self.close_sign_editor();
-            return Ok(());
-        }
-        if self.book.is_some() {
-            self.close_book();
+        if let Some(editor) = self.active_editor_overlay() {
+            if !self.screen_key_pressed(KeyCode::Escape, false) {
+                self.editor_input(editor, Some(KeyCode::Escape), None);
+            }
             return Ok(());
         }
         self.key_pressed(KeyCode::Escape, KeyCode::Escape)
@@ -803,6 +856,13 @@ impl Game<'_> {
 
     /// The left stick as the move vector, while playing.
     pub(super) fn pad_move(&self) -> Option<[f32; 2]> {
+        gamepad::move_vector(
+            self.pad_move_axes()?,
+            self.settings.controller.move_deadzone,
+        )
+    }
+
+    fn pad_move_axes(&self) -> Option<[f32; 2]> {
         let settings = &self.settings.controller;
         if !settings.enabled
             || self.pad_in_menu()
@@ -811,7 +871,38 @@ impl Game<'_> {
         {
             return None;
         }
-        gamepad::move_vector(self.pad.state.left, settings.move_deadzone)
+        Some(self.pad.state.left)
+    }
+
+    /// Read only at the gameplay movement tick, not when a HUD or tutorial observes keys.
+    pub(super) fn pad_move_for_tick(&self, external_server: bool) -> (Option<[f32; 2]>, bool) {
+        let Some(axes) = self.pad_move_axes() else {
+            return (None, false);
+        };
+        let deadzone = self.settings.controller.move_deadzone;
+        if self.riding.is_none()
+            && axes != [0.0; 2]
+            && mod_api::__private::enabled_listened(mod_api::HookId::ControllerMove)
+            && axes.iter().all(|axis| axis.is_finite())
+        {
+            let mut movement = None;
+            self.native_controller_move(mod_api::__private::ControllerMoveCall {
+                axes,
+                deadzone,
+                frame_seconds: self.frame_ticks / 20.0,
+                external_server,
+                movement: &mut movement,
+            });
+            if let Some(movement) = movement
+                && let Some(direction) = bounded_move_override(movement.direction)
+            {
+                return (
+                    (direction != [0.0; 2]).then_some(direction),
+                    movement.bypass_square_movement,
+                );
+            }
+        }
+        (gamepad::move_vector(axes, deadzone), false)
     }
 
     /// The right stick turns the view, once per frame (`Entity.turn`).
@@ -826,13 +917,34 @@ impl Game<'_> {
             return;
         }
         // A long frame (a hitch) must not spin the view.
-        let seconds = seconds.min(0.1);
-        let turn = gamepad::look_delta(
-            self.pad.state.right,
-            settings,
-            seconds,
-            self.camera_type.is_first_person() && self.scoping(),
-        );
+        let seconds = seconds.min(horizon_client::input_source::LOOK_SECONDS_CAP);
+        let axes = self.pad.state.right;
+        let scoping = self.camera_type.is_first_person() && self.scoping();
+        let mut turn = None;
+        if axes != [0.0; 2]
+            && mod_api::__private::enabled_listened(mod_api::HookId::ControllerLook)
+            && axes.iter().all(|axis| axis.is_finite())
+        {
+            let input = mod_api::ControllerLookInput::from_game(
+                axes,
+                settings.look_deadzone,
+                settings.look_sensitivity,
+                [settings.invert_x, settings.invert_y],
+                seconds,
+                scoping,
+                self.input_is_external_multiplayer(),
+            );
+            self.native_controller_look(mod_api::__private::ControllerLookCall {
+                input: &input,
+                turn: &mut turn,
+            });
+        }
+        let turn = match turn {
+            Some([yaw, pitch]) if yaw.is_finite() && pitch.is_finite() => {
+                (yaw.clamp(-180.0, 180.0), pitch.clamp(-180.0, 180.0))
+            }
+            _ => gamepad::look_delta(axes, settings, seconds, scoping),
+        };
         // The cinematic camera eases the stick's turn in and out, as it does the mouse's.
         let (yaw, pitch) = self.pad.look.turn(turn, seconds, self.smooth_camera);
         if yaw == 0.0 && pitch == 0.0 {
@@ -848,11 +960,10 @@ impl Game<'_> {
         if !settings.enabled || !settings.vibration || !self.pad.in_use {
             return;
         }
-        // Bedrock's own switch, off for a player who doesn't want every block to tick; the
-        // split's tick has its own, so either can be off without the other.
+        // Bedrock's own switch, off for a player who doesn't want every block to tick. It
+        // covers the split's buzz too: both are the same Bedrock-like feedback.
         match rumble {
-            Rumble::BlockBroken if !settings.block_vibration => return,
-            Rumble::ItemStackSplit if !settings.split_vibration => return,
+            Rumble::BlockBroken | Rumble::ItemStackSplit if !settings.block_vibration => return,
             _ => {}
         }
         let Some(pulse) = rumble.pulse() else {
@@ -1020,5 +1131,17 @@ impl Game<'_> {
                 Ok(json!({ "ok": true }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bounded_move_override;
+
+    #[test]
+    fn finite_extreme_controller_override_keeps_its_ratio() {
+        let [x, y] = bounded_move_override([f32::MAX, f32::MAX / 2.0]).unwrap();
+        assert!((x * x + y * y - 1.0).abs() < f32::EPSILON);
+        assert_eq!(x, y * 2.0);
     }
 }

@@ -8,7 +8,7 @@ use crate::{
     block_support::BlockSupportRegistry,
     block_survival::{BlockSurvivalRegistry, SurvivalDefinitions, SurvivalRule},
     collision::CachedCollisionRegistry,
-    registry::{BlockRegistry, BlockTableFile},
+    registry::{BlockRegistry, BlockStateId, BlockTableFile},
 };
 use horizon_std::fs;
 use horizon_std::fs::PathExt as _;
@@ -30,8 +30,32 @@ pub(super) struct BlockBehavior {
 fn resource(message: impl Into<String>) -> GeneratorError {
     GeneratorError::Resource(message.into())
 }
-fn rule(name: &str) -> Option<SurvivalRule> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrowingPlantFamilyDefinition {
+    head: String,
+    body: String,
+    direction: String,
+    #[serde(default)]
+    kelp: bool,
+}
+
+fn rule(value: &Value) -> Option<SurvivalRule> {
     use SurvivalRule::*;
+    let Some(name) = value.as_str() else {
+        let family: GrowingPlantFamilyDefinition = serde_json::from_value(value.clone()).ok()?;
+        let direction = match family.direction.as_str() {
+            "up" => horizon_core::geometry::Direction::Up,
+            "down" => horizon_core::geometry::Direction::Down,
+            _ => return None,
+        };
+        return Some(GrowingPlantFamily {
+            head: family.head,
+            body: family.body,
+            direction,
+            kelp: family.kelp,
+        });
+    };
     if let Some(tag) = name.strip_prefix("TagBelow:") {
         return Some(TagBelow(tag.to_owned()));
     }
@@ -93,11 +117,14 @@ impl BlockBehavior {
     /// Files: `block-properties.nbt`, `cached-collision.nbt`,
     /// `cached-support.nbt`, `survival-rules.json`,
     /// `survival-extra-definitions.json` and `placement-definitions.json`.
+    /// `asks_their_ground` is the block behaviours' answer to which templates ask the
+    /// ground they stand on (`Behaviours::states_asking_their_ground`), empty without them.
     pub(super) fn load(
         dir: &Path,
         registry: &'static BlockRegistry,
         tags: &BTreeMap<String, Vec<String>>,
         fluid_tags: &BTreeMap<String, Vec<String>>,
+        asks_their_ground: BTreeSet<BlockStateId>,
     ) -> Result<Option<Self>, GeneratorError> {
         if !dir.join("block-properties.nbt").fs_exists() {
             return Ok(None);
@@ -135,10 +162,9 @@ impl BlockBehavior {
             .ok_or_else(|| resource("survival rules"))?
             .iter()
             .map(|(name, value)| {
-                let text = value.as_str().unwrap_or_default();
-                rule(text)
+                rule(value)
                     .map(|rule| (name.clone(), rule))
-                    .ok_or_else(|| resource(format!("unknown survival rule {text}")))
+                    .ok_or_else(|| resource(format!("unknown survival rule {value}")))
             })
             .collect::<Result<_, _>>()?;
         let extra = json("survival-extra-definitions.json")?;
@@ -155,6 +181,7 @@ impl BlockBehavior {
             &definitions,
             tags,
             fluid_tags,
+            asks_their_ground,
         )?;
         let placement = json("placement-definitions.json")?;
         Ok(Some(Self {

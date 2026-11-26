@@ -5,13 +5,9 @@
 //! icon, name, line, summary, what it may do, downloads, and Install in or Remove from the
 //! instance).
 //!
-//! The mockup's tabs are its sources (Horizon, Modrinth, CurseForge soon); the launcher's page
-//! is by kind (mods, modpacks, resource packs, shader packs, data packs), each with its sources,
-//! so the tabs are the kinds and the sources are a switch under the search: Horizon's registry
-//! or Modrinth, CurseForge beside them as coming soon, on the kinds both serve (`switches`):
-//! shader packs are Horizon's registry's only, and a Java
-//! instance's files always Modrinth's. Modrinth's Java mods are offered to a Horizon instance
-//! too, each marked Works, Partly or Doesn't run in Horizon. Not in the mockup, kept in its
+//! The page is by kind (mods, modpacks, resource packs, shader packs, data packs); each kind
+//! searches its own source. Resource packs, shader packs and data packs can switch between
+//! Horizon and Modrinth. A Java instance's supported files come from Modrinth. Kept in the mockup's
 //! patterns: Show everything, the filters, which instance or world installs go to (under the
 //! search); the
 //! project's page, its rating and why it runs or not (in the project's card); adding a native mod
@@ -29,7 +25,7 @@ impl Launcher {
     /// The search's placeholder: the registry's count when it is listed whole.
     pub(super) fn mods_placeholder(&self) -> SharedString {
         let m = &self.mods;
-        let registry = m.source == SourceId::Horizon && m.java.is_none();
+        let registry = m.source() == SourceId::Horizon;
         if registry
             && m.kind == PackKind::Mod
             && m.searched
@@ -37,7 +33,7 @@ impl Launcher {
             && m.text.text().is_empty()
         {
             // Results come in pages: only a last page gives the real count.
-            if m.more {
+            if m.next_offset.is_some() {
                 return tr("Search Horizon mods").into();
             }
             trf(
@@ -45,10 +41,6 @@ impl Launcher {
                 &[("count", &m.results.len().to_string())],
             )
             .into()
-        } else if m.source == SourceId::Modrinth
-            && matches!(m.kind, PackKind::ResourcePack | PackKind::Modpack)
-        {
-            tr("Search resource packs and modpacks").into()
         } else {
             tr("Search, then Enter").into()
         }
@@ -129,61 +121,58 @@ impl Launcher {
             );
         }
 
-        let java = self.mods.java_for(self.mods.kind).is_some();
-        let registry = self.mods.source == SourceId::Horizon && !java;
-        let everything = self.mods.everything;
-        let extras = div()
+        let source_controls = self.mods_source_switch(cx).map(|switch| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(16.))
+                .child(switch)
+                .when(self.mods.can_show_everything(), |d| {
+                    d.child(self.mods_everything_toggle(cx))
+                })
+        });
+        let search = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .flex_1()
+                    .min_w(px(220.))
+                    .child(self.mods_field(cx)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap(px(8.))
+                    .child(self.glass_mods_sort(cx))
+                    .child(self.mods_filters_trigger(cx)),
+            );
+        let toolbar = div()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .px(px(8.))
-            .pb(px(8.))
-            .when(!registry && !java, |d| {
-                d.child(
-                    div()
-                        .id("mods-everything")
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .cursor_pointer()
-                        .child(ui::toggle(
-                            "mods-everything-switch",
-                            everything,
-                            ui::look().accent,
-                            ui::look().on_accent,
-                            &t,
-                        ))
-                        .child(ui::text(13., FontWeight::NORMAL, 0.7).child(tr("Show everything")))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.mods.toggle_everything();
-                            this.mods_search(0);
-                            cx.notify();
-                        })),
-                )
-            })
-            .when(switches(self.mods.kind) && !java, |d| {
-                d.child(self.glass_source_switch(cx))
-            })
-            .child(self.mods_filters(cx))
+            .px(px(4.))
+            .pt(px(4.))
+            .pb(px(12.))
+            .child(search)
+            .children(source_controls)
+            .children(self.mods_filters_body(cx))
             .children(self.mods_target_line(cx))
             .children(self.mods_left_out_note());
-        // The search, and the sort on its right.
-        let search = div()
-            .m(px(4.))
-            .mb(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(div().flex_1().min_w_0().child(self.mods_field(cx)))
-            .child(self.glass_mods_sort(cx));
         let list = crate::glass::plate(radius::PANEL)
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
             .p(px(8.))
-            .child(search)
-            .child(extras)
+            .child(toolbar)
             .child(self.glass_mods_list(cx));
         // The card stays in view as the list scrolls (`lg:sticky lg:top-0`, `sticky.rs`).
         let detail = self.glass_mod_detail(&instance, cx).map(|d| {
@@ -223,55 +212,6 @@ impl Launcher {
         )
     }
 
-    /// The source switch (`switches`): Horizon's registry or Modrinth as small tabs, CurseForge
-    /// after them as coming soon, shown, inert, never searched, as in the mockup.
-    fn glass_source_switch(&mut self, cx: &mut Context<Self>) -> Div {
-        let t = self.theme;
-        let current = self.mods.source;
-        let active = SOURCES.iter().position(|(s, _)| *s == current).unwrap_or(0);
-        let items: Vec<_> = SOURCES
-            .into_iter()
-            .map(|(source, label)| {
-                small_tab(format!("mods-source-{label}").into(), source == current, &t)
-                    .child(tr(label).to_string())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if this.mods.source != source {
-                            this.mods.source = source;
-                            this.mods.browse.filters = Default::default();
-                            this.mods.browse.open = None;
-                            this.mods.picked = None;
-                            this.mods_search(0);
-                        }
-                        cx.notify();
-                    }))
-            })
-            .collect();
-        let row = div()
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .child(ui::pill_strip(
-                "mods-sources",
-                active,
-                32.,
-                0.,
-                div().flex().items_center().gap(px(4.)),
-                items,
-            ));
-        row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .h(px(32.))
-                .px(px(12.))
-                .text_size(px(13.))
-                .text_color(white(0.35))
-                .child("CurseForge")
-                .child(tr("soon").to_string()),
-        )
-    }
-
     /// The "Sort by" dropdown beside the search: as tall and as round as the search, white at
     /// 7 % like it; the choices on a glass popover under it, the chosen one ticked.
     fn glass_mods_sort(&mut self, cx: &mut Context<Self>) -> Div {
@@ -289,41 +229,25 @@ impl Launcher {
             .find(|(value, _)| Some(*value) == shown)
             .map_or("", |(_, label)| *label);
         let open = self.mods.browse.sort_menu;
-        let button = keyboard(
-            div()
-                .id("mods-sort")
-                .flex()
-                .flex_none()
-                .items_center()
-                .gap(px(8.))
-                .h(px(44.))
-                .px(px(14.))
-                .rounded(px(12.))
-                .bg(white(if open { 0.11 } else { 0.07 }))
-                .hover(|s| s.bg(white(0.11)))
-                .cursor_pointer()
-                .font_family(horizon_theme::glass::FONT)
-                .text_size(px(14.))
-                .text_color(white(ink::FULL))
-                .child(trf("Sort by: {order}", &[("order", tr(name))]))
-                .child(
-                    ui::icon("arrow-down-01", 16., white(ink::NOTE)).with_transformation(
-                        gpui::Transformation::rotate(gpui::radians(if open {
-                            std::f32::consts::PI
-                        } else {
-                            0.
-                        })),
-                    ),
-                )
-                .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                    if this.closed_by_this_press(event) {
-                        return;
-                    }
-                    this.mods.browse.sort_menu = !this.mods.browse.sort_menu;
-                    cx.notify();
-                })),
-            &t,
-        );
+        let button = self
+            .glass_mods_control("mods-sort", open)
+            .child(trf("Sort by: {order}", &[("order", tr(name))]))
+            .child(
+                ui::icon("arrow-down-01", 16., white(ink::NOTE)).with_transformation(
+                    gpui::Transformation::rotate(gpui::radians(if open {
+                        std::f32::consts::PI
+                    } else {
+                        0.
+                    })),
+                ),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if this.closed_by_this_press(event) {
+                    return;
+                }
+                this.mods.browse.sort_menu = !this.mods.browse.sort_menu;
+                cx.notify();
+            }));
         let mut wrap = div().relative().flex_none().child(button);
         if open {
             let mut menu = ui::popover(220.)
@@ -352,8 +276,7 @@ impl Launcher {
                 );
             }
             wrap = wrap.child(
-                gpui::deferred(div().absolute().top(px(52.)).right_0().child(menu))
-                    .with_priority(1),
+                gpui::deferred(div().absolute().top(px(52.)).left_0().child(menu)).with_priority(1),
             );
         }
         wrap
@@ -363,8 +286,7 @@ impl Launcher {
     /// use yet (made for the earlier mod system), with how many.
     fn mods_left_out_note(&self) -> Option<Div> {
         let m = &self.mods;
-        if m.source != SourceId::Horizon || m.kind != PackKind::Mod || m.java_for(m.kind).is_some()
-        {
+        if m.source() != SourceId::Horizon || m.kind != PackKind::Mod {
             return None;
         }
         let count = browser::horizon::projects_left_out().filter(|n| *n > 0)?;
@@ -373,7 +295,6 @@ impl Launcher {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .px(px(4.))
                 .child(ui::icon("information-circle", 14., white(ink::QUIET)))
                 .child(ui::text(13., FontWeight::NORMAL, ink::QUIET).child(trf(
                     "{count} more mods made for Horizon's earlier mod system are hidden until their authors update them.",
@@ -388,40 +309,19 @@ impl Launcher {
         let m = &self.mods;
         if let Some(e) = &m.error {
             // A failed search stays as an amber card: what happened in plain words, Try again,
-            // Modrinth while Horizon's own list is down, and the error's own words on request.
+            // and the error's own words on request.
             let details = m.error_details;
-            let horizon = m.source == SourceId::Horizon && m.java_for(m.kind).is_none();
+            let horizon = m.source() == SourceId::Horizon;
             let what = if horizon {
                 tr("Couldn't load Horizon's mod list.")
             } else {
                 tr("The search didn't go through.")
             };
-            let mut actions = div().flex().flex_wrap().gap(px(8.)).child(
-                button("mods-retry", "Try again", Kind::Secondary, &t).on_click(cx.listener(
-                    |this, _: &ClickEvent, _, cx| {
-                        this.mods_search(0);
-                        cx.notify();
-                    },
-                )),
-            );
-            if horizon {
-                actions = actions.child(
-                    button(
-                        "mods-to-modrinth",
-                        "Browse Modrinth instead",
-                        Kind::Ghost,
-                        &t,
-                    )
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.mods.source = SourceId::Modrinth;
-                        this.mods.browse.filters = Default::default();
-                        this.mods.browse.open = None;
-                        this.mods.picked = None;
-                        this.mods_search(0);
-                        cx.notify();
-                    })),
-                );
-            }
+            let mut actions = div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.))
+                .child(self.mods_retry_button(cx));
             actions = actions.child(
                 button(
                     "mods-error-details",
@@ -461,11 +361,13 @@ impl Launcher {
         }
         let shown = m.shown();
         if shown.is_empty() {
-            let line = if !m.results.is_empty() {
-                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
-                    .to_string()
+            let line = if m.kind == PackKind::Shader && m.java.is_some() {
+                tr("Shader packs for Java instances aren't supported yet.").to_string()
             } else if m.searching || !m.searched {
                 tr("Searching…").to_string()
+            } else if !m.results.is_empty() {
+                tr("Nothing found that runs in Horizon. Show everything lists the rest.")
+                    .to_string()
             } else if let Some(target) = m.java_for(m.kind) {
                 trf(
                     "Nothing found for {target}.",
@@ -476,9 +378,9 @@ impl Launcher {
                     "Nothing matches “{query}”.",
                     &[("query", m.text.text().trim())],
                 )
-            } else if m.source == SourceId::Horizon {
+            } else if m.source() == SourceId::Horizon {
                 tr("Nothing in Horizon's registry matches yet.").to_string()
-            } else if m.everything {
+            } else if m.everything || !m.can_show_everything() {
                 tr("Nothing found.").to_string()
             } else {
                 tr("Nothing found that runs in Horizon. Show everything lists the rest.")
@@ -490,7 +392,7 @@ impl Launcher {
                 .child(line);
             return self.glass_mods_more(div().flex().flex_col().child(line), cx);
         }
-        let picked = self.mods_picked().map(|p| p.id.clone());
+        let picked = self.mods.picked_project().map(|p| p.id);
         // Registry pages add up behind More: only the rows near the view are built (`cull`).
         let (rows, scroll) = (
             self.mods.results_list.clone(),
@@ -544,7 +446,7 @@ impl Launcher {
                 .when(can_install, |d| {
                     d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         cx.stop_propagation();
-                        this.mods_install(known.source, known.id.clone(), Some(known.clone()));
+                        this.mods_install(InstallRequest::Browse(Box::new(known.clone())));
                         cx.notify();
                     }))
                 })
@@ -636,9 +538,8 @@ impl Launcher {
     /// The list's More, under `list` while the source has more pages.
     fn glass_mods_more(&self, mut list: Div, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        if self.mods.more {
+        if let Some(offset) = self.mods.next_offset {
             let searching = self.mods.searching;
-            let offset = self.mods.results.len();
             list = list.child(
                 div().flex().p(px(8.)).child(
                     ui::quiet("mods-more", tr("More"), 36., &t)
@@ -655,35 +556,10 @@ impl Launcher {
         list
     }
 
-    /// The picked result, else the first; when a search finds nothing, the card shown last stays
-    /// (the mockup's detail keeps its mod).
-    fn mods_picked(&mut self) -> Option<Project> {
-        let shown = self.mods.shown();
-        let m = &mut self.mods;
-        let mut listed = shown.iter().map(|&i| &m.results[i]);
-        let found = m
-            .picked
-            .as_ref()
-            .and_then(|id| listed.clone().find(|p| &p.id == id))
-            .or(listed.next())
-            .cloned();
-        match found {
-            Some(p) => {
-                m.shown = Some(p.clone());
-                Some(p)
-            }
-            None if m.searched && !m.searching && m.error.is_none() => m
-                .shown
-                .clone()
-                .filter(|p| p.kind == m.kind && p.source == m.source),
-            None => None,
-        }
-    }
-
     /// The picked project's card (`ModDetail`).
     fn glass_mod_detail(&mut self, instance: &str, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
-        let p = self.mods_picked()?;
+        let p = self.mods.picked_project()?;
         let icon = self.mods_icon(&p, 64.);
         let m = &self.mods;
         let support = m.support(&p);
@@ -765,7 +641,7 @@ impl Launcher {
             .when(busy.is_some(), |d| d.opacity(0.5))
             .when(busy.is_none(), |d| {
                 d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods_install(known.source, known.id.clone(), Some(known.clone()));
+                    this.mods_install(InstallRequest::Browse(Box::new(known.clone())));
                     cx.notify();
                 }))
             })

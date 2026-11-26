@@ -151,8 +151,8 @@ pub const ROUTES: [Route; 32] = [
     Route {
         method: "POST",
         path: "/api/v1/restore",
-        takes: "`{\"name\": \"<backup>\", \"dimension\": \"minecraft:the_nether\"}` (`dimension` optional)",
-        answers: "`{\"name\": \"<backup>\", \"dimension\": \"<id>\" or null}`",
+        takes: "`{\"name\": \"<backup>\", \"dimension\": \"minecraft:the_nether\"}` (`name` must be a nonblank string; `dimension` is optional)",
+        answers: "`{\"name\": \"<backup>\", \"dimension\": \"<id>\" or null}`; `400` if no backup name is given",
         what: "Restart the game with that backup's world, or only one dimension of it (what it replaces is kept in backups/)",
     },
     Route {
@@ -381,6 +381,8 @@ pub struct Shared {
     pub event_added: std::sync::Condvar,
     /// The management protocol's connections, which its notifications go to (management.rs).
     pub management: crate::management::Clients,
+    /// `[proxy]`'s listener, when it is on (proxy/mod.rs).
+    pub proxy: Mutex<Option<crate::proxy::Proxy>>,
 }
 
 impl Shared {
@@ -413,7 +415,15 @@ impl Shared {
             events: Mutex::default(),
             event_added: std::sync::Condvar::new(),
             management: crate::management::Clients::default(),
+            proxy: Mutex::new(None),
         })
+    }
+
+    /// What `[proxy]` is told as the game starts, stops and ends (proxy/mod.rs); nothing when it is off.
+    pub fn proxy(&self, tell: impl FnOnce(&crate::proxy::Proxy)) {
+        if let Some(proxy) = self.proxy.lock().unwrap().as_ref() {
+            tell(proxy);
+        }
     }
 
     /// Ends an update or rollback: its outcome, in the log and in `status`.
@@ -455,7 +465,16 @@ impl Shared {
             update.busy = Some("Looking for the newest release".into());
         }
         if let Some(tag) = tag {
-            if !install.release(&tag).is_dir() || tag.contains(['/', '\\']) {
+            // A plain release name, as `update::unpack` requires: ".." is a folder without a slash, and
+            // would point `current` at the install's root.
+            // On Windows `releases\C:` joins to the drive-relative path `C:`, so a tag with a colon
+            // is refused too, and it must be exactly one normal path component.
+            let mut parts = std::path::Path::new(&tag).components();
+            let plain = !tag.starts_with('.')
+                && !tag.contains(['/', '\\', ':'])
+                && matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                && parts.next().is_none();
+            if !plain || !install.release(&tag).is_dir() {
                 self.update.lock().unwrap().busy = None;
                 return Err(format!(
                     "{tag} isn't installed (`horizon-server update` downloads it)"
@@ -529,13 +548,18 @@ impl Shared {
             }
         };
         if let Some(game) = game.as_mut() {
-            let saved = game.ask("console save-off").and_then(|_| {
-                // A big world's flush can take longer than an ordinary reply.
-                game.set_reply_timeout(FLUSH_TIMEOUT)?;
-                let flushed = game.ask("console save-all flush");
-                let _ = game.set_reply_timeout(engine::REPLY_TIMEOUT);
-                flushed
-            });
+            let saved = game
+                .ask("console save-off")
+                .and_then(reject_control_error)
+                .and_then(|_| {
+                    // A big world's flush can take longer than an ordinary reply.
+                    game.set_reply_timeout(FLUSH_TIMEOUT)?;
+                    let flushed = game
+                        .ask("console save-all flush")
+                        .and_then(reject_control_error);
+                    let _ = game.set_reply_timeout(engine::REPLY_TIMEOUT);
+                    flushed
+                });
             if let Err(e) = saved {
                 // Saving may be off already (a save-off whose reply was lost counts): it goes back
                 // on, or the game would run without autosaving until the next backup.
@@ -549,6 +573,18 @@ impl Shared {
         }
         result
     }
+}
+
+/// A JSON error is a reply, but it does not mean the requested save command ran.
+fn reject_control_error(reply: Value) -> std::io::Result<Value> {
+    if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+        let message = error
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| error.to_string());
+        return Err(std::io::Error::other(message));
+    }
+    Ok(reply)
 }
 
 /// How long a backup waits for the game's `save-all flush`.
@@ -764,7 +800,14 @@ pub fn route(shared: &Arc<Shared>, request: &Request) -> Response {
         }
         ("POST", "/api/v1/restore") => {
             let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
-            match backup::find(&shared.dir, body["name"].as_str().unwrap_or_default()) {
+            let Some(name) = body["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            else {
+                return Response::error(400, "a backup name is required");
+            };
+            match backup::find(&shared.dir, name) {
                 Ok(name) => {
                     let dimension = match body["dimension"].as_str() {
                         None => None,
@@ -1045,6 +1088,40 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn an_update_names_a_release_not_a_folder_around_it() {
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("horizon-server-update-tag-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("releases/v2")).unwrap();
+        let dir = root.join("server");
+        std::fs::create_dir_all(&dir).unwrap();
+        let shared = Shared::with_install(&dir, Some(Install { root: root.clone() }));
+        for tag in ["..", ".", "", ".hidden", "v2/../v2", "..\\x", "C:", "C:x"] {
+            let err = shared
+                .start_update(Some(tag.into()), Duration::from_secs(1))
+                .unwrap_err();
+            assert!(err.contains("isn't installed"), "{tag:?}: {err}");
+            assert!(shared.update.lock().unwrap().pending.is_none(), "{tag:?}");
+        }
+        shared
+            .start_update(Some("v2".into()), Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            shared
+                .update
+                .lock()
+                .unwrap()
+                .pending
+                .as_ref()
+                .map(|p| p.0.as_str()),
+            Some("v2")
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn tokens_compare_whole() {
@@ -1443,6 +1520,107 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_rejects_control_errors_while_startup_is_finishing() {
+        for (case, failed_command, expected_commands) in [
+            (
+                "save-off",
+                "console save-off",
+                vec!["console save-off", "console save-on"],
+            ),
+            (
+                "flush",
+                "console save-all flush",
+                vec![
+                    "console save-off",
+                    "console save-all flush",
+                    "console save-on",
+                ],
+            ),
+        ] {
+            let dir = std::env::temp_dir().join(format!(
+                "horizon-server-backup-startup-error-{}-{case}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join(".horizon")).unwrap();
+            std::fs::write(dir.join(crate::config::FILE), crate::config::TEMPLATE).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            std::fs::write(
+                horizon_server_launch::control_path(&dir),
+                json!({"port": port, "token": "t"}).to_string(),
+            )
+            .unwrap();
+            let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+            let heard = asked.clone();
+            let failed_command = failed_command.to_owned();
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let mut handlers = Vec::new();
+                while handlers.len() < 2 && std::time::Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let heard = heard.clone();
+                            let failed_command = failed_command.clone();
+                            handlers.push(std::thread::spawn(move || {
+                                let mut reader =
+                                    std::io::BufReader::new(stream.try_clone().unwrap());
+                                let mut writer = stream;
+                                let mut line = String::new();
+                                while std::io::BufRead::read_line(&mut reader, &mut line)
+                                    .unwrap_or(0)
+                                    > 0
+                                {
+                                    let request = line.trim().to_owned();
+                                    line.clear();
+                                    heard.lock().unwrap().push(request.clone());
+                                    let reply = if request == failed_command {
+                                        b"{\"error\":\"the dedicated server is still starting\"}\n"
+                                            .as_slice()
+                                    } else {
+                                        b"{\"ok\":true}\n".as_slice()
+                                    };
+                                    std::io::Write::write_all(&mut writer, reply).unwrap();
+                                    // Keep this connection alive after an error. An old caller that
+                                    // ignores the JSON error will continue to flush and can expose
+                                    // the false-positive backup this test guards against.
+                                    if request == "console save-on" {
+                                        return;
+                                    }
+                                }
+                            }));
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept control request: {error}"),
+                    }
+                }
+                assert_eq!(handlers.len(), 2, "save-on uses a separate connection");
+                for handler in handlers {
+                    handler.join().unwrap();
+                }
+            });
+
+            let shared = Shared::new(&dir);
+            shared.set_phase(Phase::Running);
+            let error = shared.back_up("test.zip").unwrap_err();
+            assert!(error.contains("didn't save"), "{error}");
+            server.join().unwrap();
+            let requests = asked.lock().unwrap().clone();
+            let commands: Vec<&str> = requests
+                .iter()
+                .filter(|request| !request.starts_with("auth "))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(commands, expected_commands, "{case}");
+            assert!(backup::list(&dir).is_empty(), "{case} made a backup");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
     #[ignore = "daily"]
     fn the_api_wants_its_token() {
         let dir = std::env::temp_dir().join(format!("horizon-server-api-{}", std::process::id()));
@@ -1651,6 +1829,7 @@ mod tests {
             "api.allow_public",
             "panel.bind",
             "properties.enable-rcon",
+            "anticheat.strikes=",
         ] {
             let (status, _) = call(
                 "PATCH",
@@ -1701,6 +1880,42 @@ mod tests {
         );
         assert!(backup::list(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn restore_requires_a_nonblank_backup_name() {
+        let root = std::env::temp_dir().join(format!(
+            "horizon-server-restore-validation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("backups")).unwrap();
+        // One backup: a blank name used to match it as a prefix and restore it (#20180).
+        std::fs::write(root.join("backups/2026-01-01_00-00-00-manual.zip"), b"zip").unwrap();
+        let shared = Shared::with_install(&root, None);
+        for body in [
+            "",
+            "{}",
+            r#"{"name":null}"#,
+            r#"{"name":42}"#,
+            r#"{"name":""}"#,
+            r#"{"name":" "}"#,
+        ] {
+            let response = route(
+                &shared,
+                &Request {
+                    method: "POST".into(),
+                    path: "/api/v1/restore".into(),
+                    query: String::new(),
+                    headers: Vec::new(),
+                    body: body.as_bytes().to_vec(),
+                },
+            );
+            assert_eq!(response.status, 400, "{body:?}");
+            assert!(shared.restore.lock().unwrap().is_none(), "{body:?}");
+            assert!(!shared.restart.load(Ordering::SeqCst), "{body:?}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn backup_reply(mut response: Response) -> Value {

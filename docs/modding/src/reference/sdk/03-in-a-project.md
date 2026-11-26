@@ -7,7 +7,7 @@ A code mod's project names the mod API by the path where `cargo horizon-mod` kee
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 ```
 
-`horizon-mod-points` and `horizon-internals` are named the same way, by `.horizon/sdk/api/crates/<package>`. The
+`horizon-internals` is named the same way, by `.horizon/sdk/api/crates/<package>`. The
 SDK carries no `horizon-internals` crate yet: a mod that names game internals builds through the launcher, which
 puts the mod's own generated facade in its place, and not with a plain `cargo check`. Features
 (`features = ["testing"]` on a dev-dependency) are kept.
@@ -69,7 +69,7 @@ launcher or sent to a registry.
 Every SDK base is checked the same way, against Horizon's signature. The launcher's own copies are described in
 [Cache and disk](../../how-to/native-mods/10-cache-and-disk.md).
 
-The internals commands (`internals add`, `inject add`, `inject update`, and `update` on a mod with an `internals`
-list or `[[inject]]` rows) read `internals.json` and `points.json` from the pinned build's signed SDK, through the
+The internals commands (`internals add`, and `update` on a mod with an `internals` list) read `internals.json`
+from the pinned build's signed SDK, through the
 same fetch and `HORIZON_SDK_BASE`: its `build-data.tar.xz` is unpacked once into
 `.horizon/cache/<build id>/build-data/`. A build with no SDK release is refused by name.

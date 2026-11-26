@@ -6,9 +6,10 @@
 //! process holds, which closes with it). If the launcher in place is already that version or newer
 //! it changes nothing. Otherwise it checks the signed SHA-256 again and puts the new launcher in
 //! place ([`backend::place_checked`], the same code `horizon-launcher update` uses), then starts
-//! it. When that fails it starts the old one again, which says why ([`take_failure`]). Nothing
-//! goes in without Update: a window closed with an update staged drops it ([`forget`]), and the
-//! next start checks again.
+//! it. When that fails it starts the old one again, which says why ([`take_failure`]). A window
+//! closed with an update staged hands it over the same way without the restart ([`on_close`]), and
+//! says so while it waits, so the next start is the new launcher; a failure there is said at that
+//! start. Only quitting for a data move drops it ([`forget`]), and the next start checks again.
 //!
 //! `main` handles the command before the CLI parser, so MCP and the completions never list it.
 //! Every launcher keeps it: the installer is whatever launcher file is in place when Update is
@@ -26,12 +27,33 @@ use std::time::Duration;
 pub const COMMAND: &str = "apply-update";
 const RESTART: &str = "--restart";
 const SHA256_ENV: &str = "HORIZON_LAUNCHER_UPDATE_SHA256";
+/// On a launcher started by a restart for links.json's `min_launcher` (`min_launcher`): the new
+/// one, or the old one again after a failure, or this one when the new one was already in place.
+/// That launcher doesn't restart for the minimum again. The window gives it to its installer,
+/// which gives it to the launcher it starts; read once at startup and removed
+/// ([`take_min_restarted_env`]), so no game or other program inherits it.
+pub const MIN_RESTARTED_ENV: &str = "HORIZON_LAUNCHER_MIN_RESTARTED";
+static MIN_RESTARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Notes [`MIN_RESTARTED_ENV`] and removes it from this process's environment. Called first at
+/// startup, before other threads run.
+pub fn take_min_restarted_env() {
+    if std::env::var_os(MIN_RESTARTED_ENV).is_some() {
+        MIN_RESTARTED.store(true, std::sync::atomic::Ordering::Relaxed);
+        std::env::remove_var(MIN_RESTARTED_ENV);
+    }
+}
+
+/// Whether a restart for the minimum started this launcher ([`MIN_RESTARTED_ENV`]).
+pub fn min_restarted() -> bool {
+    MIN_RESTARTED.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// How long the installer waits for the window to exit before it goes on: the replacement works
 /// under a running launcher too (the old file is moved aside, not overwritten).
 const WAIT: Duration = Duration::from_secs(60);
 
-/// The update Update hands over ([`start_now`]).
+/// The update Update ([`start_now`]) or a closing window ([`on_close`]) hands over.
 static PENDING: Mutex<Option<Staged>> = Mutex::new(None);
 
 pub fn set_pending(staged: Option<Staged>) {
@@ -47,13 +69,62 @@ pub fn forget() {
     }
 }
 
+/// What a closing window does with its staged update.
+#[derive(Debug, PartialEq)]
+enum Close {
+    Nothing,
+    /// Drop it with its stage, as [`forget`] does.
+    Drop(Staged),
+    /// Hand it to the installer, which doesn't start the launcher again.
+    Install(Staged),
+}
+
+/// Whether closing the window installs a staged update: not in a copy that doesn't replace itself
+/// (a development build, `HORIZON_LAUNCHER_NO_SELF_UPDATE`) or that a package manager owns.
+pub fn installs_on_close() -> bool {
+    installs_when(
+        backend::self_update_allowed(),
+        backend::package_managed_launcher(),
+    )
+}
+
+fn installs_when(self_update_allowed: bool, package_managed: bool) -> bool {
+    self_update_allowed && !package_managed
+}
+
+fn close_with(staged: Option<Staged>, installs: bool) -> Close {
+    match staged {
+        None => Close::Nothing,
+        Some(staged) if installs => Close::Install(staged),
+        Some(staged) => Close::Drop(staged),
+    }
+}
+
+/// The window is closing: a staged update goes in once this process has exited, and the next start
+/// is the new launcher. A game started from the window is a process of its own, which the
+/// installer neither waits for nor touches. An installer that doesn't start is said at the next
+/// start, as one that fails is ([`take_failure`]).
+pub fn on_close() {
+    let staged = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    match close_with(staged, installs_on_close()) {
+        Close::Nothing => {}
+        Close::Drop(staged) => backend::remove_stage(&backend::update_work_dir(), &staged.payload),
+        Close::Install(staged) => {
+            if let Err(e) = hand_over(&staged, false) {
+                record_failure(&staged.tag, &e);
+            }
+        }
+    }
+}
+
 /// Update was pressed: starts the installer for the staged update with a restart (true; the
 /// caller quits right after), or reports that none is staged (false: the file in place already is
-/// the new launcher, another window or `horizon-launcher update` put it there).
-pub fn start_now() -> Result<bool, String> {
+/// the new launcher, another window or `horizon-launcher update` put it there). `for_minimum`:
+/// the restart is the one for links.json's `min_launcher` ([`MIN_RESTARTED_ENV`]).
+pub fn start_now(for_minimum: bool) -> Result<bool, String> {
     let staged = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
     match staged {
-        Some(staged) => hand_over(&staged, true).map(|()| true),
+        Some(staged) => hand_over_with(&staged, true, for_minimum).map(|()| true),
         None => Ok(false),
     }
 }
@@ -61,9 +132,19 @@ pub fn start_now() -> Result<bool, String> {
 /// Starts the installer for `staged`; the caller quits right after. With `restart` the installer
 /// starts the new launcher with this one's arguments.
 pub fn hand_over(staged: &Staged, restart: bool) -> Result<(), String> {
+    hand_over_with(staged, restart, false)
+}
+
+fn hand_over_with(staged: &Staged, restart: bool, for_minimum: bool) -> Result<(), String> {
     backend::mark_handed_over(staged);
     let installer = backend::update_target();
-    let mut cmd = installer_command(&installer, staged, restart, std::env::args_os().skip(1));
+    let mut cmd = installer_command(
+        &installer,
+        staged,
+        restart,
+        for_minimum,
+        std::env::args_os().skip(1),
+    );
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -86,11 +167,27 @@ fn installer_command(
     installer: &Path,
     staged: &Staged,
     restart: bool,
+    for_minimum: bool,
     window_args: impl IntoIterator<Item = OsString>,
 ) -> Command {
     let mut cmd = crate::process::command(installer);
     cmd.args(installer_args(staged, restart, window_args))
         .env(SHA256_ENV, &staged.sha256);
+    if for_minimum {
+        cmd.env(MIN_RESTARTED_ENV, "1");
+    }
+    cmd
+}
+
+/// What the installer starts after it ran: the launcher in place (the new one, or the old one
+/// after a failure) with the window's `args`, and [`MIN_RESTARTED_ENV`] when it was a restart
+/// for the minimum.
+fn restart_command(target: &Path, args: Vec<OsString>, for_minimum: bool) -> Command {
+    let mut cmd = crate::process::command(target);
+    cmd.args(args).env_remove(SHA256_ENV).stdin(Stdio::null());
+    if for_minimum {
+        cmd.env(MIN_RESTARTED_ENV, "1");
+    }
     cmd
 }
 
@@ -169,8 +266,7 @@ pub fn run() -> Option<i32> {
         record_failure(&request.staged.tag, e);
     }
     if let Some(args) = request.restart {
-        let mut cmd = crate::process::command(backend::update_target());
-        cmd.args(args).env_remove(SHA256_ENV).stdin(Stdio::null());
+        let mut cmd = restart_command(&backend::update_target(), args, min_restarted());
         if let Err(e) = cmd.spawn() {
             record_failure(&request.staged.tag, &format!("{e}"));
         }
@@ -188,13 +284,27 @@ fn wait_for_window(limit: Duration) {
 }
 
 fn install(staged: &Staged) -> Result<(), String> {
-    let installed = backend::installed_launcher_version(&backend::update_target());
-    install_over(
-        installed.as_deref(),
+    let target = backend::update_target();
+    install_locked(
+        &backend::update_lock_file(&target),
+        || backend::installed_launcher_version(&target),
         staged,
         &backend::update_work_dir(),
         backend::place_staged,
     )
+}
+
+/// [`install_over`] under the update lock ([`backend::lock_update`]), with the version in place
+/// read only once it is held: an installer that waited for another one sees what that one put in.
+fn install_locked(
+    lock: &Path,
+    installed: impl FnOnce() -> Option<String>,
+    staged: &Staged,
+    work: &Path,
+    place: impl FnOnce(&Staged) -> Result<(), String>,
+) -> Result<(), String> {
+    let _lock = backend::lock_update(lock)?;
+    install_over(installed().as_deref(), staged, work, place)
 }
 
 /// `installed` is the version of the launcher in place, which may have changed since this update
@@ -290,6 +400,7 @@ mod tests {
             Path::new("horizon-launcher"),
             &staged(),
             true,
+            false,
             window.clone(),
         );
         let sha256 = cmd
@@ -314,6 +425,59 @@ mod tests {
                 restart: None,
             })
         );
+    }
+
+    /// Closing installs a staged update, without the restart, only where this copy replaces
+    /// itself; elsewhere it is dropped. A data move drops it before the window quits.
+    #[test]
+    fn closing_installs_a_staged_update_only_where_the_launcher_updates_itself() {
+        assert_eq!(close_with(None, true), Close::Nothing);
+        assert_eq!(close_with(Some(staged()), true), Close::Install(staged()));
+        let args = installer_args(&staged(), false, os(&["play"]));
+        assert!(!args.iter().any(|a| a == RESTART));
+        assert_eq!(parse(args, "abc".into()).unwrap().restart, None);
+        assert_eq!(close_with(Some(staged()), false), Close::Drop(staged()));
+        assert!(installs_when(true, false));
+        for (allowed, package_managed) in [(false, false), (true, true), (false, true)] {
+            assert!(!installs_when(allowed, package_managed));
+        }
+        // The data move: `forget` empties what the close would hand over.
+        set_pending(Some(Staged {
+            payload: std::env::temp_dir().join("horizon-no-stage"),
+            ..staged()
+        }));
+        forget();
+        let left = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert_eq!(close_with(left, true), Close::Nothing);
+    }
+
+    fn env_of(cmd: &Command, name: &str) -> Option<Option<String>> {
+        cmd.get_envs()
+            .find(|(key, _)| key.to_str() == Some(name))
+            .map(|(_, value)| value.and_then(|v| v.to_str()).map(str::to_owned))
+    }
+
+    /// A restart for links.json's minimum is marked from the window to its installer and from the
+    /// installer to the launcher it starts, the new one or the old one after a failure; any other
+    /// restart is not.
+    #[test]
+    fn a_restart_for_the_minimum_is_marked_through_the_installer() {
+        let marked = Some(Some("1".to_owned()));
+        let installer = |for_minimum| {
+            installer_command(Path::new("i"), &staged(), true, for_minimum, os(&["play"]))
+        };
+        assert_eq!(env_of(&installer(true), MIN_RESTARTED_ENV), marked);
+        assert_eq!(env_of(&installer(false), MIN_RESTARTED_ENV), None);
+
+        let restart = restart_command(Path::new("horizon-launcher"), os(&["play"]), true);
+        assert_eq!(env_of(&restart, MIN_RESTARTED_ENV), marked);
+        assert_eq!(env_of(&restart, SHA256_ENV), Some(None));
+        assert_eq!(
+            restart.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("play")]
+        );
+        let plain = restart_command(Path::new("horizon-launcher"), os(&["play"]), false);
+        assert_eq!(env_of(&plain, MIN_RESTARTED_ENV), None);
     }
 
     #[test]
@@ -472,6 +636,72 @@ mod tests {
         assert_eq!(result, Ok(()));
         assert_eq!(placed.as_deref(), Some(NEW_LAUNCHER));
         let _ = fs::remove_dir_all(work);
+    }
+
+    /// Two windows staged the same release and closed: their installers go one after the other,
+    /// and the second, which reads nothing before it has the lock, sees the first one's launcher
+    /// and changes nothing.
+    #[test]
+    fn a_second_installer_waits_and_then_changes_nothing() {
+        let (work, _, staged) = stage("two-installers");
+        let lock = work.join("horizon-launcher.lock");
+        let in_place = std::sync::Arc::new(Mutex::new(OLD.map(str::to_owned)));
+        let held = backend::lock_update(&lock).unwrap();
+        let second = std::thread::spawn({
+            let (lock, work, staged, in_place) =
+                (lock.clone(), work.clone(), staged.clone(), in_place.clone());
+            move || {
+                let placed = std::cell::Cell::new(false);
+                let result = install_locked(
+                    &lock,
+                    || in_place.lock().unwrap().clone(),
+                    &staged,
+                    &work,
+                    |_| {
+                        placed.set(true);
+                        Ok(())
+                    },
+                );
+                (result, placed.get())
+            }
+        });
+        // The first installer, holding the lock, puts the release in.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !second.is_finished(),
+            "the second installer waits for the lock"
+        );
+        *in_place.lock().unwrap() = Some("0.2.41".into());
+        drop(held);
+        assert_eq!(second.join().unwrap(), (Ok(()), false));
+        let _ = fs::remove_dir_all(work);
+    }
+
+    /// The startup cleanup leaves an installer's files alone while it holds the lock, and removes
+    /// what is left once no installer does.
+    #[test]
+    fn the_cleanup_waits_for_an_installer() {
+        let dir = std::env::temp_dir().join(format!("horizon-cleanup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let name = "horizon-launcher.exe";
+        let lock = backend::update_lock_file(&dir.join(name));
+        let aside = [format!("{name}.old-7-0"), format!("{name}.update-7")];
+        for file in &aside {
+            fs::write(dir.join(file), b"x").unwrap();
+        }
+        fs::write(dir.join(name), b"the launcher").unwrap();
+        let held = backend::lock_update(&lock).unwrap();
+        assert!(!backend::remove_replaced_once(&dir, name, 1, &lock));
+        assert!(aside.iter().all(|file| dir.join(file).exists()));
+        // Unlocked, not only closed: a process another test is starting right now can still hold
+        // a copy of the descriptor until its exec, and on Unix that copy keeps the lock.
+        held.unlock().unwrap();
+        drop(held);
+        assert!(backend::remove_replaced_once(&dir, name, 1, &lock));
+        assert!(aside.iter().all(|file| !dir.join(file).exists()));
+        assert!(dir.join(name).exists() && lock.exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// A window from before stage folders hands the installer its old command line, with no SHA-256

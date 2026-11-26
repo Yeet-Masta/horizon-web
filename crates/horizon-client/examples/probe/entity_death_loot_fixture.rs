@@ -295,6 +295,7 @@ pub fn main() -> horizon_client::Result<()> {
                 vehicle: c.get("vehicle").map(|v| LootEntity::new(v)),
                 mob_drops: true,
                 world_seed,
+                raid_at: false,
             };
             // Vanilla's entity tables all name a random sequence: no level random.
             let mut level = horizon_core::random::LevelRandom::for_level(LegacyRandom::new(0));
@@ -313,6 +314,7 @@ pub fn main() -> horizon_client::Result<()> {
                             &mut level_random,
                             Some((&mut sequences, world_seed)),
                         );
+                        let stacks = block_items.split_stacks(stacks);
                         for s in stacks
                             .iter()
                             .filter(|s| enderman::carried_block_drop_kept(s))

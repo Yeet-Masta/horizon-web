@@ -482,6 +482,27 @@ fn a_sky_can_keep_or_replace_minecrafts_clouds_sun_moon_and_stars() {
 }
 
 #[test]
+fn a_sky_can_tilt_the_suns_path() {
+    let manifest = |stages: &str| {
+        Manifest::parse(&format!(
+            "schema = 1\nid = \"a\"\nname = \"A\"\nversion = \"1\"\napi = \"0.2\"\n{stages}"
+        ))
+    };
+    let m = manifest("[sky]\nfile = \"s.wgsl\"\nsun_path_rotation = -40.0\n").unwrap();
+    assert_eq!(m.sky.unwrap().sun_path_rotation, Some(-40.0));
+    let m = manifest("[sky]\nfile = \"s.wgsl\"\n").unwrap();
+    assert_eq!(m.sky.unwrap().sun_path_rotation, None);
+    for tilt in ["90.5", "-120.0"] {
+        let e = manifest(&format!(
+            "[sky]\nfile = \"s.wgsl\"\nsun_path_rotation = {tilt}\n"
+        ));
+        assert!(e.unwrap_err().to_string().contains("sun_path_rotation"));
+    }
+    let e = manifest("[material]\nfile = \"m.wgsl\"\nsun_path_rotation = 30.0\n");
+    assert!(e.unwrap_err().to_string().contains("keys of [sky] only"));
+}
+
+#[test]
 fn reads_settings_pages_and_refuses_broken_links() {
     let pages = "[[pages]]\nid = \"main\"\nname = \"Sample\"\nitems = [\"saturation\", \"\", \"page:more\"]\n\
                  [[pages]]\nid = \"more\"\nname = \"More\"\ndescription = \"The rest.\"\ncolumns = 1\n\
@@ -784,8 +805,9 @@ const SMALLEST: &str = "schema = 1\nid = \"p\"\nname = \"P\"\nversion = \"1\"\na
 
 #[test]
 fn the_frame_tonemap_and_entity_keys_are_read() {
-    use horizon_shader_api::{Blend, Coverage, Fog, Primaries};
+    use horizon_shader_api::{Blend, Coverage, Fog, Jitter, Primaries};
     let m = Manifest::parse(SMALLEST).unwrap();
+    assert_eq!(m.jitter, Jitter::Off);
     assert_eq!((m.blend, m.tonemap.is_none()), (Blend::Gamma, true));
     assert_eq!(m.primaries, Primaries::Bt709);
     let named = format!("{SMALLEST}[frame]\nprimaries = \"bt709\"\n");
@@ -831,6 +853,16 @@ fn the_frame_tonemap_and_entity_keys_are_read() {
     assert_eq!(Manifest::parse(&own).unwrap().fog, Fog::Pack);
     let engine = format!("{both}[frame]\nfog = \"engine\"\n");
     assert_eq!(Manifest::parse(&engine).unwrap().fog, Fog::Engine);
+    // The world's sub-pixel offset under the pack's own post chain: always, or while an
+    // option is on.
+    let jitter = |value: &str, options: &str| {
+        let text = format!("{SMALLEST}{options}[frame]\njitter = {value}\n");
+        Manifest::parse(&text).unwrap().jitter
+    };
+    assert_eq!(jitter("true", ""), Jitter::On);
+    assert_eq!(jitter("false", ""), Jitter::Off);
+    let taa = "[[options]]\nid = \"taa\"\nname = \"TAA\"\ntype = \"bool\"\ndefault = true\n";
+    assert_eq!(jitter("\"taa\"", taa), Jitter::While("taa".into()));
     let tonemap = format!("{SMALLEST}[tonemap]\nfile = \"t.wgsl\"\nname = \"Curve\"\n");
     let m = Manifest::parse(&tonemap).unwrap();
     assert_eq!(m.tonemap.as_ref().unwrap().name.as_deref(), Some("Curve"));
@@ -850,6 +882,19 @@ fn the_frame_tonemap_and_entity_keys_are_read() {
     let m = Manifest::parse(&entity).unwrap();
     assert_eq!(m.entity.as_ref().unwrap().name.as_deref(), Some("Mobs"));
     assert_eq!(m.files(), ["light.wgsl", "e.wgsl"]);
+}
+
+/// `[entity] surface`: off unless the entity stage sets it.
+#[test]
+fn the_entity_surface_key_is_read() {
+    let surface = |keys: &str| {
+        let text = format!("{SMALLEST}[entity]\nfile = \"e.wgsl\"\n{keys}");
+        Manifest::parse(&text).unwrap().entity_surface
+    };
+    assert!(!Manifest::parse(SMALLEST).unwrap().entity_surface);
+    assert!(!surface(""));
+    assert!(!surface("surface = false\n"));
+    assert!(surface("surface = true\n"));
 }
 
 #[test]
@@ -884,8 +929,20 @@ fn the_frame_tonemap_and_entity_keys_are_checked() {
             "`coverage` is a key of [material] and [entity] only",
         ),
         (
+            format!("{SMALLEST}[material]\nfile = \"m.wgsl\"\nsurface = true\n"),
+            "`surface` is a key of [entity] only",
+        ),
+        (
+            format!("{SMALLEST}[[post]]\nfile = \"b.wgsl\"\nsurface = false\n"),
+            "`surface` is a key of [entity] only",
+        ),
+        (
             format!("{SMALLEST}[frame]\nfog = \"none\"\n"),
             "frame.fog \"none\": engine or pack",
+        ),
+        (
+            format!("{SMALLEST}[frame]\njitter = \"taa\"\n"),
+            "frame.jitter: `taa` is no option",
         ),
         (
             format!(
@@ -903,7 +960,7 @@ fn the_frame_tonemap_and_entity_keys_are_checked() {
         ),
         (
             format!("{SMALLEST}[entity]\nfile = \"e.wgsl\"\nclouds = false\n"),
-            "`clouds`, `sun`, `moon` and `stars` are keys of [sky] only",
+            "`clouds`, `sun`, `moon`, `stars` and `sun_path_rotation` are keys of [sky] only",
         ),
         (
             format!("{SMALLEST}[entity]\nfile = \"e.glsl\"\n"),
@@ -972,7 +1029,7 @@ fn ray_tracing_is_a_key_for_a_pack_with_a_post_pass_or_a_material_stage() {
     let cases = [
         (
             SMALLEST.replace("[[post]]", "[sky]") + "[ray_tracing]\n",
-            "[ray_tracing] needs a [[post]] pass, a [[before_world]] pass or a [material] stage",
+            "[ray_tracing] needs a [[post]] pass, a [[before_world]] pass, a [material] or an [entity] stage",
         ),
         (
             format!("{SMALLEST}[ray_tracing]\nbounces = 2\n"),

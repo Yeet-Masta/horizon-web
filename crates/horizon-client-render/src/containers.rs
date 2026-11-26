@@ -446,6 +446,46 @@ impl Crafter {
     }
 }
 impl BlockEntity {
+    /// Its saved stacks as the game that owns `prototypes` takes them in
+    /// (`ItemStack.CODEC`, `applyPatch`): each slot, record, book, brushed item and a
+    /// vault's key, display and ejections, through `item_data::clean_stack`. A mod's
+    /// slots are written only when one changes, so an unchanged entity keeps its
+    /// revision. True when a stack changed.
+    pub fn clean_stacks(&mut self, prototypes: &horizon_items::item_data::ItemPrototypes) -> bool {
+        fn clean<'a>(
+            stacks: impl IntoIterator<Item = &'a mut Option<ItemStack>>,
+            prototypes: &horizon_items::item_data::ItemPrototypes,
+        ) -> bool {
+            horizon_items::item_data::clean_stacks(stacks.into_iter().flatten(), prototypes)
+        }
+        match self {
+            BlockEntity::Chest(items) => clean(items, prototypes),
+            BlockEntity::Furnace(f) => clean(&mut f.items, prototypes),
+            BlockEntity::Brewing(b) => clean(&mut b.items, prototypes),
+            BlockEntity::Jukebox(j) => clean(&mut j.items, prototypes),
+            BlockEntity::Lectern(l) => clean([&mut l.book], prototypes),
+            BlockEntity::Crafter(c) => clean(&mut c.items, prototypes),
+            BlockEntity::Campfire(c) => clean(&mut c.items, prototypes),
+            BlockEntity::Brushable(b) => clean([&mut b.item], prototypes),
+            BlockEntity::Shelf(s) => clean(&mut s.items, prototypes),
+            BlockEntity::ChiseledBookshelf(b) => clean(&mut b.items, prototypes),
+            BlockEntity::Vault(v) => {
+                let ejected =
+                    horizon_items::item_data::clean_stacks(&mut v.items_to_eject, prototypes);
+                clean([&mut v.config.key_item, &mut v.display_item], prototypes) | ejected
+            }
+            BlockEntity::Mod(m) => {
+                let mut items = m.items.clone();
+                let changed = clean(&mut items, prototypes);
+                if changed {
+                    m.items = items;
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the stock factory gives this block item slots. Shares the factory's
     /// classifier without constructing an entity or consulting a world instance.
     pub fn has_builtin_item_container(name: &str) -> bool {
@@ -464,6 +504,18 @@ impl BlockEntity {
             return None;
         }
         Self::for_factory(factory)
+    }
+
+    /// `BlockEntity.<init>(pos, state)`: applies a block-state `mode` property
+    /// that a block entity's constructor reads from the placed `BlockState`
+    /// (`StructureBlock.MODE`).
+    pub fn apply_state_mode(&mut self, mode: Option<&str>) {
+        if let Self::StructureBlock(b) = self
+            && let Some(mode) =
+                mode.and_then(crate::structure_block::StructureMode::of_serialized_name)
+        {
+            b.mode = mode;
+        }
     }
 
     fn for_factory(name: &str) -> Option<Self> {
@@ -553,10 +605,11 @@ impl BlockEntity {
         }
         if name == "minecraft:structure_block" {
             // The entity's mode is the state's (`StructureBlock.MODE`); the block's
-            // state is not known here, so a new one starts in its default, SAVE.
+            // state is not known here, so a new one starts in its default, LOAD
+            // (`StructureBlock.<init>`).
             return Some(Self::StructureBlock(Box::new(
                 crate::structure_block::StructureBlock::new(
-                    crate::structure_block::StructureMode::Save,
+                    crate::structure_block::StructureMode::Load,
                 ),
             )));
         }
@@ -1105,6 +1158,31 @@ mod tests {
         assert!(entity.fits("minecraft:end_portal"));
         // A stone block is not an end portal.
         assert!(BlockEntity::for_block("minecraft:stone").is_none());
+    }
+
+    /// `StructureBlock.<init>` defaults `MODE` to `StructureMode.LOAD`, which
+    /// `StructureBlockEntity.<init>` copies into the block entity; explicit
+    /// block-state modes (`mode=save`, `mode=corner`) propagate as well.
+    #[test]
+    fn bare_structure_block_starts_in_load_mode() {
+        let mut entity =
+            BlockEntity::for_block("minecraft:structure_block").expect("structure block entity");
+        let BlockEntity::StructureBlock(block) = &entity else {
+            panic!("expected structure block entity");
+        };
+        assert_eq!(block.mode, crate::structure_block::StructureMode::Load);
+        let saved = block.save();
+        let mode = saved.iter().find(|(k, _)| *k == "mode").map(|(_, v)| v);
+        assert_eq!(mode, Some(&horizon_core::nbt::Tag::String("LOAD".into())));
+
+        entity.apply_state_mode(Some("save"));
+        let BlockEntity::StructureBlock(block) = &entity else {
+            panic!("expected structure block entity");
+        };
+        assert_eq!(block.mode, crate::structure_block::StructureMode::Save);
+        let saved = block.save();
+        let mode = saved.iter().find(|(k, _)| *k == "mode").map(|(_, v)| v);
+        assert_eq!(mode, Some(&horizon_core::nbt::Tag::String("SAVE".into())));
     }
 }
 

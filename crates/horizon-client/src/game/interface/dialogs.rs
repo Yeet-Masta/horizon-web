@@ -10,7 +10,7 @@ use horizon_client::{
     clipboard::EditShortcut,
     confirm_screen::Confirm,
     dialog::{AfterAction, Body, Click, Control, Dialog, InputValue, Kind},
-    dialog_screen::{BOX, Layout, Part, WARNING_SPRITES, text_height, waiting_button},
+    dialog_screen::{BOX, Layout, LayoutCache, Part, WARNING_SPRITES, text_height, waiting_button},
     font::Font,
     hud::{HudBatch, rgba},
     multiline_edit::MultiLineEdit,
@@ -34,6 +34,8 @@ struct Open {
     dragging: Option<usize>,
     /// The multiline input the pointer is selecting in.
     selecting: Option<usize>,
+    /// Where its parts go, laid out once for each screen size.
+    layout: LayoutCache,
 }
 
 /// A dialog a clicked command closed, kept for its confirmation's no.
@@ -269,6 +271,7 @@ impl Game<'_> {
                 scroll: ui::Scroll::default(),
                 dragging: None,
                 selecting: None,
+                layout: LayoutCache::default(),
             });
             game.dialogs.waiting = None;
             game.keys.clear();
@@ -440,13 +443,15 @@ impl Game<'_> {
         }
     }
 
+    /// The open dialog's layout, from its `LayoutCache`: the body is wrapped
+    /// once per screen size, and the copy only shares each line's text, so a
+    /// frame neither wraps it again nor copies its spans (#19102). Mods hook
+    /// this, so draw, click, scroll and drag all ask it.
     fn dialog_layout(&self) -> Option<Layout> {
         let open = self.dialogs.open.as_ref()?;
-        Some(Layout::new(
-            &open.dialog,
-            &self.gui.atlas.font,
-            self.gui_size(),
-        ))
+        let font = &self.gui.atlas.font;
+        let kept = open.layout.get(&open.dialog, font, self.gui_size());
+        Some(Layout::clone(&kept))
     }
 
     pub(super) fn draw_dialog(&mut self, batch: &mut HudBatch) {
@@ -1322,6 +1327,7 @@ mod pause_tests {
                 scroll: ui::Scroll::default(),
                 dragging: None,
                 selecting: None,
+                layout: LayoutCache::default(),
             }),
             waiting: None,
             warning: false,
@@ -1345,5 +1351,43 @@ mod pause_tests {
         let mut waiting = state(true);
         waiting.waiting = Some(Instant::now());
         assert!(!waiting.pauses_world());
+    }
+}
+#[cfg(test)]
+mod covered_screen_tests {
+    use crate::game::{Game, Screen, native_entity_refs::tests::with_client_game};
+    use horizon_client::motion::PlayerMotion;
+    use horizon_core::{geometry::Vec3, nbt::Tag};
+
+    /// `DialogScreen` keeps the screen it replaced for closing, but
+    /// `Gui.extractRenderState` draws only the active screen: an inventory
+    /// under a dialog draws nothing until the dialog closes.
+    #[test]
+    #[ignore = "daily"]
+    fn a_dialog_hides_the_inventory_it_covers_until_it_closes() {
+        with_client_game(|game| {
+            game.title = None;
+            // In a world: a dialog without a player replaces the whole HUD.
+            game.player = Some(PlayerMotion::new(game.motion, Vec3::ZERO).unwrap());
+            game.ui.hide_gui = true;
+            game.craft_size = 2;
+            game.level.recipe_book.open = [false; 4];
+            let frame = |game: &mut Game<'_>, screen| {
+                game.screen = screen;
+                game.hud([320, 240]).vertices.len()
+            };
+            let inventory = frame(game, Screen::Inventory);
+            let s = |value: &str| Tag::String(value.into());
+            game.show_dialog(&Tag::compound([("type", s("notice")), ("title", s("Hi"))]));
+            assert!(game.dialog_open());
+            let dialog_alone = frame(game, Screen::Playing);
+            assert_eq!(
+                frame(game, Screen::Inventory),
+                dialog_alone,
+                "the covered inventory draws nothing"
+            );
+            game.close_dialogs();
+            assert_eq!(frame(game, Screen::Inventory), inventory);
+        });
     }
 }

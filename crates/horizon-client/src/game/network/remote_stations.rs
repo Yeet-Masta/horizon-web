@@ -46,7 +46,9 @@ impl Game<'_> {
 
     /// The server set station slot `internal`: the client menu's
     /// `Slot.set` runs its container's `setChanged`, so the loom lists the
-    /// patterns its inputs allow and the stonecutter the recipes of its input.
+    /// patterns its inputs allow, the stonecutter the recipes of its input and
+    /// the merchant the offer its payment buys, which a result take uses up
+    /// (`MerchantContainer.updateSellItem`).
     pub(super) fn remote_station_slot_changed(&mut self, internal: usize) {
         if !self.station.as_ref().is_some_and(|s| {
             matches!(
@@ -57,6 +59,7 @@ impl Game<'_> {
                     | Kind::Anvil
                     | Kind::Smithing
                     | Kind::Cartography
+                    | Kind::Merchant
             )
         }) {
             return;

@@ -5,7 +5,7 @@
 use super::json::{self, Json};
 use horizon_core::{
     random::java_string_hash,
-    text::{parse_java_integer, parse_java_long},
+    text::{parse_java_integer, parse_java_long, parse_java_uuid},
 };
 use horizon_java_properties::{Properties, date_string, now_millis};
 use horizon_protocol::crypto::md5;
@@ -189,22 +189,9 @@ pub fn name_uuid(bytes: &[u8]) -> u128 {
     u128::from_be_bytes(h)
 }
 
-/// The JDK's lenient UUID parser: five dash-separated hex groups.
+/// The JDK's lenient UUID parser (`UUID.fromString`): five dash-separated signed-long hex groups.
 pub fn parse_uuid(s: &str) -> Option<u128> {
-    let parts: Vec<&str> = s.split('-').collect();
-    if parts.len() != 5 || s.len() > 36 {
-        return None;
-    }
-    let mut v = [0u64; 5];
-    for (i, p) in parts.iter().enumerate() {
-        if p.is_empty() || p.len() > 16 {
-            return None;
-        }
-        v[i] = u64::from_str_radix(p, 16).ok()?;
-    }
-    let msb = (v[0] & 0xffff_ffff) << 32 | (v[1] & 0xffff) << 16 | (v[2] & 0xffff);
-    let lsb = (v[3] & 0xffff) << 48 | (v[4] & 0xffff_ffff_ffff);
-    Some(u128::from(msb) << 64 | u128::from(lsb))
+    parse_java_uuid(s)
 }
 
 /// Java's `Boolean` parsing.
@@ -261,12 +248,20 @@ impl Reader {
 }
 
 impl ServerProperties {
-    /// DedicatedServerProperties.fromFile; a file that cannot be read is an
-    /// empty set (Settings.loadFromFile logs and continues).
+    /// `DedicatedServerProperties.fromFile`; unlike vanilla's `Settings.loadFromFile`,
+    /// only a missing file is empty. Do not let callers store defaults over unreadable settings.
     pub fn from_file(path: &std::path::Path, entropy: &mut dyn Entropy) -> Result<Self, String> {
         let p = match horizon_std::fs::read(path) {
             Ok(bytes) => Properties::load_file(&bytes).map_err(|e| e.to_string())?,
-            Err(_) => Properties::default(),
+            // `read` also returns NotFound for a dangling link; renaming over it would lose it.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && horizon_std::fs::symlink_metadata(path)
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Properties::default()
+            }
+            Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
         };
         Self::new(p, entropy)
     }
@@ -651,7 +646,7 @@ mod tests {
         let _ = horizon_std::fs::remove_dir_all(&dir);
         horizon_std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("server.properties");
-        let props = ServerProperties::new(Properties::default(), &mut Fixed).unwrap();
+        let props = ServerProperties::from_file(&path, &mut Fixed).unwrap();
         props.store(&path).unwrap();
         let mode = |p: &std::path::Path| {
             horizon_std::fs::metadata(p).unwrap().permissions().mode() & 0o777
@@ -768,6 +763,23 @@ mod tests {
         assert_eq!(
             parse_uuid("1-2-3-4-5"),
             Some(0x0000_0001_0002_0003_0004_0000_0000_0005)
+        );
+    }
+
+    #[test]
+    fn parse_uuid_matches_java_signed_long_and_unicode_hex_digits() {
+        // Signed-long overflow in any group is rejected by Java's UUID.fromString.
+        assert_eq!(parse_uuid("ffffffffffffffff-0-0-0-0"), None);
+        assert_eq!(parse_uuid("8000000000000000-0-0-0-0"), None);
+        // i64::MAX is accepted and masked to the field's low 32 bits.
+        assert_eq!(
+            parse_uuid("7fffffffffffffff-0-0-0-0"),
+            Some(0xffff_ffff_0000_0000_0000_0000_0000_0000)
+        );
+        // Non-ASCII BMP hex digits (Arabic-Indic 1, fullwidth 2/A/f) are accepted.
+        assert_eq!(
+            parse_uuid("\u{0661}-\u{ff12}-\u{ff21}-4-\u{ff46}"),
+            Some(0x0000_0001_0002_000a_0004_0000_0000_000f)
         );
     }
 }

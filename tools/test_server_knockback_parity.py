@@ -14,6 +14,8 @@ players made of vanilla's protocol code, joins them both and runs one script on 
   first stops Alice's sprint), a mace smash, and a weak hit then a stronger one inside Bob's hurt cooldown.
   Bob's own ClientboundSetEntityMotionPacket (the knockback his client applies, Player.causeExtraKnockback),
   Alice's motion packets and her sprint flag as the server sets it are compared exactly;
+- Bob, in creative, hits an end crystal (his own push, and Alice's, in survival nine blocks away: she is hurt and
+  pushed by a blast Bob set off);
 - a zombie hits Bob, twice: the knockback reaches Bob's client once his server-side copy has
   travelled a tick (the mob's hit, then ServerPlayer's travel, then ServerEntity.sendChanges). It is night, so
   that no zombie burns (a burning mob is in its hurt cooldown);
@@ -22,8 +24,9 @@ players made of vanilla's protocol code, joins them both and runs one script on 
 
 The script waits on the server, not on the wall: `ticks N` is N ticks of its game clock (with a `sync` round trip
 before and after, so each client holds what the server sent), `tickstep` is one `/tick step` that has run, `frozen`
-a frozen game that has stopped, and `hit` a hit that has landed (a frozen server still ticks its players, so a hit
-lands in Alice's next tick). A server that stalls under load gets the same ticks as an idle one.
+a frozen game that has stopped, `hit` a hit that has landed (a frozen server still ticks its players, so a hit
+lands in Alice's next tick), and `blast` a right click whose blast has moved a given entity (test_bed_explosion_parity).
+A server that stalls under load gets the same ticks as an idle one.
 
 Each case is compared on its own. KNOWN lists the cases Horizon still gets wrong and why; one that matches
 again is reported, and should leave the list.
@@ -38,14 +41,15 @@ import sys
 import time
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from .test_locator_bar_parity import generate_world, ops_json
+    from .test_locator_bar_parity import ClientOutput, generate_world, ops_json
 except ImportError:
+    import fast_bins
     import lab
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, free_port, game_time, wait_ticks
-    from test_locator_bar_parity import generate_world, ops_json
+    from test_locator_bar_parity import ClientOutput, generate_world, ops_json
 
 NAME = 'server-knockback-parity'
 PLAYERS = ('Alice', 'Bob')
@@ -190,16 +194,36 @@ def zombie_half_shield_case():
             'cmd Alice gamemode survival']
 
 
-def blast_case(blast, row):
+def blast_case(blast, row, bystander=False):
     """A blast two blocks east of Bob in creative, which hurts him not: an end crystal he hits himself, or primed TNT
     about to go off. The push his client is sent (the explosion packet's playerKnockback, ServerExplosion.hitPlayers)
-    and his motion packet. Each case has a floor of its own (`row` blocks south), as a blast digs a crater."""
+    and his motion packet. Each case has a floor of its own (`row` blocks south), as a blast digs a crater.
+
+    With `bystander`, Alice stands in survival nine blocks north of the crystal Bob hits: she is hurt (`/data get
+    entity @s Health`, her regeneration off so that no tick adds to it) and pushed by a blast she did not set off.
+    She wears Blast Protection IV netherite: its explosion knockback resistance cancels the push, so the case compares
+    the hurt and the blast packet without the separate motion-timing difference."""
     at, z = (V[0], V[1], V[2] + row), V[2] + row
     summon = {'crystal': f'cmd Alice summon minecraft:end_crystal {at[0] + 2} {at[1]} {z} {{ShowBottom:0b}}',
               'tnt': f'cmd Alice summon minecraft:tnt {at[0] + 2} {at[1]} {z} {{fuse:20s}}'}[blast]
     lines = ['cmd Alice kill @e[type=!player]', 'cmd Bob gamemode creative',
-             f'cmd Alice tp Bob {at[0]} {at[1]} {at[2]} -90 0', *stand('Bob', at, -90), 'ticks 20', summon, 'ticks 5']
+             f'cmd Alice tp Bob {at[0]} {at[1]} {at[2]} -90 0', *stand('Bob', at, -90)]
+    watcher = (at[0] + 2, at[1], z - 9)
+    if bystander:
+        lines += ['cmd Alice gamerule natural_health_regeneration false',
+                  f'cmd Alice tp Alice {watcher[0]} {watcher[1]} {watcher[2]} 0 0', *stand('Alice', watcher, 0),
+                  *[f'cmd Alice item replace entity @s armor.{slot} with minecraft:netherite_{piece}'
+                    '[enchantments={"minecraft:blast_protection":4}]'
+                    for slot, piece in (('head', 'helmet'), ('chest', 'chestplate'), ('legs', 'leggings'),
+                                        ('feet', 'boots'))]]
+    lines += ['ticks 20', summon, 'ticks 5']
     lines += ['attack Bob end_crystal', 'ticks 10'] if blast == 'crystal' else ['ticks 30']
+    if bystander:
+        lines += ['cmd Alice data get entity @s Health', 'cmd Alice effect give @s minecraft:instant_health 1 5 true',
+                  'cmd Alice gamerule natural_health_regeneration true',
+                  *[f'cmd Alice item replace entity @s armor.{slot} with minecraft:air'
+                    for slot in ('head', 'chest', 'legs', 'feet')],
+                  f'cmd Alice tp Alice {A[0]} {A[1]} {A[2]} -90 0', *stand('Alice', A, -90)]
     return lines + [*stand('Bob', at, -90), 'cmd Bob gamemode survival', 'cmd Alice kill @e[type=!player]',
                     f'cmd Alice tp Bob {V[0]} {V[1]} {V[2]} 90 0', *stand('Bob', V, 90)]
 
@@ -229,6 +253,7 @@ CASES = {
     'pvp-cooldown': pvp_case(cooldown=True),
     'zombie-hits-bob': mob_hits_case('zombie'),
     'crystal-creative': blast_case('crystal', 16),
+    'crystal-bystander': blast_case('crystal', 48, bystander=True),
     'tnt-creative': blast_case('tnt', 32),
     'pvp-takeoff': pvp_takeoff_case(),
 }
@@ -254,6 +279,43 @@ def server_data(server, selector, path, timeout=120):
                 return line.split('data: ', 1)[-1]
         time.sleep(0.02)
     raise AssertionError(f'{server.log_path.name}: no entity data in {timeout} s')
+
+
+TICK_STATUS = re.compile(r'The game is (frozen|running)')
+# Seconds a client may take to acknowledge a `sync`: KnockbackClient gives up on a server reply after 30 s and
+# acknowledges anyway, so a client that is silent for longer has stopped.
+SYNC_TIMEOUT = 60
+
+
+def left(deadline, what):
+    """The seconds left before `deadline`, or the failure `what` once there are none."""
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        raise AssertionError(what)
+    return remaining
+
+
+def frozen(server, timeout=60):
+    """Waits until the server reports ticking frozen (`/tick query`) and its game clock stands still across four
+    ticks' time, and returns that clock. Two equal clock reads alone can fall inside one live tick."""
+    deadline = time.time() + timeout
+    failure = f'{server.log_path.name}: ticking was not reported frozen with a still clock in {timeout} s'
+    while True:
+        start = len(server.lines)
+        server.console('tick query')
+        status = None
+        while status is None:
+            status = next((m.group(1) for line in server.lines[start:] if (m := TICK_STATUS.search(line))), None)
+            if status is None:
+                left(deadline, failure)
+                time.sleep(0.02)
+        if status == 'frozen':
+            clock = game_time(server, left(deadline, failure))
+            time.sleep(0.2)
+            if game_time(server, left(deadline, failure)) == clock:
+                return clock
+        left(deadline, failure)
+        time.sleep(0.05)
 
 
 def server_dir(directory, world):
@@ -283,6 +345,7 @@ def run_side(label, server_command, client_command, build, world):
             client = subprocess.Popen([*map(str, client_command), '127.0.0.1', str(port), str(out)],
                                       cwd=lab.ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, text=True)
+            output = ClientOutput(client, log, f'{label} (see {build}/{label}-client.log)')
 
             def sync():
                 """Every script line sent so far has run, and each client holds what its server sent before."""
@@ -290,10 +353,7 @@ def run_side(label, server_command, client_command, build, world):
                     client.stdin.write(f'sync {name}\n')
                 client.stdin.flush()
                 for name in PLAYERS:
-                    while (reply := client.stdout.readline()) != f'synced {name}\n':
-                        if not reply:
-                            raise AssertionError(f'{label}: the client exited (see {build}/{label}-client.log)')
-                        log.write(reply)
+                    output.expect(f'synced {name}', SYNC_TIMEOUT)
 
             def send(line):
                 """A script line for the client, or one of ours: the waits are on the server's game clock, not the
@@ -306,10 +366,8 @@ def run_side(label, server_command, client_command, build, world):
                     wait_ticks(server, int(line.split()[1]))
                     sync()
                 elif word == 'frozen':
-                    # The tick in flight when ticking was frozen has finished: the clock reads the same twice.
                     sync()
-                    while game_time(server) != game_time(server):
-                        pass
+                    frozen(server)
                 elif word == 'hit':
                     # Alice hits the mob. A frozen server still ticks its players, and the hit lands in Alice's
                     # next tick, not when the packet arrives: the mob's motion says when it has.
@@ -320,6 +378,27 @@ def run_side(label, server_command, client_command, build, world):
                     client.stdin.flush()
                     while server_data(server, mob, 'Motion') == before:
                         time.sleep(0.05)
+                    sync()
+                elif word == 'blast':
+                    # `blast X Y Z SELECTOR`: Alice right-clicks the block's top, and the wait ends once the blast
+                    # has moved the selected entity. Like a hit, a frozen server may apply the click in Alice's
+                    # next tick, not when the packet arrives.
+                    sync()
+                    x, y, z, selector = line.split()[1:5]
+                    deadline = time.time() + 30
+                    failure = f'{server.log_path.name}: the click on {x} {y} {z} did not move {selector} in 30 s'
+                    try:
+                        before = server_data(server, selector, 'Motion', timeout=left(deadline, failure))
+                        client.stdin.write(f'useblock Alice {x} {y} {z}\n')
+                        client.stdin.flush()
+                        while True:
+                            motion = server_data(server, selector, 'Motion', timeout=left(deadline, failure))
+                            left(deadline, failure)  # a reply after the deadline is no success
+                            if motion != before:
+                                break
+                            time.sleep(0.05)
+                    except AssertionError as error:
+                        raise AssertionError(f'{failure} ({error})') from None
                     sync()
                 elif word == 'waitage':
                     # Hold until an entity's `Age` has reached N. A value that
@@ -376,7 +455,9 @@ def run_side(label, server_command, client_command, build, world):
                         send(line)
                     send('ticks 10')
                 send('end')
-                log.write(client.communicate(timeout=60)[0])
+                client.stdin.close()
+                output.drain(60)
+                client.wait(timeout=10)
             finally:
                 if client.poll() is None:
                     client.kill()
@@ -388,11 +469,12 @@ def run_side(label, server_command, client_command, build, world):
 
 
 DATA = re.compile(r'^chat \S+ has the following entity data: \[(.*)\]$')
+HEALTH = re.compile(r'^chat \S+ has the following entity data: (-?[0-9.]+)f$')
 
 
 def compared(lines):
-    """Per case, what is compared: the mob's Pos and Motion (to 1e-9), and each player's motion packets, the push
-    each explosion packet carries for them and their sprint flag."""
+    """Per case, what is compared: the mob's Pos and Motion (to 1e-9), Alice's health when a case reads it, and each
+    player's motion packets, the push each explosion packet carries for them and their sprint flag."""
     cases = {}
     for line in lines:
         who, step, text = line.split(' ', 2)
@@ -403,6 +485,8 @@ def compared(lines):
         data = DATA.match(text)
         if who == 'Alice' and data:
             kept.append('data ' + ' '.join(f'{float(v.rstrip("d")):.9f}' for v in data.group(1).split(', ')))
+        elif who == 'Alice' and (health := HEALTH.match(text)):
+            kept.append('health ' + health.group(1))
         elif text.startswith(('motion self', 'sprinting', 'explode push')):
             kept.append(f'{who} {text}')
         elif text.startswith('error') or text.startswith('disconnected'):
@@ -424,14 +508,14 @@ def main():
     subprocess.run(['javac', '--release', str(lock['minecraft']['java_major']), '-proc:none', '-nowarn', '-sourcepath',
                     lab.ROOT / 'mods/horizon/src/test/java', '-cp', dependencies, '-d', classes, oracle],
                    cwd=lab.ROOT, check=True, capture_output=True)
-    subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'], cwd=lab.ROOT,
+    subprocess.run(fast_bins.command('horizon-client'), cwd=lab.ROOT,
                    check=True, capture_output=True)
     import json
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--no-deps', '--format-version', '1'],
                                                   cwd=lab.ROOT, text=True))
     binary = Path(metadata['target_directory']) / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
-    horizon_server = [binary, '--resources', lab.LOCAL / 'horizon-client/26.3', '--dedicated', '--nogui']
+    horizon_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     client = ['java', '-Xmx1g', '-cp', str(classes) + os.pathsep + dependencies, 'dev.horizonlab.parity.KnockbackClient']
 
     world = generate_world(vanilla_server, build)

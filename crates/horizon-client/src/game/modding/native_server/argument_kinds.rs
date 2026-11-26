@@ -14,13 +14,14 @@ use std::{
 
 /// The argument kinds a native usage may name, each with a [`parser`]; `resource:<registry>`
 /// and `mod_id` come on top.
-pub(super) const KINDS: [&str; 18] = [
+pub(super) const KINDS: [&str; 19] = [
     "word",
     "text",
     "integer",
     "number",
     "boolean",
     "player",
+    "player_name",
     "entity",
     "entities",
     "players",
@@ -38,6 +39,10 @@ pub(super) const KINDS: [&str; 18] = [
 /// The tree property marking `vec3_uncentered`: vanilla's `vec3(false)` has the same parser id
 /// and properties as `vec3()`, so the report format cannot tell them apart.
 pub(super) const UNCENTERED: &str = "uncentered";
+
+/// The tree key marking a custom argument of `CommandArgumentKind::Token`: the wire parser is a
+/// Brigadier word, so the server's own dispatcher type is told apart by this key.
+pub(super) const TOKEN: &str = "token";
 
 /// The custom argument types the mods registered, by namespaced id, for the command tree being
 /// built and its server dispatcher.
@@ -122,9 +127,10 @@ pub(super) fn custom_value(kind: &str, value: String) -> mod_api::CommandArgumen
     }
 }
 
-/// Whether `word` is a usage's literal word: lowercase letters, digits, `_` and `-`. The first
-/// word may also start with one `/`, so a mod can register WorldEdit-style `//set` (typed with the
-/// chat slash): the node keeps the slash, and the client completes `//set ` against it.
+/// Whether `word` is a usage's literal word: ASCII letters of either case, digits, `_` and `-`.
+/// Brigadier's literals take any case (`/cu callItemClear`), matched as written. The first word
+/// may also start with one `/`, so a mod can register WorldEdit-style `//set` (typed with the chat
+/// slash): the node keeps the slash, and the client completes `//set ` against it.
 pub(super) fn command_word(word: &str, first: bool) -> bool {
     let word = match first {
         true => word.strip_prefix('/').unwrap_or(word),
@@ -133,7 +139,7 @@ pub(super) fn command_word(word: &str, first: bool) -> bool {
     !word.is_empty()
         && word
             .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-".contains(c))
+            .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
 }
 
 /// The brigadier parser of a built-in argument kind, its properties and its dispatcher type.
@@ -175,6 +181,9 @@ pub(super) fn parser(kind: &str) -> Option<(&'static str, Value, ArgType)> {
                 ArgType::Entity { single, players },
             )
         }
+        // `GameProfileArgument`: a player's name, online or not, completed from the online
+        // players. The mod gets the typed name as a string, never a selector.
+        "player_name" => ("minecraft:game_profile", Value::Null, ArgType::GameProfile),
         "item" => ("minecraft:item_stack", Value::Null, ArgType::Item),
         "block_pos" => ("minecraft:block_pos", Value::Null, ArgType::BlockPos),
         // `Vec3Argument.vec3()` centres whole x and z on their block, `vec3(false)` does not.
@@ -309,6 +318,8 @@ pub(super) fn argument_type(node: &Value, arguments: &CommandArguments) -> ArgTy
         // Use the validated tree property rather than calling mod code again.
         let kind = if node["properties"]["type"] == "greedy" {
             horizon_client::command::CustomArgumentKind::Greedy
+        } else if node[TOKEN] == true {
+            horizon_client::command::CustomArgumentKind::Token
         } else {
             horizon_client::command::CustomArgumentKind::Word
         };
@@ -374,6 +385,32 @@ pub(super) fn argument_type(node: &Value, arguments: &CommandArguments) -> ArgTy
             },
         ));
     }
+    // `player_name` asks the server for its completions (`usage_nodes`): names only, since the
+    // mod gets a name and the vanilla selector completion would offer `@p` and the like.
+    if node["parser"] == "minecraft:game_profile" {
+        return ArgType::Custom(horizon_client::command::CustomArgument::new(
+            MOD_ID,
+            horizon_client::command::CustomArgumentKind::Word,
+            |input| {
+                if input.starts_with('@') {
+                    return Err(Text::tr("argument.entity.notfound.player", &[]));
+                }
+                Ok(input.to_owned())
+            },
+            |reg: &horizon_client::command::Registries, prefix: &str| {
+                let typed = prefix.to_lowercase();
+                reg.players
+                    .iter()
+                    .filter(|name| name.to_lowercase().starts_with(&typed))
+                    .map(|name| horizon_client::command::CustomSuggestion {
+                        text: name.clone(),
+                        tooltip: None,
+                        replace_start: None,
+                    })
+                    .collect()
+            },
+        ));
+    }
     if node["parser"] == "minecraft:vec3" && node[UNCENTERED] == true {
         return ArgType::Vec3 { center: false };
     }
@@ -409,6 +446,16 @@ mod tests {
         // Inside a two-byte character: no boundary to split the replacement on.
         let inside = mod_api::CommandSuggestion::new("é").replacing_from(1);
         assert!(suggestion_refusal("test:pattern", "é ", &inside).is_some());
+    }
+
+    #[test]
+    fn the_player_name_kind_is_vanillas_game_profile_parser() {
+        let (parser, properties, ty) =
+            super::parser("player_name").expect("the player_name kind has a parser");
+        assert_eq!(parser, "minecraft:game_profile");
+        assert_eq!(properties, Value::Null, "the parser takes no properties");
+        assert!(matches!(ty, ArgType::GameProfile), "{ty:?}");
+        assert!(KINDS.contains(&"player_name"));
     }
 
     #[test]

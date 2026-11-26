@@ -96,6 +96,69 @@ pub enum MappingError {
     },
 }
 
+/// Identity and count of a nonempty stack in the client's container prediction.
+/// Component hashes are intentionally not exposed.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct PredictedClickStack {
+    /// Namespaced item name from the connection registry, or `None` for an unknown id.
+    pub item: Option<String>,
+    /// The exact count sent in the prediction.
+    pub count: i32,
+}
+
+impl PredictedClickStack {
+    /// Construct the identity and count of a predicted stack.
+    pub fn new(item: Option<String>, count: i32) -> Self {
+        Self { item, count }
+    }
+}
+
+/// The local prediction sent for one container click, not the server's reply.
+#[derive(Clone, Debug, PartialEq, Eq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct ContainerClickSnapshot {
+    /// The wire container id; `0` is the player's own inventory.
+    pub container: i32,
+    /// The wire state id (menu revision) the click answers.
+    pub state: i32,
+    /// The clicked menu slot, or `-999` for a click outside the window.
+    pub slot: i16,
+    /// The wire button, whose meaning depends on the input type.
+    pub button: i8,
+    /// The wire input ordinal: pickup (0), quick move (1), swap (2), clone (3),
+    /// throw (4), quick craft (5), or pickup all (6).
+    pub input: i32,
+    /// Changed menu slots in wire order, with their stacks after this click.
+    /// `None` for a slot means it was emptied.
+    pub changed: Vec<(i16, Option<PredictedClickStack>)>,
+    /// The stack on the cursor after the click, or `None` if empty.
+    pub carried: Option<PredictedClickStack>,
+}
+
+impl ContainerClickSnapshot {
+    /// Construct a snapshot of one outgoing click.
+    pub fn new(
+        container: i32,
+        state: i32,
+        slot: i16,
+        button: i8,
+        input: i32,
+        changed: Vec<(i16, Option<PredictedClickStack>)>,
+        carried: Option<PredictedClickStack>,
+    ) -> Self {
+        Self {
+            container,
+            state,
+            slot,
+            button,
+            input,
+            changed,
+            carried,
+        }
+    }
+}
+
 /// The metadata of a server play packet observed by `Hooks::client_packet`.
 ///
 /// Fields beyond the type id are exposed only for custom payloads. This is
@@ -724,6 +787,17 @@ pub struct ScreenId {
     pub id: String,
 }
 
+/// The topmost screen's identity, without render or input state.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+// exhaustive: the game builds it with a literal; mods only read it
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ScreenIdentity {
+    /// The same stable identifier as [`ScreenView::id`], such as `inventory` or `dialog`.
+    pub id: String,
+    /// The same menu type as [`ScreenView::menu`], if the screen has one.
+    pub menu: Option<String>,
+}
+
 /// The sign the sign editor is on (`ScreensClientHost::sign_editor`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 // exhaustive: the game builds it with a literal; mods only read it
@@ -733,6 +807,62 @@ pub struct SignEditView {
     pub pos: BlockPos,
     /// Whether the side being edited is the sign's front (`true`) or back (`false`).
     pub front: bool,
+}
+
+/// A snapshot of the client-visible book or sign editor, from `ClientHost::editor_overlay`.
+/// Changing the snapshot does not edit the book or sign.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum EditorOverlayView {
+    /// `book_view`, including a book on a lectern.
+    BookView {
+        /// Zero-based page index.
+        page: usize,
+        /// Displayed page count (at least one, even for an empty book).
+        page_count: usize,
+        /// The current page component, or none for an empty book.
+        text: Option<Text>,
+        /// The lectern, when reading from one.
+        lectern: Option<BlockPos>,
+        /// Whether the stock screen offers Take Book.
+        can_take: bool,
+    },
+    /// `book_edit`, the page of a book and quill.
+    BookEdit {
+        /// Zero-based page index.
+        page: usize,
+        /// Displayed page count.
+        page_count: usize,
+        /// The current page text.
+        text: String,
+        /// The caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
+    /// `book_sign`, the title entry of a book and quill.
+    BookSign {
+        /// The proposed title, as shown in the title box.
+        title: String,
+        /// The author displayed under the title.
+        author: String,
+        /// The caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
+    /// `sign_edit` or `hanging_sign_edit`.
+    Sign {
+        /// The sign's block position.
+        pos: BlockPos,
+        /// True for the front side; false for the back side.
+        front: bool,
+        /// True for either mounting style of hanging sign.
+        hanging: bool,
+        /// The four lines displayed on the side being edited.
+        lines: [String; 4],
+        /// Zero-based index of the line that has the caret.
+        line: usize,
+        /// The active line's caret and selection anchor, in Unicode scalar characters.
+        selection: [usize; 2],
+    },
 }
 
 // no wire: borrowed call-scoped view; transport uses owned snapshots rather than serializing references.
@@ -754,6 +884,9 @@ pub struct ScreenView<'a> {
     /// `world_select`, `world_create`, `world_create_flat`, `world_edit`,
     /// `multiplayer`, `add_server`, `direct_connect`…, with no menu, no title
     /// and no slots.
+    /// Gameplay editor overlays report `book_view`, `book_edit`, `book_sign`,
+    /// `sign_edit` or `hanging_sign_edit`, also with no menu, title or slots.
+    /// Read their contents through `ClientHost::editor_overlay`.
     pub id: &'static str,
     /// The type id of the menu the server opened for this screen
     /// (`minecraft:generic_9x3`, `minecraft:furnace`, a mod's own id; a mount's
@@ -769,7 +902,8 @@ pub struct ScreenView<'a> {
     /// The screen's container panel in GUI pixels, `[x, y, width, height]`;
     /// the whole window for a screen with none. The panel is where the game
     /// draws the window: 176 wide for most, wider for the merchant and the
-    /// beacon, a mod screen's own size for a mod's.
+    /// beacon, a mod screen's own size for a mod's. For an editor
+    /// overlay, this is the stock editor frame, excluding its full-window shade.
     pub rect: [f32; 4],
     /// The slots the open menu has, as `Game::slots` counts them: the player
     /// inventory's 36, then the container's, the station's, the mod screen's
@@ -782,6 +916,28 @@ pub struct ScreenView<'a> {
     /// This frame's partial tick (`getGameTimeDeltaPartialTick(false)`, 0 to
     /// 1): what the screen draws animation against.
     pub partial_tick: f32,
+}
+
+/// Mouse input about to be handled by a container screen.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+pub enum ContainerMouseInput {
+    /// A press or release. Buttons use GLFW indices: 0 left, 1 right, 2 middle.
+    Button {
+        /// The GLFW button index.
+        button: i32,
+        /// `true` for a press, `false` for a release.
+        pressed: bool,
+    },
+    /// Scrolling in x and y, with the same scaling as `screen_mouse_scrolled_pre`.
+    Scroll([f64; 2]),
+    /// A pointer movement with a held button.
+    Drag {
+        /// The GLFW button index.
+        button: i32,
+        /// The pointer movement in GUI pixels.
+        delta: [f32; 2],
+    },
 }
 
 /// A camera-local visual light, with no gameplay light or shadow writes.
@@ -934,8 +1090,8 @@ pub enum PanelEvent {
         stack: Stack,
     },
     /// A click on a slot of a recipe the panel shows: the recipe's index in
-    /// `native_panel_recipes`' list and the slot's in it (the results come
-    /// after the slots), and the stack it showed then.
+    /// `panel_recipes`' list and the slot's in it (the results come after
+    /// the slots), and the stack it showed then.
     SlotClicked {
         /// The recipe's index in the panel's list.
         recipe: u32,
@@ -955,6 +1111,172 @@ pub enum PanelEvent {
     Back,
     /// The player picked the tab at this index.
     Tab(u32),
+}
+
+/// How the panel lays out a recipe of `panel_recipes`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// exhaustive: a closed set the game draws, matched without a wildcard
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum RecipeLayout {
+    /// A crafting grid of `width` x `height` slots, an arrow and the result.
+    Grid,
+    /// One input over a flame, an arrow and the result (furnaces, smokers,
+    /// campfires).
+    Cooking,
+    /// One input, an arrow and the result (the stonecutter).
+    Single,
+    /// Template, base and addition, an arrow and the result.
+    Smithing,
+    /// A potion and an ingredient, an arrow and the result.
+    Brewing,
+}
+
+/// One result of a recipe the panel shows (`panel_recipes`): a slot cycling
+/// through `stacks`, one a second, and the chance in percent the recipe gives
+/// it (`Some(25.0)` draws "25%"); `None` gives it every time.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct RecipeResult {
+    /// The stacks the slot cycles through, at most 64.
+    pub stacks: Vec<Stack>,
+    /// The chance in percent, 0 to 100; `None` for every time.
+    pub chance: Option<f32>,
+}
+
+impl RecipeResult {
+    /// A result slot cycling through `stacks`, given every time.
+    pub fn new(stacks: Vec<Stack>) -> Self {
+        Self {
+            stacks,
+            chance: None,
+        }
+    }
+}
+
+/// A recipe the panel shows (`panel_recipes`), laid out by the game with its
+/// own slots, arrow and buttons. Each slot, and each result, cycles through
+/// its stacks, one a second; an empty slot shows nothing.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct RecipeView {
+    /// How the recipe is drawn.
+    pub layout: RecipeLayout,
+    /// The grid's size (`Grid` only), 1 to 3 each; slots past it continue in
+    /// rows under it, 27 in all.
+    pub width: u32,
+    /// The grid's height, as `width`.
+    pub height: u32,
+    /// Each slot's stacks, at most 64 each: a grid's row by row, else the
+    /// layout's inputs in order (`Smithing`: template, base, addition).
+    pub slots: Vec<Vec<Stack>>,
+    /// Up to four, left to right after the arrow.
+    pub results: Vec<RecipeResult>,
+    /// Fluids the recipe takes, `amount` in millibuckets, each in a well with
+    /// its amount under it; at most eight. A well shows the fluid's client
+    /// look (`data/<mod>/horizon/fluid/`: sprite and tint), a flat square of
+    /// vanilla's colour for water and lava, and else grey.
+    pub fluid_inputs: Vec<FluidStack>,
+    /// Fluids the recipe gives, as `fluid_inputs`.
+    pub fluid_outputs: Vec<FluidStack>,
+    /// A short line under the recipe (a cooking time), or "".
+    pub note: String,
+    /// The action button beside it (a viewer's "+"), heard as
+    /// `PanelEvent::Action`: none, enabled (`Some(true)`) or shown greyed.
+    pub action: Option<bool>,
+}
+
+impl RecipeView {
+    /// A recipe of `layout` with these slots and results, in a 1 x 1 grid,
+    /// with no fluids, note or action button: set those fields after.
+    pub fn new(layout: RecipeLayout, slots: Vec<Vec<Stack>>, results: Vec<RecipeResult>) -> Self {
+        Self {
+            layout,
+            width: 1,
+            height: 1,
+            slots,
+            results,
+            fluid_inputs: Vec::new(),
+            fluid_outputs: Vec::new(),
+            note: String::new(),
+            action: None,
+        }
+    }
+}
+
+/// A native mod's `controller_move` answer for one local player tick.
+// no wire: native-only controller input hook.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ControllerMoveOverride {
+    /// `[left, forward]`, in gameplay coordinates. Non-finite answers are discarded; the
+    /// game limits the vector to unit length. Zero suppresses only this stick, not the keys.
+    pub direction: [f32; 2],
+    /// Keep the analog angle and magnitude instead of applying `LocalPlayer`'s square
+    /// movement transform. The normal 0.98, item-use and crouch multipliers still apply.
+    /// This has no effect on external servers, digital input or vehicle physics.
+    pub bypass_square_movement: bool,
+}
+
+impl ControllerMoveOverride {
+    /// Answer `controller_move` with a direction and whether to skip square movement.
+    pub fn new(direction: [f32; 2], bypass_square_movement: bool) -> Self {
+        Self {
+            direction,
+            bypass_square_movement,
+        }
+    }
+}
+
+/// Right-stick axes and game options before the native `controller_look` hook.
+// no wire: native-only controller input hook.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct ControllerLookInput {
+    /// `[right, up]` in `[-1, 1]`, before the dead zone or inversion.
+    pub axes: [f32; 2],
+    /// Configured controller look dead zone.
+    pub deadzone: f32,
+    /// Applied controller look sensitivity on a 0–1 scale (0.5 is the default).
+    pub sensitivity: f32,
+    /// Whether the applied settings invert the horizontal axis.
+    pub invert_x: bool,
+    /// Whether the applied settings invert the vertical axis.
+    pub invert_y: bool,
+    /// Elapsed seconds for this frame, capped at 0.1 as in stock stick look.
+    pub frame_seconds: f32,
+    /// A spyglass in use in first person, the condition for stock scope slowdown.
+    pub first_person_scoping: bool,
+    /// Whether the player is connected to an external multiplayer server.
+    pub external_server: bool,
+}
+
+impl ControllerLookInput {
+    /// The game's sample passed to `controller_look`.
+    // hidden: the game constructs the call's read-only sample.
+    #[doc(hidden)]
+    pub fn from_game(
+        axes: [f32; 2],
+        deadzone: f32,
+        sensitivity: f32,
+        inverted: [bool; 2],
+        frame_seconds: f32,
+        first_person_scoping: bool,
+        external_server: bool,
+    ) -> Self {
+        let [invert_x, invert_y] = inverted;
+        Self {
+            axes,
+            deadzone,
+            sensitivity,
+            invert_x,
+            invert_y,
+            frame_seconds,
+            first_person_scoping,
+            external_server,
+        }
+    }
 }
 
 /// The zoom a native mod asks for (`zoom`): the factor (1 is none), eased through the

@@ -51,6 +51,10 @@ fn co_located_guests_own_distinct_streams_and_restore_the_saved_body() {
         ticks_frozen: 23,
         invulnerable: true,
         invulnerable_time: 7,
+        impulse: horizon_world::living_fall::ImpulseContext {
+            reset_grace_time: 12,
+            impact_position: Some(Vec3::new(0.5, 80.0, 0.5)),
+        },
     };
     first.loaded_body = Some(saved);
     initialize(&resources, &mut first);

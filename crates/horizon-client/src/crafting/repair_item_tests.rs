@@ -35,10 +35,11 @@ fn run(item: &str, maxes: [Option<i32>; 2], damages: [u32; 2], remove: bool) -> 
         );
     }
     let input = Input::of(&cells, 2).unwrap();
-    if !Special::RepairItem.matches(&ctx, &input) {
+    let stacks = InputStacks::from_input(&input);
+    if !Special::RepairItem.matches(&ctx, &input, stacks.as_slice()) {
         return None;
     }
-    Special::RepairItem.assemble(&ctx, &input)
+    Special::RepairItem.assemble(&ctx, &input, stacks.as_slice())
 }
 
 #[test]
@@ -88,7 +89,11 @@ fn repair_plain_pickaxes() {
         false,
     )
     .unwrap();
-    assert_eq!(out.max_damage(None), 1561);
+    // The prototype's 1561 is no part of the result's patch (`set` leaves it out).
+    assert!(
+        out.data()
+            .is_none_or(|d| d.other("minecraft:max_damage").is_none())
+    );
     assert_eq!(out.damage, 561);
 }
 

@@ -1,0 +1,3 @@
+# A client mod recording the world session needs prepared resources.
+# PACKAGE TEST TARGET daily REASON
+horizon-client game::native_recording_tests::a_client_mod_records_the_session_into_the_recordings_folder lib daily resources

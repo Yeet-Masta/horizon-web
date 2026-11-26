@@ -3,9 +3,9 @@ use horizon_client::{
     blocks::{BlockFacts, RenderShape, StateFacts},
     chunk::Chunk,
     gfx::Renderer,
-    mesher::{SectionMesh, Vertex},
+    mesher::Vertex,
     spans,
-    streaming::Streaming,
+    streaming::{PendingUploads, Streaming},
     voxel_occlusion::Culler as OcclusionCuller,
     world::World,
 };
@@ -195,7 +195,7 @@ impl FrameProofValidationCache {
         world: &World,
         renderer: Option<&Renderer>,
         streaming: &Streaming,
-        pending_uploads: &[((i32, i32, i32), SectionMesh)],
+        pending_uploads: &PendingUploads,
         counts: &mut ProofValidationCounts,
     ) {
         if self.frame_verified {
@@ -249,7 +249,7 @@ impl FrameProofValidationCache {
                 || !renderer.is_some_and(|renderer| renderer.has_section(key))
                 || world.dirty_sections.contains(&key)
                 || streaming.is_meshing(key)
-                || pending_uploads.iter().any(|(pending, _)| *pending == key)
+                || pending_uploads.contains(&key)
             {
                 invalid = true;
                 break;
@@ -302,7 +302,7 @@ impl FrameProofValidationCache {
         world: &World,
         renderer: Option<&Renderer>,
         streaming: &Streaming,
-        pending_uploads: &[((i32, i32, i32), SectionMesh)],
+        pending_uploads: &PendingUploads,
         counts: &mut ProofValidationCounts,
     ) -> bool {
         match self.sections.binary_search_by_key(&key, |(key, _)| *key) {
@@ -315,7 +315,7 @@ impl FrameProofValidationCache {
                 let current = renderer.is_some_and(|renderer| renderer.has_section(key))
                     && !world.dirty_sections.contains(&key)
                     && !streaming.is_meshing(key)
-                    && !pending_uploads.iter().any(|(pending, _)| *pending == key);
+                    && !pending_uploads.contains(&key);
                 self.sections.insert(index, (key, current));
                 current
             }
@@ -1164,7 +1164,7 @@ impl AsyncOcclusionCuller {
         world: &World,
         renderer: Option<&Renderer>,
         streaming: &Streaming,
-        pending_uploads: &[((i32, i32, i32), SectionMesh)],
+        pending_uploads: &PendingUploads,
         proof: &OcclusionProof,
     ) -> bool {
         let started = if self.measure_bounds_timing.get() {
@@ -1909,7 +1909,7 @@ fn proof_is_current(
     world: &World,
     renderer: Option<&Renderer>,
     streaming: &Streaming,
-    pending_uploads: &[((i32, i32, i32), SectionMesh)],
+    pending_uploads: &PendingUploads,
     proof: &OcclusionProof,
     cache: &mut FrameProofValidationCache,
 ) -> (bool, ProofValidationCounts) {
@@ -1964,7 +1964,7 @@ pub struct SyncOccluder<'a> {
     facts: &'a BlockFacts,
     renderer: Option<&'a Renderer>,
     streaming: &'a Streaming,
-    pending_uploads: &'a [((i32, i32, i32), SectionMesh)],
+    pending_uploads: &'a PendingUploads,
     bottom_y: i32,
     chunk_slots: [Option<(ChunkKey, Option<&'a Chunk>)>; 4],
     section_slots: [Option<(SectionKey, bool)>; 4],
@@ -1976,7 +1976,7 @@ impl<'a> SyncOccluder<'a> {
         facts: &'a BlockFacts,
         renderer: Option<&'a Renderer>,
         streaming: &'a Streaming,
-        pending_uploads: &'a [((i32, i32, i32), SectionMesh)],
+        pending_uploads: &'a PendingUploads,
     ) -> Self {
         Self {
             world,
@@ -2020,7 +2020,7 @@ impl<'a> SyncOccluder<'a> {
                 let ready = self.renderer.is_some_and(|r| r.has_section(section))
                     && !self.world.dirty_sections.contains(&section)
                     && !self.streaming.is_meshing(section)
-                    && !self.pending_uploads.iter().any(|(key, _)| *key == section);
+                    && !self.pending_uploads.contains(&section);
                 self.section_slots[section_index] = Some((section, ready));
                 ready
             }

@@ -114,8 +114,8 @@ pub fn started(shared: &Shared) {
 
 /// The notification a typed event of the game is, if vanilla sends one for it: a player who joined or left
 /// (`playerJoined`, `playerLeft`, with the player as a `PlayerDto`), a world save that began or ended
-/// (`serverSaveStarted`, `serverSaveCompleted`), and a change of the operators, the allowlist, the bans or the
-/// IP bans.
+/// (`serverSaveStarted`, `serverSaveCompleted`), world upgrades, and a change of the operators, the allowlist,
+/// the bans or the IP bans.
 pub fn game_event(shared: &Shared, kind: &str, event: &Value) {
     let player = || Some(json!({ "id": event["uuid"], "name": event["name"] }));
     let (method, params) = match kind {
@@ -123,6 +123,16 @@ pub fn game_event(shared: &Shared, kind: &str, event: &Value) {
         "leave" => ("notification/players/left", player()),
         "saving" => ("notification/server/saving", None),
         "saved" => ("notification/server/saved", None),
+        "world_upgrade_started" => ("notification/world/upgrade_started", None),
+        "world_upgrade_progress" => (
+            "notification/world/upgrade_progress",
+            event.get("progress").cloned(),
+        ),
+        "world_upgrade_finished" => ("notification/world/upgrade_finished", None),
+        "world_upgrade_failed" => (
+            "notification/world/upgrade_failed",
+            event.get("reason").cloned(),
+        ),
         // `ServerActivityMonitor.reportLoginActivity`: a login attempt, told at most once in thirty seconds.
         "login_activity" => {
             if activity_due(shared, Instant::now()) {
@@ -662,7 +672,7 @@ fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Read, Write};
 
     const SECRET: &str = "abcdefghijABCDEFGHIJ0123456789abcdefghij";
 
@@ -978,6 +988,81 @@ mod tests {
 
     #[test]
     #[ignore = "daily"]
+    fn startup_upgrade_events_reach_a_management_client() {
+        use std::net::TcpListener;
+
+        let shared = shared();
+        std::fs::create_dir_all(shared.dir.join(".horizon")).unwrap();
+        let address = listen_on(shared.clone(), settings());
+        let mut client = upgrade(address);
+        registered(&shared, 1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            horizon_server_launch::control_path(&shared.dir),
+            json!({"port": port, "token": "startup-token"}).to_string(),
+        )
+        .unwrap();
+        let peer = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "auth startup-token");
+            writeln!(socket, "{{\"ok\":true}}").unwrap();
+            for (seq, event) in [
+                (1, json!({"type": "world_upgrade_started"})),
+                (
+                    2,
+                    json!({"type": "world_upgrade_progress", "progress": 0.5}),
+                ),
+                (3, json!({"type": "world_upgrade_finished"})),
+                (
+                    4,
+                    json!({
+                        "type": "world_upgrade_failed",
+                        "reason": "World upgrade failed"
+                    }),
+                ),
+            ] {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert!(line.starts_with("server-events "), "{line}");
+                if matches!(seq, 2 | 4) {
+                    std::thread::sleep(Duration::from_millis(350));
+                }
+                let mut event = event;
+                event["seq"] = seq.into();
+                writeln!(socket, "{}", json!({"next": seq, "events": [event]})).unwrap();
+            }
+        });
+
+        {
+            let mut state = shared.state.lock().unwrap();
+            state.phase = Phase::Starting;
+            state.engine_pid = Some(42);
+        }
+        crate::events::poll_game(shared.clone());
+        for expected in [
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_started"}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_progress","params":[0.5]}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_finished"}"#,
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_failed","params":["World upgrade failed"]}"#,
+        ] {
+            assert_eq!(next_text(&mut client), expected);
+        }
+        shared.set_phase(Phase::Stopped);
+        peer.join().unwrap();
+        drop(client);
+        std::fs::remove_dir_all(&shared.dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "daily"]
     fn the_games_events_become_the_notifications_vanilla_sends() {
         let shared = shared();
         let address = listen_on(shared.clone(), settings());
@@ -994,6 +1079,18 @@ mod tests {
         game_event(&shared, "saving", &json!({ "type": "saving" }));
         game_event(&shared, "saved", &json!({ "type": "saved" }));
         game_event(&shared, "leave", &json!({ "name": "Kim0", "uuid": id }));
+        game_event(&shared, "world_upgrade_started", &json!({}));
+        game_event(
+            &shared,
+            "world_upgrade_progress",
+            &json!({ "progress": 0.5 }),
+        );
+        game_event(&shared, "world_upgrade_finished", &json!({}));
+        game_event(
+            &shared,
+            "world_upgrade_failed",
+            &json!({ "reason": "World upgrade failed" }),
+        );
         // The chat is not a notification; the rest come in order, the player as a `PlayerDto`.
         let player = format!(r#"[{{"id":"{id}","name":"Kim0"}}]"#);
         assert_eq!(
@@ -1015,6 +1112,22 @@ mod tests {
             format!(
                 r#"{{"jsonrpc":"2.0","method":"minecraft:notification/players/left","params":{player}}}"#
             )
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_started"}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_progress","params":[0.5]}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_finished"}"#
+        );
+        assert_eq!(
+            next_text(&mut client),
+            r#"{"jsonrpc":"2.0","method":"minecraft:notification/world/upgrade_failed","params":["World upgrade failed"]}"#
         );
         // A change of a list reaches the client with its one parameter (the player, for an allowlist).
         game_event(
@@ -1127,6 +1240,10 @@ mod tests {
             "notification/server/stopping",
             "notification/server/saving",
             "notification/server/saved",
+            "notification/world/upgrade_started",
+            "notification/world/upgrade_progress",
+            "notification/world/upgrade_finished",
+            "notification/world/upgrade_failed",
             "notification/players/joined",
             "notification/players/left",
             "notification/operators/added",

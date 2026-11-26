@@ -1,0 +1,1 @@
+horizon-client game::lightning::tests::lightning_targets_an_armor_stand_by_its_box lib daily resources

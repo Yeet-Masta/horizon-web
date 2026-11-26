@@ -223,8 +223,93 @@ fn own_player_frame(game: &mut Game<'_>, spectator: bool) -> Vec<Vertex> {
     game.player_model.as_mut().unwrap().extra.spectator = spectator;
     game.prepare_entity_culling(glam::DVec3::ZERO);
     let mut out = Vec::new();
-    game.player_model_geometry(CAMERA, 1.0, &mut out);
+    game.player_model_geometry(CAMERA, 1.0, None, &mut out);
     out
+}
+
+struct FirstPersonProbe(Arc<Mutex<Option<([f32; 3], bool)>>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for FirstPersonProbe {
+    fn render_first_person_body(
+        &self,
+        _: &dyn mod_api::ClientHost,
+        event: &mut mod_api::RenderFirstPersonBodyEvent<'_>,
+    ) {
+        let Some((offset, hide_helmet)) = *self.0.lock().unwrap() else {
+            return;
+        };
+        assert_eq!(event.player.id, 4321);
+        event.body.show = true;
+        event.body.offset = offset;
+        event.body.hidden.hide(mod_api::HumanoidPart::Head);
+        if hide_helmet {
+            event.body.hide_layer(mod_api::FirstPersonBodyLayer::Helmet);
+        }
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn first_person_listener_admits_offsets_and_filters_the_local_world_model() {
+    use horizon_client::{camera::CameraType, items::ItemStack};
+
+    // Share the fixture's answer with the registered listener, not with the render path.
+    let answer = Arc::new(Mutex::new(None));
+    let mods = vec![mod_api::ModEntry::new(
+        "body",
+        Box::new(FirstPersonProbe(answer.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        super::native_entity_refs::tests::with_client_game(|game| {
+            game.armor[0] = Some(ItemStack::new("minecraft:iron_helmet", 1));
+            let third_person = own_player_frame(game, false);
+            assert!(!third_person.is_empty());
+            let draw = |game: &Game<'_>| {
+                let mut out = Vec::new();
+                let body = game.first_person_body(1.0);
+                game.player_model_geometry(CAMERA, 1.0, body.as_ref(), &mut out);
+                out
+            };
+            game.camera_type = CameraType::FirstPerson;
+            assert!(
+                draw(game).is_empty(),
+                "a listener that doesn't opt in draws nothing"
+            );
+
+            *answer.lock().unwrap() = Some(([0.0; 3], false));
+            let with_helmet = draw(game);
+            assert!(
+                with_helmet.len() < third_person.len(),
+                "the head was hidden"
+            );
+            *answer.lock().unwrap() = Some(([0.0; 3], true));
+            let bare = draw(game);
+            assert!(
+                !bare.is_empty() && bare.len() < with_helmet.len(),
+                "only the helmet was removed"
+            );
+
+            let delta = glam::Vec3::new(0.25, -0.125, -0.5);
+            *answer.lock().unwrap() = Some((delta.to_array(), true));
+            let shifted = draw(game);
+            assert_eq!(shifted.len(), bare.len());
+            for (base, moved) in bare.iter().zip(shifted) {
+                let actual = glam::Vec3::from_array(moved.pos) - glam::Vec3::from_array(base.pos);
+                assert!((actual - delta).length() < 1e-5);
+            }
+
+            game.camera_type = CameraType::ThirdPersonBack;
+            let third_after = draw(game);
+            assert!(
+                third_person
+                    .iter()
+                    .map(|v| v.pos)
+                    .eq(third_after.iter().map(|v| v.pos))
+            );
+        });
+    });
 }
 
 #[test]
@@ -282,5 +367,122 @@ fn a_spectator_draws_no_layers_but_gets_its_post_hooks() {
         game.mobs.push(mannequin);
         mob_frame(game);
         assert_eq!(events(&heard), ["living_pre 94", "living_post 94"]);
+    });
+}
+
+/// A mod subscribed only to `render_living_pre` (no post hooks, no player hooks).
+struct LivingPreOnly(Arc<Mutex<Heard>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for LivingPreOnly {
+    fn render_living_pre(
+        &self,
+        _: &dyn mod_api::ClientHost,
+        event: &mut RenderLivingPreEvent<'_>,
+    ) -> mod_api::Flow {
+        let mut heard = self.0.lock().unwrap();
+        heard.events.push(format!("living_pre {}", event.entity.id));
+        event.cancelled = heard.cancel_living.contains(&event.entity.id);
+        mod_api::Flow::Continue
+    }
+}
+
+/// A mod subscribed only to `render_living_pre` and `render_player_post` (no `render_living_post`,
+/// no `render_player_pre`).
+struct LivingPreAndPlayerPost(Arc<Mutex<Heard>>);
+
+#[mod_api::__subscriptions]
+impl Hooks for LivingPreAndPlayerPost {
+    fn render_living_pre(
+        &self,
+        _: &dyn mod_api::ClientHost,
+        event: &mut RenderLivingPreEvent<'_>,
+    ) -> mod_api::Flow {
+        let mut heard = self.0.lock().unwrap();
+        heard.events.push(format!("living_pre {}", event.entity.id));
+        event.cancelled = heard.cancel_living.contains(&event.entity.id);
+        mod_api::Flow::Continue
+    }
+    fn render_player_post(
+        &self,
+        _: &dyn mod_api::ClientHost,
+        event: &mut RenderPlayerPostEvent<'_>,
+    ) {
+        let mut heard = self.0.lock().unwrap();
+        heard
+            .events
+            .push(format!("player_post {}", event.who.local));
+    }
+}
+
+#[test]
+#[ignore = "daily"]
+fn single_pre_hook_runs_pre_only_and_skips_post_phase() {
+    let heard: Arc<Mutex<Heard>> = Arc::default();
+    let mods = vec![mod_api::ModEntry::new(
+        "living_pre_only",
+        Box::new(LivingPreOnly(heard.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        super::native_entity_refs::tests::with_client_game(|game| {
+            game.mobs.clear();
+            game.mobs.push(mob(game, "minecraft:zombie", 91, 0.0));
+            mob_frame(game);
+            let hooks = game.mob_render_listened();
+            assert!(hooks.any_pre());
+            assert!(!hooks.any_post());
+            assert!(!hooks.any_post_for(false));
+            assert!(!hooks.any_post_for(true));
+            assert_eq!(events(&heard), ["living_pre 91"]);
+
+            // Entering `mod_render_post` directly with no post hooks active is a no-op.
+            let mut out = Vec::new();
+            game.mod_render_post(&game.mobs[0], None, None, 1.0, CAMERA, 0, &mut out);
+            assert!(out.is_empty());
+            assert!(events(&heard).is_empty());
+
+            // Player pass also runs only `living_pre` and skips player/living post hooks.
+            own_player_frame(game, false);
+            assert_eq!(events(&heard), ["living_pre 4321"]);
+        });
+    });
+}
+
+#[test]
+#[ignore = "daily"]
+fn living_pre_and_player_post_gating_matches_per_hook_mask() {
+    let heard: Arc<Mutex<Heard>> = Arc::default();
+    let mods = vec![mod_api::ModEntry::new(
+        "living_pre_and_player_post",
+        Box::new(LivingPreAndPlayerPost(heard.clone())),
+    )]
+    .into();
+    mod_platform::testing::with_mods(mods, || {
+        super::native_entity_refs::tests::with_client_game(|game| {
+            game.mobs.clear();
+            game.mobs.push(mob(game, "minecraft:zombie", 91, 0.0));
+            mob_frame(game);
+            let hooks = game.mob_render_listened();
+            assert!(hooks.any_pre());
+            assert!(hooks.any_post());
+            assert!(!hooks.any_post_for(false));
+            assert!(hooks.any_post_for(true));
+            assert_eq!(
+                events(&heard),
+                ["living_pre 91"],
+                "non-player mob does not fire player_post or unsubscribed living_post"
+            );
+
+            // Uncanceled player fires living_pre then player_post.
+            own_player_frame(game, false);
+            assert_eq!(events(&heard), ["living_pre 4321", "player_post true"]);
+
+            // Canceled living_pre on a player still triggers player_post.
+            heard.lock().unwrap().cancel_living.push(4321);
+            own_player_frame(game, false);
+            assert_eq!(events(&heard), ["living_pre 4321", "player_post true"]);
+            assert!(game.own_render_canceled());
+        });
     });
 }

@@ -9,6 +9,9 @@ impl Game<'_> {
     /// (`renderBlockDestroyAnimation`: within 32 blocks of the camera, the furthest progress on
     /// each block).
     pub(super) fn cracks(&self, camera: glam::DVec3) -> Vec<([i32; 3], CrackSprite)> {
+        if self.mining.is_none() && self.destroying.is_empty() {
+            return Vec::new();
+        }
         // Only a renderer drawing the transparency path draws a translucent crack with its set.
         let transparent = self
             .renderer
@@ -59,9 +62,19 @@ impl Game<'_> {
         sky: &horizon_client::environment::Sky,
         rain: f32,
     ) -> (Vec<Vertex>, Option<(glam::Mat4, f32)>) {
+        const MOON_PHASES: [&str; 8] = [
+            "environment/celestial/moon/full_moon",
+            "environment/celestial/moon/waning_gibbous",
+            "environment/celestial/moon/third_quarter",
+            "environment/celestial/moon/waning_crescent",
+            "environment/celestial/moon/new_moon",
+            "environment/celestial/moon/waxing_crescent",
+            "environment/celestial/moon/first_quarter",
+            "environment/celestial/moon/waxing_gibbous",
+        ];
         let body_color =
             0x00FF_FFFF | (((1.0 - rain).clamp(0.0, 1.0) * 255.0).round() as u32) << 24;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(8);
         let atlas = &self.gui.atlas;
         let frame = |angle: f32| {
             glam::Mat4::from_rotation_y((-90.0f32).to_radians())
@@ -102,19 +115,8 @@ impl Game<'_> {
             }
         };
         body("environment/celestial/sun", sky.sun_angle, 30.0, false);
-        let phases = [
-            "full_moon",
-            "waning_gibbous",
-            "third_quarter",
-            "waning_crescent",
-            "new_moon",
-            "waxing_crescent",
-            "first_quarter",
-            "waxing_gibbous",
-        ];
-        let phase = phases[sky.moon_phase as usize];
         body(
-            &format!("environment/celestial/moon/{phase}"),
+            MOON_PHASES[sky.moon_phase as usize],
             sky.moon_angle,
             20.0,
             true,
@@ -124,6 +126,27 @@ impl Game<'_> {
             (sky.star_brightness > 0.0).then(|| (frame(sky.star_angle), sky.star_brightness));
         (out, stars)
     }
+    /// The atlas entry and model width that the first-person arms use, including
+    /// the fallback when the player's skin has not reached the atlas.
+    fn first_person_arm_skin(&self) -> Option<(&str, &horizon_client::hud::Rect, bool)> {
+        let model = self.player_model.as_ref();
+        let slim = model.is_some_and(|m| m.slim);
+        let sprites = &self.gui.atlas.sprites;
+        let (sprite, rect) = model
+            .and_then(|m| m.skin.as_deref())
+            .and_then(|skin| sprites.get_key_value(skin))
+            .or_else(|| sprites.get_key_value("entity/player/wide/steve"))?;
+        Some((sprite.as_str(), rect, slim))
+    }
+
+    pub(in crate::game) fn local_player_arm_skin(&self) -> Option<(&str, bool)> {
+        if !self.native_window() || self.player.is_none() {
+            return None;
+        }
+        self.first_person_arm_skin()
+            .map(|(sprite, _, slim)| (sprite, slim))
+    }
+
     /// `renderPlayerHand` (`AvatarRenderer.renderHand`): the player's own
     /// `left` or right arm with its skin at pose `m`, in its rest pose
     /// turned 0.1 radians outwards. Mods are asked first (`RenderArmEvent`)
@@ -161,20 +184,10 @@ impl Game<'_> {
                 return;
             }
         }
-        let slim = self.player_model.as_ref().is_some_and(|m| m.slim);
-        let Some(arm) = self.res.player_arm(slim, left).as_ref() else {
+        let Some((_, r, slim)) = self.first_person_arm_skin() else {
             return;
         };
-        // The player's own skin, as the inventory's model shows it.
-        let sprites = &self.gui.atlas.sprites;
-        let Some(r) = self
-            .player_model
-            .as_ref()
-            .and_then(|m| m.skin.as_deref())
-            .and_then(|skin| sprites.get(skin))
-            .or_else(|| sprites.get("entity/player/wide/steve"))
-            .copied()
-        else {
+        let Some(arm) = self.res.player_arm(slim, left).as_ref() else {
             return;
         };
         let z_rot = if left { -0.1 } else { 0.1 };
@@ -408,8 +421,9 @@ impl Game<'_> {
                     remaining: owner.use_item_remaining_ticks as f32,
                     partial: a,
                 },
-                Some(ItemUseState::Other(animation)) => item_use::use_pose(
+                Some(ItemUseState::Other(animation)) => item_use::held_use_pose(
                     animation,
+                    &*stack.item == "minecraft:shield",
                     owner.use_item_remaining_ticks as f32,
                     owner.use_duration as f32,
                     a,

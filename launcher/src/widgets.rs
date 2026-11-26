@@ -366,14 +366,20 @@ pub(crate) fn sync_system_clipboard(text: String) {
 
 /// An on/off switch: a square knob sliding in a sunk track that turns violet when on.
 pub(crate) fn switch(id: impl Into<SharedString>, on: bool, t: &Theme) -> Stateful<Div> {
+    keyboard(switch_face(id, on, t), t)
+}
+
+/// The switch inside a control that provides its own keyboard focus.
+pub(crate) fn switch_face(id: impl Into<SharedString>, on: bool, t: &Theme) -> Stateful<Div> {
     if t.glass {
         let look = glass_ui::look();
-        return glass_ui::toggle(id, on, look.accent, look.on_accent, t);
+        return glass_ui::toggle_face(id, on, look.accent, look.on_accent);
     }
     let t = *t;
     let id: SharedString = id.into();
     let knob = if on { t.on_face } else { t.muted };
-    keyboard(div().id(id.clone()), &t)
+    div()
+        .id(id.clone())
         .relative()
         .flex_none()
         .w(px(44.))
@@ -557,6 +563,77 @@ pub(crate) fn starts_now(prepared: bool, preparing: bool, running: bool) -> bool
     play_press(prepared, None, preparing || running) == PlayPress::Play
 }
 
+/// How the launcher's single running or starting game relates to the instance shown on Home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SelectedGameState<'a> {
+    Idle,
+    SelectedRunning { since: Instant },
+    OtherRunning { id: Option<&'a str> },
+    SelectedStarting,
+    OtherStarting { id: Option<&'a str> },
+}
+
+/// Classifies the running or starting game against `selected_id`, so Home's play-time line and
+/// Play/Stop controls only treat the started instance as running or starting (#20630).
+pub(crate) fn selected_game_state<'a>(
+    selected_id: Option<&str>,
+    client_running: bool,
+    client_run: Option<&'a (String, Instant)>,
+    starting_client: bool,
+    starting_instance: Option<&'a str>,
+) -> SelectedGameState<'a> {
+    if client_running {
+        match (selected_id, client_run) {
+            (Some(sel), Some((run_id, since))) if sel == run_id => {
+                SelectedGameState::SelectedRunning { since: *since }
+            }
+            (_, run) => SelectedGameState::OtherRunning {
+                id: run.map(|(id, _)| id.as_str()),
+            },
+        }
+    } else if starting_client {
+        match (selected_id, starting_instance) {
+            (Some(sel), Some(start_id)) if sel == start_id => SelectedGameState::SelectedStarting,
+            (_, start_id) => SelectedGameState::OtherStarting { id: start_id },
+        }
+    } else {
+        SelectedGameState::Idle
+    }
+}
+
+/// Looks up the active instance `id` in `instances`, returning its trimmed non-empty display name
+/// and whether that instance has its own selectable Home view (`Default` or `Own`) where Stop
+/// already lives.
+pub(crate) fn other_game_info<'a>(
+    instances: &'a [instances::Instance],
+    id: Option<&str>,
+) -> (Option<&'a str>, bool) {
+    let Some(instance) = id.and_then(|id| instances.iter().find(|i| i.id == id)) else {
+        return (None, false);
+    };
+    let name = Some(instance.name.trim()).filter(|s| !s.is_empty());
+    let has_home = matches!(
+        instance.kind,
+        instances::Kind::Default | instances::Kind::Own
+    );
+    (name, has_home)
+}
+
+/// Status caption shown on Home's primary button when another instance is running or starting.
+pub(crate) fn other_game_label(phase: crate::frame::RowPhase, name: Option<&str>) -> String {
+    let name = name.map(str::trim).filter(|s| !s.is_empty());
+    match (phase, name) {
+        (crate::frame::RowPhase::Running, Some(instance)) => {
+            trf("{instance} is running", &[("instance", instance)])
+        }
+        (crate::frame::RowPhase::Running, None) => tr("Another instance is running").into(),
+        (crate::frame::RowPhase::Starting, Some(instance)) => {
+            trf("{instance} is starting", &[("instance", instance)])
+        }
+        (crate::frame::RowPhase::Starting, None) => tr("Another instance is starting").into(),
+    }
+}
+
 /// Whether `tag` can start being deleted now: it is installed, no instance plays it (`used_by`),
 /// no install is writing it, and it is not already going. Another version deleting at the same
 /// time does not stop it.
@@ -571,17 +648,6 @@ pub(crate) fn removable(
         && installing != Some(tag)
         && installed.iter().any(|t| t == tag)
         && !removing.iter().any(|t| t == tag)
-}
-
-/// The selected version once one has been removed: the saved choice if it is still installed,
-/// else the newest left.
-pub(crate) fn selection_after_removal(
-    installed: &[String],
-    saved: Option<String>,
-) -> Option<String> {
-    saved
-        .filter(|s| installed.contains(s))
-        .or_else(|| installed.first().cloned())
 }
 
 /// The row menu a press on a sidebar row leaves open: that row's, or none when it was already

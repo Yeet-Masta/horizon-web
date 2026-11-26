@@ -575,6 +575,33 @@ mod tests {
         });
     }
 
+    /// Every type that has recipes is listed once, by type and never by serializer, and so is a
+    /// mod's registered type with no recipe yet.
+    #[test]
+    #[ignore = "daily"]
+    fn recipe_types_list_each_type_with_recipes_or_a_serializer() {
+        mod_platform::testing::with_recipe_types(&["typesprobe:grinding"], || {
+            with_game(|game| {
+                let types = game.recipe_types();
+                for kind in [
+                    "minecraft:blasting",
+                    "minecraft:campfire_cooking",
+                    "minecraft:crafting",
+                    "minecraft:smelting",
+                    "minecraft:smithing",
+                    "minecraft:smoking",
+                    "minecraft:stonecutting",
+                    "typesprobe:grinding",
+                ] {
+                    assert!(types.iter().any(|t| t == kind), "{kind}: {types:?}");
+                }
+                assert!(!types.iter().any(|t| t == "minecraft:crafting_shaped"));
+                assert!(types.is_sorted());
+                assert!(types.windows(2).all(|pair| pair[0] != pair[1]));
+            })
+        });
+    }
+
     #[test]
     #[ignore = "daily"]
     fn tag_and_fluid_reads_follow_vanilla_and_load_nothing() {
@@ -847,14 +874,15 @@ mod tests {
             });
             {
                 use mod_api::LevelHost;
-                let hit =
-                    super::super::native_hooks::HitLevel(horizon_client::health::DamageLevel::of(
+                let hit = super::super::native_hooks::HitLevel::new(
+                    horizon_client::health::DamageLevel::of(
                         &mut game.world,
                         game.pack.assets.registry,
                         Some(world_items!(game)),
                         Some(&game.pack.block_registries),
                         &game.damage_hooks,
-                    ));
+                    ),
+                );
                 assert_eq!(
                     hit.block_state_id("minecraft:oak_slab[waterlogged=true]"),
                     parsed
@@ -885,14 +913,15 @@ mod tests {
             }
             {
                 use mod_api::LevelHost;
-                let hit =
-                    super::super::native_hooks::HitLevel(horizon_client::health::DamageLevel::of(
+                let hit = super::super::native_hooks::HitLevel::new(
+                    horizon_client::health::DamageLevel::of(
                         &mut game.world,
                         game.pack.assets.registry,
                         None,
                         None,
                         &game.damage_hooks,
-                    ));
+                    ),
+                );
                 assert_eq!(hit.block_state_id("minecraft:stone"), None);
                 assert_eq!(
                     hit.block_state_default(mod_platform::__private::part_tests::block_key(

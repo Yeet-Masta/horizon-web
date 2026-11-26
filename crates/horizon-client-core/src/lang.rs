@@ -798,11 +798,8 @@ mod tests {
         assert_eq!(en.get("horizon.options.controller"), Some("Controller"));
         let ru = Language::load(&[&empty], "ru_ru");
         assert_eq!(ru.get("horizon.options.controller"), Some("Геймпад"));
-        // Every bundled string carries both languages: a key added to one file
-        // and forgotten in the other shows as a key name on screen.
-        for key in en.map().keys() {
-            assert!(ru.get(key).is_some(), "{key} has no ru_ru value");
-        }
+        // A key ru_ru.json lacks is no gap on screen: `load` layers en_us under every
+        // language, so it shows the English (#12714). `tools/lang_coverage.py` lists them.
         assert_eq!(en.get("horizon.pages.mods"), Some("Mods"));
         assert_eq!(ru.get("horizon.pages.mods"), Some("Моды"));
         let zh = Language::load(&[&empty], "zh_cn");
@@ -964,25 +961,331 @@ mod tests {
             })
             .collect()
     }
-    /// The fields the code fills in (`%s`, `%d`, `%1$s`, `%.2f`, `%%`), sorted. A
-    /// percent sign that starts none of them ("100% is") is plain text.
-    fn placeholders(text: &str) -> Vec<String> {
-        let mut found = Vec::new();
-        let mut rest = text;
-        while let Some(at) = rest.find('%') {
-            rest = &rest[at + 1..];
-            let spec = rest
-                .find(|c: char| !(c.is_ascii_digit() || c == '$' || c == '.'))
-                .unwrap_or(rest.len());
-            let after = rest[spec..].chars().next();
-            if after.is_some_and(|c| matches!(c, 's' | 'd' | 'f' | '%')) {
-                let end = spec + 1;
-                found.push(format!("%{}", &rest[..end]));
-                rest = &rest[end..];
+    /// How the game reads `text` as a template, walked by the formatter's own parser
+    /// (`crate::text::walk_template`): the argument indices it fills in, once per use and
+    /// sorted, and its literal text; `None` where it shows the template as written whatever the
+    /// arguments (`%d`, `%q`, a `%` at the end, `%0$s`). `tools/lang_coverage.py` mirrors it.
+    fn template(text: &str) -> Option<(Vec<usize>, String)> {
+        use crate::text::{TemplatePiece, TemplateWalk, walk_template};
+        use std::ops::ControlFlow;
+        let mut fields = Vec::new();
+        let mut literal = String::new();
+        let walk = walk_template(text, |piece| match piece {
+            // `%0$s`: no call has an argument at usize::MAX.
+            TemplatePiece::Argument(usize::MAX) => ControlFlow::Break(()),
+            TemplatePiece::Argument(index) => {
+                fields.push(index);
+                ControlFlow::Continue(())
+            }
+            TemplatePiece::Literal(text) => {
+                literal.push_str(text);
+                ControlFlow::Continue(())
+            }
+        });
+        if walk != TemplateWalk::Done {
+            return None;
+        }
+        fields.sort_unstable();
+        Some((fields, literal))
+    }
+    /// The keys whose English text the game cannot format: read as plain text, never formatted.
+    /// The list may only shrink: `a_listed_unformattable_key_still_cannot_be_formatted` pins it.
+    fn unformattable() -> HashMap<String, String> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/lang_unformattable.json"
+        );
+        serde_json::from_str(&horizon_std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+    /// Unicode's bidirectional embedding, override and isolate controls.
+    fn is_bidi_control(c: char) -> bool {
+        matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }
+
+    /// What is wrong with one translated `value` of `key`, if anything: the game cannot format
+    /// it (it would show the template as written, `%s` and all), it fills in other arguments
+    /// than English, it drops the percent sign English writes as `%%`, or it carries a control
+    /// character. A line break is always allowed, a tab and a bidi control only where English
+    /// has one.
+    fn entry_problem(
+        key: &str,
+        value: &str,
+        english: &str,
+        plain: &HashMap<String, String>,
+    ) -> Option<&'static str> {
+        let (read, wanted) = (template(value), template(english));
+        if plain.contains_key(key) {
+            if read.map(|t| t.0).unwrap_or_default() != wanted.map(|t| t.0).unwrap_or_default() {
+                return Some("is read as plain text and must fill in no argument");
+            }
+        } else {
+            let Some((fields, literal)) = read else {
+                return Some("is a template the game cannot format");
+            };
+            if wanted.as_ref().map(|t| &t.0) != Some(&fields) {
+                return Some("changes the placeholders of the English text");
+            }
+            if english.contains("%%") && !literal.contains('%') {
+                return Some("drops the percent sign the English text shows");
             }
         }
-        found.sort();
+        text_problem(english, value).map(|rule| match rule {
+            "control" => "carries a control character its English text lacks",
+            "invisible" => "carries an invisible character its English text lacks",
+            "combining_marks" => "stacks more combining marks than its English text allows",
+            "bidi" => "opens bidi controls it does not close, or more than its English text",
+            "formatting_code" => "has other `§` formatting codes than its English text",
+            "line_break" => "has more line breaks than twice its English text's",
+            "length" => "is longer than its English text allows",
+            _ => "has a longer unbroken run than its English text allows",
+        })
+    }
+
+    /// At most this many times the English length in characters, or the English length plus
+    /// `LENGTH_SLACK`, whichever is more; the longest run without a break is `MAX_RUN`, and the
+    /// most combining marks in a row `MAX_MARKS`, unless English has more. The same as
+    /// `tools/lang_coverage.py`.
+    const LENGTH_FACTOR: usize = 4;
+    const LENGTH_SLACK: usize = 80;
+    const MAX_RUN: usize = 60;
+    const MAX_MARKS: usize = 4;
+
+    fn is_invisible(c: char) -> bool {
+        matches!(c,
+            '\u{200b}' | '\u{2060}' | '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{ad}' | '\u{34f}'
+            | '\u{180e}' | '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e007f}'
+            | '\u{fdd0}'..='\u{fdef}'
+            | '\u{e000}'..='\u{f8ff}'
+            | '\u{f0000}'..='\u{ffffd}'
+            | '\u{100000}'..='\u{10fffd}')
+            || ((c as u32) & 0xfffe) == 0xfffe
+    }
+    fn is_variation_selector(c: char) -> bool {
+        matches!(c,
+            '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}' | '\u{180b}'..='\u{180d}' | '\u{180f}')
+    }
+    /// One of the sorted, disjoint range lists of `tools/lang_unicode_tables.json`, which
+    /// `tools/gen_lang_unicode_tables.py` writes from the Unicode Character Database and
+    /// `tools/lang_coverage.py` reads too: std has no general category or script.
+    fn in_table(name: &str, c: char) -> bool {
+        type Tables = HashMap<String, Vec<(u32, u32)>>;
+        static TABLES: std::sync::OnceLock<Tables> = std::sync::OnceLock::new();
+        let tables = TABLES.get_or_init(|| {
+            let path = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/lang_unicode_tables.json"
+            );
+            let body: serde_json::Value =
+                serde_json::from_str(&horizon_std::fs::read_to_string(path).unwrap()).unwrap();
+            ["spaceless", "combining", "transparent"]
+                .into_iter()
+                .map(|key| {
+                    let ranges = serde_json::from_value(body[key].clone()).unwrap();
+                    (key.to_owned(), ranges)
+                })
+                .collect()
+        });
+        let ranges = &tables[name];
+        let at = ranges.partition_point(|&(_, high)| high < c as u32);
+        ranges.get(at).is_some_and(|&(low, _)| low <= c as u32)
+    }
+    /// The legacy codes in `text` in order, ASCII ones lowercased: a `§` takes the character
+    /// after it, whatever it is, and neither is drawn (`Text::resolve_legacy`); a `§` at the end
+    /// is a code of its own.
+    fn formatting_codes(text: &str) -> Vec<Option<char>> {
+        let mut found = Vec::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '§' {
+                found.push(chars.next().map(|code| code.to_ascii_lowercase()));
+            }
+        }
         found
+    }
+    /// The most characters one token holds that the game's wrapper cannot break inside: a token
+    /// is what lies between spaces and line breaks (`Font::split_lines` breaks there only), and
+    /// letters of a script written without spaces do not count, since a line of them is cut
+    /// where it overflows.
+    fn longest_run(text: &str) -> usize {
+        text.split(['\n', ' '])
+            .map(|token| token.chars().filter(|&c| !in_table("spaceless", c)).count())
+            .max()
+            .unwrap_or(0)
+    }
+    /// The most combining marks in a row; a transparent character between them (a joiner, a
+    /// direction mark, an emoji modifier) neither counts nor ends the row.
+    fn most_marks(text: &str) -> usize {
+        let (mut most, mut current) = (0, 0);
+        for c in text.chars().filter(|&c| !in_table("transparent", c)) {
+            current = if in_table("combining", c) {
+                current + 1
+            } else {
+                0
+            };
+            most = most.max(current);
+        }
+        most
+    }
+    /// Every bidi embedding, override and isolate `text` opens it closes, nested, and no more of
+    /// each than English opens.
+    fn bidi_balanced(english: &str, text: &str) -> bool {
+        let embedding = |c: char| matches!(c, '\u{202a}' | '\u{202b}' | '\u{202d}' | '\u{202e}');
+        let isolate = |c: char| matches!(c, '\u{2066}'..='\u{2068}');
+        let count = |s: &str, c: char| s.chars().filter(|&x| x == c).count();
+        if text
+            .chars()
+            .filter(|&c| embedding(c) || isolate(c))
+            .any(|c| count(text, c) > count(english, c))
+        {
+            return false;
+        }
+        let mut open = Vec::new();
+        for c in text.chars() {
+            if embedding(c) || isolate(c) {
+                open.push(c);
+            } else if c == '\u{202c}' || c == '\u{2069}' {
+                let closes: fn(char) -> bool = if c == '\u{202c}' { embedding } else { isolate };
+                if !open.pop().is_some_and(closes) {
+                    return false;
+                }
+            }
+        }
+        open.is_empty()
+    }
+    /// The first rule `text`, a translation of `english`, breaks, by its name in
+    /// `tests/fixtures/translation_text_rules.json`: what it may carry beyond its placeholders.
+    fn text_problem(english: &str, text: &str) -> Option<&'static str> {
+        let stray = text.chars().any(|c| match c {
+            '\n' => false,
+            '\t' => !english.contains('\t'),
+            c if is_bidi_control(c) => !english.contains(c),
+            c => c.is_control(),
+        });
+        if stray {
+            return Some("control");
+        }
+        let mut previous: Option<char> = None;
+        for c in text.chars() {
+            if is_invisible(c) && !english.contains(c)
+                || is_variation_selector(c)
+                    && previous.is_none_or(|p| p.is_whitespace() || is_variation_selector(p))
+            {
+                return Some("invisible");
+            }
+            previous = Some(c);
+        }
+        if most_marks(text) > MAX_MARKS.max(most_marks(english)) {
+            return Some("combining_marks");
+        }
+        if !bidi_balanced(english, text) {
+            return Some("bidi");
+        }
+        if formatting_codes(text) != formatting_codes(english) {
+            return Some("formatting_code");
+        }
+        let breaks = |s: &str| s.matches('\n').count();
+        if breaks(text) > 2 * breaks(english) {
+            return Some("line_break");
+        }
+        let length = english.chars().count();
+        if text.chars().count() > (LENGTH_FACTOR * length).max(length + LENGTH_SLACK) {
+            return Some("length");
+        }
+        (longest_run(text) > MAX_RUN.max(longest_run(english))).then_some("unbroken_run")
+    }
+
+    #[test]
+    fn translated_text_keeps_what_its_english_allows() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/translation_text_rules.json"
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(&horizon_std::fs::read_to_string(path).unwrap()).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let (english, text) = (
+                case["english"].as_str().unwrap(),
+                case["text"].as_str().unwrap(),
+            );
+            assert_eq!(
+                text_problem(english, text),
+                case["rule"].as_str(),
+                "{}",
+                case["case"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_translation_the_game_cannot_format_or_with_a_control_character_is_refused() {
+        let plain = HashMap::from([("plain".to_owned(), String::new())]);
+        let problem = |value: &str, english: &str| entry_problem("k", value, english, &plain);
+        assert_eq!(problem("%2$s, %1$s", "%s and %s"), None);
+        assert_eq!(problem("50% off %s, %%", "%s"), None);
+        assert_eq!(problem("50 % de %s", "50%% off %s"), None);
+        assert_eq!(problem("line\nnext", "one\ntwo"), None);
+        assert_eq!(problem("a\u{2067}b\u{2069}", "\u{2067}x\u{2069}"), None);
+        for (value, english) in [
+            ("%s %q", "%s %s"),
+            ("%s in %", "%s in"),
+            ("%d", "%s"),
+            ("%s", "%s and %s"),
+            ("%s %s", "%s"),
+            ("%1$s %1$s", "%s %s"),
+            // Past any argument count a probe would supply, and an index no call has.
+            ("Durability %33$s", "Durability"),
+            ("%0$s", "%0$s"),
+            // Text that looks like a filled-in argument is still text.
+            ("\u{e000}0\u{e001}", "%s"),
+            ("50 off %s", "50%% off %s"),
+        ] {
+            assert!(
+                problem(value, english).is_some(),
+                "{value:?} for {english:?}"
+            );
+        }
+        for value in [
+            "a\u{1b}[0m",
+            "a\tb",
+            "a\u{7f}",
+            "a\u{85}",
+            "a\u{202e}b",
+            "a\u{2066}b",
+        ] {
+            assert!(problem(value, "a b").is_some(), "{value:?}");
+        }
+        // A key read as plain text is held to filling in nothing.
+        assert_eq!(
+            entry_problem("plain", "En %", "Durability in %", &plain),
+            None
+        );
+        assert!(entry_problem("plain", "En %s", "Durability in %", &plain).is_some());
+        assert!(entry_problem("plain", "En %33$s", "Durability in %", &plain).is_some());
+    }
+
+    #[test]
+    fn a_listed_unformattable_key_still_cannot_be_formatted() {
+        let en: HashMap<String, String> = serde_json::from_str(
+            &horizon_std::fs::read_to_string(bundled_dir().join("en_us.json")).unwrap(),
+        )
+        .unwrap();
+        let listed = unformattable();
+        // Growing the list takes changing this test (and tests/test_lang_coverage.py's twin).
+        let mut keys: Vec<&str> = listed.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["horizon.pvp.hud_armour_percent"]);
+        for key in listed.keys() {
+            let english = en
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} is not in en_us.json"));
+            assert_eq!(
+                template(english),
+                None,
+                "{key} formats now: take it off tools/lang_unformattable.json"
+            );
+        }
     }
 
     #[test]
@@ -1007,11 +1310,13 @@ mod tests {
         }
     }
 
-    /// The checks every lang folder passes: flat maps, no repeated key, no key en_us lacks, the
-    /// same placeholders as English, no empty text. Its en_us and how many files it has.
+    /// The checks every lang folder passes: flat maps, no repeated key, no key en_us lacks, text
+    /// the game can format with the same arguments as English, no control character English
+    /// lacks, no empty text. Its en_us and how many files it has.
     fn check_lang_dir(dir: &std::path::Path, bundled: bool) -> (HashMap<String, String>, usize) {
         let en_body = horizon_std::fs::read_to_string(dir.join("en_us.json")).unwrap();
         let en: HashMap<String, String> = serde_json::from_str(&en_body).unwrap();
+        let plain = unformattable();
         let mut seen = 0;
         for entry in horizon_std::fs::read_dir(dir).unwrap().flatten() {
             let name = entry.file_name().into_string().unwrap();
@@ -1039,12 +1344,9 @@ mod tests {
                 let english = en
                     .get(key)
                     .unwrap_or_else(|| panic!("{code}: {key} is not in en_us.json"));
-                // A translation keeps the fields the code fills in.
-                assert_eq!(
-                    placeholders(value),
-                    placeholders(english),
-                    "{code}: {key} changes the placeholders of the English text"
-                );
+                if let Some(problem) = entry_problem(key, value, english, &plain) {
+                    panic!("{code}: {key} {problem}: {value:?}");
+                }
                 assert!(!value.trim().is_empty(), "{code}: {key} is empty");
             }
         }

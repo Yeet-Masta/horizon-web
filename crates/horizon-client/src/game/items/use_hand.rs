@@ -174,9 +174,10 @@ impl Game<'_> {
                     .or_else(|| self.use_decorated_pot(hit.pos, state, held.as_ref(), ItemOn))
                     .or_else(|| self.use_chiseled_bookshelf(hit, state, held.as_ref(), ItemOn));
             }
-            // TRY_WITH_EMPTY_HAND: only the main hand's turn uses the block itself (useWithoutItem). The block's item behaviour hears both hands.
-            if !anchor_passed && !chains_sign && (self.hand == Hand::Main || block_answer.is_some())
-            {
+            // `ServerPlayerGameMode.useItemOn` runs `BlockState.useItemOn` for
+            // either hand; only the main hand follows its TRY_WITH_EMPTY_HAND
+            // with `useWithoutItem`.
+            if !anchor_passed && !chains_sign {
                 let face = match hit.face {
                     [0, 1, 0] => Direction::Up,
                     [0, -1, 0] => Direction::Down,
@@ -505,13 +506,17 @@ impl Game<'_> {
             || self.use_empty_map(&stack)
                 || self.use_book(&stack)
                 // KnowledgeBookItem.use: the recipes it names become known.
-                || self.use_knowledge_book(&stack)
-                // Block items (heads, carved pumpkins) aimed at a block are
-                // placed first (useItemOn before useItem).
-                || (!(info.block.is_some() && block_hit.is_some())
-                    && self.equip_from_hand(&stack)))
+                || self.use_knowledge_book(&stack))
         {
             return Ok(true);
+        }
+        // Block items (heads, carved pumpkins) aimed at a block are placed
+        // first (useItemOn before useItem).
+        if !on_block
+            && !(info.block.is_some() && block_hit.is_some())
+            && let Some(ends) = self.equip_use(&stack)
+        {
+            return Ok(ends);
         }
         if !on_block && &*stack.item == "minecraft:spyglass" {
             self.use_spyglass();
@@ -569,9 +574,19 @@ impl Game<'_> {
                 || self.use_lodestone_compass(hit, &stack, before)
                 || self.use_map_on_banner(hit, &stack, before)
                 || self.place_armor_stand(hit, &stack)
-                || self.place_cushion(hit, &stack)
-                || self.place_end_crystal(hit, &stack))
+                || self.place_cushion(hit, &stack))
         {
+            return Ok(true);
+        }
+        // EndCrystalItem.useOn: its FAIL (another block, no free cell above, an
+        // entity in the cell) ends the click, so the off hand gets no turn.
+        if let Some(hit) = block_hit
+            && self.may_use_on(hit.pos)
+            && &*stack.item == "minecraft:end_crystal"
+        {
+            if !self.place_end_crystal(hit, &stack) {
+                self.use_failed = true;
+            }
             return Ok(true);
         }
         if self.use_ender_eye(&stack, block_hit.is_some())? {
@@ -651,25 +666,23 @@ impl Game<'_> {
         {
             self.world.block_entities.insert(key, entity);
         }
-        if self.world.block_entities.get(&key).is_some() {
-            self.apply_placed_item(target, &stack, game_master);
-            // Block.setPlacedBy.
-            match self.world.block_entities.get(&key) {
-                Some(BlockEntity::CommandBlock(_)) => {
-                    let data = stack.data().is_some_and(|d| {
-                        d.other(horizon_client::block_entity_item::BLOCK_ENTITY_DATA)
-                            .is_some()
-                    });
-                    self.command_block_placed(key, !data);
-                }
-                Some(BlockEntity::StructureBlock(_)) => self.structure_block_placed(key),
-                Some(BlockEntity::TestBlock(_)) => self.test_block_placed(key),
-                Some(BlockEntity::Jukebox(_)) => self.jukebox_placed(target, &stack),
-                Some(BlockEntity::Sign(sign)) if !sign.waxed && sign.front.has_editable_text() => {
-                    self.open_text_edit(key, true)
-                }
-                _ => {}
+        self.apply_placed_item(target, &stack, game_master);
+        // Block.setPlacedBy.
+        match self.world.block_entities.get(&key) {
+            Some(BlockEntity::CommandBlock(_)) => {
+                let data = stack.data().is_some_and(|d| {
+                    d.other(horizon_client::block_entity_item::BLOCK_ENTITY_DATA)
+                        .is_some()
+                });
+                self.command_block_placed(key, !data);
             }
+            Some(BlockEntity::StructureBlock(_)) => self.structure_block_placed(key),
+            Some(BlockEntity::TestBlock(_)) => self.test_block_placed(key),
+            Some(BlockEntity::Jukebox(_)) => self.jukebox_placed(target, &stack),
+            Some(BlockEntity::Sign(sign)) if !sign.waxed && sign.front.has_editable_text() => {
+                self.open_text_edit(key, true)
+            }
+            _ => {}
         }
         let placer = self.native_acting_player();
         self.block_item_placed(&stack, placer, pos, &ctx);

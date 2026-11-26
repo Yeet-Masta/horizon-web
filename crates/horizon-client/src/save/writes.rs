@@ -29,6 +29,7 @@ struct WriteTarget {
     poi_regions: Arc<RegionCache>,
     pending: Arc<PendingWrites>,
     outstanding: Arc<Outstanding>,
+    backend: Option<Arc<dyn Backend>>,
 }
 impl WriteTarget {
     /// Writes `batch` (`batch_count` queued batches of `kind`) and settles them.
@@ -49,10 +50,16 @@ impl WriteTarget {
         let resolved: Vec<_> = batch
             .iter()
             .filter(|(k, _, seq)| newest(k, *seq))
-            .filter_map(|(k, r, _)| Some((*k, resolve_poi(&self.root, cache, *k, r)?)))
+            .filter_map(|(k, r, _)| {
+                Some((
+                    *k,
+                    resolve_poi(&self.root, cache, self.backend.as_deref(), *k, r)?,
+                ))
+            })
             .collect();
         let records: Vec<_> = resolved.iter().map(|(k, r)| (*k, r)).collect();
-        let result = write_region_records(&self.root, cache, folder, &records);
+        let result =
+            write_region_records(&self.root, cache, folder, self.backend.as_deref(), &records);
         if let Err(e) = &result {
             let message = format!("failed to write {folder} files: {e}");
             log::warn!("Horizon: {message}");
@@ -75,7 +82,7 @@ impl WriteTarget {
         if kind == Folder::Region {
             self.outstanding
                 .chunks
-                .fetch_sub(batch.len(), Ordering::Relaxed);
+                .fetch_sub(batch.len(), Ordering::Release);
         }
         if let Ok(mut count) = self.outstanding.count.lock() {
             *count -= batch_count;
@@ -129,7 +136,7 @@ impl SaveDir {
             } else {
                 0
             };
-            self.outstanding.chunks.fetch_add(chunks, Ordering::Relaxed);
+            self.outstanding.chunks.fetch_add(chunks, Ordering::Release);
             // The one-thread web build has no thread to write on: the batch is written here.
             #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
             self.write_target().write(folder, batch, 1);
@@ -139,7 +146,7 @@ impl SaveDir {
             let writer = writer.get_or_insert_with(|| self.start_writer());
             #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
             if writer.send.send((folder, batch)).is_err() {
-                self.outstanding.chunks.fetch_sub(chunks, Ordering::Relaxed);
+                self.outstanding.chunks.fetch_sub(chunks, Ordering::Release);
                 *self
                     .outstanding
                     .error
@@ -167,6 +174,7 @@ impl SaveDir {
             poi_regions: self.poi_regions.clone(),
             pending: self.pending.clone(),
             outstanding: self.outstanding.clone(),
+            backend: self.backend.clone(),
         }
     }
     #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
@@ -220,9 +228,25 @@ impl SaveDir {
         }
         self.write_result()
     }
+    /// Wait until queued chunk writes drop below `limit` (or all writes finish).
+    pub(super) fn wait_for_chunk_writes_below(&self, limit: usize) -> Result<()> {
+        let count = self
+            .outstanding
+            .count
+            .lock()
+            .map_err(|_| "writer poisoned")?;
+        // The page's thread of the threaded web build may not wait on the condition: it looks.
+        drop(horizon_std::sync::wait_while(
+            &self.outstanding.done,
+            &self.outstanding.count,
+            count,
+            |count| *count > 0 && self.outstanding.chunks.load(Ordering::Acquire) >= limit,
+        ));
+        self.write_result()
+    }
     /// `ChunkMap.activeChunkWrites`: chunk records, excluding entity/POI IO.
     pub fn active_chunk_writes(&self) -> usize {
-        self.outstanding.chunks.load(Ordering::Relaxed)
+        self.outstanding.chunks.load(Ordering::Acquire)
     }
     /// Poll durability without holding up the event loop. Errors remain visible
     /// to every waiter, including a later synchronous shutdown.

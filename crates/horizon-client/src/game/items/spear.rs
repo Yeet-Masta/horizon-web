@@ -7,14 +7,14 @@
 //! `Player.stabAttack`). The hit's feedback (`onKineticHit`) reaches the
 //! players around as entity event 2. A left click jabs instead
 //! (`PiercingWeapon.attack`), which Lunge turns into a dash.
-use super::{Game, view_vector};
+use super::{Game, lan_vehicles::ridden_known_movement, view_vector};
 pub(super) use horizon_client::spear::hits_in_reach;
 use horizon_client::{
     attack_strength::delay,
     collisions::SceneCollisions,
     first_person::Hand,
     items::ItemStack,
-    mobs::Damage,
+    mobs::{Damage, equine},
     spear::{HIT_FEEDBACK_TICKS, Kinetic, REACH},
 };
 use horizon_core::{
@@ -51,16 +51,34 @@ impl Game<'_> {
         true
     }
 
-    /// `ServerPlayer.getKnownMovement` of the acting player: what they moved
-    /// in the last tick. A guest's comes with their moves. A rider's is its
-    /// mount's move (`getKnownSpeed`: the vehicle's, or the move the driver's
-    /// client sent for it), so a charge on horseback carries the horse's speed.
+    /// `ServerPlayer.getKnownMovement` of the acting player: what their client
+    /// moved. A guest's comes with its moves, and while it rides, with its
+    /// mount's (`handleMoveVehicle` → `handlePlayerKnownMovement`): a rider
+    /// sends no position of its own, so a charge on horseback carries the
+    /// horse's speed. A passenger that is not at the reins takes the move of
+    /// the one that is (`Entity.getKnownSpeed`), and a ride vanilla hands no
+    /// player the reins of takes the vehicle's own move of the tick, its
+    /// `lastKnownSpeed`: a mount nobody saddled, a pig or a strider whose
+    /// rider holds no stick, anything else `/ride` puts a player on — the mobs
+    /// `Game::mob_speed` reads. A vehicle `self.mobs` does not hold (a boat, a
+    /// minecart) keeps no such source here yet: `ridden_known_movement` says
+    /// which cases that leaves. The window's own player follows its mount
+    /// instead (`positionRider`).
     pub(super) fn known_player_movement(&self) -> Vec3 {
-        if let Some(i) = self
-            .riding
-            .and_then(|v| self.mobs.iter().position(|m| m.id == v))
+        if let (Some(conn), Some(vehicle), Some(host)) =
+            (self.lan_acting, self.riding, self.lan.as_ref())
         {
-            return self.mob_speed(i).scale(1.0 / 20.0);
+            // `Entity.getKnownSpeed`: without a controlling player, the mob's
+            // own move applies to every passenger. Check that before treating
+            // the first guest's client movement as the vehicle's movement.
+            if let Some(i) = self.mobs.iter().position(|m| m.id == vehicle)
+                && !equine::controlled(&self.mobs[i])
+            {
+                return self.mob_speed(i).scale(1.0 / 20.0);
+            }
+            if let Some(movement) = ridden_known_movement(&host.hub.guests, conn, vehicle) {
+                return movement;
+            }
         }
         if self.lan_acting.is_some() {
             return self.known_movement;
@@ -348,7 +366,7 @@ impl Game<'_> {
             // The players a server serves are sent them too (the window of the server thread).
             self.lan_send_particles(super::lan_particles::QueuedParticle {
                 dimension: self.dim.id(),
-                options: indicator,
+                options: indicator.into(),
                 state: None,
                 at: [feet[0], feet[1] + height * 0.5, feet[2]],
                 spread: [0.1, 0.0, 0.1],
@@ -468,35 +486,6 @@ impl Game<'_> {
         };
         if let (Some(kinetic), Some(at)) = (item.as_deref().and_then(Kinetic::of), at) {
             self.kinetic_hit_feedback(if own { OWN } else { id }, &kinetic, [at.x, at.y, at.z]);
-        }
-    }
-
-    /// Synchronize look rotation before sending a spear jab so the server
-    /// raycasts along the player's updated look direction.
-    pub(in crate::game) fn remote_sync_look(&mut self) {
-        let (yaw, pitch) = (self.yaw, self.pitch);
-        let (riding, controls) = (self.riding.is_some(), self.controls_camera());
-        if let Some(p) = self.player.as_ref()
-            && let Some(r) = self.remote.as_mut()
-        {
-            let pos = [p.position.x, p.position.y, p.position.z];
-            let (g, c) = (p.ground.on_ground, p.collision.horizontal);
-            let pkt = if riding {
-                Some(horizon_protocol::packets::play::Serverbound::MovePlayerRot(
-                    horizon_protocol::packets::play::MovePlayerRot {
-                        yaw,
-                        pitch,
-                        flags: u8::from(g) | u8::from(c) << 1,
-                    },
-                ))
-            } else if controls {
-                r.position_sender.update(pos, (yaw, pitch), g, c)
-            } else {
-                None
-            };
-            if let Some(pkt) = pkt {
-                r.session.send(pkt);
-            }
         }
     }
 }

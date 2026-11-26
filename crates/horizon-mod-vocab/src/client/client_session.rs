@@ -1,6 +1,6 @@
 //! Read-only client session and local-player status.
 
-use crate::{BlockPos, GameMode, Text};
+use crate::{BlockPos, GameMode, Identifier, Text};
 
 /// The connected server, not the reconnect target of an earlier session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,5 +140,129 @@ impl ClientTabListEntry {
             latency,
             display,
         }
+    }
+}
+
+/// The locator bar's tracked waypoints (`ClientWaypointManager`), read with
+/// `ClientSession::client_waypoints`: what this client has been sent, changing as the server
+/// tracks and untracks waypoints.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ClientWaypoints {
+    /// The tracked waypoints in the order the server sent them.
+    pub entries: Vec<ClientWaypointEntry>,
+}
+
+impl ClientWaypoints {
+    /// Waypoints from their entries.
+    pub fn new(entries: Vec<ClientWaypointEntry>) -> Self {
+        Self { entries }
+    }
+}
+
+/// One tracked waypoint (`TrackedWaypoint`) as the locator bar holds it.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ClientWaypointEntry {
+    /// The waypoint's identifier: the tracked entity's UUID, or its name when it has no entity.
+    pub id: ClientWaypointId,
+    /// What the waypoint points at: a block, a chunk, a bearing, or nothing.
+    pub target: ClientWaypointTarget,
+    /// The waypoint's icon style (`Waypoint.Icon.style`, a `waypoint_style` asset id such as
+    /// `minecraft:default`).
+    pub style: Identifier,
+    /// The waypoint's icon colour as `0xRRGGBB`, as `living_set_waypoint_color` takes it;
+    /// `None` when the server sent none (the bar then colours the dot from the waypoint's id).
+    pub color: Option<u32>,
+}
+
+impl ClientWaypointEntry {
+    /// A waypoint from its parts.
+    pub fn new(
+        id: ClientWaypointId,
+        target: ClientWaypointTarget,
+        style: Identifier,
+        color: Option<u32>,
+    ) -> Self {
+        Self {
+            id,
+            target,
+            style,
+            color,
+        }
+    }
+}
+
+/// The title, subtitle and action bar on screen now, read with
+/// `ClientSession::client_titles`: what this client has been sent, changing as the server
+/// sends titles.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ClientTitles {
+    /// The title; `None` once its timer has run out.
+    pub title: Option<Text>,
+    /// The subtitle; shown only with a title.
+    pub subtitle: Option<Text>,
+    /// The action bar; `None` once its timer has run out.
+    pub action_bar: Option<Text>,
+}
+
+impl ClientTitles {
+    /// Titles from their parts.
+    pub fn new(title: Option<Text>, subtitle: Option<Text>, action_bar: Option<Text>) -> Self {
+        Self {
+            title,
+            subtitle,
+            action_bar,
+        }
+    }
+}
+
+/// A tracked waypoint's identifier (`Either<UUID, String>`).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum ClientWaypointId {
+    /// The tracked entity's UUID (a player's waypoint).
+    Uuid(u128),
+    /// The waypoint's name (a named waypoint with no entity).
+    Name(String),
+}
+
+/// What a tracked waypoint points at (`TrackedWaypoint`'s `Type` and contents).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub enum ClientWaypointTarget {
+    /// An untracked waypoint (`TrackedWaypoint.empty`).
+    Empty,
+    /// A block position (`Vec3iWaypoint`).
+    Block(BlockPos),
+    /// A chunk (`ChunkWaypoint`).
+    Chunk([i32; 2]),
+    /// A bearing in radians (`AzimuthWaypoint`).
+    Azimuth(f32),
+}
+
+/// One boss bar the window shows, read with `ClientSession::client_boss_bars`. Unlike
+/// `ClientBossBar`, the bar a `customize_boss_event_progress` event hands a mod, this is the
+/// bar as the window holds it: name and progress only.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct ClientBossBarEntry {
+    /// The bar's name.
+    pub name: Text,
+    /// 0 to 1, as drawn (the lerped value).
+    pub progress: f32,
+}
+
+impl ClientBossBarEntry {
+    /// A boss bar entry from its parts.
+    pub fn new(name: Text, progress: f32) -> Self {
+        Self { name, progress }
     }
 }

@@ -26,7 +26,7 @@ MobEffectInstance.hashCode	skip:java		value hash
 MobEffectInstance.BlendState.setImmediate	port	crates/horizon-world/src/status_effect.rs::EffectInstance::skip_blending	factor and previous frame jump to 1 or 0 at once; the restore on login or a dimension change never calls it, so a restored nausea or darkness still fades in from 0
 MobEffectInstance.BlendState.getFactor	port	crates/horizon-client/src/game/interface/fov.rs::Game::nausea_blend	lerp of the previous and current factor; darkness has its own in sculk.rs::Game::darkness_blend
 MobEffectInstance.Details.create	skip:java		record constructor for the codec
-MobEffectUtil.hasDigSpeed	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::mining_speed_factor	haste or conduit power, also read for the arm swing duration in first_person.rs
+MobEffectUtil.hasDigSpeed	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::haste_mining_factor	haste or conduit power, also read for the arm swing duration in first_person.rs
 MobEffectUtil.hasWaterBreathing	inline	crates/horizon-client-render/src/effects.rs::PlayerEffects::status	water_breathing flag is water breathing or conduit power; breath of the nautilus is its own flag read with it
 MobEffectUtil.shouldEffectsRefillAirsupply	inline	crates/horizon-client/src/motion/environment.rs::MotionWorld::tick_environment_damage	air refills unless only breath of the nautilus is active
 OozingMobEffect.onMobRemoved	inline	crates/horizon-client/src/game/items/potions.rs::Game::effects_on_death	oozing branch: two slimes, fewer when slimes within 2 blocks fill max_entity_cramming
@@ -58,7 +58,7 @@ AreaEffectCloud.get	skip:other		entity data component accessor for predicates an
 AreaEffectCloud.applyImplicitComponents	inline	crates/horizon-client/src/game/items/potions.rs::Game::splash	the lingering branch takes the thrown stack's potion effects and colour; potion_duration_scale is fixed at 0.25
 AreaEffectCloud.applyImplicitComponent	inline	crates/horizon-client/src/game/items/potions.rs::Game::splash	same: potion contents only
 Avatar.defineSynchedData	port	crates/horizon-client/src/lan/hub.rs::Hub::player_state	gap: minor: skin parts (entry 16) are sent, the main hand entry is not
-Avatar.isModelPartShown	port	crates/horizon-client/src/game/network/remote/mod.rs::Game::update_remote_skins	the Skin Customization cape option reaches the drawn player
+Avatar.isModelPartShown	port	crates/horizon-client/src/game/network/remote/skins.rs::Game::update_remote_skins_body	the Skin Customization cape option reaches the drawn player
 Bucketable.loadDefaultDataFromBucketTag	port	crates/horizon-client/src/entity_nbt.rs::apply_item_components	NoAI, Silent, NoGravity, Glowing, Invulnerable, PersistenceRequired and Health, read from the bucket's entity data
 ContainerUser.getLivingEntity	skip:java		interface cast; every container user here is the player
 ConversionTracker.addAdditionalSaveData	inline	crates/horizon-client/src/entity_nbt.rs::mob_to_nbt	Zombie-derived InWaterTime saves -1 unless cached eyes are in water; gap: supplied NBT can still shadow live counter progress
@@ -66,7 +66,7 @@ ConversionTracker.readAdditionalSaveData	port	crates/horizon-client/src/entity_n
 ConversionTracker.doConversion	inline	crates/horizon-client/src/mobs/undead.rs::custom_server_ai_step	gap: player: zombie to drowned, husk to zombie and skeleton to stray (and piglin to zombified piglin, hoglin to zoglin) spawn a fresh mob through SpawnKind, so the old one's armor, held items, name tag and effects are lost
 ConversionType.convertCommon	port	crates/horizon-client/src/game/mobs/zombie_villagers.rs::carry_over	gap: player: only villager and zombie villager conversions use it (dispenser.rs::Game::convert_mob copies the flags for shearing); drowned, stray, zombified piglin, zoglin, frog and witch conversions go through SpawnKind and carry only baby, yaw and persistence, so name tag, armor, held items and effects are lost; the absorption is copied by `mobs/conversion.rs::single` (the SINGLE path), tags are never copied
 ConversionType.copyComponent	inline	crates/horizon-client/src/game/mobs/zombie_villagers.rs::carry_over	gap: minor: the custom name is kept by carry_over and convert_mob, custom data is not
-Crackiness.byFraction	port	crates/horizon-client/src/mobs/golem.rs::crackiness	iron golem thresholds 0.75, 0.5, 0.25; wolf armor 0.95, 0.69, 0.32 are in mobs/render.rs::layers and mobs.rs::Mob::hurt_wolf_armor
+Crackiness.byFraction	port	crates/horizon-client/src/mobs/golem.rs::crackiness	iron golem thresholds 0.75, 0.5, 0.25; wolf armor 0.95, 0.69, 0.32 are in mobs/render.rs::layers and mobs/wolf.rs::hurt_armor
 Crackiness.byDamage	inline	crates/horizon-client/src/mobs/render.rs::layers	wolf armor: durability left over max picks the crack texture; a golem uses its health instead
 Display.onSyncedDataUpdated	port	crates/horizon-client/src/game/entities/text_displays.rs::RemoteTextDisplay::metadata	gap: minor: text displays a remote server sends only; start delay, duration and render state flags are tracked
 Display.createTransformation	port	crates/horizon-client/src/text_display.rs::TextDisplayData::matrix	translation, left rotation, scale, right rotation plus the billboard turn
@@ -83,7 +83,7 @@ Display.getBrightnessOverride	inline	crates/horizon-client/src/game/entities/tex
 Display.calculateInterpolationProgress	port	crates/horizon-client/src/game/entities/text_displays.rs::RemoteTextDisplay::progress
 Display.updateCulling	port	crates/horizon-client/src/text_display.rs::culling_box	noCulling when width or height is 0 (`no_culling`); else the width/height AABB
 Display.shouldRenderAtSqrDistance	inline	crates/horizon-client/src/game/entities/text_displays.rs::Game::display_in_view	view_range * 64 * view scale squared; frustum when width and height are set
-Display.getTeamColor	missing		minor: glow_color_override is read but a glowing display gets no coloured outline
+Display.getTeamColor	port	crates/horizon-client/src/game/entities/glowing.rs::Game::display_outline	glow_color_override, falling back to the team's colour or white
 Display.createFreshRenderState	inline	crates/horizon-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	the copy of the synced data when no interpolation runs
 Display.createInterpolatedRenderState	inline	crates/horizon-client/src/game/entities/text_displays.rs::RemoteTextDisplay::tick	the new start state is the old one blended to the last drawn progress (TextDisplayData::blend)
 Display.BlockDisplay	home	crates/horizon-client/src/game/entities/text_displays.rs	a block display submits its block model under the display's transformation, lit and tracked like an entity (Game::block_item_display_geometry)

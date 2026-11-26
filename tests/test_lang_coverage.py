@@ -49,17 +49,100 @@ class GameCoverageTests(unittest.TestCase):
         self.assertEqual(by_code(rows, "xx")["same"], ["a"])
         self.assertEqual(by_code(rows, "en_us")["same"], [])
 
-    def test_a_changed_placeholder_is_reported_and_plain_percent_text_is_not(self):
-        self.assertEqual(lang_coverage.placeholders("%s chunks of %1$s, 100% sure, %.2f, %%"),
-                         ["%%", "%.2f", "%1$s", "%s"])
-        self.assertEqual(lang_coverage.placeholders("100% is plain text"), [])
+    def test_templates_parse_and_format_as_the_game_reads_them(self):
+        # The same cases the game's own parser and formatter are tested on (text.rs), so the two
+        # cannot drift.
+        fixture = Path(__file__).parent / "fixtures/translation_templates.json"
+        for case in json.loads(fixture.read_text(encoding="utf-8"))["cases"]:
+            with self.subTest(template=case["template"][:40]):
+                pieces = lang_coverage.translation_pieces(case["template"])
+                self.assertEqual(None if pieces is None else
+                                 [piece for piece in pieces if isinstance(piece, int)],
+                                 case["fields"])
+                self.assertEqual(lang_coverage.format_translation(case["template"], case["args"]),
+                                 case["out"])
+
+    def test_the_fields_a_template_fills_in_and_one_the_game_cannot_format(self):
+        self.assertEqual(lang_coverage.template("%s of %1$s, 100% sure, %.2f, %%"),
+                         ([0, 0], " of , 100% sure, %.2f, %"))
+        self.assertEqual(lang_coverage.template("%2$s before %1$s")[0], [0, 1])
+        self.assertEqual(lang_coverage.template("%33$s")[0], [32])
+        self.assertEqual(lang_coverage.template("100% is plain text")[0], [])
+        for text in ("%s %q", "in %", "%0$s"):
+            self.assertIsNone(lang_coverage.template(text), text)
+
+    def test_a_changed_or_unformattable_placeholder_is_reported_and_a_reordered_one_is_not(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            write(folder, "en_us.json", '{\n  "z": "%s and %d"\n}\n')
-            write(folder, "xx.json", '{\n  "z": "%s"\n}\n')
+            write(folder, "en_us.json", '{\n  "z": "%s and %s"\n}\n')
+            write(folder, "xx.json", '{\n  "z": "%2$s, %1$s"\n}\n')
+            write(folder, "yy.json", '{\n  "z": "%s and %q"\n}\n')
+            write(folder, "zz.json", '{\n  "z": "%s"\n}\n')
             _, rows = lang_coverage.game_rows(folder, set())
-        changed = by_code(rows, "xx")["placeholders"]
-        self.assertEqual([entry["key"] for entry in changed], ["z"])
+        self.assertEqual(by_code(rows, "xx")["placeholders"], [])
+        for code in ("yy", "zz"):
+            self.assertEqual([entry["key"] for entry in by_code(rows, code)["placeholders"]],
+                             ["z"], code)
+
+    def test_an_argument_past_any_count_or_text_that_looks_like_one_is_no_argument(self):
+        plain = set()
+        self.assertFalse(lang_coverage.formats_like("k", "Durability", "Durability %33$s", plain))
+        self.assertFalse(lang_coverage.formats_like("k", "%s", "\ue0000\ue001", plain))
+        self.assertTrue(lang_coverage.formats_like("k", "%s" * 33, "%33$s" + "%s" * 32, plain))
+
+    def test_a_percent_sign_english_writes_as_two_is_kept(self):
+        plain = set()
+        self.assertTrue(lang_coverage.formats_like("k", "50%% off %s", "50 % de %s", plain))
+        self.assertTrue(lang_coverage.formats_like("k", "50%% off %s", "%s: 50%%", plain))
+        self.assertFalse(lang_coverage.formats_like("k", "50%% off %s", "50 off %s", plain))
+
+    def test_a_key_read_as_plain_text_only_has_to_fill_in_nothing(self):
+        plain = {"k"}
+        self.assertTrue(lang_coverage.formats_like("k", "Durability in %", "En %", plain))
+        self.assertTrue(lang_coverage.formats_like("k", "Durability in %", "En 100%%", plain))
+        self.assertFalse(lang_coverage.formats_like("k", "Durability in %", "En %s", plain))
+        self.assertFalse(lang_coverage.formats_like("k", "Durability in %", "En %33$s", plain))
+        self.assertFalse(lang_coverage.formats_like("other", "Durability in %", "En %", plain))
+
+    def test_the_plain_text_list_holds_exactly_the_keys_reviewed_here(self):
+        # Growing the list takes changing this test (and lang.rs's twin); lang.rs also fails once
+        # a listed key's English formats, so the list shrinks when the English is fixed.
+        self.assertEqual(lang_coverage.unformattable(), {"horizon.pvp.hud_armour_percent"})
+
+    def test_a_control_character_is_stray_unless_it_is_a_tab_or_bidi_control_english_has(self):
+        self.assertEqual(lang_coverage.stray_controls("a", "b\nc"), [])
+        self.assertEqual(lang_coverage.stray_controls("a", "b\tc\x7f\x85"), ["\t", "\x7f", "\x85"])
+        self.assertEqual(lang_coverage.stray_controls("a", "b\u202ec\u2066"), ["\u202e", "\u2066"])
+        self.assertEqual(lang_coverage.stray_controls("a\u2067b\u2069\t", "c\u2067d\u2069\t"), [])
+        self.assertEqual(lang_coverage.stray_controls("a\x1b", "b\x1b"), ["\x1b"])
+
+    def test_translated_text_keeps_what_its_english_allows(self):
+        # The same cases lang.rs's bundled-file test reads, so the importer and the test agree.
+        fixture = Path(__file__).parent / "fixtures/translation_text_rules.json"
+        for case in json.loads(fixture.read_text(encoding="utf-8"))["cases"]:
+            with self.subTest(case["case"]):
+                self.assertEqual(lang_coverage.text_problem(case["english"], case["text"]),
+                                 case["rule"])
+
+    def test_the_unicode_tables_are_sorted_disjoint_ranges_of_unicode_17(self):
+        # tools/gen_lang_unicode_tables.py writes the file from UCD files that are not committed,
+        # so the test checks only what any correct output holds.
+        body = json.loads(lang_coverage.UNICODE_TABLES_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(body["unicode"], "17.0.0")
+        self.assertEqual(set(body["sources"]),
+                         {"UnicodeData.txt", "Scripts.txt", "GraphemeBreakProperty.txt"})
+        every = []
+        for name in lang_coverage.UNICODE_TABLES:
+            ranges = body[name]
+            with self.subTest(name):
+                self.assertTrue(ranges)
+                self.assertTrue(all(0 <= low <= high <= 0x10FFFF for low, high in ranges))
+                # Sorted and apart: touching ranges would have been written as one.
+                self.assertTrue(all(a[1] + 1 < b[0] for a, b in zip(ranges, ranges[1:])))
+            every += ranges
+        every.sort()
+        # No character is in two tables.
+        self.assertTrue(all(a[1] < b[0] for a, b in zip(every, every[1:])))
 
     def test_a_repeated_key_or_a_missing_indent_is_a_problem(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -8,7 +8,11 @@ mod generated {
     include!(concat!(env!("OUT_DIR"), "/native_render_generated.rs"));
 }
 pub use generated::{
-    HandDrawnEvent, RenderNeedsEvent, WorldDrawnEvent, WorldViewDrawnEvent, WorldViewsEvent,
+    CelestialSkyEvent, HandDrawnEvent, RenderNeedsEvent, WorldDrawnEvent, WorldViewDrawnEvent,
+    WorldViewsEvent,
+};
+pub use horizon_client_render::render_slots::celestial_sky::{
+    CelestialDrawError, CelestialSky, CelestialVertex, MAX_CELESTIAL_TRIANGLES,
 };
 pub use wgpu;
 
@@ -24,6 +28,11 @@ macro_rules! replaced {
 /// Whether a mixin replaced the raw world draw function.
 pub fn world_drawn_hooked() -> bool {
     replaced!(world_drawn)
+}
+
+/// Whether a mixin replaced the raw hand draw function.
+pub fn hand_drawn_hooked() -> bool {
+    replaced!(hand_drawn)
 }
 
 /// What a mod can draw with once the world is drawn: after the sky, terrain, entities,
@@ -70,6 +79,10 @@ pub struct WorldDrawn<'a> {
     /// The block textures the terrain samples, for drawing blocks with the player's own
     /// textures (`block_sprites` says where a block's are).
     pub block_sprites: BlockSpriteArrays<'a>,
+    /// The sky, fog, sun, light and water the frame was drawn under ([`WorldLook`]), for a pass
+    /// that should sit in the same light: the fog's colour and distances, the sun's and moon's
+    /// directions (with a shader pack's `sunPathRotation`), the light's colours, under water.
+    pub look: WorldLook,
 }
 
 /// The block sprite arrays ([`WorldDrawn::block_sprites`]): each texture a whole square layer,
@@ -367,11 +380,21 @@ pub fn world_views_hooked() -> bool {
     replaced!(world_views)
 }
 
+/// Add a backdrop to the main Overworld-style sky before its sun, moon and stars.
+/// The triangles submitted through [`CelestialSky`] draw over the sky and behind terrain.
+#[inline(never)]
+#[horizon_mod_api_macros::replaceable]
+pub fn celestial_sky(sky: &mut CelestialSky<'_>) {
+    let _ = sky;
+}
+
 pub use horizon_client_render::render_geometry::{EntitySpan, Vertex};
+pub use horizon_client_render::render_slots::WorldLook;
 
 /// Install the native render adapters before engine startup.
 pub fn install() {
     use horizon_client_render::render_slots as engine;
+    engine::celestial_sky::install(|| replaced!(celestial_sky).then_some(celestial_sky));
     engine::install(engine::Slots {
         world_drawn: |v| {
             world_drawn(&mut WorldDrawn {
@@ -399,6 +422,7 @@ pub fn install() {
                     nearest: v.block_sprites.nearest,
                     filtered: v.block_sprites.filtered,
                 },
+                look: v.look,
             })
         },
         hand_drawn: |v| {
@@ -446,5 +470,6 @@ pub fn install() {
             })
         },
         world_drawn_hooked,
+        hand_drawn_hooked,
     });
 }

@@ -48,7 +48,7 @@ pub struct World {
     pub version: Option<String>,
     /// Bytes on disk, every file in its folder.
     pub size: u64,
-    /// `icon.png`, the picture the game took of it.
+    /// `icon.png`, the picture the game took of it: drawn only through [`icon_picture`].
     pub icon: Option<PathBuf>,
     /// The ids of the mods it was last saved with: the code mods of `fml.LoadingModList`, then the
     /// content mods of Horizon's `horizon.ContentModList`, as the game writes them.
@@ -82,9 +82,29 @@ pub fn list(home: &Path) -> Vec<World> {
     worlds
 }
 
+/// The most a world's `icon.png` is read of: what a pack's `pack.png` may weigh
+/// (`packs::entry`); vanilla's is 64 × 64, a few kilobytes.
+const MAX_ICON_FILE: u64 = 4 << 20;
+
+/// The picture of the world in the folder `world` (its `icon.png`), as the launcher's lists draw
+/// it: PNG made small ([`crate::pictures::list_picture`]). None when there is none, or it isn't
+/// a picture within those limits.
+pub fn icon_picture(world: &Path) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(world.join("icon.png"))
+        .ok()?
+        .take(MAX_ICON_FILE + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_ICON_FILE {
+        return None;
+    }
+    crate::pictures::list_picture(bytes)
+}
+
 /// level.dat: gzip, as vanilla writes it, or plain.
 fn level_dat(path: &Path) -> Option<Tag> {
-    let bytes = fs::read(path).ok()?;
+    let bytes = crate::instances::read_capped(path, crate::instances::MAX_LEVEL_DAT).ok()?;
     let mut raw = Vec::new();
     let raw = match flate2::read::GzDecoder::new(&bytes[..])
         .take(64 << 20)

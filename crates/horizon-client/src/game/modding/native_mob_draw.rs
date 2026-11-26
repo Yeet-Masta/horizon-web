@@ -18,14 +18,42 @@ use horizon_client::{
     mesher::Vertex,
     mobs::{Mob, Species, anim, render, villager},
 };
-use mod_api::{EntityRenderState, HiddenParts, HookId, PosedParts};
+use mod_api::{
+    EntityRenderState, EquipmentRender, FirstPersonBody, HiddenParts, HookId, PosedParts,
+};
 use std::cell::RefCell;
 
-/// What the frame's entity pass decided about the mods' render hooks: whether any mod listens to
-/// the pair (asked once a frame), and the entities a pre hook canceled.
+/// Which of the four mob/player render hooks have at least one listener this frame.
+#[derive(Clone, Copy, Default)]
+pub(in crate::game) struct MobRenderHooks {
+    living_pre: bool,
+    living_post: bool,
+    player_pre: bool,
+    player_post: bool,
+}
+
+impl MobRenderHooks {
+    #[inline]
+    pub(in crate::game) fn any_pre(self) -> bool {
+        self.living_pre || self.player_pre
+    }
+    #[inline]
+    pub(in crate::game) fn any_post(self) -> bool {
+        self.living_post || self.player_post
+    }
+    #[inline]
+    pub(in crate::game) fn any_post_for(self, is_player: bool) -> bool {
+        self.living_post || (is_player && self.player_post)
+    }
+}
+
+/// What the frame's entity pass decided about the mods' render hooks: which hooks have
+/// listeners (asked once a frame), whether any listens to `render_worn_equipment`, and the
+/// entities a pre hook canceled.
 #[derive(Default)]
 struct EntityFrame {
-    listened: bool,
+    listened: MobRenderHooks,
+    equipment: bool,
     canceled: FxHashSet<u32>,
 }
 
@@ -34,18 +62,19 @@ thread_local! {
     static FRAME: RefCell<EntityFrame> = RefCell::default();
 }
 
-/// Starts a frame's entity pass: asks once whether any mod listens to the render hook pair, and
+/// Starts a frame's entity pass: asks once which render hooks have listeners, and
 /// forgets the last frame's canceled entities.
 pub(in crate::game) fn begin_entity_frame() {
-    let hooks = [
-        HookId::RenderLivingPre,
-        HookId::RenderLivingPost,
-        HookId::RenderPlayerPre,
-        HookId::RenderPlayerPost,
-    ];
-    let listened = hooks.into_iter().any(mod_api::__private::listened);
+    let hooks = MobRenderHooks {
+        living_pre: mod_api::__private::listened(HookId::RenderLivingPre),
+        living_post: mod_api::__private::listened(HookId::RenderLivingPost),
+        player_pre: mod_api::__private::listened(HookId::RenderPlayerPre),
+        player_post: mod_api::__private::listened(HookId::RenderPlayerPost),
+    };
+    let equipment = mod_api::__private::listened(HookId::RenderWornEquipment);
     FRAME.with_borrow_mut(|frame| {
-        frame.listened = listened;
+        frame.listened = hooks;
+        frame.equipment = equipment;
         frame.canceled.clear();
     });
 }
@@ -137,9 +166,32 @@ pub(super) fn mob_pose(at: DVec3, body_yaw: f32) -> Mat4 {
 }
 
 impl Game<'_> {
-    /// Whether a mod listens to the render hook pair this frame (asked once, when the frame's
-    /// entity pass began): with none, nothing is posed or built for the hooks per entity.
-    pub(super) fn mob_render_listened(&self) -> bool {
+    /// Ask before the local player's span is classified as world-visible or shadow-only.
+    pub(super) fn first_person_body(&self, partial: f32) -> Option<FirstPersonBody> {
+        if self.own_body_in_view()
+            || self.spectator()
+            || !mod_api::__private::listened(HookId::RenderFirstPersonBody)
+            || !self
+                .player
+                .as_ref()
+                .is_some_and(|p| !p.health.dead_or_dying())
+        {
+            return None;
+        }
+        let mob = self.player_model.as_ref()?;
+        let player =
+            entity_render_state(mob, render_id(mob.id, true, self.own_entity_id()), partial);
+        let mut body = FirstPersonBody::default();
+        self.native_render_first_person_body(&player, self.riding.is_some(), &mut body);
+        if !body.offset.into_iter().all(f32::is_finite) {
+            body.offset = [0.0; 3];
+        }
+        body.show.then_some(body)
+    }
+
+    /// Which of the four render hooks have listeners this frame (asked once, when the frame's
+    /// entity pass began): with none for a phase, nothing is posed or built for it per entity.
+    pub(super) fn mob_render_listened(&self) -> MobRenderHooks {
         FRAME.with_borrow(|frame| frame.listened)
     }
     /// Whether a mod's pre hook canceled the drawing of entity `id` this frame: the later passes
@@ -161,34 +213,39 @@ impl Game<'_> {
     /// turned with the body, whose geometry is kept. None when one canceled: the entity draws
     /// nothing more this frame and its post hooks aren't asked, but for a player whose living pre
     /// alone canceled, whose `render_player_post` is asked here. Else the parts of the vanilla
-    /// model the hooks hid. `listened` is the frame's [`Game::mob_render_listened`].
+    /// model the hooks hid. `hooks` is the frame's [`Game::mob_render_listened`].
     #[allow(clippy::too_many_arguments)]
     pub(super) fn mod_render_pre(
         &self,
         mob: &Mob,
         who: Option<PlayerRender<'_>>,
-        listened: bool,
+        hooks: MobRenderHooks,
         partial: f32,
         camera: DVec3,
         light: u32,
+        mut hidden: HiddenParts,
         out: &mut Vec<Vertex>,
     ) -> Option<HiddenParts> {
-        let mut hidden = HiddenParts::default();
-        if !listened {
+        if !hooks.any_pre() {
             return Some(hidden);
         }
         let local = who.as_ref().is_some_and(|who| who.local);
         let mut canceled = false;
-        if let Some(who) = &who {
+        if hooks.player_pre
+            && let Some(who) = &who
+        {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
                 self.native_render_player_pre(render, who, draw, &mut hidden, &mut canceled);
             });
         }
-        if !canceled {
+        if !canceled && hooks.living_pre {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
                 self.native_render_living_pre(render, draw, &mut hidden, &mut canceled);
             });
-            if canceled && let Some(who) = &who {
+            if canceled
+                && hooks.player_post
+                && let Some(who) = &who
+            {
                 self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
                     self.native_render_player_post(render, who, None, draw);
                 });
@@ -200,6 +257,25 @@ impl Game<'_> {
         let id = render_id(mob.id, local, self.own_entity_id());
         FRAME.with_borrow_mut(|frame| frame.canceled.insert(id));
         None
+    }
+    /// What the mods' `render_worn_equipment` left of what `mob` wears and holds, asked after
+    /// its pre hooks didn't cancel (`local` marks this window's own player): a scope that draws
+    /// its armour, body, wings and held items that way until it is dropped, or None when no mod
+    /// listens or none hid or tinted anything.
+    pub(super) fn mod_render_equipment(
+        &self,
+        mob: &Mob,
+        local: bool,
+        partial: f32,
+    ) -> Option<render::EquipmentScope> {
+        // Every mob in view each frame: only when a mod listens.
+        if !FRAME.with_borrow(|frame| frame.equipment) {
+            return None;
+        }
+        let entity = mob_render(mob, render_id(mob.id, local, self.own_entity_id()), partial);
+        let mut equipment = EquipmentRender::new();
+        self.native_render_worn_equipment(&entity, &mut equipment);
+        (!equipment.is_empty()).then(|| render::EquipmentScope::enter(equipment))
     }
     /// The renderer a mod registered for `mob`'s type (`register_entity_renderers`), drawn in place
     /// of its model and its vanilla layers, from a draw at its feet, not turned: true when it
@@ -260,15 +336,20 @@ impl Game<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
-        // Every mob in view each frame: only when a mod listens.
-        if !self.mob_render_listened() {
+        let hooks = self.mob_render_listened();
+        // Every mob in view each frame: only when a mod listens to a post hook.
+        if !hooks.any_post() {
             return;
         }
         let local = who.as_ref().is_some_and(|who| who.local);
-        self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
-            self.native_render_living_post(render, parts.as_ref(), draw);
-        });
-        if let Some(who) = &who {
+        if hooks.living_post {
+            self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
+                self.native_render_living_post(render, parts.as_ref(), draw);
+            });
+        }
+        if hooks.player_post
+            && let Some(who) = &who
+        {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
                 self.native_render_player_post(render, who, parts.as_ref(), draw);
             });

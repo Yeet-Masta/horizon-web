@@ -566,7 +566,7 @@ public final class VanillaCommandExecOracle {
                     messages.add(spans(chatType.decorate(message.content())));
                 }
             };
-            if(Boolean.getBoolean("horizon.merchantFixture")||Boolean.getBoolean("horizon.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
+            if(Boolean.getBoolean("horizon.merchantFixture") || Boolean.getBoolean("horizon.merchantCraftedFixture")) this.tickRateManager().setFrozen(true);
             Connection connection = new Connection(PacketFlow.SERVERBOUND);
             EmbeddedChannel channel = Boolean.getBoolean("horizon.merchantCraftedFixture") ? new EmbeddedChannel(
                 new io.netty.channel.ChannelInitializer<io.netty.channel.Channel>() {
@@ -786,6 +786,24 @@ public final class VanillaCommandExecOracle {
                         out.append(gson.toJson(record)).append('\n');
                     }
                     case "player_state" -> {
+                        if (op.has("observe") && op.get("observe").getAsString().equals("fishing_cast")) {
+                            JsonObject record = new JsonObject();
+                            record.addProperty("cmd", "#player_state " + op.get("label").getAsString());
+                            record.add("messages", new JsonArray());
+                            record.add("results", new JsonArray());
+                            try {
+                                var hook = player.fishing;
+                                var lure = hook.getClass().getDeclaredField("lureSpeed");
+                                var luck = hook.getClass().getDeclaredField("luck");
+                                lure.setAccessible(true);
+                                luck.setAccessible(true);
+                                record.add("state", gson.toJsonTree(new int[] {lure.getInt(hook), luck.getInt(hook)}));
+                            } catch (ReflectiveOperationException e) {
+                                throw new IllegalStateException(e);
+                            }
+                            out.append(gson.toJson(record)).append('\n');
+                            break;
+                        }
                         try {
                             var field=net.minecraft.server.PlayerAdvancements.class.getDeclaredField("progress");field.setAccessible(true);
                             var progress=(java.util.Map<?,?>)field.get(player.getAdvancements());
@@ -911,6 +929,7 @@ public final class VanillaCommandExecOracle {
                         }
                         }
                     }
+                    case "release_item" -> player.releaseUsingItem();
                     case "crafter_max_map_fixture" -> {
                         // Independent official saved-map file, copied unchanged to the Game scratch world.
                         level.setMapData(new net.minecraft.world.level.saveddata.maps.MapId(31),
@@ -1111,6 +1130,7 @@ public final class VanillaCommandExecOracle {
                     }
                     case "close_menu" -> player.connection.handleContainerClose(
                         new net.minecraft.network.protocol.game.ServerboundContainerClosePacket(player.containerMenu.containerId));
+                    case "merchant_save" -> saveEverything(true, true, true);
                     case "merchant_saved_stats" -> {
                         player.getStats().save();
                         String raw;

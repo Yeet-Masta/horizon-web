@@ -16,11 +16,12 @@ import subprocess
 import sys
 
 try:
-    from . import lab, test_rust_parity as base
+    from . import fast_bins, lab, test_rust_parity as base
     from .test_dedicated_server_parity import Server, wait_ticks
     from .test_forced_end_parity import answer
     from .test_locator_bar_parity import generate_world, server_dir
 except ImportError:
+    import fast_bins
     import lab
     import test_rust_parity as base
     from test_dedicated_server_parity import Server, wait_ticks
@@ -91,11 +92,11 @@ def main():
     report = build / 'report.json'
     report.unlink(missing_ok=True)
     dependencies = os.pathsep.join(map(str, [jars['server'], *libraries]))
-    subprocess.run(['cargo', 'build', '--profile', 'fast', '-p', 'horizon-game', '--bin', 'horizon-client'],
+    subprocess.run(fast_bins.command('horizon-client'),
                    cwd=lab.ROOT, check=True, capture_output=True)
     binary = lab.cargo_target() / 'fast' / ('horizon-client.exe' if os.name == 'nt' else 'horizon-client')
     vanilla_server = ['java', '-Xmx2g', '-Duser.timezone=UTC', '-cp', dependencies, 'net.minecraft.server.Main', 'nogui']
-    horizon_server = [binary, '--resources', lab.LOCAL / 'horizon-client/26.3', '--dedicated', '--nogui']
+    horizon_server = [binary, '--resources', lab.RESOURCES, '--dedicated', '--nogui']
     world = generate_world(vanilla_server, build)
     vanilla = run_side('vanilla', vanilla_server, build, world)
     horizon = run_side('horizon', horizon_server, build, world)

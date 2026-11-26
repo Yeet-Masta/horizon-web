@@ -10,6 +10,7 @@
 //!   `pickedShaderPack` in `horizon-graphics.txt`.
 //!
 //! Every other line of both files is written back as it was.
+use crate::i18n::trf;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -44,7 +45,7 @@ pub struct Pack {
     pub title: String,
     /// `pack.mcmeta`'s description as plain text; a shader pack's format.
     pub description: String,
-    /// `pack.png`, a resource pack's picture.
+    /// `pack.png`, a resource pack's picture, as PNG made small ([`crate::pictures::list_picture`]).
     pub icon: Option<Vec<u8>>,
     pub enabled: bool,
     /// Why the game can't run it: a Horizon shader pack made for another shader API.
@@ -74,20 +75,17 @@ fn migrate_shader_values(home: &Path, pack: &Path, key: &str) -> std::io::Result
     if target.exists() {
         return Ok(());
     }
-    let previous = line_value(
-        &fs::read_to_string(home.join(GRAPHICS)).unwrap_or_default(),
-        "pickedShaderPack",
-    )
-    .filter(|picked| {
-        !picked.starts_with("horizon:")
-            && (shader_key(&dir.join(picked)).as_deref() == Some(key)
-                || (!dir.join(picked).exists()
-                    && picked
-                        .strip_prefix(&format!("{id}-"))
-                        .is_some_and(|version| {
-                            version.len() > ".hshader".len() && version.ends_with(".hshader")
-                        })))
-    });
+    let previous =
+        line_value(&read_text(home.join(GRAPHICS)), "pickedShaderPack").filter(|picked| {
+            !picked.starts_with("horizon:")
+                && (shader_key(&dir.join(picked)).as_deref() == Some(key)
+                    || (!dir.join(picked).exists()
+                        && picked
+                            .strip_prefix(&format!("{id}-"))
+                            .is_some_and(|version| {
+                                version.len() > ".hshader".len() && version.ends_with(".hshader")
+                            })))
+        });
     // Changing the selection would discard the old filename needed to import its sidecar.
     for source in previous
         .map(|name| dir.join(name))
@@ -126,7 +124,7 @@ pub fn list(home: &Path, kind: Kind) -> Vec<Pack> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter_map(|e| read(&e.path(), kind, &on))
+        .filter_map(|e| read(&e.path(), kind, &on, true))
         .collect();
     packs.sort_by(|a, b| a.file.cmp(&b.file));
     let mut keys = std::collections::HashSet::new();
@@ -140,16 +138,13 @@ pub fn list(home: &Path, kind: Kind) -> Vec<Pack> {
 /// The file names turned on, bottom first.
 fn enabled(home: &Path, kind: Kind) -> Vec<String> {
     match kind {
-        Kind::Resource => option_list(&fs::read_to_string(home.join(OPTIONS)).unwrap_or_default())
+        Kind::Resource => option_list(&read_text(home.join(OPTIONS)))
             .into_iter()
             .filter_map(|id| id.strip_prefix("file/").map(str::to_string))
             .collect(),
         Kind::Shader => {
-            let picked = line_value(
-                &fs::read_to_string(home.join(GRAPHICS)).unwrap_or_default(),
-                "pickedShaderPack",
-            )
-            .filter(|v| !v.is_empty());
+            let picked = line_value(&read_text(home.join(GRAPHICS)), "pickedShaderPack")
+                .filter(|v| !v.is_empty());
             let dir = home.join(Kind::Shader.folder());
             picked
                 .map(|p| {
@@ -181,7 +176,9 @@ fn enabled(home: &Path, kind: Kind) -> Vec<String> {
     }
 }
 
-fn read(path: &Path, kind: Kind, on: &[String]) -> Option<Pack> {
+/// The pack at `path`; its picture made only when `picture` is set (a list draws it, an add
+/// doesn't, and decoding one is slow).
+fn read(path: &Path, kind: Kind, on: &[String], picture: bool) -> Option<Pack> {
     let file = path.file_name()?.to_str()?.to_string();
     if file.starts_with('.') {
         return None;
@@ -196,7 +193,10 @@ fn read(path: &Path, kind: Kind, on: &[String]) -> Option<Pack> {
             (
                 file.clone(),
                 plain(&meta["pack"]["description"]),
-                entry(path, "pack.png"),
+                picture
+                    .then(|| entry(path, "pack.png"))
+                    .flatten()
+                    .and_then(crate::pictures::list_picture),
             )
         }
         Kind::Shader if path.join(SHADER_MANIFEST).is_file() || ext(SHADER_PACKAGE) => {
@@ -302,9 +302,36 @@ fn option_list(options: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A settings file's text, empty when it is missing, unreadable or implausibly large.
+fn read_text(path: impl AsRef<Path>) -> String {
+    crate::instances::read_text_capped(path.as_ref(), crate::instances::MAX_TEXT_FILE)
+        .unwrap_or_default()
+}
+
 /// Sets `key:value` in the file, or adds the line; every other line stays.
 fn set_line(path: &Path, key: &str, value: &str) -> Result<(), String> {
-    let text = fs::read_to_string(path).unwrap_or_default();
+    // Rewriting a file too large to read would replace it with one line.
+    if fs::metadata(path).is_ok_and(|m| m.len() > crate::instances::MAX_TEXT_FILE) {
+        return Err(trf(
+            "{path}: file too large",
+            &[("path", &path.display().to_string())],
+        ));
+    }
+    // Only a missing file is empty text: a read that fails otherwise (say, a file that grew past
+    // the cap since the check) must not end in rewriting the settings from nothing.
+    let text = match crate::instances::read_text_capped(path, crate::instances::MAX_TEXT_FILE) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(trf(
+                "{path}: {error}",
+                &[
+                    ("path", &path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            ));
+        }
+    };
     let mut found = false;
     let mut out: Vec<String> = text
         .lines()
@@ -335,7 +362,7 @@ pub fn set_enabled(home: &Path, pack: &Pack, on: bool) -> Result<(), String> {
     match pack.kind {
         Kind::Resource => {
             let options = home.join(OPTIONS);
-            let text = fs::read_to_string(&options).unwrap_or_default();
+            let text = read_text(&options);
             let id = format!("file/{}", pack.file);
             let mut list = option_list(&text);
             list.retain(|i| *i != id);
@@ -362,11 +389,8 @@ pub fn set_enabled(home: &Path, pack: &Pack, on: bool) -> Result<(), String> {
             )
         }
         Kind::Shader => {
-            if let Some(previous) = line_value(
-                &fs::read_to_string(home.join(GRAPHICS)).unwrap_or_default(),
-                "pickedShaderPack",
-            )
-            .filter(|p| !p.is_empty() && !p.starts_with("horizon:"))
+            if let Some(previous) = line_value(&read_text(home.join(GRAPHICS)), "pickedShaderPack")
+                .filter(|p| !p.is_empty() && !p.starts_with("horizon:"))
             {
                 if let Some(key) = enabled(home, Kind::Shader).first() {
                     let path = home.join(Kind::Shader.folder()).join(previous);
@@ -432,7 +456,7 @@ pub fn kind_of(file: &Path) -> Result<Kind, String> {
 }
 
 /// Copies a pack file into the right folder of `home`, under a name not taken yet. Returns it,
-/// turned off.
+/// turned off, without its picture: the list read after it makes that.
 pub fn add(home: &Path, file: &Path) -> Result<Pack, String> {
     let kind = kind_of(file)?;
     let dir = home.join(kind.folder());
@@ -454,7 +478,7 @@ pub fn add(home: &Path, file: &Path) -> Result<Pack, String> {
         .find(|p| !p.exists())
         .unwrap();
     fs::copy(file, &target).map_err(|e| format!("Could not copy {}: {e}", file.display()))?;
-    read(&target, kind, &[])
+    read(&target, kind, &[], false)
         .ok_or_else(|| format!("{} is not a pack the game reads", target.display()))
 }
 

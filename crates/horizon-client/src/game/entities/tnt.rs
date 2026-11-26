@@ -1,7 +1,7 @@
 //! Primed TNT (`PrimedTnt`): 80-tick fuse, gravity and drag, explosion of
 //! power 4, `TntRenderer` swell and white flash, and `TntBlock.useItemOn`
 //! (flint and steel / fire charge).
-use super::Game;
+use super::{Game, ray_box};
 use horizon_client::lan::playerdata::uuid_ints;
 use horizon_client::{Result, items::ItemStack, mesher::Vertex, mobs::Who, text::Text};
 use horizon_core::{
@@ -14,6 +14,35 @@ use horizon_world::level::flags as level_flags;
 pub(super) use horizon_gameplay::tnt::PrimedTnt;
 
 impl Game<'_> {
+    /// `LocalPlayer.pick`: a live, tracked primed TNT is pickable using its own box.
+    pub(super) fn primed_tnt_hit(&self, reach: f64) -> Option<(&PrimedTnt, f64)> {
+        let (eye, direction) = self.aim()?;
+        let camera = self.remote_camera_id();
+        self.tnts
+            .iter()
+            .filter(|tnt| tnt.id != 0 && Some(tnt.id) != camera && Some(tnt.id) != self.riding)
+            .filter_map(|tnt| {
+                let distance = ray_box(eye, direction, reach, tnt.bounds())?;
+                (distance < reach).then_some((tnt, distance))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// `Player.attack` reaches TNT, but `PrimedTnt.hurtServer` always declines damage.
+    pub(super) fn attack_primed_tnt(&mut self, id: u32) {
+        let ((_, scale, _, _), admitted) =
+            self.melee_damage_with_admission("minecraft:tnt", false, Some(id));
+        // `Player.onAttack` resets the server's charge even on a refused hit.
+        self.attack_ticks = 0;
+        if admitted {
+            if scale > 0.9 && self.player.as_ref().is_some_and(|p| p.sprinting) {
+                self.play_at_feet("minecraft:entity.player.attack.knockback");
+            }
+            self.sweep_decision(scale, false, "minecraft:tnt");
+            self.play_at_feet("minecraft:entity.player.attack.nodamage");
+        }
+    }
+
     /// Asks the mods whether the TNT at `pos` may be primed
     /// (`native_tnt_primed`); the acting guest, if any, is its player.
     pub(super) fn tnt_prime_allowed(&mut self, pos: BlockPos) -> bool {
@@ -181,6 +210,13 @@ impl Game<'_> {
             entities,
         )?;
         let (id, snow) = (t.id, (t.previous, t.position, t.bounds(), t.velocity));
+        // Entity.applyEffectsFromBlocks: TNT is fire immune, so it is never
+        // `isOnFire` and its fire ticks are set to `-getFireImmuneTicks()`, 0.
+        if let Some(horizon_core::nbt::Tag::Compound(raw)) = self.persist.raw.get_mut(&id)
+            && let Some(fire) = raw.get_mut(&"Fire".into())
+        {
+            *fire = horizon_core::nbt::Tag::Short(0);
+        }
         // Entity.checkFallDamage: fallOn and HIT_GROUND after a fall, during the move.
         if let Some(fall) = landed {
             self.non_living_fall_on(id, snow.1, snow.2, fall);
@@ -193,62 +229,70 @@ impl Game<'_> {
         for pos in tops {
             self.bubble_column_particles(pos);
         }
-        let t = &mut self.tnts[i];
-        if t.fuse <= 0 {
-            let center = [
-                t.position.x,
-                t.position.y + PrimedTnt::SIZE * 0.0625,
-                t.position.z,
-            ];
-            let bounds = t.bounds();
-            let (id, owner, guest, power) = (t.id, t.owner, t.guest, t.power);
-            let used_portal = t.used_portal;
-            let silent = self.entity_silent(id);
-            let (owner, guest) = self.tnt_owner(id, owner, guest);
-            let in_water = self.bounds_in_water(bounds);
-            self.tnts.remove(i);
-            // PrimedTnt.tick: with `tnt_explodes` off it goes away without exploding.
-            if !self
-                .ui
-                .rules
-                .bool_at(horizon_client::gamerules::vanilla::TNT_EXPLODES)
-            {
-                return Ok(());
-            }
-            // ExplosionInteraction.TNT: the tnt_explosion_drop_decay rule.
-            let interaction =
-                self.destroy_type(horizon_client::gamerules::vanilla::TNT_EXPLOSION_DROP_DECAY);
-            self.combat.explosion_in_water = in_water;
-            self.combat.explosion_direct = Some(id);
-            self.set_blast_owner(owner, guest);
-            let result = self.with_hive_emptying_blast(|g| {
-                g.server_explode_from(
-                    center,
-                    power,
-                    interaction,
-                    false,
-                    super::explosion::ExplosionSource::default()
-                        .with_silence(silent)
-                        .with_portal_proof(used_portal)
-                        .with_entity(id, "minecraft:tnt"),
-                )
-            });
-            self.combat.blast_owner = None;
-            self.combat.blast_owner_player = false;
-            self.combat.blast_guest = None;
-            self.combat.explosion_in_water = false;
-            self.combat.explosion_direct = None;
-            result?;
+        if self.tnts[i].fuse <= 0 {
+            self.explode_primed_tnt(i)?;
         }
         Ok(())
     }
+    /// `PrimedTnt.explode`: removes primed TNT `i` and explodes it where it stands, with its
+    /// power, owner, silence and the TNT drop rule. Runs when its fuse ends, and for
+    /// `entity_detonate`. Nothing explodes while the `tnt_explodes` rule is off.
+    pub(in crate::game) fn explode_primed_tnt(&mut self, i: usize) -> Result<()> {
+        let t = &self.tnts[i];
+        let center = [
+            t.position.x,
+            t.position.y + PrimedTnt::SIZE * 0.0625,
+            t.position.z,
+        ];
+        let bounds = t.bounds();
+        let (id, owner, guest, power) = (t.id, t.owner, t.guest, t.power);
+        let used_portal = t.used_portal;
+        let silent = self.entity_silent(id);
+        let (owner, guest) = self.tnt_owner(id, owner, guest);
+        let in_water = self.bounds_in_water(bounds);
+        self.tnts.remove(i);
+        // PrimedTnt.tick: with `tnt_explodes` off it goes away without exploding.
+        if !self
+            .ui
+            .rules
+            .bool_at(horizon_client::gamerules::vanilla::TNT_EXPLODES)
+        {
+            return Ok(());
+        }
+        // ExplosionInteraction.TNT: the tnt_explosion_drop_decay rule.
+        let interaction =
+            self.destroy_type(horizon_client::gamerules::vanilla::TNT_EXPLOSION_DROP_DECAY);
+        self.combat.explosion_in_water = in_water;
+        self.combat.explosion_direct = Some(id);
+        self.set_blast_owner(owner, guest);
+        let result = self.with_hive_emptying_blast(|g| {
+            g.server_explode_from(
+                center,
+                power,
+                interaction,
+                false,
+                super::explosion::ExplosionSource::default()
+                    .with_silence(silent)
+                    .with_portal_proof(used_portal)
+                    .with_entity(id, "minecraft:tnt"),
+            )
+        });
+        self.combat.blast_owner = None;
+        self.combat.blast_owner_player = false;
+        self.combat.blast_guest = None;
+        self.combat.explosion_in_water = false;
+        self.combat.explosion_direct = None;
+        result?;
+        Ok(())
+    }
+
     /// The saved compound of primed TNT `i`: chunk saves, `/data get`, portals.
     pub(super) fn tnt_nbt(&mut self, i: usize) -> horizon_core::nbt::Tag {
         let id = self.tnts[i].id;
         let uuid = self.uuid_for(id);
         let owner = self.tnt_owner_uuid(self.tnts[i].owner, self.tnts[i].guest);
         let t = &self.tnts[i];
-        horizon_client::entity_nbt::tnt_to_nbt(
+        let mut tag = horizon_client::entity_nbt::tnt_to_nbt(
             t.position,
             t.velocity,
             t.on_ground,
@@ -260,7 +304,10 @@ impl Game<'_> {
             uuid,
             owner,
             self.persist.raw.get(&id),
-        )
+        );
+        // Entity.saveWithoutId: the live `PortalCooldown`.
+        self.save_portal_cooldown(id, &mut tag);
+        tag
     }
     /// `EntityReference.of(owner)`: the UUID of the player or mob that lit it.
     fn tnt_owner_uuid(&mut self, owner: Option<Who>, guest: Option<u32>) -> Option<[i32; 4]> {
@@ -1138,6 +1185,77 @@ mod tests {
             "water alone does not lift it, got {}",
             tnt.position.y
         );
+    }
+
+    /// #16279: `Entity.checkInsideBlocks` follows the move, Y first, so a
+    /// column the TNT leaves sideways still pushes it that tick, and one it
+    /// crosses in a move over a block long pushes it though its box ends
+    /// beyond it.
+    #[test]
+    fn a_bubble_column_on_the_way_pushes_primed_tnt() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("movement-properties.nbt").exists() {
+            return;
+        }
+        let assets = horizon_client::assets::Assets::load(&root).unwrap();
+        let render = assets
+            .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap();
+        let facts = horizon_client::blocks::BlockFacts::load(&root, assets.registry).unwrap();
+        let collision = horizon_client::collisions::load(&root, assets.registry).unwrap();
+        let mut world = horizon_client::world::World::test_scene(&assets, &render, 3).unwrap();
+        let water = assets.registry.default_state("minecraft:water").unwrap();
+        let default = assets
+            .registry
+            .default_state("minecraft:bubble_column")
+            .unwrap();
+        let mut up = assets.registry.state(default).unwrap().clone();
+        up.properties.insert("drag".into(), "false".into());
+        let column = assets.registry.resolve(&up).unwrap();
+        for y in 3..=8 {
+            world.set(20, y, 20, column).unwrap();
+        }
+        world.set(20, 9, 20, water).unwrap();
+        let pushed = |from: Vec3, to: Vec3| {
+            let mut tnt = PrimedTnt {
+                attachment_lifetime: Default::default(),
+                used_portal: false,
+                rotation: [0.0, 0.0],
+                join: Default::default(),
+                no_gravity: false,
+                id: 0,
+                position: to,
+                previous: from,
+                velocity: Vec3::ZERO,
+                fuse: 80,
+                on_ground: false,
+                fall_distance: 3.0,
+                stuck: Vec3::ZERO,
+                in_water: false,
+                owner: None,
+                guest: None,
+                power: 4.0,
+                block_state: None,
+            };
+            let original = Some(to.subtract(from));
+            tnt.apply_effects_from_blocks(&world, &assets, &facts, &collision, from, original);
+            (tnt.velocity.y, tnt.fall_distance)
+        };
+        // Four blocks west in one move, through the column: its box ends
+        // clear of it.
+        let (lift, fall) = pushed(Vec3::new(22.5, 6.0, 20.5), Vec3::new(18.5, 6.0, 20.5));
+        assert!(lift > 0.0, "the column it crossed lifts it, got {lift}");
+        assert_eq!(fall, 0.0);
+        // Up and out to the east in a short move: the Y step is still in it.
+        let (lift, _) = pushed(Vec3::new(20.5, 6.0, 20.5), Vec3::new(21.5, 6.5, 20.5));
+        assert!(lift > 0.0, "the column it left lifts it, got {lift}");
+        // A move beside the column is not pushed.
+        let (lift, fall) = pushed(Vec3::new(22.5, 6.0, 20.5), Vec3::new(21.5, 6.0, 20.5));
+        assert_eq!((lift, fall), (0.0, 3.0));
     }
 
     /// `Entity.onAboveBubbleColumn` sends the surface particles only from the top of
@@ -2257,6 +2375,32 @@ mod entity_collision_tests {
                     .any(|i| &*i.stack.item == "minecraft:sand"),
                 "the sand breaks into an item"
             );
+        });
+    }
+
+    /// `ServerLevel.tick` ticks every entity in the level's tick list, in the
+    /// order they joined: an experience orb that joined after three primed
+    /// TNT leaves them their tick (#17269). Each TNT's fuse counts down once.
+    #[test]
+    #[ignore = "daily"]
+    fn primed_tnt_ticks_when_an_orb_joined_after_it() {
+        super::super::native_entity_refs::tests::with_game(|game| {
+            game.build_registries();
+            game.set_allow_commands(true);
+            game.world
+                .chunks
+                .insert((0, 0), Arc::new(Chunk::empty(0, 0)));
+            game.block_ticks
+                .add_empty_chunk(ChunkPos::new(0, 0))
+                .unwrap();
+            assert!(game.run_command("forceload add 0 0"));
+            for x in [3, 6, 9] {
+                assert!(game.run_command(&format!("summon tnt {x}.5 200 8.5 {{fuse:400,NoGravity:1b}}")));
+            }
+            assert!(game.run_command("summon experience_orb 12.5 200 2.5 {Value:3,NoGravity:1b}"));
+            game.tick_world(true).unwrap();
+            let fuses: Vec<i32> = game.tnts.iter().map(|t| t.fuse).collect();
+            assert_eq!(fuses, [399, 399, 399]);
         });
     }
 }

@@ -116,6 +116,11 @@ impl BlockLandingWorld for MobLanding<'_, '_, '_> {
         );
         cancel
     }
+    /// Only a server loop's switch counts: a client replays its server.
+    fn template_suppressed(&self, state: BlockStateId) -> bool {
+        self.w.loop_context.side() != horizon_world::native_load_context::LoopSide::Client
+            && crate::block_contact::template_suppressed(self.w.registry, state)
+    }
     // A mob never sneaks, so nothing suppresses a slime block's bounce.
     fn suppressing_bounce(&mut self) -> Result<bool, String> {
         Ok(false)
@@ -171,8 +176,12 @@ impl BlockLandingWorld for MobLanding<'_, '_, '_> {
         volume: f32,
         pitch: f32,
     ) -> Result<(), String> {
+        // `ClientLevel.playSeededSound` plays a mob's `playSound` nowhere: the
+        // server's broadcast is the one the rider hears, so the copy a client
+        // drives keeps quiet.
         if let Some(name) = sound
             && !self.mob.silent
+            && !self.mob.extra.client_side
         {
             let at = self.at();
             self.events.push(MobEvent::Sound(name, at, volume, pitch));
@@ -186,7 +195,9 @@ impl BlockLandingWorld for MobLanding<'_, '_, '_> {
         volume: f32,
         pitch: f32,
     ) -> Result<(), String> {
-        if let Some(name) = sound {
+        if let Some(name) = sound
+            && !self.mob.extra.client_side
+        {
             let at = [
                 f64::from(position.x) + 0.5,
                 f64::from(position.y) + 0.5,

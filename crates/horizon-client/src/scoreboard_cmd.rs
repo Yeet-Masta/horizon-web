@@ -6,6 +6,7 @@ use crate::{
         Arg, CmdResult, CommandError, Context,
         args::{ScoreHolderArg, Selector},
     },
+    component_codec::canonical_text_component,
     scoreboard::{
         self as sb, Comp, NumberFormat, RenderType, Scoreboard, Visibility, comp_text,
         criteria_read_only, literal,
@@ -51,8 +52,12 @@ pub trait Env {
 pub fn err(key: &str, args: &[&dyn std::fmt::Display]) -> CommandError {
     CommandError::tr(key, args)
 }
-/// `ComponentUtils.formatList` with the gray ", " separator.
-pub fn format_list(items: Vec<Text>) -> Text {
+/// `ComponentUtils.formatList` with the gray ", " separator: one item is that item
+/// itself (`formatList`'s `size() == 1` branch), not a component wrapping it.
+pub fn format_list(mut items: Vec<Text>) -> Text {
+    if items.len() == 1 {
+        return items.remove(0);
+    }
     let mut out = Text::empty();
     for (i, t) in items.into_iter().enumerate() {
         if i > 0 {
@@ -298,7 +303,10 @@ fn scoreboard(id: &str, ctx: &Context, env: &mut dyn Env) -> CmdResult<i32> {
             let name = objective_name(ctx, env, "objective")?;
             let display = component(ctx, "displayName", env)?;
             let o = env.sb_mut().objective_mut(&name).expect("checked");
-            if o.display_name != display {
+            // ScoreboardCommand.setDisplayName compares decoded components.
+            if o.display_name != display
+                && canonical_text_component(&o.display_name) != canonical_text_component(&display)
+            {
                 o.display_name = display;
                 let shown = o.formatted_display_name();
                 env.feedback(tr(

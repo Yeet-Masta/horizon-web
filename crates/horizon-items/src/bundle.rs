@@ -119,6 +119,26 @@ fn contents_weight(items: &Items, inside: &[ItemStack]) -> Weight {
     })
 }
 
+/// `BundleContents.computeContentWeight` returns an error when its fraction
+/// arithmetic exceeds Java's integer bounds. The weight may exceed one.
+pub(crate) fn valid_contents_weight(items: &Items, inside: &[ItemStack]) -> bool {
+    fn checked(weight: Weight) -> Option<Weight> {
+        (i32::try_from(weight.n).is_ok() && i32::try_from(weight.d).is_ok()).then_some(weight)
+    }
+    fn weigh(items: &Items, inside: &[ItemStack]) -> Option<Weight> {
+        inside.iter().try_fold(Weight::ZERO, |total, stack| {
+            let weight = if let Some(nested) = contents_of(items, stack) {
+                checked(weigh(items, nested)?.add(Weight::new(1, 16)))?
+            } else {
+                item_weight(items, stack)
+            };
+            let weight = checked(weight.times(stack.count))?;
+            checked(total.add(weight))
+        })
+    }
+    weigh(items, inside).is_some()
+}
+
 /// `BundleItem.onDestroyed` (`ItemStack.onDestroyed` for a bundle): the stack
 /// is emptied and every stack it held comes back as its own item copy, which
 /// `ItemUtils.onContainerDestroyed` drops where the entity lay.
@@ -161,6 +181,15 @@ impl Contents {
     /// `getTooltipImage`) need the item **and** the component: a bundle with
     /// it removed, or another item carrying it, is a plain item.
     pub fn of(items: &Items, stack: &ItemStack) -> Option<Self> {
+        let mut contents = Self::from_stack(items, stack)?;
+        // `BundleContents.Mutable` materializes each saved `ItemStackTemplate`.
+        if crate::item_data::clean_stacks(&mut contents.items, &items.component_defaults) {
+            contents.weight = contents_weight(items, &contents.items);
+        }
+        Some(contents)
+    }
+
+    fn from_stack(items: &Items, stack: &ItemStack) -> Option<Self> {
         if !is_bundle_item(items, stack) {
             return None;
         }
@@ -376,7 +405,7 @@ pub fn tooltip_layout(
     box_width: f32,
     description_lines: usize,
 ) -> Option<TooltipLayout> {
-    let contents = Contents::of(items, stack)?;
+    let contents = Contents::from_stack(items, stack)?;
     let offset = ((box_width - 96.0) / 2.0).floor();
     if contents.items().is_empty() {
         // The description takes the top; the bar follows it. Its lines are

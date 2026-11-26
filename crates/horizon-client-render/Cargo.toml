@@ -95,7 +95,7 @@ web-sys = { version = "0.3.106", features = [
 glam = { version = "0.30", features = ["core-simd"] }
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["std", "time"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }

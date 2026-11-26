@@ -147,6 +147,8 @@ pub enum JoinError {
     InsufficientPrivileges,
     /// multiplayer.access.banned or FORCED_USERNAME_CHANGE.
     Banned,
+    /// HTTP 429, with the service's message.
+    RateLimited(String),
     /// Anything else, with the service's message.
     Other(String),
 }
@@ -164,11 +166,17 @@ impl JoinError {
         match status {
             401 => Self::InvalidSession,
             500.. => Self::Unavailable,
-            _ => Self::Other(
-                v.get("errorMessage")
+            _ => {
+                let message = v
+                    .get("errorMessage")
                     .and_then(|m| m.as_str())
-                    .map_or_else(|| format!("Status: {status}"), str::to_owned),
-            ),
+                    .map_or_else(|| format!("Status: {status}"), str::to_owned);
+                if status == 429 {
+                    Self::RateLimited(message)
+                } else {
+                    Self::Other(message)
+                }
+            }
         }
     }
     /// ClientHandshakePacketListenerImpl.authenticateServer's message: the
@@ -179,7 +187,7 @@ impl JoinError {
             Self::InvalidSession => Ok("disconnect.loginFailedInfo.invalidSession"),
             Self::InsufficientPrivileges => Ok("disconnect.loginFailedInfo.insufficientPrivileges"),
             Self::Banned => Ok("disconnect.loginFailedInfo.userBanned"),
-            Self::Other(message) => Err(message),
+            Self::RateLimited(message) | Self::Other(message) => Err(message),
         }
     }
 }
@@ -759,7 +767,7 @@ mod tests {
             JoinError::InvalidSession,
             JoinError::Banned,
             JoinError::InsufficientPrivileges,
-            JoinError::Other("Status: 429".into()),
+            JoinError::RateLimited("Status: 429".into()),
         ] {
             assert_eq!(joined(&[Err(refused.clone())]), (Err(refused), 1));
         }
@@ -902,7 +910,7 @@ mod tests {
         assert_eq!(e(503, "down"), JoinError::Unavailable);
         assert_eq!(
             e(429, r#"{"errorMessage":"Too many"}"#),
-            JoinError::Other("Too many".into())
+            JoinError::RateLimited("Too many".into())
         );
         assert_eq!(
             JoinError::InvalidSession.reason(),
