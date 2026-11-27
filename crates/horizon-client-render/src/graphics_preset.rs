@@ -155,7 +155,9 @@ pub fn apply_preset(preset: Preset, s: &mut Settings) {
     g.cache_banners = true;
     g.cache_copper_golem_statues = true;
     g.chunk_updates = 0;
-    g.upload_budget_kib = 0;
+    // The platform's own default: unlimited natively, 4 MiB a frame on the web, where an
+    // unlimited budget put a join's whole mesh upload into a few long frames.
+    g.upload_budget_kib = if horizon_std::WEB { 4096 } else { 0 };
     g.sky = true;
     g.fog = true;
     g.weather = true;

@@ -320,6 +320,10 @@ def main():
                     help="also record a Chrome trace of the recording here (.json: DevTools' "
                     "Performance panel opens it) and sum up what the GPU process did; keep "
                     "--seconds short, the trace grows by megabytes a second")
+    ap.add_argument("--home", type=pathlib.Path, action="append", default=[], metavar="FILE",
+                    help="put FILE in the game's directory before Play (its name kept): "
+                    "a player's options.txt or horizon-graphics.txt, to profile their settings; "
+                    "repeatable")
     ap.add_argument("--console", type=pathlib.Path,
                     help="also write every line the page logged here (the browser console)")
     ap.add_argument("--passes", action="store_true",
@@ -384,6 +388,21 @@ def main():
             page.goto(f"http://127.0.0.1:{port}/?env={env}")
             page.wait_for_selector("#play:not([disabled])", timeout=180_000)
             machine = page.evaluate(ADAPTER)
+            # --home: the files the game reads at start, in the page's origin private file
+            # system, where the web build keeps its game directory (/home/horizon).
+            for file in args.home:
+                page.evaluate(
+                    """async ([name, text]) => {
+                        let dir = await navigator.storage.getDirectory();
+                        for (const part of ["home", "horizon"])
+                            dir = await dir.getDirectoryHandle(part, { create: true });
+                        const w = await (await dir.getFileHandle(name, { create: true }))
+                            .createWritable();
+                        await w.write(text);
+                        await w.close();
+                    }""",
+                    [file.name, file.read_text(encoding="utf-8")],
+                )
             page.evaluate(
                 "a => document.getElementById('args').value = a",
                 f"--world Profile{int(time.time())} --creative --seed {args.seed}"
