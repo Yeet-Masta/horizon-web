@@ -921,6 +921,11 @@ impl ChunkEncoder {
         biome_names: &[String],
         biome_registry: &[String],
     ) -> Self {
+        // The web build starts the warm-up threads with the server, while the world still
+        // loads: started by the first chunks sent, their eleven workers' start-up took the
+        // page's thread some 80 ms in the first second in the world.
+        #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+        let _ = warm_pool();
         Self::with_types(
             states,
             builtin,

@@ -389,6 +389,14 @@ def main():
                 f"--world Profile{int(time.time())} --creative --seed {args.seed}"
                 + (f" --render-distance {args.render_distance}" if args.render_distance else ""),
             )
+            # The profiler's first start collects every function's source positions on the
+            # page's thread: 128 ms, the first frame of every recording until it was done
+            # here, before Play, where it costs the measurement nothing.
+            cdp = page.context.new_cdp_session(page)
+            cdp.send("Profiler.enable")
+            cdp.send("Profiler.setSamplingInterval", {"interval": 250})
+            cdp.send("Profiler.start")
+            cdp.send("Profiler.stop")
             page.click("#play")
             started = time.time()
             while not any("logged in with entity id" in line for line in log):
@@ -414,9 +422,6 @@ def main():
                     page.wait_for_timeout(120)
                 page.keyboard.down("Control")
                 page.keyboard.down("w")
-            cdp = page.context.new_cdp_session(page)
-            cdp.send("Profiler.enable")
-            cdp.send("Profiler.setSamplingInterval", {"interval": 250})
             if args.passes:
                 page.evaluate("globalThis.horizonGlue.horizon_pass_timing(true)")
             page.evaluate("globalThis.horizonGlue.horizon_frame_stats_ask(true)")
