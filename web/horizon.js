@@ -268,6 +268,28 @@ addEventListener("pagehide", () => globalThis.horizonFlush?.());
 
 // ---- What the game says --------------------------------------------------------------------
 
+// The page thread's log lines (horizon_std::web::console), a console call each 100 ms at most:
+// DevTools, or a profiler attached, serializes every console call, and a world loading in logs
+// slow frames and ticks (HORIZON_SPIKES) by the dozen a second: 4.5% of the page's thread in a
+// Chromium profile of a join. Warnings and errors go out at once, after what queued before them.
+let logQueue = [];
+let logTimer = 0;
+const logFlush = () => {
+  logTimer = 0;
+  if (logQueue.length) console.info(logQueue.join("\n"));
+  logQueue = [];
+};
+globalThis.horizonConsole = (level, text) => {
+  if (level <= 2) {
+    logFlush();
+    (level === 1 ? console.error : console.warn)(text);
+    return;
+  }
+  logQueue.push(text);
+  if (!logTimer) logTimer = setTimeout(logFlush, 100);
+};
+addEventListener("pagehide", logFlush);
+
 globalThis.horizonStatus = (text, error) => {
   overlay.hidden = false;
   overlay.textContent = text;

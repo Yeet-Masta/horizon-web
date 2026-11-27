@@ -40,6 +40,9 @@ extern "C" {
     fn set_timeout(callback: &js_sys::Function, ms: i32) -> JsValue;
     #[wasm_bindgen(js_name = setInterval)]
     fn set_interval(callback: &Closure<dyn FnMut()>, ms: i32) -> i32;
+    /// The page's log line, batched by web/horizon.js (`horizonConsole`).
+    #[wasm_bindgen(js_namespace = globalThis, js_name = horizonConsole)]
+    fn horizon_console(level: u8, message: &str);
     #[wasm_bindgen(js_namespace = console, js_name = error)]
     fn console_error(message: &str);
     #[wasm_bindgen(js_namespace = console, js_name = warn)]
@@ -57,6 +60,10 @@ extern "C" {
 
 /// The browser console: 1 error, 2 warning, 3 info, else debug.
 pub fn console(level: u8, message: &str) {
+    // The page's lines go out batched (web/horizon.js); a worker's straight to its console.
+    if on_page_thread() {
+        return horizon_console(level, message);
+    }
     match level {
         1 => console_error(message),
         2 => console_warn(message),

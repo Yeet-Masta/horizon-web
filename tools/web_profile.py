@@ -322,6 +322,9 @@ def main():
     ap.add_argument("--passes", action="store_true",
                     help="also time Horizon's own passes on the GPU (as F3 does) and report each "
                     "one's median: where the GPU's time per frame goes")
+    ap.add_argument("--browser-arg", action="append", default=[], metavar="ARG",
+                    help="another command-line switch for the browser (repeatable), as "
+                    "--browser-arg=--js-flags=--no-wasm-lazy-compilation")
     ap.add_argument("--worker-cpuprofiles", type=pathlib.Path, metavar="DIR",
                     help="also profile every worker (chunk generation, meshing, lighting, saves) "
                     "for the recording: one .cpuprofile each in DIR, and a summary of where "
@@ -352,6 +355,7 @@ def main():
             real_gpu = bool(args.channel or args.browser)
             gpu = ["--ignore-gpu-blocklist"] if args.stock else GPU
             launch = {"headless": False, "args": (gpu if real_gpu else SWIFTSHADER) + COMMON}
+            launch["args"] = launch["args"] + args.browser_arg
             if args.worker_cpuprofiles:
                 launch["args"] = launch["args"] + [f"--remote-debugging-port={WORKER_PORT}"]
             if args.channel:
@@ -369,7 +373,8 @@ def main():
                 context = pw.chromium.launch(**launch).new_context(viewport=viewport)
                 page = context.new_page()
             log, errors = [], []
-            page.on("console", lambda m: log.append(m.text))
+            # The page batches its lines into one console call (web/horizon.js `horizonConsole`).
+            page.on("console", lambda m: log.extend(m.text.split("\n")))
             page.on("pageerror", lambda e: errors.append(str(e)))
             page.add_init_script(RAF)
             env = ",".join([f"HORIZON_SPIKES={args.spikes:g}", *args.env])
