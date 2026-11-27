@@ -144,11 +144,11 @@ fn entry(path: &Path) -> Option<Entry> {
             traces,
         });
     }
-    let zip = path.is_file()
+    let zip = path.fs_is_file()
         && path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-    (zip || path.join("shaders").is_dir()).then(|| Entry {
+    (zip || path.join("shaders").fs_is_dir()).then(|| Entry {
         title: file.clone(),
         key: file.clone(),
         file,

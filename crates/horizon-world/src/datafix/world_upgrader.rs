@@ -15,6 +15,7 @@ use crate::region::{ChunkRecord, RegionFile};
 use horizon_core::nbt::{Limits, Tag};
 use horizon_core::position::ChunkPos;
 use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use horizon_std::sync::Mutex;
 use horizon_std::thread::JoinHandle;
 use std::collections::{BTreeMap, HashSet};
@@ -438,7 +439,7 @@ impl RegionStorageUpgrader {
         let folder = file.parent().unwrap_or(Path::new("."));
         let new_file =
             resolve_recreate_directory(folder).join(file.file_name().unwrap_or_default());
-        if !new_file.exists() {
+        if !new_file.fs_exists() {
             eprintln!(
                 "Failed to replace an old region file. New file {} does not exist.",
                 new_file.display()

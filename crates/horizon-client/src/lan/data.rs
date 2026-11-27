@@ -9,6 +9,7 @@ use horizon_protocol::{
     packets::configuration::{RegistryData, RegistryEntry, RegistryTags, TagEntry, UpdateTags},
     registry::{Builtin, Dynamic},
 };
+use horizon_std::fs::PathExt as _;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -657,7 +658,7 @@ impl SyncData {
         Self::merge_pack_tags(&mut tags, &root, overlay, &builtin, &dynamic);
         Self::merge_damage_tags(&mut tags, resources, overlay, &builtin, &dynamic)?;
         drop(tags_step);
-        let content_identity = if resources.join(crate::content_identity::MARKER).exists()
+        let content_identity = if resources.join(crate::content_identity::MARKER).fs_exists()
             || crate::content_identity::requires_horizon()
         {
             Some(
@@ -1000,7 +1001,7 @@ impl SyncData {
         keys.sort();
         for key in keys {
             let dir = tag_root.join(key.trim_start_matches("minecraft:"));
-            if !dir.is_dir() {
+            if !dir.fs_is_dir() {
                 continue;
             }
             let mut files = BTreeMap::new();

@@ -650,7 +650,7 @@ pub fn discover(resources: &Path, packs_dir: &Path) -> Vec<Pack> {
         ("high_contrast", "resourcePack.high_contrast.name"),
     ] {
         let z = resources.join(format!("assets/minecraft/resourcepacks/{id}.zip"));
-        if z.exists()
+        if z.fs_exists()
             && let Some(p) = pack(id.into(), Text::translate(key, &[]), Source::Zip(z))
         {
             out.push(p);
@@ -687,7 +687,7 @@ pub(crate) fn folder_with(
                     return None;
                 }
             };
-            let source = if path.is_dir() {
+            let source = if path.fs_is_dir() {
                 Source::Dir(path)
             } else if path
                 .extension()
@@ -892,7 +892,7 @@ fn link(target: &Path, at: &Path) -> io::Result<()> {
 }
 #[cfg(not(unix))]
 fn link(target: &Path, at: &Path) -> io::Result<()> {
-    if target.is_dir() {
+    if target.fs_is_dir() {
         Ok(())
     } else {
         // The mirror only reads these files, and unix links them: a hardlink gives
@@ -1075,7 +1075,7 @@ fn build_overlay_uncached(
     out: &Path,
     dependencies: &mut cache::Dependencies,
 ) -> io::Result<()> {
-    if out.exists() {
+    if out.fs_exists() {
         fs::remove_dir_all(out)?;
     }
     fs::create_dir_all(out)?;
@@ -1174,7 +1174,7 @@ fn build_overlay_uncached(
                 }
             } else if filters.is_empty()
                 && !touched.contains(&child)
-                && vanilla.join(&child).is_dir()
+                && vanilla.join(&child).fs_is_dir()
                 && junction(&vanilla.join(&child), &out.join(&child)).is_ok()
             {
                 // Linked whole, like the unix symlink: no file in it is visited or copied.
@@ -1183,7 +1183,7 @@ fn build_overlay_uncached(
                 // above), so an untouched one has to be mirrored: skipping it hid textures/font
                 // and the title panorama from the overlay, and a font json that names those
                 // sheets then failed to load (#1688).
-                || (vanilla.join(&child).is_dir() && (cfg!(not(unix)) || !filters.is_empty()))
+                || (vanilla.join(&child).fs_is_dir() && (cfg!(not(unix)) || !filters.is_empty()))
             {
                 mirror(
                     &child,

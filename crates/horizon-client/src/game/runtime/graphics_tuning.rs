@@ -1,4 +1,5 @@
 //! Supervises graphics benchmark workers without giving them the player's game directory.
+use horizon_std::fs::PathExt as _;
 use horizon_bench::autotune::{
     Failure, Group, Identity, Mode, Outcome, Profile, SESSION_VERSION, Session,
 };
@@ -183,7 +184,7 @@ fn reclaim_abandoned_trials(dir: &Path) {
             .to_str()
             .is_some_and(|name| name.starts_with("trial-"));
         if is_trial
-            && entry.path().is_dir()
+            && entry.path().fs_is_dir()
             && let Err(error) = fs::remove_dir_all(entry.path())
         {
             log::warn!(

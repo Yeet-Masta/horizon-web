@@ -1,5 +1,6 @@
 //! Instance-local picker entries. Hiding an entry never removes settings or world saves.
 use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use std::{io, path::Path};
 
 const HIDDEN: &str = ".hidden";
@@ -18,7 +19,7 @@ pub fn names(root: &Path) -> io::Result<Vec<String>> {
         };
         if entry.file_type()?.is_dir()
             && super::valid_name(&name)
-            && !entry.path().join(HIDDEN).exists()
+            && !entry.path().join(HIDDEN).fs_exists()
         {
             names.push(name);
         }

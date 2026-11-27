@@ -16,6 +16,7 @@ use crate::{
     streaming::{LodDetail, LodSampler, LodSource},
 };
 use horizon_core::position::ChunkPos;
+use horizon_std::fs::PathExt as _;
 use horizon_std::sync::Mutex;
 use std::{
     path::{Path, PathBuf},
@@ -133,7 +134,7 @@ pub fn bobby_level_dir(
     servers
         .into_iter()
         .map(|server| server.join(hashed_seed.to_string()).join(level_path(level)))
-        .find(|dir| dir.is_dir())
+        .find(|dir| dir.fs_is_dir())
 }
 
 /// `<namespace>/<path>` of a level key.

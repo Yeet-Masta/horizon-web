@@ -405,7 +405,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
-    if path.is_file() {
+    if path.fs_is_file() {
         return path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
@@ -417,7 +417,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
     if !path.fs_is_dir() {
         return false;
     }
-    if path.join("pack.mcmeta").is_file() {
+    if path.join("pack.mcmeta").fs_is_file() {
         return copy_dir(path, &dir.join(name()));
     }
     let own: Vec<PathBuf> = horizon_std::fs::read_dir(path)
@@ -425,7 +425,7 @@ pub fn copy_pack(path: &Path, dir: &Path) -> bool {
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.fs_is_dir() && p.join("pack.mcmeta").is_file())
+        .filter(|p| p.fs_is_dir() && p.join("pack.mcmeta").fs_is_file())
         .collect();
     match own.as_slice() {
         [one] => copy_dir(one, &dir.join(one.file_name().unwrap_or_default())),

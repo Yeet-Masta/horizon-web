@@ -6,6 +6,7 @@ use crate::{
     save::{Level, put, read_dat, uuid_from_tag, uuid_tag, write_dat},
 };
 use horizon_protocol::crypto::uuid_string;
+use horizon_std::fs::PathExt as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -50,7 +51,7 @@ pub fn ints_uuid(ints: [i32; 4]) -> u128 {
 
 /// Whether a saved file exists for this player.
 pub fn exists(world: &Path, uuid: u128) -> bool {
-    path(world, uuid).is_file()
+    path(world, uuid).fs_is_file()
 }
 
 /// The key `ServerPlayer.addAdditionalSaveData` stores the `WardenSpawnTracker` under.

@@ -4,6 +4,7 @@
 //! or format is cleared on first use.
 use super::{Column, Span, Surface};
 use crate::fast_hash::FxHashMap;
+use horizon_std::fs::PathExt as _;
 use horizon_std::fs::{File, OpenOptions};
 use horizon_std::sync::Mutex;
 use horizon_world::registry::BlockStateId;
@@ -123,7 +124,7 @@ impl DiskCache {
 
     fn open(&self, (rx, rz): (i32, i32), create: bool) -> Option<Region> {
         let path = self.dir.join(format!("r.{rx}.{rz}.hlod"));
-        if !create && !path.exists() {
+        if !create && !path.fs_exists() {
             return None;
         }
         if create {
@@ -184,7 +185,7 @@ pub fn build_key(states: usize, biomes: usize) -> u64 {
     match option_env!("HORIZON_COMMIT") {
         Some(commit) => commit.hash(&mut hasher),
         None => horizon_std::env::current_exe()
-            .and_then(|exe| exe.metadata()?.modified())
+            .and_then(|exe| exe.fs_metadata()?.modified())
             .ok()
             .hash(&mut hasher),
     }

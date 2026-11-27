@@ -1,6 +1,7 @@
 use super::process::probe_output;
 use horizon_std::env;
 use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use horizon_std::time::Duration;
 use std::ffi::OsStr;
 use std::fmt;
@@ -249,7 +250,7 @@ fn find_ffmpeg(path: &OsStr) -> Option<PathBuf> {
 
 fn resolve(path: &Path) -> Option<PathBuf> {
     let path = path.canonicalize().ok()?;
-    let metadata = path.metadata().ok()?;
+    let metadata = path.fs_metadata().ok()?;
     if !metadata.is_file() {
         return None;
     }

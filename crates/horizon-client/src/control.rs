@@ -10,6 +10,7 @@
 //! writes `{"transport":"tcp","port":N,"token":"..."}` to the path, readable
 //! only by its user; a client's first line must then be `auth TOKEN`.
 use crate::block_entity_render::StaticCacheFrameStats;
+use horizon_std::fs::PathExt as _;
 use horizon_std::{thread, time::Instant};
 use horizon_threads::alloc_count::{Counts, ON};
 use std::{
@@ -261,7 +262,7 @@ impl Server {
         check_path(path)?;
         private_dir(path, true)?;
         // An endpoint left by a crashed game refuses connections; replace it.
-        if path.exists() && connect(path).is_err() {
+        if path.fs_exists() && connect(path).is_err() {
             horizon_std::fs::remove_file(path)?;
         }
         let (sender, requests) = mpsc::channel();

@@ -43,7 +43,10 @@ pub fn pool(stack: &ResourceSource, vanilla: &Path, skip_if_modified: bool) -> S
 /// Whether the top `minecraft` splashes come from the game's own resources
 /// (the built-in vanilla pack), not from a resource pack or a mod.
 fn from_vanilla(stack: &ResourceSource, vanilla: &Path) -> bool {
-    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+    let same = |a: &Path, b: &Path| match (
+        horizon_std::fs::canonicalize(a),
+        horizon_std::fs::canonicalize(b),
+    ) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     };

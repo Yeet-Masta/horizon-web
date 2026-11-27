@@ -8,6 +8,7 @@ mod loot_query;
 use crate::{Result, blocks::BlockFacts};
 use horizon_core::random::RandomSource;
 use horizon_std::fs;
+use horizon_std::fs::PathExt as _;
 use horizon_world::registry::{BlockRegistry, BlockStateId};
 use horizon_world::{
     item_defaults::ItemDefaults,
@@ -724,7 +725,7 @@ pub(crate) fn load_tag_lists(
     // Vanilla's tags; with content mods also the convention (`c`) tags and the mods' own.
     for namespace in crate::content_namespaces::tag_namespaces(root) {
         let dir = root.join(format!("data/{namespace}/tags/{kind}"));
-        if dir.exists() {
+        if dir.fs_exists() {
             walk(&dir, &namespace, &mut raw)?;
         }
     }
