@@ -124,12 +124,16 @@ impl<T> Resident<T> {
         self.items.reserve(more);
         self.bounds.reserve(more);
         self.marked.reserve(more);
-        self.slots.reserve(sections.saturating_sub(self.slots.len()));
+        self.slots
+            .reserve(sections.saturating_sub(self.slots.len()));
         let more = columns.saturating_sub(self.columns.len());
         self.columns.reserve(more);
         self.column_headers.reserve(more);
-        self.column_marked_bits
-            .reserve(columns.div_ceil(64).saturating_sub(self.column_marked_bits.len()));
+        self.column_marked_bits.reserve(
+            columns
+                .div_ceil(64)
+                .saturating_sub(self.column_marked_bits.len()),
+        );
         self.column_index
             .reserve(columns.saturating_sub(self.column_index.len()));
     }

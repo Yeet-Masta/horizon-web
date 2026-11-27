@@ -6161,7 +6161,11 @@ impl Renderer {
     /// Room for the sections of `columns` columns, before a world loads them in
     /// (`Resident::reserve`): about a dozen of a column's sections have quads.
     pub fn reserve_sections(&mut self, columns: usize) {
-        self.sections.reserve(columns.saturating_mul(12), columns);
+        let sections = columns.saturating_mul(12);
+        self.sections.reserve(sections, columns);
+        // Their upload times too: a map of tens of thousands that rehashed while a world loaded.
+        self.section_uploaded
+            .reserve(sections.saturating_sub(self.section_uploaded.len()));
     }
     pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) -> bool {
         if let Some(copies) = &mut self.capture_copies {
@@ -9010,8 +9014,8 @@ impl Renderer {
         // is given up rather than submitted with what failed. Native error scopes resolve at
         // once. A browser's answer comes later, so the web build never read it: it pushes
         // none, and an error goes to the console as an uncaptured one.
-        let backstop =
-            (checks.is_none() && !cfg!(target_family = "wasm")).then(|| GpuChecks::push(&self.device));
+        let backstop = (checks.is_none() && !cfg!(target_family = "wasm"))
+            .then(|| GpuChecks::push(&self.device));
         let size = [self.config.width, self.config.height];
         let target_texture = match (&surface_frame, &mut self.hdr) {
             (_, Some(hdr)) => hdr.frame(&self.device, size),
@@ -14333,6 +14337,23 @@ fn hdr10_to_rgb16(pixels: &[[u8; 4]]) -> Vec<u8> {
 }
 /// Centre-crop the frame to a square and average it down to `size`.
 pub(crate) fn square_downscale(pixels: &[u8], width: u32, height: u32, size: [u32; 2]) -> Vec<u8> {
+    square_downscale_by(
+        |x, y| {
+            let p = ((y * width + x) * 4) as usize;
+            [pixels[p], pixels[p + 1], pixels[p + 2]]
+        },
+        width,
+        height,
+        size,
+    )
+}
+/// [`square_downscale`] of the frame whose pixel at `(x, y)` is `rgb(x, y)`.
+pub(crate) fn square_downscale_by(
+    rgb: impl Fn(u32, u32) -> [u8; 3],
+    width: u32,
+    height: u32,
+    size: [u32; 2],
+) -> Vec<u8> {
     let (side, cx, cy) = if width > height {
         (height, (width - height) / 2, 0)
     } else {
@@ -14349,10 +14370,10 @@ pub(crate) fn square_downscale(pixels: &[u8], width: u32, height: u32, size: [u3
             let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
             for y in y0..y1 {
                 for x in x0..x1 {
-                    let p = ((y * width + x) * 4) as usize;
-                    r += u32::from(pixels[p]);
-                    g += u32::from(pixels[p + 1]);
-                    b += u32::from(pixels[p + 2]);
+                    let [pr, pg, pb] = rgb(x, y);
+                    r += u32::from(pr);
+                    g += u32::from(pg);
+                    b += u32::from(pb);
                 }
             }
             let count = (x1 - x0) * (y1 - y0);

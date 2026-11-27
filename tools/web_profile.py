@@ -56,6 +56,9 @@ TRACE_CATEGORIES = [
     "toplevel", "benchmark", "gpu", "gpu.dawn", "disabled-by-default-gpu.dawn", "webgpu",
     "disabled-by-default-webgpu", "viz", "cc", "blink", "v8.execute",
     "disabled-by-default-devtools.timeline", "disabled-by-default-devtools.timeline.frame",
+    # V8's own: lazy wasm compiles (wasm.CompileLazy), tier-ups, GC.
+    "v8", "v8.wasm", "v8.wasm.detailed", "disabled-by-default-v8.wasm.detailed",
+    "disabled-by-default-v8.compile",
 ]
 # The browser, its GPU and the display as the page sees them.
 ADAPTER = """async () => {

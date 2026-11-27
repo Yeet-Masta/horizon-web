@@ -4,18 +4,19 @@
 //! The map is only readable from outside (`Deref`): there is no `DerefMut`.
 use super::{BlockEntity, Pos, next_token};
 use crate::fast_hash::FxHashMap;
-use std::collections::HashMap;
 
 #[derive(Default)]
 pub(super) struct Revised {
-    map: HashMap<Pos, BlockEntity>,
+    /// Fx-hashed, as the other position maps here: std's SipHash was 49 ms of a 6 s world
+    /// join's block updates in a Chromium profile (`BlockEntities::get`, per update).
+    map: FxHashMap<Pos, BlockEntity>,
     /// A token from the process-wide counter, new for each write: a position
     /// and revision pair is never reused, by this store or any other.
     revisions: FxHashMap<Pos, u64>,
 }
 
 impl std::ops::Deref for Revised {
-    type Target = HashMap<Pos, BlockEntity>;
+    type Target = FxHashMap<Pos, BlockEntity>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }

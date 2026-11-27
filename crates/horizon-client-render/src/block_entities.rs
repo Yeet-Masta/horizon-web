@@ -26,6 +26,7 @@
 use crate::chunk::block_entity::{BlockEntity, ModContainer, ModEnergyBuffer, ModFluidTanks};
 use crate::fast_hash::{FxHashMap, FxHashSet};
 use horizon_mod_runtime::attachments::{Attachments, observer::AttachmentObserver};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::{
     Arc,
@@ -340,7 +341,7 @@ fn forget_mod(mods: &mut FxHashMap<(i32, i32), FxHashSet<Pos>>, pos: Pos) {
 }
 
 impl std::ops::Deref for BlockEntities {
-    type Target = HashMap<Pos, BlockEntity>;
+    type Target = FxHashMap<Pos, BlockEntity>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }

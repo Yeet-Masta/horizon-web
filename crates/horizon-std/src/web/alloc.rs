@@ -87,6 +87,8 @@ const BIG: usize = 1 << 20;
 const GRANULARITY: usize = 1 << 20;
 /// A page of wasm memory.
 const PAGE: usize = 64 << 10;
+/// What the memory grows by at least ([`Pages::alloc`]).
+const GROW: usize = 32 << 20;
 /// Pages the memory can have: 4 GiB on wasm32, the 8 GiB web/threads.toml
 /// declares on wasm64.
 #[cfg(target_arch = "wasm32")]
@@ -211,9 +213,22 @@ unsafe impl dlmalloc::Allocator for Pages {
         let base = match POOL.take(size) {
             Some(base) => base,
             None => {
-                let first = memory_grow::<0>(size / PAGE);
+                // Growing a shared memory costs V8 about a millisecond whatever the size
+                // (1.1 ms for 1 MiB, 1.5 ms for 32 MiB): a chunk load grew it a MiB at a
+                // time, some 1700 times, and the page's thread took 30 to 45 ms over a
+                // single large block. It grows by GROW at least, the rest going to the pool.
+                let step = size.max(GROW);
+                let mut first = memory_grow::<0>(step / PAGE);
+                let mut grown = step;
+                if first == usize::MAX && step > size {
+                    first = memory_grow::<0>(size / PAGE);
+                    grown = size;
+                }
                 if first == usize::MAX {
                     return (ptr::null_mut(), 0, 0);
+                }
+                if grown > size {
+                    POOL.give(first * PAGE + size, grown - size);
                 }
                 first * PAGE
             }
@@ -301,7 +316,11 @@ impl Heap {
                 // SAFETY: a deferred block starts with its `Deferred`, written by `free`
                 // before the list (Release) published it; the heap gave it out.
                 unsafe {
-                    let Deferred { next: after, size, align } = block.cast::<Deferred>().read();
+                    let Deferred {
+                        next: after,
+                        size,
+                        align,
+                    } = block.cast::<Deferred>().read();
                     dl.free(block, size, align);
                     next = after;
                 }

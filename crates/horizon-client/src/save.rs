@@ -90,7 +90,11 @@ mod loot_tests;
 /// An empty batch skips both maps; one chunk uses the direct filter path.
 pub fn chunks_with_block_entities<'a, N: std::hash::BuildHasher>(
     chunks: impl IntoIterator<Item = &'a Arc<Chunk>>,
-    entities: &HashMap<(i32, i32, i32), crate::containers::BlockEntity>,
+    entities: &HashMap<
+        (i32, i32, i32),
+        crate::containers::BlockEntity,
+        impl std::hash::BuildHasher,
+    >,
     names: &HashMap<(i32, i32, i32), Tag, N>,
 ) -> Vec<Chunk> {
     snapshot(chunks, entities, names, |_| None)
@@ -107,7 +111,11 @@ pub fn chunks_with_revised_block_entities<'a, N: std::hash::BuildHasher>(
 }
 fn snapshot<'a, N: std::hash::BuildHasher>(
     chunks: impl IntoIterator<Item = &'a Arc<Chunk>>,
-    entities: &HashMap<(i32, i32, i32), crate::containers::BlockEntity>,
+    entities: &HashMap<
+        (i32, i32, i32),
+        crate::containers::BlockEntity,
+        impl std::hash::BuildHasher,
+    >,
     names: &HashMap<(i32, i32, i32), Tag, N>,
     revision: impl Fn(&(i32, i32, i32)) -> Option<u64>,
 ) -> Vec<Chunk> {

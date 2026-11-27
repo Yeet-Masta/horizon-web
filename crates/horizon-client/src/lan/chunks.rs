@@ -1376,7 +1376,7 @@ impl ChunkEncoder {
                 .or_else(|| pot_tag(chunk, hidden.pos))
                 .map(|tag| (kind, tag));
         }
-        let entities = chunk.block_entities.iter().cloned().collect();
+        let entities: HashMap<_, _> = chunk.block_entities.iter().cloned().collect();
         let body = self
             .prepare_view(chunk, &entities, SectionMask::ALL, Some(&wires))
             .write();
@@ -1516,7 +1516,7 @@ impl ChunkEncoder {
     fn body(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         around: SectionMask,
     ) -> Vec<u8> {
         self.prepare(chunk, block_entities, around).write()
@@ -1526,7 +1526,7 @@ impl ChunkEncoder {
     fn prepare(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         around: SectionMask,
     ) -> Prepared {
         self.prepare_view(chunk, block_entities, around, None)
@@ -1535,7 +1535,7 @@ impl ChunkEncoder {
     fn prepare_view(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         around: SectionMask,
         view: Option<&TerrainWires>,
     ) -> Prepared {
@@ -1624,7 +1624,7 @@ impl ChunkEncoder {
     pub fn encode(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
     ) -> LevelChunkWithLight {
         let mut packet = self.encode_blocks(chunk, block_entities);
         packet.light = self.light_data(chunk, SectionMask::ALL);
@@ -1635,7 +1635,7 @@ impl ChunkEncoder {
     fn encode_blocks(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
     ) -> LevelChunkWithLight {
         let (wires, block_entities) = self.blocks(chunk, block_entities, None);
         LevelChunkWithLight {
@@ -1669,7 +1669,7 @@ impl ChunkEncoder {
     fn blocks(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         view: Option<&TerrainWires>,
     ) -> (Vec<Arc<[u8]>>, Vec<BlockEntityInfo>) {
         let mut wires = Vec::with_capacity(self.sections.len());
@@ -1698,7 +1698,7 @@ impl ChunkEncoder {
     fn chunk_entity_info(
         &self,
         chunk: &Chunk,
-        block_entities: &HashMap<(i32, i32, i32), BlockEntity>,
+        block_entities: &HashMap<(i32, i32, i32), BlockEntity, impl std::hash::BuildHasher>,
         section: usize,
         index: u16,
         state: u32,

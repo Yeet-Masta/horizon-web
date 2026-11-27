@@ -40,6 +40,48 @@ impl Reader {
         buffer.unmap();
         Ok(pixels)
     }
+    /// The `size` icon `request` asks for, averaged straight from the mapped copy of the
+    /// frame, which is unmapped after: the page's thread made it in the mapping's callback,
+    /// and the frame copied twice over first took it 100 ms of a world's join.
+    #[cfg(target_family = "wasm")]
+    fn mapped_icon(
+        &self,
+        request: &ScreenshotRequest,
+        size: [u32; 2],
+        buffer: &wgpu::Buffer,
+    ) -> std::result::Result<PendingScreenshot, String> {
+        let (width, height) = (self.config.width, self.config.height);
+        let row = padded_row(width) as usize;
+        let bgra = matches!(
+            self.config.format.remove_srgb_suffix(),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
+        let pixels = {
+            let data = buffer.get_mapped_range(..).map_err(|e| e.to_string())?;
+            super::square_downscale_by(
+                |x, y| {
+                    let p = y as usize * row + x as usize * 4;
+                    let px = &data[p..p + 3];
+                    if bgra {
+                        [px[2], px[1], px[0]]
+                    } else {
+                        [px[0], px[1], px[2]]
+                    }
+                },
+                width,
+                height,
+                size,
+            )
+        };
+        buffer.unmap();
+        Ok(PendingScreenshot {
+            path: request.path.clone(),
+            background: request.background,
+            no_replace: false,
+            image: mod_api::ScreenshotImage::new(size[0], size[1], pixels),
+            hdr: None,
+        })
+    }
     pub(super) fn read_screenshot(
         &self,
         request: &ScreenshotRequest,
@@ -125,8 +167,13 @@ impl Readbacks {
             buffer.map_async(wgpu::MapMode::Read, .., move |r| {
                 let result = r
                     .map_err(|e| e.to_string())
-                    .and_then(|()| reader.mapped_frame(&frame).map_err(|e| e.to_string()))
-                    .map(|frame| reader.screenshot(&request, frame, None));
+                    .and_then(|()| match request.size {
+                        Some(size) => reader.mapped_icon(&request, size, &frame),
+                        None => reader
+                            .mapped_frame(&frame)
+                            .map(|frame| reader.screenshot(&request, frame, None))
+                            .map_err(|e| e.to_string()),
+                    });
                 let _ = sender.send(result);
             });
             self.0.push(receiver);
