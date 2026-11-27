@@ -1051,6 +1051,8 @@ fn future_request_device(
                     ident: crate::cmp::Identifier::create(),
                     error_scope_count: Rc::new(Cell::new(0)),
                     bundles: bundles.clone(),
+                    limits: Rc::new(core::cell::OnceCell::new()),
+                    features: Rc::new(core::cell::OnceCell::new()),
                 }
                 .into(),
                 WebQueue {
@@ -1280,6 +1282,11 @@ pub struct WebDevice {
     error_scope_count: Rc<Cell<u32>>,
     /// Its render passes' bundles for repeated indirect draws (`bundles`).
     pub(crate) bundles: Rc<bundles::Cache>,
+    /// Horizon's: the device's limits and features, read from the browser once. A device's
+    /// never change, and reading them is a call into the browser for each of their ~40
+    /// fields, which the renderer did every frame.
+    limits: Rc<core::cell::OnceCell<crate::Limits>>,
+    features: Rc<core::cell::OnceCell<crate::Features>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2082,11 +2089,15 @@ impl WebDevice {
 
 impl dispatch::DeviceInterface for WebDevice {
     fn features(&self) -> crate::Features {
-        map_wgt_features(self.inner.features())
+        *self
+            .features
+            .get_or_init(|| map_wgt_features(self.inner.features()))
     }
 
     fn limits(&self) -> crate::Limits {
-        map_wgt_limits(self.inner.limits())
+        self.limits
+            .get_or_init(|| map_wgt_limits(self.inner.limits()))
+            .clone()
     }
 
     fn adapter_info(&self) -> crate::AdapterInfo {

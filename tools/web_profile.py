@@ -319,6 +319,9 @@ def main():
                     "--seconds short, the trace grows by megabytes a second")
     ap.add_argument("--console", type=pathlib.Path,
                     help="also write every line the page logged here (the browser console)")
+    ap.add_argument("--passes", action="store_true",
+                    help="also time Horizon's own passes on the GPU (as F3 does) and report each "
+                    "one's median: where the GPU's time per frame goes")
     ap.add_argument("--cpuprofile", type=pathlib.Path,
                     help="also write the page thread's CPU profile here (.cpuprofile: Chrome "
                     "DevTools' Performance panel and speedscope.app open it)")
@@ -397,6 +400,8 @@ def main():
             cdp = page.context.new_cdp_session(page)
             cdp.send("Profiler.enable")
             cdp.send("Profiler.setSamplingInterval", {"interval": 250})
+            if args.passes:
+                page.evaluate("globalThis.horizonGlue.horizon_pass_timing(true)")
             page.evaluate("globalThis.horizonGlue.horizon_frame_stats_ask(true)")
             # Its answer has the terrain so far (chunks, sections meshed): the recording's
             # terrain is what the last answer adds.
@@ -557,6 +562,9 @@ def print_report(r):
         print("phases, average ms:", json.dumps(g.get("phases_avg_ms")))
         if g.get("slow_phases_avg_ms") is not None:
             print("phases in the slowest 1%:", json.dumps(g.get("slow_phases_avg_ms")))
+        if g.get("gpu_passes"):
+            passes = sorted(g["gpu_passes"].items(), key=lambda kv: -kv[1])
+            print("GPU passes, median ms:", ", ".join(f"{k} {v:.2f}" for k, v in passes))
     s = r["slow_frames"]
     print(f"\n## Slow frames' steps ({s['slow_frames']} frames over the threshold)")
     for row in s["steps"][:15]:

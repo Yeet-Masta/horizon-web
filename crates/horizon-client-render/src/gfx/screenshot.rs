@@ -48,11 +48,11 @@ impl ScreenshotSave {
     fn spawn(original: PathBuf, write: impl FnOnce() -> SaveOutcome + Send + 'static) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
         let completed = sender.clone();
-        let spawned = horizon_std::thread::Builder::new()
-            .name("Screenshot writer".into())
-            .spawn(move || {
-                let _ = completed.send(write());
-            });
+        // A worker of its own: the web build's `Builder::spawn` runs where it is called, so
+        // the PNG encode held the page's thread for a frame.
+        let spawned = horizon_std::thread::spawn_worker("Screenshot writer", move || {
+            let _ = completed.send(write());
+        });
         if let Err(error) = spawned {
             let _ = sender.send((original.clone(), Err(error.to_string())));
         }

@@ -2208,11 +2208,14 @@ impl Streaming {
                 received.push_back(done);
             }
         }
+        // Most of what came back is meshes: their list is sized once rather than grown (and
+        // its large meshes copied) a push at a time.
+        let uploads = Vec::with_capacity(deferred.len() + received.len());
         self.resume_plan_update(
             world,
             PlanResume {
                 sweep,
-                uploads: Vec::new(),
+                uploads,
                 stale: Vec::new(),
                 deferred,
                 received,

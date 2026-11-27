@@ -9003,8 +9003,10 @@ impl Renderer {
         // A window frame's own scopes, read before its commands are finished (`frame_lost`):
         // where something no fallback of its own covers runs out of memory (#13624), the frame
         // is given up rather than submitted with what failed. Native error scopes resolve at
-        // once.
-        let backstop = checks.is_none().then(|| GpuChecks::push(&self.device));
+        // once. A browser's answer comes later, so the web build never read it: it pushes
+        // none, and an error goes to the console as an uncaptured one.
+        let backstop =
+            (checks.is_none() && !cfg!(target_family = "wasm")).then(|| GpuChecks::push(&self.device));
         let size = [self.config.width, self.config.height];
         let target_texture = match (&surface_frame, &mut self.hdr) {
             (_, Some(hdr)) => hdr.frame(&self.device, size),
@@ -13741,7 +13743,8 @@ impl Renderer {
         };
         // Finishing the commands can run out of memory too (#13624); a screenshot's frame has
         // its own scopes (`checks`) still open.
-        let finishing = checks.is_none().then(|| GpuChecks::push(&self.device));
+        let finishing = (checks.is_none() && !cfg!(target_family = "wasm"))
+            .then(|| GpuChecks::push(&self.device));
         let commands = crate::spans::time("encode", || encoder.finish());
         if let Some(finishing) = finishing {
             let (memory, validation) = finishing.errors();

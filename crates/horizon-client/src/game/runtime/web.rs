@@ -133,6 +133,24 @@ pub fn horizon_frame_stats_ask(reset: bool) {
     *FRAME_STATS_ASK.lock().unwrap() = Some(reset);
 }
 
+/// What the page asked of the GPU pass timers ([`horizon_pass_timing`]): 1 on, 2 off.
+static PASS_TIMING_ASK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The page times Horizon's own passes on the GPU while `on`, as F3 does: the frame
+/// statistics then carry each pass's median (`gpu_passes`, tools/web_profile.py `--passes`).
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn horizon_pass_timing(on: bool) {
+    PASS_TIMING_ASK.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the page last asked of the pass timers, once: the game's `gpu_passes` follows it.
+pub fn pass_timing_ask() -> Option<bool> {
+    match PASS_TIMING_ASK.swap(0, std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ask => Some(ask == 1),
+    }
+}
+
 /// The answer to [`horizon_frame_stats_ask`], as JSON, once the game gave it.
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn horizon_frame_stats() -> Option<String> {
@@ -146,6 +164,7 @@ pub fn answer_frame_stats(
     stats: &mut horizon_client::control::FrameStats,
     chunks: usize,
     meshed_sections: u64,
+    renderer: Option<&horizon_client_render::gfx::Renderer>,
 ) {
     let Some(reset) = FRAME_STATS_ASK.lock().unwrap().take() else {
         return;
@@ -154,6 +173,14 @@ pub fn answer_frame_stats(
     if let Some(fields) = summary.as_object_mut() {
         fields.insert("chunks".into(), chunks.into());
         fields.insert("meshed_sections".into(), meshed_sections.into());
+        let passes = renderer.map(|r| r.own_pass_times()).unwrap_or_default();
+        if !passes.is_empty() {
+            let passes: serde_json::Map<_, _> = passes
+                .into_iter()
+                .map(|(name, ms)| (name, f64::from(ms).into()))
+                .collect();
+            fields.insert("gpu_passes".into(), passes.into());
+        }
     }
     *FRAME_STATS.lock().unwrap() = Some(summary.to_string());
     if reset {

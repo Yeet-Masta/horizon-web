@@ -10884,11 +10884,17 @@ impl Game<'_> {
                     }
                     // The page's profiler reads them (tools/web_profile.py).
                     #[cfg(target_family = "wasm")]
-                    web::answer_frame_stats(
-                        &mut self.frame_stats,
-                        self.world.chunks.len(),
-                        self.streaming.meshed_total,
-                    );
+                    {
+                        if let Some(on) = web::pass_timing_ask() {
+                            self.gpu_passes = on;
+                        }
+                        web::answer_frame_stats(
+                            &mut self.frame_stats,
+                            self.world.chunks.len(),
+                            self.streaming.meshed_total,
+                            self.renderer.as_ref(),
+                        );
+                    }
                     if !exporting {
                         self.limit_frame();
                     }

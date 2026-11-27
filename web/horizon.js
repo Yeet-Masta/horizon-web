@@ -185,6 +185,50 @@ async function gameFiles(lazy = false) {
   }));
 }
 
+// The private file system's writes run on a worker of their own: on the page's thread, a
+// world being generated had every changed region file (megabytes each) written out every two
+// seconds in the middle of its frames. The page hands the bytes over (transferred, not copied)
+// and the worker writes them in order, each file as createWritable commits it: whole, or not.
+// Made from a Blob, so the one-file build has it too; without it, the page writes them.
+const KEEPER = `
+const parts = (p) => p.split("/").filter(Boolean);
+let root = null;
+async function dir(names, create) {
+  let d = root ??= await navigator.storage.getDirectory();
+  for (const name of names) d = await d.getDirectoryHandle(name, { create });
+  return d;
+}
+async function keep(path, kind, data) {
+  const names = parts(path);
+  if (kind === "dir") return void await dir(names, true);
+  const name = names.pop();
+  if (kind === "removed") {
+    try { await (await dir(names, false)).removeEntry(name, { recursive: true }); } catch {}
+    return;
+  }
+  const out = await (await (await dir(names, true)).getFileHandle(name, { create: true })).createWritable();
+  await out.write(data ?? new Uint8Array());
+  await out.close();
+}
+let queue = Promise.resolve();
+onmessage = ({ data: records }) => {
+  queue = queue.then(async () => {
+    for (const [path, kind, data] of records) await keep(path, kind, data);
+  }).catch((e) => postMessage(String(e)));
+};`;
+let keeper;
+function keeperWorker() {
+  if (keeper === undefined) {
+    try {
+      keeper = new Worker(URL.createObjectURL(new Blob([KEEPER], { type: "text/javascript" })));
+      keeper.onmessage = ({ data }) => console.error("Horizon: could not keep the game folder:", data);
+    } catch (e) {
+      keeper = null;
+    }
+  }
+  return keeper;
+}
+
 // What the game wrote since the last call, in order; writes queue so none overtakes another.
 let persisting = Promise.resolve();
 globalThis.horizonPersist = (records) => {
@@ -192,6 +236,14 @@ globalThis.horizonPersist = (records) => {
   persisting = persisting.then(async () => {
     if (opfs) {
       await moveToOpfs();
+      const worker = keeperWorker();
+      if (worker) {
+        // Each buffer once: one listed twice is a DataCloneError.
+        const moved = [...new Set(records.flatMap(([, kind, data]) =>
+          kind === "file" && data?.buffer instanceof ArrayBuffer ? [data.buffer] : []))];
+        worker.postMessage(records.map(([path, kind, data]) => [path, kind, data]), moved);
+        return;
+      }
       for (const [path, kind, data] of records) {
         if (kind === "removed") await opfsRemove(path);
         else if (kind === "dir") await opfsDir(parts(path), true);

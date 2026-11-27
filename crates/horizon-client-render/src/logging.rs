@@ -472,6 +472,11 @@ fn ours(target: &str) -> bool {
 
 impl log::Log for Logger {
     fn enabled(&self, meta: &log::Metadata) -> bool {
+        // The web build's lines go to the browser console, a call into the page each: other
+        // crates' info lines (the Ogg demuxer's, for every sound that starts) stay out there.
+        if cfg!(target_family = "wasm") && !ours(meta.target()) {
+            return meta.level() <= log::Level::Warn;
+        }
         meta.level() <= log::Level::Info
     }
 

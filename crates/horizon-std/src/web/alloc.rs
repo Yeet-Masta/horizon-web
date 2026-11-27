@@ -257,6 +257,19 @@ unsafe impl dlmalloc::Allocator for Pages {
 struct Heap {
     lock: Lock,
     dl: UnsafeCell<Dlmalloc<Pages>>,
+    /// Blocks the page's thread freed while a worker held the lock ([`Deferred`]): a list
+    /// through the blocks, freed by the next holder. The page's thread spins where a worker
+    /// sleeps, and a Chromium profile had it spinning for 90 ms of a 6 s chunk load freeing
+    /// what the workers made (saved sections, resized chunk arrays).
+    deferred: AtomicUsize,
+}
+/// What a deferred block holds until its heap frees it.
+#[repr(C)]
+struct Deferred {
+    /// The next deferred block's address, 0 for none.
+    next: usize,
+    size: usize,
+    align: usize,
 }
 // SAFETY: the dlmalloc is only touched with the lock held (`Heap::with`).
 unsafe impl Sync for Heap {}
@@ -267,16 +280,76 @@ impl Heap {
         Self {
             lock: Lock(AtomicI32::new(0)),
             dl: UnsafeCell::new(dl),
+            deferred: AtomicUsize::new(0),
         }
     }
     /// `f` on the dlmalloc with the lock held. Nothing in it allocates, so
     /// no thread holds two heaps' locks.
     fn with<R>(&self, f: impl FnOnce(&mut Dlmalloc<Pages>) -> R) -> R {
         self.lock.lock();
+        self.held(f)
+    }
+    /// [`Heap::with`] with the lock already taken: frees the deferred blocks too, then
+    /// lets the lock go.
+    fn held<R>(&self, f: impl FnOnce(&mut Dlmalloc<Pages>) -> R) -> R {
         // SAFETY: the lock is held.
-        let out = f(unsafe { &mut *self.dl.get() });
+        let dl = unsafe { &mut *self.dl.get() };
+        if self.deferred.load(Ordering::Relaxed) != 0 {
+            let mut next = self.deferred.swap(0, Ordering::Acquire);
+            while next != 0 {
+                let block = next as *mut u8;
+                // SAFETY: a deferred block starts with its `Deferred`, written by `free`
+                // before the list (Release) published it; the heap gave it out.
+                unsafe {
+                    let Deferred { next: after, size, align } = block.cast::<Deferred>().read();
+                    dl.free(block, size, align);
+                    next = after;
+                }
+            }
+        }
+        let out = f(dl);
         self.lock.unlock();
         out
+    }
+    /// Frees `block`, of `layout`, into this heap; on the page's thread, while another
+    /// thread holds the lock, it waits on the list for the next holder instead.
+    ///
+    /// # Safety
+    /// This heap gave `block` out, with `layout`.
+    unsafe fn free(&self, block: *mut u8, layout: Layout) {
+        let fits = layout.size() >= std::mem::size_of::<Deferred>();
+        if !fits {
+            self.lock.lock();
+        } else if !self.lock.try_lock() {
+            if may_sleep() {
+                self.lock.lock();
+                // SAFETY: the caller's promise.
+                return self.held(|dl| unsafe { dl.free(block, layout.size(), layout.align()) });
+            }
+            let mut head = self.deferred.load(Ordering::Relaxed);
+            loop {
+                // SAFETY: the block is ours to write, at least a `Deferred` long, and
+                // aligned for one (every block is, to `ALIGN` at least).
+                unsafe {
+                    block.cast::<Deferred>().write(Deferred {
+                        next: head,
+                        size: layout.size(),
+                        align: layout.align(),
+                    })
+                };
+                match self.deferred.compare_exchange_weak(
+                    head,
+                    block as usize,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(now) => head = now,
+                }
+            }
+        }
+        // SAFETY: the caller's promise.
+        self.held(|dl| unsafe { dl.free(block, layout.size(), layout.align()) })
     }
 }
 static HEAP: [Heap; HEAPS] = heaps();
@@ -353,7 +426,7 @@ fn heap_alloc(layout: Layout, zeroed: bool) -> *mut u8 {
 unsafe fn heap_dealloc(block: *mut u8, layout: Layout) {
     match owner(block) {
         // SAFETY: the heap gave it out, with this layout.
-        Some(h) => HEAP[h].with(|dl| unsafe { dl.free(block, layout.size(), layout.align()) }),
+        Some(h) => unsafe { HEAP[h].free(block, layout) },
         // SAFETY: std's gave it out, with this layout.
         None => locked(|| unsafe { System.dealloc(block, layout) }),
     }
@@ -427,6 +500,12 @@ impl Lock {
                 }
             }
         }
+    }
+    /// Takes the lock if it is free, at once.
+    fn try_lock(&self) -> bool {
+        self.0
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
     }
     fn unlock(&self) {
         if self.0.swap(0, Ordering::Release) == 2 {
