@@ -2392,10 +2392,10 @@ fn sign_text_revision_skips_recomparison_and_invalidates_on_edit_and_pack_reload
     };
     world
         .block_entities
-        .insert((0, 64, 0), BlockEntity::Sign(sign_a.clone()));
+        .insert((0, 64, 0), BlockEntity::Sign(Box::new(sign_a.clone())));
     world
         .block_entities
-        .insert((2, 64, 0), BlockEntity::Sign(sign_b.clone()));
+        .insert((2, 64, 0), BlockEntity::Sign(Box::new(sign_b.clone())));
     let rev_initial = world.block_entities.sign_revision();
 
     // Non-sign mutations must not bump `sign_revision`.
@@ -2435,7 +2435,7 @@ fn sign_text_revision_skips_recomparison_and_invalidates_on_edit_and_pack_reload
 
     let render_world = |world: &World, atlas_revision: u64, glyphs: u64| {
         let sign_fn = |p: [i32; 3]| match world.block_entities.get(&(p[0], p[1], p[2])) {
-            Some(BlockEntity::Sign(sign)) => Some(sign),
+            Some(BlockEntity::Sign(sign)) => Some(&**sign),
             _ => None,
         };
         let scene = Scene {
@@ -2517,13 +2517,13 @@ fn sign_text_revision_skips_recomparison_and_invalidates_on_edit_and_pack_reload
     let mut world2 = World::new(BlockStateId(0), 1);
     world2.block_entities.insert(
         (0, 64, 0),
-        BlockEntity::Sign(SignData {
+        BlockEntity::Sign(Box::new(SignData {
             front: SignText {
                 lines: ["x".into(), String::new(), String::new(), String::new()],
                 ..Default::default()
             },
             ..Default::default()
-        }),
+        })),
     );
     assert_ne!(
         world2.block_entities.sign_revision(),

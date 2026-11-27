@@ -2104,12 +2104,12 @@ fn block_entity_for_block(
                 ..Default::default()
             }
         });
-        return Some(BlockEntity::Sign(horizon_client::signs::SignData {
+        return Some(BlockEntity::Sign(Box::new(horizon_client::signs::SignData {
             hanging: form.hanging,
             front: text.clone(),
             back: text,
             ..Default::default()
-        }));
+        })));
     }
     BlockEntity::for_block(name)
 }

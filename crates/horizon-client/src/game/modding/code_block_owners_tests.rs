@@ -171,7 +171,7 @@ fn furnace(game: &mut Game<'_>) {
     game.world.set(pos.0, pos.1, pos.2, state).unwrap();
     game.world.block_entities.insert(
         pos,
-        BlockEntity::Furnace(Furnace {
+        BlockEntity::Furnace(Box::new(Furnace {
             kind: FurnaceKind::Furnace,
             items: [
                 Some(ItemStack::new("minecraft:raw_iron", 1)),
@@ -184,7 +184,7 @@ fn furnace(game: &mut Game<'_>) {
             cooking_total: 200,
             speed: 1.0,
             recipes_used: std::collections::HashMap::new(),
-        }),
+        })),
     );
     game.player = Some(
         horizon_client::motion::PlayerMotion::new(

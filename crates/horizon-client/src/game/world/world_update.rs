@@ -376,6 +376,10 @@ impl Game<'_> {
             .map(|p| [p.position.x, p.position.y, p.position.z])
             .and_then(|camera| self.lod_aim(camera));
         if let Some(renderer) = self.renderer.as_mut() {
+            if !uploads.is_empty() {
+                let side = 2 * self.streaming.radius.max(0) as usize + 1;
+                renderer.reserve_sections(side * side);
+            }
             let g = &self.settings.horizon;
             let budgeted = g.chunk_updates > 0 || g.upload_budget_kib > 0;
             // The meshes, once copied, are freed by a worker (`Streaming::free`).

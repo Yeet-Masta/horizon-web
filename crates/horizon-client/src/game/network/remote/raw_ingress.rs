@@ -120,6 +120,10 @@ impl Game<'_> {
         // C1..CN below belong to one closed bundle; while it is non-zero the
         // frame may not stop at a chunk budget or reorder its items.
         let mut group_left = 0usize;
+        // The web build's budget for every event (`WEB_EVENTS_PER_FRAME`): the clock, a call
+        // into the page, read every 16 events.
+        #[cfg(target_family = "wasm")]
+        let (frame_start, mut handled) = (Instant::now(), 0u32);
         while let Some((item, queued_at)) = events.pop_front() {
             let item = match item {
                 Received::Bundle(parts, credit) => {
@@ -166,6 +170,20 @@ impl Game<'_> {
                 self.forget_remote_columns(&mut forgotten, true)
             });
             forgotten_credits.clear();
+            #[cfg(target_family = "wasm")]
+            {
+                handled += 1;
+                // A frame export takes every event up to its fence (`cutoff`) in its frame.
+                if !in_bundle && cutoff.is_none() && handled.is_multiple_of(16) {
+                    let now = Instant::now();
+                    if now.saturating_duration_since(frame_start) >= WEB_EVENTS_PER_FRAME
+                        && !backlog_item_overdue(queued_at, now)
+                    {
+                        events.push_front((item, queued_at));
+                        break;
+                    }
+                }
+            }
             let chunk = matches!(item, Received::Chunk(_, _));
             if chunk
                 && !in_bundle

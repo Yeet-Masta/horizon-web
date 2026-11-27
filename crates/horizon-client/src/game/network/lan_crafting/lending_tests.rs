@@ -334,7 +334,7 @@ fn menu_links_skip_a_furnace_the_mod_names() {
         let furnace = (33, 200, 4);
         game.world.block_entities.insert(
             furnace,
-            BlockEntity::Furnace(Furnace {
+            BlockEntity::Furnace(Box::new(Furnace {
                 kind: FurnaceKind::Furnace,
                 items: [
                     Some(ItemStack::new("minecraft:iron_ore", 1)),
@@ -347,7 +347,7 @@ fn menu_links_skip_a_furnace_the_mod_names() {
                 cooking_total: 200,
                 speed: 1.0,
                 recipes_used: Default::default(),
-            }),
+            })),
         );
         // The mod names the furnace first, then the chest: only the chest links.
         lending(

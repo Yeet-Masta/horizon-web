@@ -67,10 +67,10 @@ fn a_refused_text_from_another_player_keeps_the_editor() {
             .set_chat_filter(Some(Box::new(Refuses)));
         game.world.block_entities.insert(
             (2, 4, 3),
-            BlockEntity::Sign(SignData {
+            BlockEntity::Sign(Box::new(SignData {
                 allowed_editor: Some(12),
                 ..SignData::default()
-            }),
+            })),
         );
 
         game.lan_sign_update(13, update("bad words"));

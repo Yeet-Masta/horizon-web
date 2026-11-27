@@ -115,6 +115,24 @@ impl<T> Resident<T> {
                 .sum::<usize>()
             + self.column_index.capacity() * (size_of::<((i32, i32), u32)>() + 1)
     }
+    /// Room for `sections` in `columns` columns, so a world loading in grows none of the lists
+    /// a section at a time: doubling, each copy of a list of tens of thousands of sections
+    /// took fresh memory pages (about 70 ms of a Chromium profile's chunk load). Does nothing
+    /// once they have it.
+    pub fn reserve(&mut self, sections: usize, columns: usize) {
+        let more = sections.saturating_sub(self.items.len());
+        self.items.reserve(more);
+        self.bounds.reserve(more);
+        self.marked.reserve(more);
+        self.slots.reserve(sections.saturating_sub(self.slots.len()));
+        let more = columns.saturating_sub(self.columns.len());
+        self.columns.reserve(more);
+        self.column_headers.reserve(more);
+        self.column_marked_bits
+            .reserve(columns.div_ceil(64).saturating_sub(self.column_marked_bits.len()));
+        self.column_index
+            .reserve(columns.saturating_sub(self.column_index.len()));
+    }
     pub fn contains(&self, key: SectionKey) -> bool {
         self.slots.contains_key(&key)
     }

@@ -1189,12 +1189,12 @@ pub fn decode_block_entity(tag: &Tag) -> Option<((i32, i32, i32), crate::contain
     if id == "minecraft:skull" {
         return Some((
             pos,
-            BlockEntity::Skull(crate::containers::Skull::new(
+            BlockEntity::Skull(Box::new(crate::containers::Skull::new(
                 tag.get("profile").cloned(),
                 text(tag.get("note_block_sound")),
                 tag.get("custom_name")
                     .and_then(crate::block_entity_nbt::component),
-            )),
+            ))),
         ));
     }
     // A spawner's block entity id is not its block's name.

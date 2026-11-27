@@ -2200,12 +2200,15 @@ impl Streaming {
         // the rest wait in the mailbox for later frames.
         #[cfg(target_family = "wasm")]
         {
+            // The clock is a call into the page: read every few results, not each.
             let until = horizon_std::time::Instant::now() + WEB_RESULTS_TIME;
-            while horizon_std::time::Instant::now() < until {
-                let Some(done) = self.shared.done.try_recv() else {
-                    break;
-                };
-                received.push_back(done);
+            'slice: while horizon_std::time::Instant::now() < until {
+                for _ in 0..8 {
+                    let Some(done) = self.shared.done.try_recv() else {
+                        break 'slice;
+                    };
+                    received.push_back(done);
+                }
             }
         }
         // Most of what came back is meshes: their list is sized once rather than grown (and

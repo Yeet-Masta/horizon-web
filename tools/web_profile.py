@@ -322,6 +322,10 @@ def main():
     ap.add_argument("--passes", action="store_true",
                     help="also time Horizon's own passes on the GPU (as F3 does) and report each "
                     "one's median: where the GPU's time per frame goes")
+    ap.add_argument("--worker-cpuprofiles", type=pathlib.Path, metavar="DIR",
+                    help="also profile every worker (chunk generation, meshing, lighting, saves) "
+                    "for the recording: one .cpuprofile each in DIR, and a summary of where "
+                    "their time goes (tools/cdp_socket.py; a debugging port, 9333)")
     ap.add_argument("--cpuprofile", type=pathlib.Path,
                     help="also write the page thread's CPU profile here (.cpuprofile: Chrome "
                     "DevTools' Performance panel and speedscope.app open it)")
@@ -348,6 +352,8 @@ def main():
             real_gpu = bool(args.channel or args.browser)
             gpu = ["--ignore-gpu-blocklist"] if args.stock else GPU
             launch = {"headless": False, "args": (gpu if real_gpu else SWIFTSHADER) + COMMON}
+            if args.worker_cpuprofiles:
+                launch["args"] = launch["args"] + [f"--remote-debugging-port={WORKER_PORT}"]
             if args.channel:
                 launch["channel"] = args.channel
             if args.browser:
@@ -379,6 +385,9 @@ def main():
             started = time.time()
             while not any("logged in with entity id" in line for line in log):
                 if errors or time.time() - started > args.join_timeout:
+                    # What the page logged up to there is what tells where it stopped.
+                    if args.console:
+                        args.console.write_text("\n".join(log) + "\n", encoding="utf-8")
                     sys.exit(f"web_profile: no join: {errors[:3]}")
                 page.wait_for_timeout(500)
             joined = time.time() - started
@@ -420,11 +429,18 @@ def main():
                     "traceConfig": {"recordMode": "recordAsMuchAsPossible",
                                     "includedCategories": TRACE_CATEGORIES},
                 })
+            workers = None
+            if args.worker_cpuprofiles:
+                import cdp_socket
+                workers = cdp_socket.WorkerProfiles(WORKER_PORT, f"127.0.0.1:{port}")
+                print(f"web_profile: profiling {workers.start()} workers", flush=True)
             cdp.send("Profiler.start")
             print(f"web_profile: recording {args.seconds:g} s"
                   f"{'' if args.still else ', flying forward'}", flush=True)
             page.wait_for_timeout(args.seconds * 1000)
             profile = cdp.send("Profiler.stop")["profile"]
+            if workers:
+                worker_report(workers.stop(), args.worker_cpuprofiles)
             trace = None
             if args.trace:
                 done = {}
@@ -522,6 +538,44 @@ def terrain_report(start, end, seconds):
         "meshed_per_s": round(meshed / seconds, 1),
         "chunks": [start.get("chunks"), end.get("chunks")],
     }
+
+
+WORKER_PORT = 9333
+
+
+def worker_report(profiles, out_dir):
+    """Writes each worker's profile and prints how busy they were and on what."""
+    import collections
+    out_dir.mkdir(parents=True, exist_ok=True)
+    total = collections.Counter()
+    busy_all = span_all = 0.0
+    rows = []
+    for i, (title, prof) in enumerate(profiles):
+        (out_dir / f"worker-{i:02}.cpuprofile").write_text(json.dumps(prof))
+        nodes = {n["id"]: n for n in prof["nodes"]}
+        deltas = prof.get("timeDeltas", [])
+        own = collections.Counter()
+        for sample, dt in zip(prof.get("samples", []), deltas[1:] + [0]):
+            own[nodes[sample]["callFrame"]["functionName"] or "(anonymous)"] += dt / 1000
+        span = sum(deltas) / 1000
+        idle = sum(v for k, v in own.items() if k in ("(idle)", "(program)"))
+        # A waiting worker sits in Atomics.wait (memory.atomic.wait32), not idle.
+        waiting = sum(v for k, v in own.items() if "wait" in k.lower() or "park" in k.lower())
+        busy = max(span - idle - waiting, 0.0)
+        busy_all += busy
+        span_all += span
+        rows.append((busy, title))
+        for k, v in own.items():
+            if k not in ("(idle)", "(program)", "(garbage collector)"):
+                total[k] += v
+    print(f"\n## Workers ({len(profiles)} profiled, profiles in {out_dir})")
+    print(f"busy {busy_all / 1000:.1f} s of {span_all / 1000:.1f} s worker-seconds "
+          f"({100 * busy_all / max(span_all, 1e-9):.0f}%)")
+    for busy, title in sorted(rows, reverse=True)[:8]:
+        print(f"  {busy / 1000:6.2f} s busy  {title[:80]}")
+    print("their own time, all workers:")
+    for k, v in total.most_common(25):
+        print(f"  {v:8.1f} ms  {k[:140]}")
 
 
 def print_report(r):

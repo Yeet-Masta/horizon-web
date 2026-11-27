@@ -807,7 +807,7 @@ fn piston_push_reaction_position_state_opens_ticks_and_saves() {
                     slots[4] = Some(ItemStack::new("minecraft:diamond", 7));
                 }
                 let entity = if case == "furnace" {
-                    BlockEntity::Furnace(Furnace {
+                    BlockEntity::Furnace(Box::new(Furnace {
                         kind: FurnaceKind::Furnace,
                         items: [None, None, None],
                         lit_remaining: 100,
@@ -816,7 +816,7 @@ fn piston_push_reaction_position_state_opens_ticks_and_saves() {
                         cooking_total: 200,
                         speed: 1.0,
                         recipes_used: HashMap::new(),
-                    })
+                    }))
                 } else {
                     BlockEntity::Chest(slots.clone())
                 };

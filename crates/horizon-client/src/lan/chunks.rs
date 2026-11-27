@@ -2440,9 +2440,9 @@ mod tests {
             ..Default::default()
         };
         let block_entities = HashMap::from([
-            (notice, BlockEntity::Sign(sign.clone())),
-            (lantern, BlockEntity::Sign(hanging.clone())),
-            (casing, BlockEntity::Sign(sign.clone())),
+            (notice, BlockEntity::Sign(Box::new(sign.clone()))),
+            (lantern, BlockEntity::Sign(Box::new(hanging.clone()))),
+            (casing, BlockEntity::Sign(Box::new(sign.clone()))),
         ]);
         let infos = encoder.encode(&chunk, &block_entities).chunk.block_entities;
         let sent = |kind: i32| infos.iter().find(|i| i.kind == kind).map(|i| &i.tag);
@@ -2455,7 +2455,7 @@ mod tests {
         sign.front.color = 9;
         sign.back.glowing = true;
         sign.waxed = true;
-        let entity = BlockEntity::Sign(sign);
+        let entity = BlockEntity::Sign(Box::new(sign));
         assert_eq!(encoder.entity_type(1), Some(7));
         assert_eq!(encoder.entity_type(2), Some(8));
         let tag = encoder.update_tag(notice, 1, &entity).unwrap();
@@ -2787,7 +2787,7 @@ mod tests {
         let mut entities = HashMap::new();
         entities.insert(
             (-7 * 16 + 8, 64, 12 * 16 + 1),
-            BlockEntity::Sign(crate::signs::SignData::default()),
+            BlockEntity::Sign(Box::new(crate::signs::SignData::default())),
         );
         let packet = |encoder: &ChunkEncoder, around: SectionMask| {
             let mut packet = encoder.encode_blocks(&chunk, &entities);
@@ -2884,7 +2884,7 @@ mod tests {
                 Arc::make_mut(&mut chunk.sections[(n % 24) as usize]).light = Light::Full(light);
                 world.block_entities.insert(
                     (x * 16 + 2, 70, z * 16 + 3),
-                    BlockEntity::Sign(crate::signs::SignData::default()),
+                    BlockEntity::Sign(Box::new(crate::signs::SignData::default())),
                 );
                 chunk.set(2, 70, 3, 3);
                 world.chunks.insert((x, z), Arc::new(chunk));

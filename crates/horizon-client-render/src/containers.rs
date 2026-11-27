@@ -382,7 +382,7 @@ impl StockItemContainer {
 
     fn build(self) -> BlockEntity {
         match self {
-            Self::Furnace(kind) => BlockEntity::Furnace(Furnace {
+            Self::Furnace(kind) => BlockEntity::Furnace(Box::new(Furnace {
                 kind,
                 items: [None, None, None],
                 lit_remaining: 0,
@@ -391,12 +391,12 @@ impl StockItemContainer {
                 cooking_total: 0,
                 speed: 1.0,
                 recipes_used: HashMap::new(),
-            }),
+            })),
             // CrafterBlock.newBlockEntity copies the placed state's flag.
-            Self::Crafter => BlockEntity::Crafter(Crafter {
+            Self::Crafter => BlockEntity::Crafter(Box::new(Crafter {
                 state_triggered: Some(false),
                 ..Crafter::default()
-            }),
+            })),
             Self::Brewing => BlockEntity::Brewing(Box::new(crate::brewing::BrewingStand::new())),
             Self::Jukebox => BlockEntity::Jukebox(Jukebox::default()),
             Self::Shelf => BlockEntity::Shelf(Box::default()),
@@ -520,10 +520,10 @@ impl BlockEntity {
 
     fn for_factory(name: &str) -> Option<Self> {
         if let Some(hanging) = crate::signs::sign_kind(name) {
-            return Some(Self::Sign(crate::signs::SignData {
+            return Some(Self::Sign(Box::new(crate::signs::SignData {
                 hanging,
                 ..Default::default()
-            }));
+            })));
         }
         if let Some(container) = StockItemContainer::for_factory(name) {
             return Some(container.build());
@@ -570,7 +570,7 @@ impl BlockEntity {
             return Some(Self::Banner(Banner::default()));
         }
         if is_skull(name) {
-            return Some(Self::Skull(Skull::default()));
+            return Some(Self::Skull(Box::new(Skull::default())));
         }
         if name == "minecraft:end_gateway" {
             return Some(Self::EndGateway(EndGateway::default()));

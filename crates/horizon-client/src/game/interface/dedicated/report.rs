@@ -567,7 +567,7 @@ mod tests {
         };
         game.world
             .block_entities
-            .insert((1, 64, 1), BlockEntity::Sign(sign));
+            .insert((1, 64, 1), BlockEntity::Sign(Box::new(sign)));
 
         let dir = horizon_std::env::temp_dir().join(format!("hz-privacy-{}", std::process::id()));
         let _ = horizon_std::fs::remove_dir_all(&dir);

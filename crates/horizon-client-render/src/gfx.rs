@@ -6158,6 +6158,11 @@ impl Renderer {
     /// with no quads counting (there is nothing to draw). False when the arena had no room
     /// for them: the mesh is gone once the game frees it, so the section is remembered here
     /// (`queue_upload_retries`) and meshed again once memory allows.
+    /// Room for the sections of `columns` columns, before a world loads them in
+    /// (`Resident::reserve`): about a dozen of a column's sections have quads.
+    pub fn reserve_sections(&mut self, columns: usize) {
+        self.sections.reserve(columns.saturating_mul(12), columns);
+    }
     pub fn upload(&mut self, key: SectionKey, mesh: &SectionMesh) -> bool {
         if let Some(copies) = &mut self.capture_copies {
             copies.section(key, mesh);

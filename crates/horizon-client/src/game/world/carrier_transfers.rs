@@ -1226,7 +1226,7 @@ mod tests {
             game.world.block_entities.insert(
                 (4, 64, 4),
                 horizon_client::chunk::block_entity::BlockEntity::Furnace(
-                    horizon_client::chunk::block_entity::Furnace {
+                    Box::new(horizon_client::chunk::block_entity::Furnace {
                         kind: horizon_client::chunk::block_entity::FurnaceKind::Furnace,
                         items: [None, None, None],
                         lit_remaining: 0,
@@ -1235,7 +1235,7 @@ mod tests {
                         cooking_total: 0,
                         speed: 1.0,
                         recipes_used: Default::default(),
-                    },
+                    }),
                 ),
             );
             match game.carrier_assemble(53, &[BlockPos::new(4, 64, 4)]) {

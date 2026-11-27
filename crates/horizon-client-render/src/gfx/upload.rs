@@ -69,6 +69,12 @@ pub struct Uploads {
     receiver: Mutex<mpsc::Receiver<Chunk>>,
     epoch: u64,
     last_finish_at: Instant,
+    /// The web build's mapping of each of `active_chunks`, whole, taken at its first write:
+    /// each `getMappedRange` is a call into the browser that makes a new ArrayBuffer, and a
+    /// section's mesh is several writes. One range a chunk made small writes about 3.5 times
+    /// as fast in Chromium (4 KiB each); natively a range is a pointer.
+    #[cfg(target_family = "wasm")]
+    views: Vec<Option<wgpu::BufferViewMut>>,
 }
 
 impl Uploads {
@@ -92,6 +98,8 @@ impl Uploads {
             receiver: Mutex::new(receiver),
             epoch: 0,
             last_finish_at: Instant::now(),
+            #[cfg(target_family = "wasm")]
+            views: Vec::new(),
         }
     }
     /// Power-of-two capacity for an oversized write, or `self.chunk` for regular writes.
@@ -131,9 +139,9 @@ impl Uploads {
             .min_by_key(|(_, c)| c.buffer.size())
             .map(|(i, _)| i)
     }
-    /// A mapped staging slice of exactly `size` bytes, aligned to at least
-    /// `alignment` and `MAP_ALIGNMENT`.
-    fn allocate(&mut self, size: NonZeroU64, alignment: NonZeroU64) -> wgpu::BufferSlice<'_> {
+    /// A mapped staging range of exactly `size` bytes, aligned to at least
+    /// `alignment` and `MAP_ALIGNMENT`: the active chunk it is in, and where.
+    fn allocate(&mut self, size: NonZeroU64, alignment: NonZeroU64) -> (usize, u64) {
         let size = size.get();
         assert!(
             size.is_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT),
@@ -163,12 +171,49 @@ impl Uploads {
                 }
             };
             self.active_chunks.push(chunk);
+            #[cfg(target_family = "wasm")]
+            self.views.push(None);
             self.active_chunks.len() - 1
         };
 
-        let chunk = &mut self.active_chunks[index];
-        let start = chunk.allocate(size, alignment);
-        chunk.buffer.slice(start..start + size)
+        let start = self.active_chunks[index].allocate(size, alignment);
+        (index, start)
+    }
+    /// `write` on a mapping of the `size` bytes at `start` of active chunk `index`, given
+    /// where in the mapping that range begins. False if nothing is mapped (a lost device: the
+    /// browser refuses, nothing it draws is seen, and the renderer is rebuilt on another,
+    /// `Renderer::device_lost`).
+    fn write_mapped(
+        &mut self,
+        index: usize,
+        start: u64,
+        size: u64,
+        write: impl FnOnce(&mut wgpu::BufferViewMut, usize),
+    ) -> bool {
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = size;
+            let view = &mut self.views[index];
+            if view.is_none() {
+                *view = self.active_chunks[index]
+                    .buffer
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .ok();
+            }
+            let Some(view) = view else { return false };
+            write(view, start as usize);
+            true
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let slice = self.active_chunks[index].buffer.slice(start..start + size);
+            let Ok(mut view) = slice.get_mapped_range_mut() else {
+                return false;
+            };
+            write(&mut view, 0);
+            true
+        }
     }
     fn receive_chunks(&mut self) {
         let receiver = self
@@ -240,28 +285,26 @@ impl Uploads {
             return;
         };
         let alignment = NonZeroU64::new(TEXTURE_COPY_OFFSET_ALIGNMENT).expect("non-zero alignment");
-        let slice = self.allocate(size, alignment);
-        {
-            // A lost device maps nothing (the browser refuses): nothing it draws is seen, and
-            // the renderer is rebuilt on another (`Renderer::device_lost`).
-            let Ok(mut view) = slice.get_mapped_range_mut() else {
-                return;
-            };
-            // copy_from_slice_at: on WebGPU straight into the browser's
-            // mapping, rather than through a copy of it in wasm memory.
+        let (index, start) = self.allocate(size, alignment);
+        // copy_from_slice_at: on WebGPU straight into the browser's
+        // mapping, rather than through a copy of it in wasm memory.
+        let written = self.write_mapped(index, start, size.get(), |view, base| {
             if row == padded {
-                view.copy_from_slice_at(0, pixels);
+                view.copy_from_slice_at(base, pixels);
             } else {
                 for (i, src) in pixels.chunks(row).enumerate() {
-                    view.copy_from_slice_at(i * padded, src);
+                    view.copy_from_slice_at(base + i * padded, src);
                 }
             }
+        });
+        if !written {
+            return;
         }
         encoder.copy_buffer_to_texture(
             wgpu::TexelCopyBufferInfo {
-                buffer: slice.buffer(),
+                buffer: &self.active_chunks[index].buffer,
                 layout: wgpu::TexelCopyBufferLayout {
-                    offset: slice.offset(),
+                    offset: start,
                     bytes_per_row: Some(padded as u32),
                     rows_per_image: Some(height),
                 },
@@ -292,16 +335,18 @@ impl Uploads {
             "buffer upload at {offset} of {size} bytes must be 4-byte aligned"
         );
         let alignment = NonZeroU64::new(wgpu::COPY_BUFFER_ALIGNMENT).expect("non-zero alignment");
-        let slice = self.allocate(size, alignment);
-        // A lost device maps nothing: see `texture`.
-        let Ok(mut view) = slice.get_mapped_range_mut() else {
-            return;
-        };
-        encoder.copy_buffer_to_buffer(slice.buffer(), slice.offset(), target, offset, size.get());
+        let (index, start) = self.allocate(size, alignment);
         // On WebGPU straight into the browser's mapping (`copy_from_slice_at`): through
         // `slice(..)` the whole mapping was copied into wasm memory and back, three copies of
-        // every mesh on the page's thread.
-        view.copy_from_slice(bytes);
+        // every mesh on the page's thread. A lost device maps nothing: see `write_mapped`.
+        let written = self.write_mapped(index, start, size.get(), |view, base| {
+            view.copy_from_slice_at(base, bytes)
+        });
+        if !written {
+            return;
+        }
+        let staging = &self.active_chunks[index].buffer;
+        encoder.copy_buffer_to_buffer(staging, start, target, offset, size.get());
     }
     /// Close this frame's staging buffers: they come back for reuse once the
     /// encoder's submission finishes on the GPU, and stale burst chunks are
@@ -313,6 +358,9 @@ impl Uploads {
             .sender
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The mappings go before their chunks are unmapped.
+        #[cfg(target_family = "wasm")]
+        self.views.clear();
         for mut chunk in self.active_chunks.drain(..) {
             chunk.last_used_epoch = self.epoch;
             chunk.last_used_at = now;

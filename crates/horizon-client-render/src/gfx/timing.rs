@@ -18,6 +18,13 @@ use std::sync::{
 
 /// Frames in flight at once; on Metal a slot is busy for about five frames.
 const SLOTS: usize = 8;
+/// The web build times one frame in this many. A browser times pass boundaries only, so each
+/// timed frame costs a marker compute pass, a marker render pass, a readback (`mapAsync`) and
+/// a wait for the queue (`onSubmittedWorkDone`): calls into the page that a Chromium profile
+/// had at 50 ms of every 6 s. One in eight still gives about 20 samples a second at 165 Hz,
+/// as many as Dynamic Resolution and GPU Culling's Auto use.
+#[cfg(target_family = "wasm")]
+const WEB_EVERY: u32 = 8;
 /// Each slot's timestamps have their own queries and resolve range.
 const RESOLVE_STRIDE: u64 = wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT;
 /// The frame's target and its format.
@@ -50,6 +57,9 @@ pub struct GpuTimer {
     markers: Option<Markers>,
     /// Slots resolved in this frame's commands, read back once it is submitted.
     resolved: Vec<usize>,
+    /// Frames begun, for the web build's one in [`WEB_EVERY`].
+    #[cfg(target_family = "wasm")]
+    frames: u32,
 }
 
 /// The marker passes: the start's compute pipeline, and the end's shader and
@@ -130,6 +140,8 @@ impl GpuTimer {
                 }
             }),
             resolved: Vec::new(),
+            #[cfg(target_family = "wasm")]
+            frames: 0,
         })
     }
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
@@ -146,6 +158,14 @@ impl GpuTimer {
                 if self.slots[slot].state.load(Ordering::Acquire) == DONE {
                     self.resolve(encoder, slot);
                 }
+            }
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            self.frames = self.frames.wrapping_add(1);
+            if self.frames % WEB_EVERY != 0 {
+                self.current = None;
+                return;
             }
         }
         let slot = self.next;

@@ -338,7 +338,7 @@ mod client_screen_tests {
             let at = (3, 64, -2);
             game.world
                 .block_entities
-                .insert(at, BlockEntity::Sign(SignData::default()));
+                .insert(at, BlockEntity::Sign(Box::new(SignData::default())));
             game.remote_open_sign_editor(play::OpenSignEditor {
                 pos: [3, 64, -2],
                 front: true,
@@ -387,7 +387,7 @@ mod client_screen_tests {
             };
             game.world
                 .block_entities
-                .insert(at, BlockEntity::Sign(sign));
+                .insert(at, BlockEntity::Sign(Box::new(sign)));
             game.remote_open_sign_editor(play::OpenSignEditor {
                 pos: [at.0, at.1, at.2],
                 front: true,

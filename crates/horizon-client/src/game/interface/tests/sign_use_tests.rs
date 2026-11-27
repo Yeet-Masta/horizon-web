@@ -40,7 +40,7 @@ fn click_sign(game: &mut crate::game::Game<'_>, sign: SignData, stack: ItemStack
     game.world.set(2, 4, 4, game.res.facts().air).unwrap();
     game.world
         .block_entities
-        .insert((2, 4, 3), BlockEntity::Sign(sign));
+        .insert((2, 4, 3), BlockEntity::Sign(Box::new(sign)));
     game.set_mode(GameMode::Adventure);
     *game.held_mut() = Some(stack);
     crate::game::sculk::TEST_POSTED_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));

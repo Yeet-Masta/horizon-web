@@ -2163,7 +2163,7 @@ fn crafter_block_entity_round_trips() {
     crafter.crafting_ticks = 3;
     let tag = block_entity_encode::encode(
         (7, 8, 9),
-        &crate::containers::BlockEntity::Crafter(crafter),
+        &crate::containers::BlockEntity::Crafter(Box::new(crafter)),
         "minecraft:crafter",
     );
     let (pos, back) = decode_block_entity(&tag).expect("crafter");
@@ -2188,7 +2188,7 @@ fn crafter_triggered_keeps_the_whole_int() {
         };
         let tag = block_entity_encode::encode(
             (0, 0, 0),
-            &crate::containers::BlockEntity::Crafter(crafter),
+            &crate::containers::BlockEntity::Crafter(Box::new(crafter)),
             "minecraft:crafter",
         );
         let (_, back) = decode_block_entity(&tag).expect("crafter");
@@ -3100,7 +3100,7 @@ fn skull_block_entity_keeps_its_profile() {
     // A profile-less head (skeleton, creeper) round-trips too.
     let plain = block_entity_encode::encode(
         pos,
-        &crate::containers::BlockEntity::Skull(crate::containers::Skull::default()),
+        &crate::containers::BlockEntity::Skull(Box::new(crate::containers::Skull::default())),
         "minecraft:creeper_head",
     );
     let (_, decoded) = decode_block_entity(&plain).expect("plain skull");

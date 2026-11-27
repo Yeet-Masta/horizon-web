@@ -423,10 +423,10 @@ fn editor_overlays_dispatch_and_preserve_stock_interaction() {
             for (hanging, id) in [(false, "sign_edit"), (true, "hanging_sign_edit")] {
                 game.world.block_entities.insert(
                     POS,
-                    BlockEntity::Sign(SignData {
+                    BlockEntity::Sign(Box::new(SignData {
                         hanging,
                         ..SignData::default()
-                    }),
+                    })),
                 );
                 game.remote_open_sign_editor(play::OpenSignEditor {
                     pos: [POS.0, POS.1, POS.2],

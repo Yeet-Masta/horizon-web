@@ -823,6 +823,12 @@ const CHUNK_PACKETS_PER_FRAME: Duration = Duration::from_millis(1);
 /// whatever inserting their columns costs, up to a column still decoding:
 /// the packets after a slow machine's chunks don't wait on its frames.
 const BACKLOG_LIMIT: Duration = Duration::from_millis(50);
+/// The web build's time a frame spends on all received events (chunks among them) before it
+/// leaves the rest for the next frame, in order. The page's thread draws the frames too: a
+/// world loading in sent block updates (with their block entities) and entities enough for
+/// 200 ms of a 6 s Chromium profile, in bursts that made the slow frames.
+#[cfg(target_family = "wasm")]
+const WEB_EVENTS_PER_FRAME: Duration = Duration::from_millis(4);
 /// The open menu name of a server's horse inventory, then its chest's
 /// columns (the packet names no `MenuType`).
 const MOUNT_MENU: &str = "horizon:mount";

@@ -181,7 +181,7 @@ impl Game<'_> {
                     .default_state(block)
                     .ok_or(block)?;
                 let entity = if kind == "furnace" {
-                    BlockEntity::Furnace(Furnace {
+                    BlockEntity::Furnace(Box::new(Furnace {
                         kind: FurnaceKind::Furnace,
                         items: [None, None, None],
                         lit_remaining: 0,
@@ -190,7 +190,7 @@ impl Game<'_> {
                         cooking_total: 0,
                         speed: 1.0,
                         recipes_used: std::collections::HashMap::new(),
-                    })
+                    }))
                 } else {
                     BlockEntity::Chest(vec![None; slots])
                 };

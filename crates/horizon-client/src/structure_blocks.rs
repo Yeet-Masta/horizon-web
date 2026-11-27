@@ -412,7 +412,7 @@ mod tests {
             else {
                 panic!("saved sign missing");
             };
-            assert_eq!(loaded, sign);
+            assert_eq!(loaded, Box::new(sign));
             assert!(generated_block_entity("minecraft:stone", &nbt).is_none());
         }
         assert!(generated_block_entity("test:road_sign", &Compound::new()).is_none());

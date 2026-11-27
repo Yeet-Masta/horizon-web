@@ -41,12 +41,15 @@ pub struct Furnace {
     pub recipes_used: HashMap<String, u32>,
 }
 #[derive(Clone, Debug)]
+// The four largest bodies are boxed: unboxed, every block entity took the 960 bytes of a sign's,
+// and the world's map of them (`BlockEntities`) moved megabytes at each of its rehashes while
+// a world loaded (about 100 ms of a Chromium profile).
 pub enum BlockEntity {
     Chest(Vec<Option<ItemStack>>),
-    Furnace(Furnace),
+    Furnace(Box<Furnace>),
     Brewing(Box<BrewingStand>),
     /// Signs and hanging signs (`SignBlockEntity`).
-    Sign(SignData),
+    Sign(Box<SignData>),
     /// `JukeboxBlockEntity`: the record and its `JukeboxSongPlayer`.
     Jukebox(Jukebox),
     /// `BeaconBlockEntity`.
@@ -63,7 +66,7 @@ pub enum BlockEntity {
     /// custom name of the golem it was (`createStatue`).
     CopperGolemStatue(Compound),
     /// `CrafterBlockEntity`.
-    Crafter(Crafter),
+    Crafter(Box<Crafter>),
     /// `SpawnerBlockEntity` (`crate::mobs::spawner`).
     Spawner(Box<Spawner>),
     /// `TrialSpawnerBlockEntity` (`crate::mobs::trial_spawner`).
@@ -77,7 +80,7 @@ pub enum BlockEntity {
     /// `CampfireBlockEntity` of campfires and soul campfires.
     Campfire(Box<Campfire>),
     /// `SkullBlockEntity` of every skull and head block.
-    Skull(Skull),
+    Skull(Box<Skull>),
     /// `TheEndGatewayBlockEntity`: its age and configured destination.
     EndGateway(EndGateway),
     /// `TheEndPortalBlockEntity`: no data, only identity.

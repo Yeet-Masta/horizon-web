@@ -1161,7 +1161,7 @@ mod furnace_changed_tests {
         game.world.set(pos.0, pos.1, pos.2, state).unwrap();
         game.world.block_entities.insert(
             pos,
-            BlockEntity::Furnace(Furnace {
+            BlockEntity::Furnace(Box::new(Furnace {
                 kind: FurnaceKind::Furnace,
                 items: [
                     Some(ItemStack::new("minecraft:raw_iron", 1)),
@@ -1174,7 +1174,7 @@ mod furnace_changed_tests {
                 cooking_total: 200,
                 speed: 1.0,
                 recipes_used: HashMap::new(),
-            }),
+            })),
         );
         game.world.modified.clear();
 
@@ -1211,7 +1211,7 @@ mod furnace_changed_tests {
         game.world.set(pos.0, pos.1, pos.2, state).unwrap();
         game.world.block_entities.insert(
             pos,
-            BlockEntity::Furnace(Furnace {
+            BlockEntity::Furnace(Box::new(Furnace {
                 kind: FurnaceKind::Furnace,
                 items: [
                     Some(ItemStack::new("minecraft:raw_iron", 1)),
@@ -1224,7 +1224,7 @@ mod furnace_changed_tests {
                 cooking_total: 200,
                 speed: 1.0,
                 recipes_used: HashMap::new(),
-            }),
+            })),
         );
         game.world.modified.clear();
 

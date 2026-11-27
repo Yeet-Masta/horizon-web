@@ -88,7 +88,7 @@ fn far_buffer_edge_sends_all_light_and_live_block_entities_without_neighbours() 
     Arc::make_mut(world.chunks.get_mut(&(12, 0)).unwrap()).set(1, 70, 2, 1);
     world.block_entities.insert(
         (193, 70, 2),
-        crate::containers::BlockEntity::Sign(crate::signs::SignData::default()),
+        crate::containers::BlockEntity::Sign(Box::new(crate::signs::SignData::default())),
     );
     hub.guests.update(0, |g| {
         g.far_queue = vec![(12, 0)];

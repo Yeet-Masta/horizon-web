@@ -406,7 +406,7 @@ impl Game<'_> {
                     "minecraft:smoker" => FurnaceKind::Smoker,
                     _ => FurnaceKind::Furnace,
                 };
-                Some(BlockEntity::Furnace(Furnace {
+                Some(BlockEntity::Furnace(Box::new(Furnace {
                     kind,
                     items: [None, None, None],
                     lit_remaining: 0,
@@ -415,7 +415,7 @@ impl Game<'_> {
                     cooking_total: 0,
                     speed: 1.0,
                     recipes_used: std::collections::HashMap::new(),
-                }))
+                })))
             }
             // HopperMenu, and DispenserMenu (MenuType.GENERIC_3x3: dispensers
             // and droppers).

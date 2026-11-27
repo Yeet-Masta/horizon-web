@@ -504,7 +504,7 @@ mod tests {
         crafter.set_slot_state(3, false);
         game.world
             .block_entities
-            .insert(key, BlockEntity::Crafter(crafter));
+            .insert(key, BlockEntity::Crafter(Box::new(crafter)));
         game.container = Some(key);
         game.world.modified.clear();
 
@@ -721,7 +721,7 @@ mod part_remainder_tests {
                 }
                 game.world
                     .block_entities
-                    .insert((0, 100, 0), BlockEntity::Crafter(crafter));
+                    .insert((0, 100, 0), BlockEntity::Crafter(Box::new(crafter)));
                 game.dropped.clear();
                 game.crafter_dispense(pos, state).unwrap();
                 let output: Vec<_> = game
